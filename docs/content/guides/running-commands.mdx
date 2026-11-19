@@ -181,6 +181,9 @@ exited 0
 
 A line longer than 64 KiB arrives as several entries, and leaving the loop leaves the command running.
 
+Iterated before it is awaited, `exec` starts the command and reads its output as one request where the server answers so, and as two, the job and then its log, where it does not; awaited after, it is the same job.
+In Rust, `sandbox.exec_with_log(&args)` does the same, yielding the job first and then each entry.
+
 ## Run several commands at once
 
 Awaiting `exec` starts a job and returns without waiting for it to end, so a command can run in the background while others run beside it.

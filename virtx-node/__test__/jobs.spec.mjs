@@ -174,10 +174,20 @@ describe('against virtx-stdio', () => {
   test('a started command is iterated to its end', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)
-    const log = await Array.fromAsync(sandbox.exec(['echo', 'hi']))
+    const started = sandbox.exec(['echo', 'hi'])
+    const log = await Array.fromAsync(started)
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
       [{ stdout: 'hi' }, { end: { code: 0 } }],
+    )
+    // Iterated at once, read with its job: the job is the one it started, awaited after.
+    const job = await started
+    assert.ok(job instanceof virtx.SandboxJob)
+    assert.deepEqual(job.cmd, ['echo', 'hi'])
+    assert.equal((await sandbox.job(job.id)).code, 0)
+    assert.deepEqual(
+      (await sandbox.jobs()).map((j) => j.id),
+      [job.id],
     )
     await sandbox.remove()
   })

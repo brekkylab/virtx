@@ -142,6 +142,7 @@ const SIGNATURES = {
   virtx_client_signal_sandbox_job: WITH_ARGS,
   virtx_client_write_sandbox_job_stdin: WITH_ARGS,
   virtx_client_sandbox_job_log: WITH_ARGS,
+  virtx_client_exec_sandbox_log: WITH_ARGS,
   virtx_port_forwarder_open: [
     'int',
     ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
@@ -375,9 +376,36 @@ class StartedJob extends Promise {
     this._log = log
   }
 
-  // `started`, a promise of the job; `log`, its log by the job.
-  static of(started, log) {
-    return new StartedJob((resolve, reject) => started.then(resolve, reject), log)
+  // `start()`, the request that answers the job, sent as the call returns, as a promise's work
+  // is; `log`, its log by the job. Given `run()`, one iterated at once -- before that -- starts
+  // the job and reads its log as one: `run` settles the job, and yields the log's entries.
+  static of(start, log, run = null) {
+    let started = null
+    let settle = null
+    const job = new StartedJob((resolve, reject) => {
+      settle = { resolve, reject }
+    }, log)
+    job._start = () => {
+      if (!started) {
+        started = start()
+        started.then(settle.resolve, settle.reject)
+      }
+    }
+    job._run =
+      run &&
+      (() => {
+        if (started) return null
+        started = true
+        return run(settle)
+      })
+    queueMicrotask(job._start)
+    return job
+  }
+
+  // biome-ignore lint/suspicious/noThenProperty: a started job is awaited as the job it starts.
+  then(resolved, rejected) {
+    this._start?.()
+    return super.then(resolved, rejected)
   }
 
   async complete(options) {
@@ -385,7 +413,15 @@ class StartedJob extends Promise {
   }
 
   async *[Symbol.asyncIterator]() {
-    yield* this._log(await this)
+    const items = this._run?.()
+    if (!items) {
+      yield* this._log(await this)
+      return
+    }
+    // Read as one with its log, a start that fails is the loop's to throw: the job's own
+    // promise, rejected with it, is not left unheard -- which would end the process.
+    Promise.prototype.then.call(this, undefined, () => {})
+    yield* items
   }
 }
 
@@ -579,7 +615,7 @@ class Client {
 
   _imageJob(name, args) {
     return StartedJob.of(
-      this._call(name, args).then((info) => new ImageJob(this, info)),
+      () => this._call(name, args).then((info) => new ImageJob(this, info)),
       (job) => job.log(),
     )
   }
@@ -948,13 +984,32 @@ class Sandbox extends Files {
   }
 
   // Starts `cmd` in it, its stdin open for `writeStdin` if `stdin`, killed after `timeoutMs` if
-  // given: the job, and its output as its `log`.
+  // given: the job, and its output as its `log`. Iterated at once, the job is started and its
+  // log read as one request, where the server answers so.
   exec(cmd, options = {}) {
+    const { client, id } = this
+    const args = { ...options, sandbox: id, cmd }
+    const handle = (info) => new SandboxJob(client, id, info)
     return StartedJob.of(
-      this.client
-        ._call('virtx_client_exec_sandbox', { ...options, sandbox: this.id, cmd })
-        .then((info) => new SandboxJob(this.client, this.id, info)),
+      () => client._call('virtx_client_exec_sandbox', args).then(handle),
       (job) => job.log(),
+      async function* (settle) {
+        let answered = false
+        try {
+          for await (const item of client._items('virtx_client_exec_sandbox_log', args)) {
+            if (item.job) {
+              answered = true
+              settle.resolve(handle(item.job))
+            } else {
+              yield item
+            }
+          }
+          if (!answered) settle.reject(new VirtxError("the job's log ended before its job"))
+        } catch (e) {
+          if (!answered) settle.reject(e)
+          throw e
+        }
+      },
     )
   }
 

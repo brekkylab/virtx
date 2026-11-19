@@ -193,8 +193,14 @@ async def test_a_build_completed_prints_its_log_and_answers_its_digest(
 async def test_an_exec_iterated_yields_its_output_and_how_it_ended(client: Client) -> None:
     await alpine(client)
     sandbox = await client.create_sandbox(ALPINE)
-    log = [entry.entry async for entry in sandbox.exec(["echo", "hi"])]
+    started = sandbox.exec(["echo", "hi"])
+    log = [entry.entry async for entry in started]
     assert log == [Stdout("hi"), SandboxJobEnd(0)]
+    # Iterated first, read with its job: the job is the one it started, awaited after.
+    job = await started
+    assert isinstance(job, SandboxJob) and job.cmd == ["echo", "hi"]
+    assert (await sandbox.job(job.id)).code == 0
+    assert [j.id for j in await sandbox.jobs()] == [job.id]
     await sandbox.remove()
 
 

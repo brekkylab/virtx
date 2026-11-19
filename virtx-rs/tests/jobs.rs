@@ -5,7 +5,8 @@ use std::{env, future, pin::Pin};
 use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
-    SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Source, Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry, Source,
+    Step,
 };
 
 mod common;
@@ -382,4 +383,97 @@ fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
         assert_eq!(completed.to_string(), failed.to_string());
     }
     assert_eq!(common::tagged(&client, &built), None);
+}
+
+#[test]
+fn a_process_is_read_with_its_log_its_job_first() {
+    for client in [common::client(), common::tcp_client()] {
+        common::alpine(&client);
+        let sandbox = client
+            .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+            .wait()
+            .unwrap();
+        let mut items =
+            sandbox.exec_with_log(&SandboxExecArgs::new(["sh", "-c", "echo hi; exit 3"]));
+        let mut read = Vec::new();
+        while let Some(item) = items.wait_next() {
+            read.push(item.unwrap());
+        }
+        let SandboxExecItem::Job(job) = &read[0] else {
+            panic!("its job first: {read:?}");
+        };
+        assert_eq!(job.cmd, ["sh", "-c", "echo hi; exit 3"]);
+        let entries: Vec<_> = read[1..]
+            .iter()
+            .map(|item| match item {
+                SandboxExecItem::Log(entry) => entry.entry.clone(),
+                SandboxExecItem::Job(_) => panic!("one job: {read:?}"),
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                SandboxJobEntry::Stdout("hi".into()),
+                SandboxJobEntry::End(SandboxJobEnd { code: 3 }),
+            ]
+        );
+        let got = sandbox.job(&job.id).wait().unwrap();
+        assert_eq!(got.info().code, Some(3));
+        sandbox.remove().wait().unwrap();
+    }
+}
+
+/// `virtx-server-tcp` answers an exec that accepts `text/event-stream` with its log, the job in
+/// `virtx-job` and its path in `Location`; and one that does not with the job alone.
+#[test]
+fn an_exec_that_accepts_an_event_stream_is_answered_with_its_log() {
+    let client = common::tcp_client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    let common::Fixture {
+        url,
+        token,
+        project,
+        ..
+    } = common::fixture();
+    let exec = |accept: &str| {
+        reqwest::blocking::Client::new()
+            .post(format!(
+                "{}/sandboxes/{}/jobs/exec/",
+                url.trim_end_matches('/'),
+                sandbox.id()
+            ))
+            .bearer_auth(token)
+            .header("virtx-project", project)
+            .header("content-type", "application/json")
+            .header("accept", accept)
+            .body(r#"{"cmd": ["echo", "hi"]}"#)
+            .send()
+            .unwrap()
+    };
+
+    let answered = exec("text/event-stream");
+    assert_eq!(answered.status(), 201);
+    let headers = answered.headers().clone();
+    assert_eq!(headers["content-type"], "text/event-stream");
+    let job: virtx::SandboxJobInfo =
+        serde_json::from_str(headers["virtx-job"].to_str().unwrap()).unwrap();
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    assert_eq!(
+        headers["location"],
+        format!("/sandboxes/{}/jobs/{}", sandbox.id(), job.id).as_str()
+    );
+    let log = answered.text().unwrap();
+    assert!(log.contains(r#"data: {"stdout":"hi"}"#), "{log}");
+    assert!(log.contains(r#"data: {"end":{"code":0}}"#), "{log}");
+
+    let answered = exec("application/json");
+    assert_eq!(answered.status(), 201);
+    assert!(answered.headers().get("virtx-job").is_none());
+    let job: virtx::SandboxJobInfo = serde_json::from_str(&answered.text().unwrap()).unwrap();
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    sandbox.remove().wait().unwrap();
 }

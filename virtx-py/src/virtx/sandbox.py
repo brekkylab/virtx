@@ -89,14 +89,22 @@ class Sandbox(Files):
         """Run ``cmd`` in it, its stdin open for ``SandboxJob.write_stdin`` if ``stdin``, killed
         after ``timeout_ms`` if one is given. Awaited, the job; iterated, its output and how it
         ended, as ``SandboxJob.log``'s; ``complete``, its exit code, as
-        ``SandboxJob.complete``'s. Sent when first awaited, iterated or completed."""
+        ``SandboxJob.complete``'s. Sent when first awaited, iterated or completed: iterated first,
+        the job is started and its log read as one request, where the server answers so."""
         request = args(sandbox=self.id, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
 
         async def start() -> SandboxJob:
             output = await self.client._call("virtx_client_exec_sandbox", request)
             return SandboxJob.from_dict(self.client, self.id, output)
 
-        return StartedJob(start, lambda job: job.log())
+        async def run() -> AsyncIterator[SandboxJob | LogEntry[SandboxJobEntry]]:
+            async for item in self.client._items("virtx_client_exec_sandbox_log", request):
+                if "job" in item:
+                    yield SandboxJob.from_dict(self.client, self.id, item["job"])
+                else:
+                    yield sandbox_job_entry(item)
+
+        return StartedJob(start, lambda job: job.log(), run)
 
     async def jobs(self) -> list[SandboxJob]:
         """Every job in it."""

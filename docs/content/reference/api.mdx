@@ -79,7 +79,7 @@ A `Sandbox` carries its client, and acts on itself:
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
+| `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. Iterated before it is awaited, the job is started and its log read as one request where the server answers so. In Rust, `exec_with_log(args)` yields the job, then its log. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 

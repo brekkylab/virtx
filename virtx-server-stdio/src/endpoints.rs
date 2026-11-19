@@ -778,9 +778,13 @@ async fn sandbox_job_list(
     Ok(json(&home.sandbox(&id)?.jobs()))
 }
 
+/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
+/// `text/event-stream`, `201` with the job's log as the body, the job in [`JOB_HEADER`] and its
+/// path in `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
+    headers: HeaderMap,
     Whole(request): Whole,
 ) -> Answer {
     let args: SandboxExecArgs = body(&request)?;
@@ -796,8 +800,47 @@ async fn sandbox_exec(
     }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?.get();
-    Ok(created(format!("/sandboxes/{id}/jobs/{}", job.id), &job))
+    let job = sandbox.exec(args.cmd, timeout).await?;
+    let answered = job.get();
+    let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
+    let streamed = headers
+        .get(header::ACCEPT)
+        .and_then(|accept| accept.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/event-stream"));
+    let said = ascii(&serde_json::to_string(&answered).map_err(internal)?);
+    // A job too long for a header is answered alone, and its log read with a request of its own.
+    if !streamed || said.len() > JOB_HEADER_MOST {
+        return Ok(created(location, &answered));
+    }
+    let mut log = events(job.log(), &HeaderMap::new());
+    *log.status_mut() = StatusCode::CREATED;
+    let value = |value: &str| header::HeaderValue::from_str(value).map_err(internal);
+    log.headers_mut()
+        .insert(header::LOCATION, value(&location)?);
+    log.headers_mut().insert(JOB_HEADER, value(&said)?);
+    Ok(log)
+}
+
+/// Where an exec answered with its log says its job.
+const JOB_HEADER: &str = "virtx-job";
+
+/// The longest job, as JSON, [`JOB_HEADER`] carries.
+const JOB_HEADER_MOST: usize = 8 << 10;
+
+/// `json` with every character past ASCII, and `DEL`, escaped, `\uXXXX` as JSON writes one:
+/// the same JSON, and a header's value.
+fn ascii(json: &str) -> String {
+    let mut escaped = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() && c != '\u{7f}' {
+            escaped.push(c);
+        } else {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                escaped.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    escaped
 }
 
 async fn sandbox_job_get(

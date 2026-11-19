@@ -8,7 +8,7 @@ use sse_stream::SseStream;
 use super::LogEntry;
 use crate::{
     Error,
-    transport::{TransportClient, full, http::refused},
+    transport::{Body, TransportClient, full, http::refused},
 };
 
 /// The entries of the log at `path`, each read as an `E`, after the `after`th if given: as
@@ -31,6 +31,20 @@ pub(crate) fn log<'a, E: DeserializeOwned + Send + 'a>(
             Err::<(), _>(refused(response).await)?;
             return;
         }
+        let mut entries = std::pin::pin!(entries(response, path));
+        while let Some(entry) = entries.next().await {
+            yield entry?;
+        }
+    }
+}
+
+/// The entries of the log `response` carries as its body, each read as an `E`, until the body
+/// ends: `path` is the log's, for what an error says.
+pub(crate) fn entries<E: DeserializeOwned + Send>(
+    response: http::Response<Body>,
+    path: String,
+) -> impl Stream<Item = Result<LogEntry<E>, Error>> + Send {
+    async_stream::try_stream! {
         let mut events = SseStream::new(response.into_body());
         while let Some(event) = events.next().await {
             let event = event.map_err(|e| Error::Transport(format!("reading the log: {e}")))?;

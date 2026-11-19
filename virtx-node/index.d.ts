@@ -453,7 +453,8 @@ export interface CompleteOptions {
  * read until its `end` entry, and `complete`, the job's own once started. The job starts at the
  * call, as a promise's work does, and once however the value is used: awaited, iterated,
  * completed, or each. Each loop reads the log from its start; leaving one leaves the job
- * running, which the job's `remove` cancels.
+ * running, which the job's `remove` cancels. A sandbox's `exec` iterated at once starts the job
+ * and reads its log as one request, where the server answers so.
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   /** Start the job and follow it to its end, as its `complete` does. */

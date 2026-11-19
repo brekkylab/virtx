@@ -324,7 +324,7 @@ A sandbox job is a process in a [sandbox](#sandboxes), run beside whatever else 
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /sandboxes/{id}/jobs/` | | `200`, array of sandbox jobs |
-| `POST /sandboxes/{id}/jobs/exec/` | `{cmd, stdin?, timeout_ms?}` | `201`, the job |
+| `POST /sandboxes/{id}/jobs/exec/` | `{cmd, stdin?, timeout_ms?}` | `201`, the job, or [with its log](#an-exec-answered-with-its-log) |
 | `GET /sandboxes/{id}/jobs/{job}` | | `200`, the job |
 | `DELETE /sandboxes/{id}/jobs/{job}` | | `204` |
 | `POST /sandboxes/{id}/jobs/{job}/signal` | `{signal}` | `204` |
@@ -339,6 +339,16 @@ A sandbox job is `{id, kind, pid, cmd, running, code?}`:
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
 
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
+
+#### An exec answered with its log
+
+An exec whose request accepts `text/event-stream` MAY be answered with the job's log as well, saving the client a second request:
+
+- `201`, with `Content-Type: text/event-stream`, and the job's log as the body, from its first entry, as `GET {job}/events` would answer it.
+- The job, as JSON, in the `virtx-job` header, written in ASCII with any other character escaped as `\uXXXX`, and its path in `Location`, as any `201` has.
+
+A server MAY answer such a request with the job alone, as JSON, as it answers any other: so a client that asks for the log this way MUST accept `application/json` too, and read the job's log with its `GET {job}/events` where the answer is the job alone.
+A client whose answer breaks off before the log's end reads the rest from the job's log, after the last entry it read, as [Events](#events) says.
 
 Its log's entries are each an object with one member:
 

@@ -21,6 +21,7 @@ use http::HeaderMap;
 use virtx_core::{
     SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
 };
+use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::sandbox::{NoHooks, Sandboxes};
 use virtx_uvm::{
     Admission, FsTree, ImageStore, MachineSpec, NoRoom, RegistryClient, Room, Sandbox,
@@ -549,6 +550,48 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
     // Deleted, its disk goes with it.
     home.sandboxes.delete(sandbox.id()).await.unwrap();
     assert_eq!(home.kept(), 0);
+}
+
+async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home: Home) {
+    let (_, before, _) = runs::since(0);
+    let home = home.parking();
+    let sandbox = home.sandbox(&small()).await;
+    let first = sandbox.up_since().expect("up as it is made");
+    run(&sandbox, &["true"], None).await.unwrap();
+    // Unused, it is parked; a job boots it again; deleted, it is down for good.
+    assert!(until(async || sandbox.up_since().is_none()).await, "parked");
+    run(&sandbox, &["true"], None).await.unwrap();
+    let second = sandbox.up_since().expect("up again");
+    assert!(second > first);
+    let id = sandbox.id().to_owned();
+    home.sandboxes.delete(&id).await.unwrap();
+    assert_eq!(sandbox.up_since(), None, "deleted");
+
+    let (told, last, all) = runs::since(before);
+    assert!(all);
+    assert_eq!(told.last().map(|run| run.seq), Some(last));
+    let ours: Vec<_> = told
+        .into_iter()
+        .filter(|run| run.root == home.root)
+        .collect();
+    assert!(ours.iter().all(|run| run.sandbox == id));
+    assert!(ours.windows(2).all(|two| two[0].seq < two[1].seq));
+    let ran: Vec<_> = ours.into_iter().map(|run| run.ran).collect();
+    let [
+        Ran::Up { at: up },
+        Ran::Down { started, ended },
+        Ran::Up { at: again },
+        Ran::Down {
+            started: started_again,
+            ended: ended_again,
+        },
+    ] = ran[..]
+    else {
+        panic!("up, down, up and down, not {ran:?}");
+    };
+    assert_eq!((up, started), (first, first));
+    assert_eq!((again, started_again), (second, second));
+    assert!(started < ended && ended <= again && again < ended_again);
 }
 
 async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
@@ -1081,6 +1124,7 @@ fn main() -> ExitCode {
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote,
+        each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
         a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good,
         a_running_sandbox_s_disk_is_held_against_another_server,

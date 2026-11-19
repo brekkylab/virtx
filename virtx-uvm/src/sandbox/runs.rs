@@ -1,10 +1,11 @@
-//! Every machine of this process's sandboxes, as it came up and as it went down -- parked or
-//! ended -- each told with when: what an embedder meters machine time by, exactly, however
-//! briefly a machine was up. Each is numbered in the order it happened, one after another, so
-//! that whoever is told of them -- as each happens ([`subscribe`]), or by asking for those
-//! after the last it has ([`since`]) -- knows when it missed one.
+//! Every machine of this process's sandboxes, as it came up and as it went down -- parked,
+//! closed or ended on its own -- each told with when: what an embedder meters machine time by,
+//! exactly, however briefly a machine was up. Each is numbered in the order it happened, one
+//! after another, so whoever is told of them -- woken as each happens ([`subscribe`]), then
+//! asking for those after the last it has ([`since`]) -- knows when it missed one.
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
 
@@ -18,7 +19,7 @@ const KEPT: usize = 100_000;
 pub enum Ran {
     /// Came up at `at`.
     Up { at: SystemTime },
-    /// Went down -- parked, or ended -- having been up from `started` to `ended`.
+    /// Went down, having been up from `started` to `ended`.
     Down {
         started: SystemTime,
         ended: SystemTime,
@@ -28,9 +29,12 @@ pub enum Ran {
 /// One thing a sandbox's machine did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineRun {
-    /// Its number: one more than the one before it, of any sandbox here.
+    /// Its number: one more than the one before it, of any sandbox in this process.
     pub seq: u64,
+    /// The sandbox's id, and the root it was made under, which tells apart two sandboxes of
+    /// one id under different roots.
     pub sandbox: String,
+    pub root: PathBuf,
     pub ran: Ran,
 }
 
@@ -50,7 +54,7 @@ static LEDGER: LazyLock<Mutex<Ledger>> = LazyLock::new(|| {
 /// The number of the last, as each is told: what a subscriber is woken by.
 static LAST: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::Sender::new(0));
 
-fn told(sandbox: &str, ran: Ran) {
+fn told(sandbox: &str, root: &Path, ran: Ran) {
     let seq = {
         let mut ledger = LEDGER.lock().unwrap();
         let seq = ledger.next;
@@ -61,6 +65,7 @@ fn told(sandbox: &str, ran: Ran) {
         ledger.kept.push_back(MachineRun {
             seq,
             sandbox: sandbox.to_owned(),
+            root: root.to_owned(),
             ran,
         });
         seq
@@ -68,20 +73,15 @@ fn told(sandbox: &str, ran: Ran) {
     LAST.send_replace(seq);
 }
 
-/// Sandbox `sandbox`'s machine up now.
-pub(super) fn up(sandbox: &str, at: SystemTime) {
-    told(sandbox, Ran::Up { at });
+/// Sandbox `sandbox`'s machine, under `root`, up since `at`.
+pub(super) fn up(sandbox: &str, root: &Path, at: SystemTime) {
+    told(sandbox, root, Ran::Up { at });
 }
 
-/// Sandbox `sandbox`'s machine, up since `started`, down now.
-pub(super) fn down(sandbox: &str, started: SystemTime) {
-    told(
-        sandbox,
-        Ran::Down {
-            started,
-            ended: SystemTime::now(),
-        },
-    );
+/// Sandbox `sandbox`'s machine, under `root`, up since `started`, down now.
+pub(super) fn down(sandbox: &str, root: &Path, started: SystemTime) {
+    let ended = SystemTime::now();
+    told(sandbox, root, Ran::Down { started, ended });
 }
 
 /// What happened after `seq`, oldest first; the number of the last, which is asked after next;
@@ -109,22 +109,47 @@ pub fn subscribe() -> watch::Receiver<u64> {
 mod tests {
     use super::*;
 
+    /// One test, since the ledger is the process's and a test that runs beside it would move it.
     #[test]
-    fn what_ran_is_asked_for_after_the_last_known_in_the_order_it_happened() {
+    fn what_ran_is_asked_for_after_the_last_known_in_order_and_what_is_gone_said_so() {
         let mut woken = subscribe();
         let (_, before, _) = since(0);
-        up("sbx_a", SystemTime::UNIX_EPOCH);
-        down("sbx_a", SystemTime::UNIX_EPOCH);
+        let root = Path::new("/home/a");
+        up("sbx_a", root, SystemTime::UNIX_EPOCH);
+        down("sbx_a", root, SystemTime::UNIX_EPOCH);
         assert!(woken.has_changed().unwrap());
-        assert!(*woken.borrow_and_update() >= before + 2);
+        assert_eq!(*woken.borrow_and_update(), before + 2);
         let (runs, last, all) = since(before);
         let ours: Vec<_> = runs
             .iter()
-            .filter(|r| r.sandbox == "sbx_a")
-            .map(|r| matches!(r.ran, Ran::Up { .. }))
+            .map(|r| {
+                (
+                    r.seq,
+                    r.sandbox.as_str(),
+                    r.root.as_path(),
+                    matches!(r.ran, Ran::Up { .. }),
+                )
+            })
             .collect();
-        assert_eq!(ours, [true, false]);
+        assert_eq!(
+            ours,
+            [
+                (before + 1, "sbx_a", root, true),
+                (before + 2, "sbx_a", root, false)
+            ]
+        );
+        assert_eq!(last, before + 2);
         assert!(all);
-        assert!(since(last).0.iter().all(|r| r.seq > last));
+        assert_eq!(since(last), (Vec::new(), last, true));
+
+        // Past what is kept, the oldest go, and asking after one gone is told it is not all.
+        for _ in 0..KEPT {
+            up("sbx_b", root, SystemTime::UNIX_EPOCH);
+        }
+        let (runs, last, all) = since(before);
+        assert!(!all, "the first after it is kept no longer");
+        assert_eq!(runs.len(), KEPT);
+        assert_eq!(runs.last().unwrap().seq, last);
+        assert!(since(last - 1).2);
     }
 }

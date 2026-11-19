@@ -168,9 +168,11 @@ type Waiting = (u64, oneshot::Sender<Result<bool, String>>);
 /// A sandbox's run: the machine it booted, up until it stops, and what is asked of it.
 pub(super) struct Run {
     pub(super) machine: Arc<Machine>,
-    /// Its sandbox's id, and when its machine came up: what [`runs`](super::runs) is told as
-    /// it comes up and as it goes down.
+    /// Its sandbox's id, the root it was made under -- which tells apart two sandboxes of one
+    /// id under different roots -- and when its machine came up: what [`runs`](super::runs) is
+    /// told as it comes up and as it goes down.
     sandbox: String,
+    root: PathBuf,
     started: SystemTime,
     /// Its disk's lock, and what the hooks hold for it, until it has stopped.
     held: Mutex<Option<(SnapshotLock, Vec<Held>)>>,
@@ -192,7 +194,7 @@ impl Run {
     fn release(&self) {
         if let Some(held) = self.held.lock().unwrap().take() {
             drop(held);
-            super::runs::down(&self.sandbox, self.started);
+            super::runs::down(&self.sandbox, &self.root, self.started);
         }
     }
 }
@@ -526,6 +528,7 @@ impl Sandbox {
         let run = Arc::new(Run {
             machine: Arc::new(machine),
             sandbox: id.to_string(),
+            root: shared.kept.parent().unwrap_or(&shared.kept).to_owned(),
             started: SystemTime::now(),
             held: Mutex::new(Some((lock, held))),
             writes,
@@ -536,7 +539,7 @@ impl Sandbox {
             rebased: Mutex::default(),
         });
         *self.state.lock().unwrap() = State::Up(Arc::clone(&run));
-        super::runs::up(&run.sandbox, run.started);
+        super::runs::up(&run.sandbox, &run.root, run.started);
         self.used();
         let (reading, read) = (Arc::clone(self), Arc::clone(&run));
         std::thread::spawn(move || reading.read(&read));

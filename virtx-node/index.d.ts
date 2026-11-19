@@ -544,9 +544,9 @@ export class Client {
   listImage(): Promise<ImageListOutputItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
   tagImage(source: string, target: string): Promise<void>
-  /** Remove the tag `reference` (`name:tag`), leaving the image it points at. */
+  /** Remove the tag `reference` (`name:tag`), leaving the image it points at. The last tag of an image a sandbox or a build uses is refused `409`, and kept. */
   untagImage(reference: string): Promise<void>
-  /** Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on it in that name. */
+  /** Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on it in that name. An image a sandbox or a build uses is refused `409`, with nothing removed. */
   removeImage(reference: string): Promise<void>
   /** Write the image `reference` names to `path`, as an OCI image layout in a tar archive, replacing what is there once all of it is written. Its events are a line of log a blob, then what it wrote. */
   downloadImage(reference: string, path: string): AsyncGenerator<Event<ImageDownloadOutput, string>>

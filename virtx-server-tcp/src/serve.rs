@@ -1089,7 +1089,8 @@ mod tests {
 
     /// What a server before this one kept of a project's sandboxes is known again as the project
     /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
-    /// was made with; what no sandbox keeps is deleted. No machine boots for it.
+    /// was made with, with its jobs, one that ran then ended `restarted`; what no sandbox keeps
+    /// is deleted. No machine boots for it.
     #[tokio::test]
     async fn a_project_s_sandboxes_are_kept_across_a_restart() {
         let served = Served::spawn("kept").await;
@@ -1101,15 +1102,19 @@ mod tests {
         let dir = demo.join("sandbox");
         std::fs::create_dir_all(&dir).unwrap();
         let capability = "c".repeat(64);
+        let jobs = json!([
+            { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
+            { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+        ]);
         let kept = [
-            ("kept", json!({ capability.clone(): 8080 }), false),
-            ("ended", json!({}), true),
+            ("kept", json!({ capability.clone(): 8080 }), false, jobs),
+            ("ended", json!({}), true, json!([])),
         ];
-        for (id, keys, exited) in kept {
+        for (id, keys, exited, jobs) in kept {
             std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
             let image = json!({ "type": "digest", "digest": digest });
             let args = json!({ "image": image, "ports": [8080] });
-            let record = json!({ "args": args, "keys": keys, "exited": exited });
+            let record = json!({ "args": args, "keys": keys, "exited": exited, "jobs": jobs });
             std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
         }
         // What a making cut short before its record leaves, and a record whose disk is gone.
@@ -1135,6 +1140,30 @@ mod tests {
         let kept_files =
             |id: &str| [".ext4", ".ext4.lock", ".json"].map(|end| format!("{id}{end}"));
         assert_eq!(left, [kept_files("ended"), kept_files("kept")].concat());
+
+        let (status, jobs) = served
+            .send("GET", "sandboxes/kept/jobs/", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let jobs: Value = serde_json::from_str(&jobs).unwrap();
+        assert_eq!(
+            jobs,
+            json!([
+                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+                {
+                    "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"],
+                    "running": false, "code": 137, "reason": "restarted",
+                },
+            ])
+        );
+        let (status, log) = served
+            .send("GET", "sandboxes/kept/jobs/ran/events", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            log,
+            "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
+        );
 
         // Its port's URL reaches it as it did: parked, nothing listens there.
         let port = served.port_url(&format!("ports/{capability}"));

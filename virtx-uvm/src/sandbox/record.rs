@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use virtx_core::SandboxCreateArgs;
+use virtx_core::{SandboxCreateArgs, SandboxJob};
 
 /// A sandbox as it is kept on disk.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,6 +26,10 @@ pub(super) struct Record {
     /// Whether its machine ended on its own: nothing boots it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) exited: bool,
+    /// Its jobs as they were when one last started or ended: each that ran then ran when its
+    /// process let it go, and is known again as ended so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) jobs: Vec<SandboxJob>,
 }
 
 impl Record {
@@ -67,6 +71,7 @@ mod tests {
             ),
             keys: HashMap::from([("key".to_owned(), 8080)]),
             exited: false,
+            jobs: Vec::new(),
         };
         record.write(dir.path(), "kept").unwrap();
         assert_eq!(Record::read(dir.path(), "kept").unwrap(), record);

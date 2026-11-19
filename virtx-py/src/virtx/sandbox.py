@@ -126,6 +126,14 @@ class SandboxJobKind(str, Enum):
     EXEC = "exec"
 
 
+class SandboxJobEndReason(str, Enum):
+    """Why a process did not end by itself: the server killed it, as ``SIGKILL`` does, its code
+    ``137``."""
+
+    RESTARTED = "restarted"
+    """Its server restarted while it ran, keeping its sandbox."""
+
+
 @dataclass(frozen=True)
 class SandboxJob:
     """A process run in a sandbox, as ``Sandbox.exec``, ``Sandbox.jobs`` and ``Sandbox.job``
@@ -154,6 +162,9 @@ class SandboxJob:
     code: int | None = None
     """Once it has ended, its exit code."""
 
+    reason: SandboxJobEndReason | None = None
+    """Once it has ended, why, if it did not end by itself."""
+
     @classmethod
     def from_dict(cls, client: Client, sandbox_id: str, value: Mapping[str, Any]) -> SandboxJob:
         return cls(
@@ -165,6 +176,7 @@ class SandboxJob:
             list(value["cmd"]),
             value["running"],
             value.get("code"),
+            _reason(value),
         )
 
     def _args(self, **fields: Any) -> bytes:
@@ -239,6 +251,15 @@ class SandboxJobEnd:
 
     code: int
 
+    reason: SandboxJobEndReason | None = None
+    """Why, if it did not end by itself."""
+
+
+def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | None:
+    """A job's, or its end's, ``reason``, if it has one."""
+    reason = value.get("reason")
+    return None if reason is None else SandboxJobEndReason(reason)
+
 
 SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd
 """An entry of a sandbox job's log."""
@@ -255,5 +276,5 @@ def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
     elif "truncated" in item:
         entry = Truncated()
     else:
-        entry = SandboxJobEnd(item["end"]["code"])
+        entry = SandboxJobEnd(item["end"]["code"], _reason(item["end"]))
     return LogEntry(item["id"], entry)

@@ -335,12 +335,13 @@ A sandbox job is a process in a [sandbox](#sandboxes), run beside whatever else 
 | `POST /sandboxes/{id}/jobs/{job}/stdin` | `{data?, eof?}` | `204` |
 | `GET /sandboxes/{id}/jobs/{job}/events` | | `200`, its [log](#events) |
 
-A sandbox job is `{id, kind, pid, cmd, running, code?}`:
+A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 
 - `kind` is `"exec"`.
 - `pid` is its process's pid in the sandbox. The job is named by `id`, not by it, so a pid the sandbox gives again never names another job.
 - `cmd` is the argv it was started with, with no shell: `["sh", "-c", "..."]` for one. An empty one is refused.
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
+- `reason`, once it has ended, is why, where the process did not end by itself and the server says, as below.
 
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
 
@@ -348,14 +349,17 @@ Its log's entries are each an object with one member:
 
 - `{"stdout": "..."}` or `{"stderr": "..."}`: a line the process wrote there, without its line ending, decoded as UTF-8 with each invalid sequence replaced by U+FFFD. A line longer than the server's limit is sent in parts, an entry each.
 - `{"truncated": {}}`, as [Events](#events) says.
-- `{"end": {"code": n}}`, last.
+- `{"end": {"code": n}}`, or `{"end": {"code": 137, "reason": "..."}}`, last: its `code`, and `reason`, as the job has them.
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
 The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
 A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
-A sandbox [kept](#sandboxes) across its server's end has none of its jobs once the server is started again.
+A sandbox [kept](#sandboxes) across its server's end keeps its jobs, as many as the server keeps: started again, the server knows each that had ended as it ended, and each that ran as killed then, its `code` `137` and its `reason` `"restarted"`. A job so kept has its `end` alone for its log.
+A server MAY say why it killed a process with `reason`, in its end and in its job:
+
+- `"restarted"`: its server ended, keeping its sandbox, while it ran.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

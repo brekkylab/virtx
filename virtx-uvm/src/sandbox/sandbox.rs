@@ -116,7 +116,7 @@ const SIGNALS: [&str; 31] = [
     "SIGPWR",
     "SIGSYS",
 ];
-const SIGKILL: i32 = 9;
+pub(super) const SIGKILL: i32 = 9;
 
 /// The signal `name`, such as `SIGTERM`, as Linux numbers it.
 pub fn signal_number(name: &str) -> Option<i32> {
@@ -336,6 +336,7 @@ impl Sandbox {
                 args,
                 keys,
                 exited: false,
+                jobs: Vec::new(),
             };
             if let Err(e) = sandbox.keep(record) {
                 let closed = Arc::clone(&sandbox);
@@ -426,6 +427,8 @@ impl Sandbox {
             ports: args.ports.clone(),
         };
         let exited = record.as_ref().is_some_and(|record| record.exited);
+        let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());
+        let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
         Ok(Sandbox {
             id: upper.id.clone(),
             dir,
@@ -443,7 +446,7 @@ impl Sandbox {
                 false => State::Parked,
             }),
             turn: tokio::sync::Mutex::new(()),
-            jobs: Mutex::default(),
+            jobs: Mutex::new(jobs),
             starting: Mutex::default(),
             ports: Ports::default(),
             park_after,
@@ -496,6 +499,18 @@ impl Sandbox {
         upper.kept = true;
         *kept = Some(record);
         Ok(())
+    }
+
+    /// Write its jobs as they are now into its record, for one kept past its process: a server
+    /// started again over its root knows each, and each that runs now as ended by the restart.
+    fn keep_jobs(&self) {
+        let jobs = self.jobs();
+        if let Some(record) = &mut *self.record.lock().unwrap() {
+            record.jobs = jobs;
+            if let Err(e) = record.write(&self.dir, &self.id) {
+                eprintln!("sandbox {}'s jobs not kept: {e}", self.id);
+            }
+        }
     }
 
     /// Start `cmd` in it, beside whatever else runs there, and kill it after `timeout`.
@@ -551,6 +566,7 @@ impl Sandbox {
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
         self.kill(&job)?;
         job.remove();
+        self.keep_jobs();
         Ok(())
     }
 
@@ -639,12 +655,13 @@ impl Sandbox {
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
         // finds the sandbox closed.
         let _turn = self.turn.blocking_lock();
+        // Taken first, so that nothing its machine's stopping ends -- its exit, a job killed
+        // with it -- is written into it: a job that runs now is kept as one that ran.
+        let record = self.record.lock().unwrap().take();
         if let State::Up(machine) = state {
             machine.stop();
         }
         self.volume_holds.lock().unwrap().clear();
-        // Taken first, so that a record of its machine's exit is not written after it is gone.
-        let record = self.record.lock().unwrap().take();
         if let Some(mut upper) = self.upper.lock().unwrap().take() {
             upper.kept = leaving && record.is_some();
         }
@@ -753,11 +770,13 @@ impl Sandbox {
                             cmd,
                             running: true,
                             code: None,
+                            reason: None,
                         });
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
                         job
                     });
+                    self.keep_jobs();
                     let _ = waiter.send(started);
                 }
                 CtrlResp::Stdout { id, line } => {
@@ -774,6 +793,7 @@ impl Sandbox {
                     if let Some(job) = running.remove(&id) {
                         job.end(code);
                         *self.used.lock().unwrap() = Instant::now();
+                        self.keep_jobs();
                     }
                 }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } => {}
@@ -802,6 +822,8 @@ impl Sandbox {
         for job in running.into_values() {
             job.end(128 + SIGKILL);
         }
+        drop(starting);
+        self.keep_jobs();
     }
 }
 
@@ -982,7 +1004,7 @@ impl Sandbox {
 
     /// Each sandbox kept under `root` past the process that made it or last knew it, that no
     /// other process knows now, known again here: parked, or exited where its machine ended
-    /// on its own, with none of its jobs, and booted again as [`create`](Sandbox::create) says
+    /// on its own, with its jobs, each that ran then ended `restarted`, and booted again as [`create`](Sandbox::create) says
     /// for the next that needs it. What sandboxes not kept left is deleted first, as
     /// [`sweep`](Sandbox::sweep) deletes it. One that cannot be known again -- its record not
     /// read, or its image, a volume or an abin of it gone -- is [`Unknown`], its disk and
@@ -1128,6 +1150,7 @@ mod tests {
                 cmd: vec!["true".into()],
                 running: true,
                 code: None,
+                reason: None,
             });
             if ended {
                 job.end(0);

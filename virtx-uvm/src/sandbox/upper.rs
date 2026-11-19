@@ -284,6 +284,7 @@ mod tests {
             args,
             keys: Default::default(),
             exited: false,
+            jobs: Vec::new(),
         };
         record.write(dir, id).unwrap();
     }

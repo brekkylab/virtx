@@ -20,7 +20,7 @@ use std::{
 use axum::body::Body;
 use futures_util::{StreamExt as _, future::join_all};
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
+use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
 use virtx_uvm::{
     DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
     VolumeStore,
@@ -167,6 +167,8 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     let gone = home.sandbox(&small(), None).await;
     let write = ["sh", "-c", "echo kept > /root/kept"];
     assert_eq!(run(&kept, &write, None).await.unwrap().1, 0);
+    let sleeping = kept.exec(vec!["sleep".into(), "600".into()], None).await;
+    let sleeping = sleeping.unwrap().get().id;
     assert!(
         home.kept().is_empty(),
         "one this process knows is no other's"
@@ -180,7 +182,29 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     assert_eq!(again.id(), id);
     assert!(again.answer().running);
     assert_eq!(again.keys(), keys);
-    assert!(again.jobs().is_empty());
+    // Its jobs are kept, the one that ran then ended by the restart, each log its end alone.
+    let ended: Vec<_> = again
+        .jobs()
+        .into_iter()
+        .map(|job| (job.id == sleeping, job.running, job.code, job.reason))
+        .collect();
+    let restarted = Some(SandboxJobEndReason::Restarted);
+    assert!(ended.contains(&(false, false, Some(0), None)), "{ended:?}");
+    assert!(
+        ended.contains(&(true, false, Some(137), restarted)),
+        "{ended:?}"
+    );
+    let log = again.job(&sleeping).unwrap();
+    let log = std::pin::pin!(Arc::clone(log.log()).events(&HeaderMap::new()));
+    let log: Vec<_> = log.collect().await;
+    let log: Vec<_> = log
+        .into_iter()
+        .map(|event| String::from_utf8(event.unwrap().to_vec()).unwrap())
+        .collect();
+    assert_eq!(
+        log,
+        ["id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"]
+    );
     let (lines, _) = run(again, &["cat", "/root/kept"], None).await.unwrap();
     assert_eq!(lines, ["kept"]);
 

@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tokio::sync::oneshot;
-use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEntry};
+use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry};
 
 use super::sandbox::LOG_LIMIT;
 
@@ -10,6 +11,9 @@ use super::sandbox::LOG_LIMIT;
 pub struct Job {
     job: Mutex<SandboxJob>,
     log: Arc<Log<SandboxJobEntry>>,
+    /// When it ended, once it has: of the ended jobs a sandbox keeps, the one that ended first
+    /// goes first.
+    ended_at: Mutex<Option<Instant>>,
     /// Its stdin, and the writes sent to it not yet written.
     stdin: Mutex<Stdin>,
     /// Held while a write to its stdin is under way, so they go one at a time.
@@ -35,7 +39,26 @@ impl Job {
                 waiting: VecDeque::new(),
             }),
             writing: tokio::sync::Mutex::new(()),
+            ended_at: Mutex::new(None),
         })
+    }
+
+    /// `job`, as a sandbox kept past its process had it, known again: ended as it ended, or,
+    /// one that ran then, as killed for its server's restart. Its log is its end alone.
+    pub(super) fn kept(mut job: SandboxJob) -> Arc<Job> {
+        if job.running {
+            (job.running, job.code) = (false, Some(128 + super::sandbox::SIGKILL));
+            job.reason = Some(SandboxJobEndReason::Restarted);
+        }
+        let end = SandboxJobEnd {
+            code: job.code.unwrap_or(128 + super::sandbox::SIGKILL),
+            reason: job.reason,
+        };
+        let kept = Job::new(job, false);
+        kept.log.end(SandboxJobEntry::End(end), || {
+            *kept.ended_at.lock().unwrap() = Some(Instant::now());
+        });
+        kept
     }
 
     /// The job as it is now.
@@ -57,10 +80,16 @@ impl Job {
     pub(super) fn end(&self, code: i32) {
         *self.stdin.lock().unwrap() = Stdin::default();
         self.log
-            .end(SandboxJobEntry::End(SandboxJobEnd { code }), || {
+            .end(SandboxJobEntry::End(SandboxJobEnd::exited(code)), || {
                 let mut job = self.job.lock().unwrap();
                 (job.running, job.code) = (false, Some(code));
+                *self.ended_at.lock().unwrap() = Some(Instant::now());
             });
+    }
+
+    /// When it ended, once it has.
+    pub(super) fn ended_at(&self) -> Option<Instant> {
+        *self.ended_at.lock().unwrap()
     }
 
     pub(super) fn remove(&self) {

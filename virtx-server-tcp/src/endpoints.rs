@@ -31,14 +31,14 @@ use virtx_core::{
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
     SandboxPort, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
-    VolumeMountCreateArgs, VolumeMountListOutputItem,
+    VolumeMountCreateArgs, VolumeMountListOutputItem, described_type, from_body,
 };
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
-    RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step, park_after,
-    signal_number,
+    RegistryServer, Sandbox, SandboxError, UnknownSandbox, VolumeError, VolumeStore, build_step,
+    park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -64,6 +64,8 @@ pub struct Home {
     registry: Arc<RegistryServer>,
     /// What its image jobs -- a pull, a push, a build's base -- connect to registries through.
     registries: Arc<dyn RegistryProxy>,
+    /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first.
+    mirror: Option<Arc<str>>,
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     pub root: PathBuf,
     volumes: VolumeStore,
@@ -73,6 +75,9 @@ pub struct Home {
     vm: Vec<OsString>,
     /// The sandboxes, by id, until each is removed.
     sandboxes: Mutex<HashMap<String, Held>>,
+    /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
+    /// with why, and refused all but its `DELETE`.
+    unknown: Mutex<HashMap<String, UnknownSandbox>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
@@ -82,36 +87,67 @@ pub struct Home {
 
 impl Home {
     /// The images in `images`, which `registry` answers for, and the volumes and the
-    /// sandboxes' upper disks under `root`. Its image jobs connect to registries on public
+    /// sandboxes' upper disks under `root`, with each sandbox a server before it kept there
+    /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
-    /// is made for says otherwise ([`Access::through`]).
+    /// is made for says otherwise ([`Access::through`]). Blocking work, as knowing each
+    /// sandbox again is.
     pub fn new(
         images: ImageStore,
         registry: Arc<RegistryServer>,
         root: &Path,
     ) -> anyhow::Result<Home> {
-        Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
+        let vm: Vec<OsString> = vec![
+            std::env::current_exe()?.into(),
+            crate::serve::MACHINE_SUBCOMMAND.into(),
+        ];
+        let kept = Sandbox::kept(&images, root, &volumes, vm.clone(), park_after());
+        let unknown = kept
+            .unknown
+            .into_iter()
+            .map(|unknown| (unknown.id().to_owned(), unknown))
+            .collect();
+        let sandboxes = kept
+            .known
+            .into_iter()
+            .map(|sandbox| {
+                let capabilities = sandbox.keys();
+                let id = sandbox.id().to_owned();
+                (
+                    id,
+                    Held {
+                        sandbox,
+                        capabilities,
+                    },
+                )
+            })
+            .collect();
         Ok(Home {
             images,
             registry,
             registries: Arc::new(PublicRegistries::default()),
+            mirror: None,
             files: Files::new(volumes.clone()),
             root: root.to_owned(),
             volumes,
-            vm: vec![
-                std::env::current_exe()?.into(),
-                crate::serve::MACHINE_SUBCOMMAND.into(),
-            ],
-            sandboxes: Mutex::default(),
+            vm,
+            sandboxes: Mutex::new(sandboxes),
+            unknown: Mutex::new(unknown),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
     }
 
-    /// This, its image jobs connecting to registries through `registries`.
-    pub(crate) fn through(mut self, registries: Arc<dyn RegistryProxy>) -> Home {
+    /// This, its image jobs connecting to registries through `registries`, and its anonymous
+    /// pulls of Docker Hub's images going to `mirror` first.
+    pub(crate) fn through(
+        mut self,
+        registries: Arc<dyn RegistryProxy>,
+        mirror: Option<Arc<str>>,
+    ) -> Home {
         self.registries = registries;
+        self.mirror = mirror;
         self
     }
 
@@ -170,12 +206,46 @@ impl Home {
         });
     }
 
+    /// Cancel every image job here, and let go of every sandbox as this server ends, side by
+    /// side, each kept for the next server over this home ([`Sandbox::leave`]): blocks until
+    /// each machine has stopped and synced what it wrote.
+    pub fn leave_all(&self) {
+        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
+            cancel(&job, &task);
+        }
+        let left: Vec<_> = self
+            .sandboxes
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, held)| held.sandbox)
+            .collect();
+        std::thread::scope(|scope| {
+            for sandbox in &left {
+                scope.spawn(|| sandbox.leave());
+            }
+        });
+    }
+
+    /// The sandbox `id`: refused `409`, `ended`, for one not known again, which takes only its
+    /// `DELETE`.
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .get(id)
-            .map(|held| Arc::clone(&held.sandbox))
-            .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))
+        if let Some(held) = sandboxes.get(id) {
+            return Ok(Arc::clone(&held.sandbox));
+        }
+        if let Some(unknown) = self.unknown.lock().unwrap().get(id) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "ended",
+                format!(
+                    "sandbox {id} was not known again since its server restarted, and takes only \
+                     its DELETE: {}",
+                    unknown.why()
+                ),
+            ));
+        }
+        Err(not_found(format!("no sandbox here has the id {id}")))
     }
 }
 
@@ -576,13 +646,15 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
+    let mirror = home.mirror.clone();
     image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry =
-                RegistryClient::new(images.clone(), args.auth).through(Some(&*registries))?;
+            let registry = RegistryClient::new(images.clone(), args.auth)
+                .with_mirror(mirror.as_deref())
+                .through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
@@ -613,15 +685,21 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         self::reference(&args.recipe.base)?;
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
-    let registries = Arc::clone(&home.registries);
+    let (registries, mirror) = (Arc::clone(&home.registries), home.mirror.clone());
     let recipe = args.recipe;
     image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
         move |mut report| async move {
-            let (mut image, mut layers, _base) =
-                base(&images, &*registries, &recipe.base, &mut report).await?;
+            let (mut image, mut layers, _base) = base(
+                &images,
+                &*registries,
+                mirror.as_deref(),
+                &recipe.base,
+                &mut report,
+            )
+            .await?;
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
@@ -655,11 +733,12 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
-/// pulled into the store now, anonymously, through `registries`, and left untagged: a build
-/// tags only what it builds.
+/// pulled into the store now, anonymously, through `registries` and from `mirror` first if it
+/// is Docker Hub's, and left untagged: a build tags only what it builds.
 async fn base(
     images: &ImageStore,
     registries: &dyn RegistryProxy,
+    mirror: Option<&str>,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {
@@ -673,6 +752,7 @@ async fn base(
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
             RegistryClient::new(images.clone(), None)
+                .with_mirror(mirror)
                 .through(Some(registries))?
                 .pull(&reference, report)
                 .await?
@@ -852,28 +932,22 @@ async fn sandbox_files(
 
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let sandboxes = home.sandboxes.lock().unwrap();
-    let listed: Vec<_> = sandboxes
+    let mut listed: Vec<_> = sandboxes
         .values()
         .map(|held| held.sandbox.answer())
         .collect();
+    let unknown = home.unknown.lock().unwrap();
+    listed.extend(unknown.values().map(UnknownSandbox::answer));
     Ok(json(&listed))
 }
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-    let sandbox = Sandbox::create(
-        &home.images,
-        &home.root,
-        &home.volumes,
-        &args,
-        home.vm.clone(),
-        park_after(),
-    )
-    .await?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
-    // what reaches this server from outside is not this server's to know.
+    // what reaches this server from outside is not this server's to know. Kept with the
+    // sandbox, so that its URLs reach it across this server's restart.
     let mut opened = Vec::new();
     let mut capabilities = HashMap::new();
     for &port in &args.ports {
@@ -888,6 +962,16 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         });
         capabilities.insert(capability, port);
     }
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        home.vm.clone(),
+        park_after(),
+        Some(capabilities.clone()),
+    )
+    .await?;
 
     let id = sandbox.id().to_owned();
     let held = Held {
@@ -917,6 +1001,9 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
+    if let Some(unknown) = home.unknown.lock().unwrap().get(&id) {
+        return Ok(json(&unknown.answer()));
+    }
     Ok(json(&home.sandbox(&id)?.answer()))
 }
 
@@ -924,6 +1011,11 @@ async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
+    let unknown = home.unknown.lock().unwrap().remove(&id);
+    if let Some(unknown) = unknown {
+        tokio::task::spawn_blocking(move || unknown.remove()).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     let removed = home.sandboxes.lock().unwrap().remove(&id);
     let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
     tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
@@ -1071,7 +1163,7 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
 }
 
 /// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope rather than as text.
+/// they do not read as one, in PROTOCOL.md's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>
@@ -1088,14 +1180,43 @@ where
         match axum::extract::Path::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(segments)) => Ok(Segments(segments)),
             Err(e) if e.status().is_server_error() => Err(internal(e.body_text())),
-            Err(e) => Err(invalid(format!("the path: {}", e.body_text()))),
+            Err(e) => Err(invalid(unread_path(&e))),
         }
     }
 }
 
-/// `request` read as a `T`.
+/// Why a path's segments did not read, naming the segment and what it takes.
+fn unread_path(rejection: &axum::extract::rejection::PathRejection) -> String {
+    use axum::extract::path::ErrorKind;
+    use axum::extract::rejection::PathRejection;
+    let PathRejection::FailedToDeserializePathParams(failed) = rejection else {
+        return "the path does not read".to_owned();
+    };
+    match failed.kind() {
+        ErrorKind::ParseErrorAtKey {
+            key,
+            value,
+            expected_type,
+        } => format!("{key}: {}, not {value:?}", described_type(expected_type)),
+        ErrorKind::ParseErrorAtIndex {
+            value,
+            expected_type,
+            ..
+        }
+        | ErrorKind::ParseError {
+            value,
+            expected_type,
+        } => format!("the path: {}, not {value:?}", described_type(expected_type)),
+        ErrorKind::InvalidUtf8InPathParam { key } => {
+            format!("{key}: UTF-8 once its escapes are read, and it is not")
+        }
+        _ => "the path does not read".to_owned(),
+    }
+}
+
+/// `request` read as a `T`; refused naming the member that does not read and what it takes.
 fn body<T: DeserializeOwned>(request: &Bytes) -> Result<T, Refused> {
-    serde_json::from_slice(request).map_err(invalid)
+    from_body(request).map_err(invalid)
 }
 
 /// `value` as a JSON body.

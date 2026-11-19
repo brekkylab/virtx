@@ -1345,13 +1345,21 @@ impl From<ImageStoreError> for Refused {
     }
 }
 
-/// What booting a sandbox's machine, or sending it a command or a signal, fails with.
+/// What booting a sandbox's machine, or sending it a command or a signal, fails with. A machine
+/// that did not start is answered with why as its process told it, and its whole account, which
+/// can name the server's paths, goes to the server's stderr.
 impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
-                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
+            MachineError::DidNotStart { account, told } => {
+                let _ = writeln!(io::stderr(), "{account}");
+                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", told)
+            }
+            MachineError::Io { source, .. }
+            | MachineError::Fstree(FstreeError::Io { source, .. })
+            | MachineError::Volume(VolumeError::Io { source, .. }) => {
+                internal(io_failure(source, &e))
             }
             _ => internal(e),
         }
@@ -1409,8 +1417,19 @@ mod tests {
                 context: CONTEXT.into(),
                 source: source(),
             };
-            let internal: [Refused; 3] = [
+            let internal: [Refused; 6] = [
                 ImageStoreError::Fstree(tree()).into(),
+                MachineError::Fstree(tree()).into(),
+                MachineError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+                MachineError::Volume(VolumeError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                })
+                .into(),
                 ProjectError::Io {
                     context: CONTEXT.into(),
                     source: source(),
@@ -1457,5 +1476,27 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["message"], "the server's projects failed");
+    }
+
+    #[tokio::test]
+    async fn a_machine_that_did_not_start_is_answered_as_it_tells_it() {
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let told = format!("{why}; last logged:\nattaching the root's image: boot error");
+        let refusal: Refused = MachineError::DidNotStart {
+            account: format!(
+                "{why}; last logged:\nvirtx_uvm::machine::machine: attaching the root's image: \
+                 boot error: /home/virtx/project/a/images/rootfs/sha256/a.vmdk"
+            ),
+            told: told.clone(),
+        }
+        .into();
+        let response = refusal.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "boot_failed");
+        assert_eq!(body["error"]["message"], told.as_str());
     }
 }

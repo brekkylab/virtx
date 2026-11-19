@@ -1074,7 +1074,7 @@ impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
+            MachineError::DidNotStart { .. } => {
                 refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
             }
             _ => internal(e),

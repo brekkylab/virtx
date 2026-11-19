@@ -70,11 +70,16 @@ pub enum CtrlResp {
     /// thing said of it.
     Exited { id: u32, code: i32 },
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
-    /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
-    /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine
-    /// could not be built or broke, logged as an error as the process's last word -- so a
-    /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
-    Log { level: String, message: String },
+    /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`, under the
+    /// `target` it was logged under. Among it are the guest's console, which libkrun logs under
+    /// `init_or_kernel`, and why the machine could not be built or broke, logged as an error as
+    /// the process's last words -- so a process that ends before [`Ready`](CtrlResp::Ready) has
+    /// said why here.
+    Log {
+        level: String,
+        target: String,
+        message: String,
+    },
     /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
     Pong,
 }
@@ -216,6 +221,7 @@ mod tests {
             },
             CtrlResp::Log {
                 level: "ERROR".into(),
+                target: "virtx_uvm".into(),
                 message: "no".into(),
             },
         ];

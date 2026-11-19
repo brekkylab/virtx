@@ -715,4 +715,92 @@ mod tests {
         );
         assert_eq!(*asked.lock().unwrap(), [None]);
     }
+
+    /// A log whose stream the server ends before its `end` is read on: after its last entry,
+    /// where entries came, so one cut on the way reads to its end and one whose job was removed
+    /// ends with that job's `404`; and where none came past where it was asked, only while its
+    /// job runs, so a reader asking after an ended log's last entry gets nothing more, at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_log_ended_before_its_end_is_read_on_while_its_job_is_there() {
+        use axum::response::IntoResponse as _;
+        use futures_util::StreamExt as _;
+        use std::sync::{Arc, Mutex};
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let noted = asked.clone();
+        let events = move |axum::extract::Path(job): axum::extract::Path<String>,
+                           headers: HeaderMap| {
+            let after = headers
+                .get("last-event-id")
+                .map_or("-".to_owned(), |v| v.to_str().unwrap().to_owned());
+            let opened = {
+                let mut asked = noted.lock().unwrap();
+                asked.push(format!("{job} after {after}"));
+                asked.iter().filter(|a| a.starts_with(&job)).count()
+            };
+            let sse = [(::http::header::CONTENT_TYPE, "text/event-stream")];
+            let lines = |lines: &[(u64, &str)]| -> String {
+                lines
+                    .iter()
+                    .map(|(id, data)| format!("id: {id}\ndata: {data}\n\n"))
+                    .collect()
+            };
+            let (a, b) = ((1, r#"{"stdout":"a"}"#), (2, r#"{"stdout":"b"}"#));
+            let end = (3, r#"{"end":{"code":0}}"#);
+            async move {
+                match (job.as_str(), opened) {
+                    ("cut", 1) => (sse, lines(&[a, b])).into_response(),
+                    ("cut", _) => (sse, lines(&[end])).into_response(),
+                    ("removed", 1) => (sse, lines(&[a])).into_response(),
+                    ("waiting", 1) | ("ended", _) => (sse, "").into_response(),
+                    ("waiting", _) => (sse, lines(&[a, b, end])).into_response(),
+                    _ => StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        };
+        let job = |axum::extract::Path(job): axum::extract::Path<String>| async move {
+            match job.as_str() {
+                "removed" => StatusCode::NOT_FOUND.into_response(),
+                _ => Json(serde_json::json!({"id": job, "running": job == "waiting"}))
+                    .into_response(),
+            }
+        };
+        let router = Router::new()
+            .route("/jobs/{job}", get(job))
+            .route("/jobs/{job}/events", get(events));
+        let client = piped(router);
+        let read = |job: &str, after: Option<u64>| {
+            let path = format!("/jobs/{job}/events");
+            let client = &client;
+            async move {
+                super::sse::client::log::<crate::SandboxJobEntry>(client, path, after)
+                    .map(|entry| entry.map(|entry| entry.id))
+                    .collect::<Vec<_>>()
+                    .await
+            }
+        };
+
+        let cut = read("cut", None).await;
+        assert!(matches!(cut[..], [Ok(1), Ok(2), Ok(3)]), "{cut:?}");
+        let removed = read("removed", None).await;
+        assert!(
+            matches!(removed[..], [Ok(1), Err(Error::Status(404, _))]),
+            "{removed:?}"
+        );
+        let waiting = read("waiting", None).await;
+        assert!(matches!(waiting[..], [Ok(1), Ok(2), Ok(3)]), "{waiting:?}");
+        let ended = read("ended", Some(3)).await;
+        assert!(ended.is_empty(), "{ended:?}");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [
+                "cut after -",
+                "cut after 2",
+                "removed after -",
+                "removed after 1",
+                "waiting after -",
+                "waiting after -",
+                "ended after 3",
+            ]
+        );
+    }
 }

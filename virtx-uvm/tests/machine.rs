@@ -366,6 +366,7 @@ async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
         &args,
         vm,
         park_after,
+        None,
     );
     let sandbox = sandbox.await.unwrap();
     let busy = [

@@ -242,11 +242,14 @@ fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavCon
             "the root is removed through its resource",
         ));
     }
-    // Without `PATCH`, an `OPTIONS` answer's `Allow` does not offer what is refused above.
+    // `Allow`, which `OPTIONS` answers and `not_allowed` sends with its `405`, leaves `PATCH`
+    // out. Given a set of methods with `PROPFIND` in it, `dav-server` would answer a `GET` of a
+    // directory with an HTML index of it; a directory is listed with `PROPFIND`.
     let mut methods = dav_server::DavMethodSet::all();
     methods.remove(dav_server::DavMethod::Patch);
     Ok(DavHandler::builder()
         .methods(methods)
+        .autoindex(false)
         .strip_prefix(prefix)
         .hide_symlinks(true)
         .read_buf_size(volume::READ))
@@ -646,6 +649,8 @@ fn status(e: &VolumeError) -> StatusCode {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt as _;
+
     use super::*;
 
     const PREFIX: &str = "/volumes/v/files";
@@ -851,6 +856,9 @@ mod tests {
         let allow = allow.to_str().unwrap();
         assert!(allow.contains("PUT"), "{allow}");
         assert!(!allow.contains("PATCH"), "OPTIONS offers a PATCH: {allow}");
+        let root = Request::get("/volumes/v/files/").body(Body::empty());
+        let status = files.volume("v", root.unwrap()).await.status();
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "GET of a directory");
 
         let partial = [
             ("a PATCH", Method::PATCH, None),
@@ -861,14 +869,22 @@ mod tests {
                 .method(method)
                 .uri(path)
                 .header(header::CONTENT_TYPE, "application/x-sabredav-partialupdate")
-                .header("X-Update-Range", "bytes=2-3")
-                .header(header::CONTENT_LENGTH, 2);
+                .header("X-Update-Range", "bytes=2-17")
+                .header(header::CONTENT_LENGTH, 16);
             if let Some(etag) = if_match {
                 request = request.header(header::IF_MATCH, etag);
             }
-            let response = files
-                .volume("v", request.body(Body::from("YY")).unwrap())
-                .await;
+            // Its body in 16 parts, each counted as it is read.
+            let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = Arc::clone(&read);
+            let parts = futures_util::stream::iter(0..16).map(move |_| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, io::Error>(bytes::Bytes::from("Y"))
+            });
+            let body = Body::from_stream(parts);
+            let response = files.volume("v", request.body(body).unwrap()).await;
+            let read = read.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(read, 16, "{what}: its body read to its end");
             assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{what}");
             assert_eq!(response.headers()[header::ALLOW], allow, "{what}");
             let body = response.into_body().collect().await.unwrap().to_bytes();

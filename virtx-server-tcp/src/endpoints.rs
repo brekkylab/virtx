@@ -53,8 +53,8 @@ use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, ImageConfiguration,
     ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, NoRoom,
     Os, PublicImages, PublicRegistries, Reference, RegistryClient, RegistryError, RegistryProxy,
-    RegistryServer, SandboxError, Sandboxes, SnapshotError, SnapshotStore, VolumeError,
-    VolumeStore, build_step, signal_number,
+    RegistryServer, SandboxError, Sandboxes as SandboxStore, SnapshotError, SnapshotStore,
+    VolumeError, VolumeStore, build_step, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -130,7 +130,7 @@ pub struct HomeInner {
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
     /// Every sandbox, its machine up or not, until it is deleted.
-    sandboxes: Sandboxes,
+    sandboxes: SandboxStore,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
@@ -168,7 +168,7 @@ impl Home {
             keeping: keeping.clone(),
             home: OnceLock::new(),
         });
-        let sandboxes = Sandboxes::new(
+        let sandboxes = SandboxStore::new(
             images.clone(),
             snapshots.clone(),
             volumes.clone(),
@@ -470,17 +470,18 @@ impl Home {
     }
 
     /// Delete each sandbox unused for [`reclaim_after`](virtx_uvm::reclaim_after), if that is
-    /// ever ([`Sandboxes::reclaim`]).
+    /// ever ([`SandboxStore::reclaim`]).
     pub fn reclaim(&self) {
         if let Some(after) = virtx_uvm::reclaim_after() {
             self.sandboxes.reclaim(after);
         }
     }
 
-    /// Its sandboxes, their machines up or not: for an embedder to count, park, move to another
-    /// server, or copy the disk of, beside what this home's routes do with them.
-    pub fn sandboxes(&self) -> &Sandboxes {
-        &self.sandboxes
+    /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
+    /// ([`serve::router`](crate::serve::router)'s `own`) and its work between requests, which
+    /// may find, count or park them.
+    pub fn sandboxes(&self) -> Sandboxes<'_> {
+        Sandboxes(self)
     }
 
     /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
@@ -526,6 +527,39 @@ impl Home {
     /// The sandbox `id`, its machine up or not.
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         Ok(self.sandboxes.get(id)?)
+    }
+}
+
+/// A home's sandboxes, as each is when it is asked: those the home knows, each whether its
+/// machine is up or not ([`Home::sandboxes`]). One kept in the home and not known again, which
+/// takes only its `DELETE`, is none of them.
+pub struct Sandboxes<'a>(&'a Home);
+
+impl Sandboxes<'_> {
+    /// Each of them, in no set order.
+    pub fn list(&self) -> Vec<Arc<Sandbox>> {
+        let store = &self.0.sandboxes;
+        let listed = store.list(None).into_iter();
+        listed
+            .filter_map(|answer| store.get(&answer.id).ok())
+            .collect()
+    }
+
+    /// The sandbox `id`, if it is one of them.
+    pub fn get(&self, id: &str) -> Option<Arc<Sandbox>> {
+        self.0.sandboxes.get(id).ok()
+    }
+
+    /// How many there are, and how many of those have their machine up now.
+    pub fn counts(&self) -> (usize, usize) {
+        let all = self.list();
+        let up = all.iter().filter(|sandbox| sandbox.is_up()).count();
+        (all.len(), up)
+    }
+
+    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk.
+    pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
+        self.0.sandboxes.running_on(id)
     }
 }
 

@@ -20,6 +20,7 @@ use axum::body::Body;
 use futures_util::{StreamExt as _, future::join_all};
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
+use virtx_uvm::disks::{Disks, DynStorage, Held, MachineDisk, set_disks};
 use virtx_uvm::{
     DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
     VolumeStore,
@@ -112,6 +113,72 @@ async fn run(
     panic!("a job's log ends with its end")
 }
 
+/// Sandboxes' disks as an embedder's: each read and written through storage of its own -- the
+/// file, opened as libkrun would -- what it is served from and when its machine booted noted in
+/// `marks/` beside the test's `sandbox/`, how many are served counted, and those removed noted.
+struct Embedded;
+
+/// How many sandbox disks are served now, each while its machine is up.
+static SERVING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The disks forgotten, as their sandboxes went.
+static FORGOTTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// A disk served, until it drops.
+struct Serving;
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        SERVING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Where what happens to the sandbox disk at `disk` is noted: `<home>/marks/<id>.<what>`.
+fn mark(disk: &Path, what: &str) -> PathBuf {
+    let home = disk.parent().unwrap().parent().unwrap();
+    let id = disk.file_stem().unwrap().to_str().unwrap();
+    home.join("marks").join(format!("{id}.{what}"))
+}
+
+/// A disk opened in its machine's process, through its file.
+struct Opened(PathBuf);
+
+impl MachineDisk for Opened {
+    fn storage(&self) -> Box<dyn DynStorage> {
+        use imago::Storage as _;
+        let options = imago::StorageOpenOptions::new()
+            .write(true)
+            .filename(&self.0);
+        Box::new(imago::file::File::open(options).unwrap())
+    }
+
+    fn booted(&self) {
+        std::fs::write(mark(&self.0, "booted"), "").unwrap();
+    }
+}
+
+impl Disks for Embedded {
+    fn serve(&self, disk: &Path) -> std::io::Result<Option<(PathBuf, Held)>> {
+        SERVING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some((mark(disk, "source"), Box::new(Serving))))
+    }
+
+    fn open(
+        &self,
+        disk: &Path,
+        source: Option<&Path>,
+    ) -> std::io::Result<Option<Arc<dyn MachineDisk>>> {
+        let source = source.expect("a source served").to_str().unwrap();
+        std::fs::create_dir_all(mark(disk, "").parent().unwrap())?;
+        std::fs::write(mark(disk, "opened"), source)?;
+        Ok(Some(Arc::new(Opened(disk.to_owned()))))
+    }
+
+    fn forget(&self, disk: &Path) -> std::io::Result<()> {
+        FORGOTTEN.lock().unwrap().push(disk.to_owned());
+        Ok(())
+    }
+}
+
 /// Close `sandbox` as a server removes one: it blocks while the guest syncs.
 async fn close(sandbox: Arc<Sandbox>) {
     tokio::task::spawn_blocking(move || sandbox.close())
@@ -190,6 +257,50 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         .unwrap()
         .count();
     assert_eq!(left, 0);
+}
+
+async fn a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs(home: Home) {
+    use std::sync::atomic::Ordering;
+    let serving = SERVING.load(Ordering::SeqCst);
+    // Served no more once its machine's process has ended, a moment after it is stopped.
+    let served_down = async || {
+        for _ in 0..100 {
+            if SERVING.load(Ordering::SeqCst) == serving {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("its disk is still served with its machine down");
+    };
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let disk = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    // Opened in its machine's process through the embedder's storage, given what it is served
+    // from, and told once its machine booted; served while its machine runs.
+    let opened = std::fs::read_to_string(mark(&disk, "opened")).unwrap();
+    assert_eq!(Path::new(&opened), mark(&disk, "source"));
+    assert!(mark(&disk, "booted").is_file());
+    assert_eq!(SERVING.load(Ordering::SeqCst), serving + 1);
+    // What the guest writes goes through it, and is there as it boots again over it.
+    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    served_down().await;
+    std::fs::remove_file(mark(&disk, "booted")).unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert!(mark(&disk, "booted").is_file(), "booted again through it");
+    assert_eq!(SERVING.load(Ordering::SeqCst), serving + 1);
+    // Closed, its disk is forgotten as it is removed.
+    close(sandbox).await;
+    served_down().await;
+    assert!(FORGOTTEN.lock().unwrap().contains(&disk));
+    assert!(!disk.exists());
 }
 
 async fn a_sandbox_closed_while_its_machine_stops_leaves_nothing(home: Home) {
@@ -875,6 +986,8 @@ fn filter(mut args: impl Iterator<Item = String>) -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    // In this process and each machine's, before either does anything with a disk.
+    set_disks(Arc::new(Embedded));
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
         let Err(_) = virtx_uvm::enter_machine();
@@ -916,6 +1029,7 @@ fn main() -> ExitCode {
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
+        a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         sandboxes_made_at_once_each_run_their_own,

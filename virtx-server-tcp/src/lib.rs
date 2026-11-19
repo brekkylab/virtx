@@ -9,6 +9,9 @@
 //! - [`access::Homes`]: what makes a project's home as it is first reached. The binary's is
 //!   [`virtx_uvm::ProjectStore`], each home in the project's directory.
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
+//! - [`virtx_uvm::disks::set_disks`]: what a sandbox's upper disk is past its file, such as data
+//!   fetched from elsewhere as the guest first reads it. Said before
+//!   [`serve::become_machine_if_spawned`], so a machine's process has it too.
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.

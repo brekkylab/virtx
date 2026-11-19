@@ -19,7 +19,7 @@ use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
     Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
-    Ports, Reference, VolumeHold, VolumeMount, VolumeStore,
+    Ports, Reference, SandboxDisk, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -334,6 +334,7 @@ impl Sandbox {
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.clone(),
+            sandbox_disk: Some(SandboxDisk::default()),
         };
         let sandbox = Arc::new(Sandbox {
             id: upper.id.clone(),
@@ -524,10 +525,20 @@ impl Sandbox {
             State::Exited => return Err(Error::Ended),
             State::Parked => {}
         }
+        // What its disk is fetched from while its machine runs, if the embedder's disks say,
+        // held with the machine.
+        let (mut config, vm) = (self.config.clone(), self.vm.clone());
+        let served = crate::disks::disks()
+            .serve(&config.upper)
+            .map_err(|e| Error::Io {
+                context: format!("serving the disk of sandbox {}", self.id),
+                source: e,
+            })?;
+        let (source, held) = served.unzip();
+        config.sandbox_disk = Some(SandboxDisk { source });
         // Booting is blocking work, until the guest takes commands.
-        let (config, vm) = (self.config.clone(), self.vm.clone());
         let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
-        let machine = Arc::new(machine);
+        let machine = Arc::new(machine.holding(held));
         let closed = {
             let mut state = self.state.lock().unwrap();
             let closed = matches!(*state, State::Exited);

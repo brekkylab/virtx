@@ -62,6 +62,21 @@ pub struct MachineConfig {
     /// [`network`](MachineSpec::network).
     #[serde(default)]
     pub ports: Vec<u16>,
+
+    /// Whether [`upper`](Self::upper) is a sandbox's disk, opened in the machine's process
+    /// through the embedder's [`Disks`](crate::disks::Disks). `None`, as a build's is: its file
+    /// alone.
+    #[serde(default)]
+    pub sandbox_disk: Option<SandboxDisk>,
+}
+
+/// A sandbox's upper disk, as its machine is handed it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxDisk {
+    /// What the machine fetches the disk's data from while it runs, as
+    /// [`Disks::serve`](crate::disks::Disks::serve) answered: `None` for a disk all in its
+    /// file.
+    pub source: Option<PathBuf>,
 }
 
 /// Make an empty upper disk at `path`, where nothing is yet, that may grow to `gib` GiB: a
@@ -159,6 +174,9 @@ pub struct Machine {
     io: mpsc::Sender<IoJob>,
     /// Where on this host's loopback each of its [`ports`](MachineConfig::ports) is reached.
     pub published: Vec<(u16, SocketAddr)>,
+    /// What the embedder serves its disk with ([`Disks::serve`](crate::disks::Disks::serve)),
+    /// held until its process has been killed and waited for.
+    held: Option<crate::disks::Held>,
 }
 
 impl Drop for Machine {
@@ -170,6 +188,12 @@ impl Drop for Machine {
 }
 
 impl Machine {
+    /// This, holding `held` until it is dropped: once its process has ended.
+    pub(crate) fn holding(mut self, held: Option<crate::disks::Held>) -> Machine {
+        self.held = held;
+        self
+    }
+
     /// Boot `config` in a process of its own, and answer once the guest takes commands.
     ///
     /// The process is `cmd` -- a program and its arguments -- with the machine's boot args
@@ -220,6 +244,7 @@ impl Machine {
                         ctrlout: Mutex::new(ctrlout),
                         io: files(ioin, ioout),
                         published,
+                        held: None,
                     });
                 }
                 Some(CtrlResp::Log { message, .. }) => {
@@ -486,6 +511,9 @@ mod tests {
             }],
             abin: Some(PathBuf::from("/sandbox/abin/work")),
             ports: vec![3000],
+            sandbox_disk: Some(SandboxDisk {
+                source: Some(PathBuf::from("/run/disk.sock")),
+            }),
         };
         let read: MachineConfig =
             serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
@@ -496,5 +524,6 @@ mod tests {
         assert_eq!(read.abin, sent.abin);
         assert_eq!(read.spec.network, sent.spec.network);
         assert_eq!(read.ports, sent.ports);
+        assert_eq!(read.sandbox_disk, sent.sandbox_disk);
     }
 }

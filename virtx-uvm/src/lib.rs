@@ -3,6 +3,7 @@
 //! -- and the files of a volume or a sandbox, served to a client; and the projects all of it
 //! belongs to.
 
+pub mod disks;
 mod files;
 mod fstree;
 mod image;
@@ -24,7 +25,7 @@ pub use image::{
 };
 pub use machine::{
     Error as MachineError, Machine, MachineConfig, MachineSpec, Network, Ports, Publication,
-    VolumeMount, enter as enter_machine, wire,
+    SandboxDisk, VolumeMount, enter as enter_machine, wire,
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;

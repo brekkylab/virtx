@@ -223,6 +223,43 @@ impl Store {
         named
     }
 
+    /// File the EROFS image at `from` as layer `layer`: a hard link to it, where `from` is on
+    /// the same filesystem, and a copy where it is not. Linked, one file serves every store
+    /// that links it, and a store's removal of the layer removes its own link alone. `from` must
+    /// be the EROFS image `layer` names -- one another store filed -- which is not read again
+    /// here.
+    ///
+    /// A layer already here is renewed; on Unix, one here as a file of its own -- written here
+    /// rather than linked -- is replaced by the link, as the same bytes, so one file serves both
+    /// after all. What has it open reads on from the file it opened.
+    pub fn link_layer(&self, from: &Path, layer: &Digest) -> Result<()> {
+        static LINKS: AtomicU64 = AtomicU64::new(0);
+        let path = self.layer_path(layer);
+        let _change = self.change()?;
+        let here =
+            renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))?;
+        if here && !other_file(&path, from) {
+            return Ok(());
+        }
+        let part = path.with_extension(format!(
+            "erofs.{}.{}.link",
+            std::process::id(),
+            LINKS.fetch_add(1, Ordering::Relaxed)
+        ));
+        if fs::hard_link(from, &part).is_err() {
+            // A copy in place of what is here already gains nothing.
+            if here {
+                return Ok(());
+            }
+            fs::copy(from, &part)
+                .map_err(|e| Error::io(format!("copying {}", from.display()), e))?;
+        }
+        fs::rename(&part, &path).map_err(|e| {
+            let _ = fs::remove_file(&part);
+            Error::io(format!("moving {} into place", path.display()), e)
+        })
+    }
+
     /// Make `layer` young again, if it is here: a prune's grace spares it for the image being
     /// made over it. `false` if it is not here.
     pub fn renew_layer(&self, layer: &Digest) -> Result<bool> {
@@ -922,6 +959,24 @@ fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resul
     Ok(part)
 }
 
+/// Whether `path` and `from` are two files, not two links to one: never said so where links
+/// cannot be told apart.
+fn other_file(path: &Path, from: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (fs::metadata(path), fs::metadata(from)) {
+            (Ok(here), Ok(there)) => (here.dev(), here.ino()) != (there.dev(), there.ino()),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, from);
+        false
+    }
+}
+
 /// Make what is filed at `path` young again, or answer `false` when nothing is.
 fn renew(path: &Path) -> io::Result<bool> {
     match File::options().write(true).open(path) {
@@ -966,6 +1021,52 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(self.0.root());
         }
+    }
+
+    #[test]
+    fn a_layer_linked_from_another_store_is_one_file_and_outlives_its_removal_there() {
+        let (one, two) = (Scratch::new("link-one"), Scratch::new("link-two"));
+        let layer = one.0.insert_layer(&tree(b"shared")).unwrap();
+        two.0.link_layer(&one.0.layer_path(&layer), &layer).unwrap();
+        assert_eq!(
+            two.0.get_layer(&layer).unwrap().unwrap().digest(),
+            tree(b"shared").digest()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let inode = |store: &Store| fs::metadata(store.layer_path(&layer)).unwrap().ino();
+            assert_eq!(inode(&one.0), inode(&two.0));
+        }
+        // Linked again: renewed, and still one file.
+        two.0.link_layer(&one.0.layer_path(&layer), &layer).unwrap();
+        // A store that wrote the layer itself: its file replaced by the link, one file after all.
+        let three = Scratch::new("link-three");
+        assert_eq!(three.0.insert_layer(&tree(b"shared")).unwrap(), layer);
+        three
+            .0
+            .link_layer(&one.0.layer_path(&layer), &layer)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let inode = |store: &Store| fs::metadata(store.layer_path(&layer)).unwrap().ino();
+            assert_eq!(inode(&one.0), inode(&three.0));
+        }
+        assert!(one.0.remove_layer(&layer).unwrap());
+        assert!(two.0.contains_layer(&layer));
+        // From nowhere: refused, and nothing left half done.
+        let other: Digest = format!("sha256:{}", "b".repeat(64)).parse().unwrap();
+        assert!(two.0.link_layer(&one.0.layer_path(&other), &other).is_err());
+        assert!(!two.0.contains_layer(&other));
+        let dir = two.0.root().join("layer").join("sha256");
+        assert!(
+            fs::read_dir(dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".link")),
+        );
     }
 
     fn tree(content: &[u8]) -> FsTree {

@@ -254,18 +254,19 @@ impl Home {
     }
 
     /// Cloud only: a sandbox made of `args` under the id `id`, its ports behind `keys` (port
-    /// by key), as one made elsewhere was -- what its client holds naming it here too -- over
-    /// the disk here under that id if there is one, else a new one; booted unless not `booted`.
-    /// For one kept nowhere to [take in](Home::take_in) from: made elsewhere and lost before it
-    /// was kept.
+    /// by key); booted unless not `booted`. Made `again`, as one made elsewhere was -- what its
+    /// client holds naming it here too -- over the disk here under that id if there is one,
+    /// else a new one: for one kept nowhere to [take in](Home::take_in) from, made elsewhere
+    /// and lost before it was kept. Not `again`, a new sandbox under the id its placer picked.
     pub async fn make_as(
         &self,
         args: SandboxCreateArgs,
         id: String,
         keys: HashMap<String, u16>,
         booted: bool,
+        again: bool,
     ) -> Result<virtx_core::Sandbox, Refused> {
-        let given = virtx_uvm::sandbox::Given { id, keys };
+        let given = virtx_uvm::sandbox::Given { id, keys, again };
         Ok(self.sandboxes.create(args, Some(given), booted).await?)
     }
 

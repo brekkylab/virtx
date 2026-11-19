@@ -31,11 +31,13 @@ pub fn reclaim_after() -> Option<Duration> {
 /// How often [`Sandboxes::spawn_reclaiming`] looks for sandboxes to reclaim, at most.
 const RECLAIM_EVERY: Duration = Duration::from_secs(60);
 
-/// A sandbox made again here under the id it had elsewhere, and the key each of its ports had
-/// there, by key.
+/// A sandbox made here under an id given it, and the key each of its ports had, by key: made
+/// `again` under the id it had elsewhere, over the disk kept for it, or new -- its id picked by
+/// what places it, which nothing was kept under.
 pub struct Given {
     pub id: String,
     pub keys: HashMap<String, u16>,
+    pub again: bool,
 }
 
 /// A server's sandboxes, from each one's making until it is deleted: each kept on disk
@@ -246,9 +248,9 @@ impl Sandboxes {
         };
 
         // Each port named as the hooks name it: one made again keeps the key it had.
-        let (given, kept) = match given {
-            Some(Given { id, keys }) => (Some(id), keys),
-            None => (None, HashMap::new()),
+        let (given, kept, moved) = match given {
+            Some(Given { id, keys, again }) => (Some(id), keys, again),
+            None => (None, HashMap::new(), false),
         };
         let mut opened = Vec::new();
         let mut keys = HashMap::new();
@@ -273,7 +275,6 @@ impl Sandboxes {
             }
         }
 
-        let moved = given.is_some();
         let sandbox = {
             let mut all = self.0.all.lock().unwrap();
             let unknown = self.0.unknown.lock().unwrap();
@@ -862,6 +863,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A sandbox made under an id given it: new, a disk of its own made; made again, over the
+    /// disk here under that id, as it was left.
+    #[tokio::test]
+    async fn a_sandbox_is_made_new_or_again_under_an_id_given_it() {
+        let root = std::env::temp_dir().join(format!("virtx-given-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let here = sandboxes(&root);
+        let given = |id: &str, again| Given {
+            id: id.to_owned(),
+            keys: HashMap::new(),
+            again,
+        };
+        let args = || SandboxCreateArgs::new("here:latest");
+        let made = here
+            .create(args(), Some(given("sbx_new", false)), false)
+            .await
+            .unwrap();
+        assert_eq!(made.id, "sbx_new");
+        let disk = root.join("sandbox/sbx_new.ext4");
+        assert!(disk.is_file());
+
+        // Its record lost, its disk left here: made again over that disk, written as it was.
+        std::fs::write(&disk, b"as left").unwrap();
+        here.0.all.lock().unwrap().remove("sbx_new");
+        std::fs::remove_file(root.join("sandbox/sbx_new.json")).unwrap();
+        here.create(args(), Some(given("sbx_new", true)), false)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&disk).unwrap(), b"as left");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn a_sandbox_is_kept_for_the_next_server_until_it_is_deleted() {
         let root = std::env::temp_dir().join(format!("virtx-sandboxes-{}", std::process::id()));
@@ -882,6 +916,7 @@ mod tests {
         let given = Given {
             id: made.id.clone(),
             keys: HashMap::new(),
+            again: true,
         };
         let again = here
             .create(SandboxCreateArgs::new("here:latest"), Some(given), false)

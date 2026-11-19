@@ -24,6 +24,10 @@ pub struct SandboxJob {
     /// Once it has ended, its exit status; `128 + signal` for one a signal ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
+
+    /// Once it has ended, why, if it did not end by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SandboxJobEndReason>,
 }
 
 /// What a sandbox job does.
@@ -117,6 +121,26 @@ pub enum SandboxJobEntry {
 pub struct SandboxJobEnd {
     /// Its exit status; `128 + signal` for one a signal ended.
     pub code: i32,
+
+    /// Why, if it did not end by itself: without one, it exited, or a signal sent it ended it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SandboxJobEndReason>,
+}
+
+impl SandboxJobEnd {
+    /// The process's own end, with `code`.
+    pub fn exited(code: i32) -> Self {
+        Self { code, reason: None }
+    }
+}
+
+/// Why a process did not end by itself: it was killed, as `SIGKILL` does, its `code` `137`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxJobEndReason {
+    /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
+    /// each that ran then is ended so.
+    Restarted,
 }
 
 /// What an exec read with its log yields
@@ -171,8 +195,15 @@ mod tests {
             ),
             (SandboxJobEntry::Truncated {}, json!({"truncated": {}})),
             (
-                SandboxJobEntry::End(SandboxJobEnd { code: 137 }),
+                SandboxJobEntry::End(SandboxJobEnd::exited(137)),
                 json!({"end": {"code": 137}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Restarted),
+                }),
+                json!({"end": {"code": 137, "reason": "restarted"}}),
             ),
         ];
         for (entry, value) in cases {
@@ -201,7 +232,7 @@ mod tests {
         let value = json!({"end": {"code": 137, "signal": "SIGKILL"}});
         assert_eq!(
             serde_json::from_value::<SandboxJobEntry>(value).unwrap(),
-            SandboxJobEntry::End(SandboxJobEnd { code: 137 })
+            SandboxJobEntry::End(SandboxJobEnd::exited(137))
         );
     }
 
@@ -229,7 +260,7 @@ mod tests {
             item,
             SandboxExecItem::Log(crate::LogEntry {
                 id: 2,
-                entry: SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+                entry: SandboxJobEntry::End(SandboxJobEnd::exited(0)),
             })
         );
         assert_eq!(serde_json::to_value(&item).unwrap(), entry);

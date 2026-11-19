@@ -378,4 +378,178 @@ mod tests {
             assert_eq!(*seen.lock().unwrap(), [] as [&str; 0]);
         }
     }
+
+    /// Counts each request to a route, and answers the `n`th (from `0`) with `answer(n)`.
+    fn counted(
+        asked: &std::sync::Arc<std::sync::atomic::AtomicU32>,
+        answer: impl Fn(u32) -> axum::response::Response + Clone + Send + Sync + 'static,
+    ) -> axum::routing::MethodRouter {
+        let asked = asked.clone();
+        axum::routing::any(move || {
+            let n = asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = answer.clone();
+            async move { answer(n) }
+        })
+    }
+
+    /// A refusal in the protocol's shape: `status`, `error` its members, `Retry-After` if any.
+    fn turned_away(
+        status: StatusCode,
+        error: serde_json::Value,
+        retry_after: Option<&str>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        let mut response = (status, Json(serde_json::json!({ "error": error }))).into_response();
+        if let Some(seconds) = retry_after {
+            response.headers_mut().insert(
+                ::http::header::RETRY_AFTER,
+                HeaderValue::from_str(seconds).unwrap(),
+            );
+        }
+        response
+    }
+
+    /// A request the server turns away for now -- a proxy's `503` page, the rate of requests
+    /// past -- is sent again after its `Retry-After`, or a wait of its own, until it is answered.
+    #[tokio::test]
+    async fn a_request_turned_away_for_now_is_sent_again_until_it_is_answered() {
+        use axum::response::IntoResponse as _;
+        use std::sync::{Arc, atomic::Ordering};
+        let (read, written) = (Arc::default(), Arc::default());
+        let router = Router::new()
+            .route(
+                "/read",
+                counted(&read, |n| match n {
+                    0 => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [(::http::header::CONTENT_TYPE, "text/html")],
+                        "<html>503</html>",
+                    )
+                        .into_response(),
+                    1 => turned_away(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        serde_json::json!({"code": "quota", "message": "slow down", "reason": "requests"}),
+                        Some("1"),
+                    ),
+                    _ => Json("read").into_response(),
+                }),
+            )
+            .route(
+                "/written",
+                counted(&written, |n| match n {
+                    0 => turned_away(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"code": "unavailable", "message": "not now"}),
+                        Some("1"),
+                    ),
+                    _ => Json("written").into_response(),
+                }),
+            );
+        let client = piped(router);
+        assert_eq!(http::get::<String>(&client, "/read").await.unwrap(), "read");
+        assert_eq!(read.load(Ordering::SeqCst), 3);
+        // A `PUT` makes nothing a second sending makes again.
+        let body = serde_json::json!({});
+        assert_eq!(
+            http::put::<String>(&client, "/written", &body)
+                .await
+                .unwrap(),
+            "written"
+        );
+        assert_eq!(written.load(Ordering::SeqCst), 2);
+    }
+
+    /// A `429` for a quota the caller is past -- sandboxes open -- is answered at once, as
+    /// waiting frees none of it, with its code; the rate of requests, which frees up by itself,
+    /// is waited out.
+    #[tokio::test]
+    async fn a_quota_past_is_answered_at_once() {
+        use std::sync::{Arc, atomic::Ordering};
+        let asked = Arc::default();
+        let router = Router::new().route(
+            "/quota",
+            counted(&asked, |_| {
+                turned_away(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    serde_json::json!({"code": "quota", "message": "3 sandboxes open", "reason": "sandboxes"}),
+                    Some("30"),
+                )
+            }),
+        );
+        let client = piped(router);
+        let error = http::get::<String>(&client, "/quota").await.unwrap_err();
+        assert!(matches!(error, Error::Status(429, _)), "{error:?}");
+        assert_eq!(error.code(), Some("quota"));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A `503` to a request that makes something is sent again only where it says nothing was
+    /// made -- `capacity` -- since any other may have come after the making began, and a second
+    /// sending would make a second of it.
+    #[tokio::test]
+    async fn a_making_turned_away_is_sent_again_only_where_nothing_was_made() {
+        use axum::response::IntoResponse as _;
+        use std::sync::{Arc, atomic::Ordering};
+        let (made, room) = (Arc::default(), Arc::default());
+        let router = Router::new()
+            .route(
+                "/made",
+                counted(&made, |_| {
+                    turned_away(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"code": "unavailable", "message": "its machine went away"}),
+                        Some("1"),
+                    )
+                }),
+            )
+            .route(
+                "/room",
+                counted(&room, |n| match n {
+                    0 => turned_away(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"code": "capacity", "message": "no room yet"}),
+                        Some("1"),
+                    ),
+                    _ => Json("made").into_response(),
+                }),
+            );
+        let client = piped(router);
+        let body = serde_json::json!({});
+        let error = http::post::<String>(&client, "/made", &body)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert_eq!(made.load(Ordering::SeqCst), 1, "made once at most");
+        assert_eq!(
+            http::post::<String>(&client, "/room", &body).await.unwrap(),
+            "made"
+        );
+        assert_eq!(room.load(Ordering::SeqCst), 2, "nothing made: sent again");
+    }
+
+    /// The time a request is held back counts the server's answers as well as the waits between
+    /// them: a server that holds each refusal 12 s is asked three times in 30 s, not once a
+    /// second for 30 s of waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_is_held_back_its_answers_time_and_its_waits_together() {
+        use std::sync::{Arc, atomic::Ordering};
+        let asked = Arc::<std::sync::atomic::AtomicU32>::default();
+        let held = asked.clone();
+        let router = Router::new().route(
+            "/slow",
+            get(async move || {
+                held.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+                turned_away(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    serde_json::json!({"code": "capacity", "message": "no room yet"}),
+                    Some("1"),
+                )
+            }),
+        );
+        let client = piped(router);
+        let error = http::get::<String>(&client, "/slow").await.unwrap_err();
+        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+    }
 }

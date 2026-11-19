@@ -141,6 +141,9 @@ Where the server answered its refusal as the protocol does, `code` is the protoc
 Tell errors apart by `source`, `status` and `code`, not by the message.
 In Rust, `source_kind()` answers the `Source`, `status()` the status and `code()` the code.
 
+A request the server turns away for now, such as `503` `capacity` while it has no room for a sandbox, is sent again after the wait the server asks for, for up to 30 seconds, before the call fails with it.
+A `429` `quota` for a limit that frees up only as you close or delete something, such as the sandboxes you have, fails at once.
+
 ## Volumes
 
 See [Mounting volumes](/docs/guides/mounting-volumes/).

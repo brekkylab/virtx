@@ -8,6 +8,7 @@ mod tcp;
 
 use std::io;
 use std::sync::{PoisonError, RwLock};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
@@ -28,6 +29,44 @@ pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
 
 /// The most a request's body may be to be kept, to send it again ([`TransportClient::send`]).
 const REPLAYABLE: u64 = 1 << 20;
+
+/// The longest a request is held back from the server, all told -- its answers' time and the
+/// waits between them -- while it turns it away for now.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// The first wait before a request turned away without a `Retry-After` is sent again, each
+/// after twice the one before; and the least wait, whatever `Retry-After` asks.
+const FIRST_WAIT: Duration = Duration::from_millis(500);
+
+/// The wait `response` asks for, in seconds (`Retry-After`; never a date, from these servers).
+fn retry_after(response: &http::Response<Body>) -> Option<Duration> {
+    let seconds = response.headers().get(http::header::RETRY_AFTER)?;
+    Some(Duration::from_secs(
+        seconds.to_str().ok()?.trim().parse().ok()?,
+    ))
+}
+
+/// `response`, a `429` or a `503`, and whether it is one to send again after a wait, as
+/// `PROTOCOL.md`'s Refused for now says: a `429` unless it is a `quota` whose `reason` is other than
+/// `requests`, which frees up only as the caller closes or deletes something; a `503` to a
+/// request that makes something (`makes`) only where it is `capacity`, nothing made, since any
+/// other may have come after the making began. Its body read, and given back whole.
+async fn for_now(response: http::Response<Body>, makes: bool) -> (http::Response<Body>, bool) {
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|b| b.to_bytes())
+        .unwrap_or_default();
+    let said: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let error = &said["error"];
+    let again = match status {
+        StatusCode::TOO_MANY_REQUESTS => error["code"] != "quota" || error["reason"] == "requests",
+        _ => !makes || error["code"] == "capacity",
+    };
+    (http::Response::from_parts(parts, full(bytes)), again)
+}
 
 /// How a client reaches the server's endpoints.
 enum Connection {
@@ -130,9 +169,13 @@ impl TransportClient {
     /// root or a name that is one, is refused unsent: over HTTP it would be resolved before it
     /// went, to another endpoint's path even, and the server refuses one that arrives.
     ///
-    /// A `401` to a token a command printed has the request sent again, once, with the one it
-    /// prints anew, when the request's body is known and small ([`REPLAYABLE`]): the server did
-    /// nothing with a request it refused.
+    /// A request whose body is known and small ([`REPLAYABLE`]) -- every resource's, and a
+    /// small file's -- is sent again when the server turns it away for now: a `429` or a `503`,
+    /// after its `Retry-After` or else a wait that doubles, for [`PATIENCE`] at most, its
+    /// answers' time counted with the waits; and a `401`, at once and once, when the token is a
+    /// command's, which prints a new one. A refusal that waiting does not change is answered at
+    /// once, and one that may have come after a making began is never sent again, so a retry
+    /// makes no second of what the first made ([`for_now`]).
     pub(crate) async fn send(
         &self,
         request: http::Request<Body>,
@@ -146,7 +189,7 @@ impl TransportClient {
         let small = hyper::body::Body::size_hint(&body)
             .exact()
             .is_some_and(|size| size <= REPLAYABLE);
-        if !small || !self.renews() {
+        if !small {
             return self.send_once(http::Request::from_parts(parts, body)).await;
         }
         let bytes = body
@@ -154,17 +197,37 @@ impl TransportClient {
             .await
             .map_err(|e| Error::Transport(e.to_string()))?
             .to_bytes();
-        let request = || {
+        let started = tokio::time::Instant::now();
+        let makes = matches!(parts.method, http::Method::POST | http::Method::PATCH);
+        let mut backoff = FIRST_WAIT;
+        let mut renewed = false;
+        loop {
             let mut request = http::Request::new(full(bytes.clone()));
             *request.method_mut() = parts.method.clone();
             *request.uri_mut() = parts.uri.clone();
             *request.version_mut() = parts.version;
             *request.headers_mut() = parts.headers.clone();
-            request
-        };
-        match self.send_once(request()).await {
-            Err(refused) if refused.status() == Some(401) => self.send_once(request()).await,
-            answered => answered,
+            let response = match self.send_once(request).await {
+                Err(refused) if refused.status() == Some(401) && !renewed && self.renews() => {
+                    renewed = true;
+                    continue;
+                }
+                answered => answered?,
+            };
+            let status = response.status();
+            if status != StatusCode::TOO_MANY_REQUESTS && status != StatusCode::SERVICE_UNAVAILABLE
+            {
+                return Ok(response);
+            }
+            let (response, again) = for_now(response, makes).await;
+            let wait = retry_after(&response)
+                .unwrap_or(backoff)
+                .clamp(FIRST_WAIT, PATIENCE);
+            if !again || started.elapsed() + wait > PATIENCE {
+                return Ok(response);
+            }
+            tokio::time::sleep(wait).await;
+            backoff *= 2;
         }
     }
 

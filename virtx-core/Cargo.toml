@@ -71,6 +71,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 hyper-util = { version = "0.1", features = ["service"] }
 # Names no two of the ensure tests' scratch directories alike.
 uuid = { version = "1", features = ["v4"] }
+# A test of how long a request is sent again for runs on a clock it moves on itself.
+tokio = { version = "1", features = ["test-util"] }
 # The transport tests serve as well as call, so a bare `cargo test` builds the server's end. A
 # dev dependency's features reach no build but the tests'.
 virtx-core = { path = ".", features = ["server"] }

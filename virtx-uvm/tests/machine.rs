@@ -314,6 +314,42 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
     home.volumes.remove("data").unwrap();
 }
 
+/// A machine with more virtio-mmio devices than the 16 legacy interrupt lines hold boots, and
+/// each answers: five volumes over the nine devices a machine always has, the guest agent's
+/// filesystem last of all on a line past 15.
+async fn a_sandbox_mounting_many_volumes_reaches_each(home: Home) {
+    let names = ["v1", "v2", "v3", "v4", "v5"];
+    for name in names {
+        home.volumes.create(name).unwrap();
+    }
+    let args = SandboxCreateArgs {
+        volumes: names
+            .iter()
+            .map(|name| SandboxVolume {
+                volume: name.to_string(),
+                path: format!("/{name}"),
+                readonly: false,
+            })
+            .collect(),
+        ..small()
+    };
+    let sandbox = home.sandbox(&args, None).await;
+    let write = [
+        "sh",
+        "-c",
+        "for v in v1 v2 v3 v4 v5; do echo $v > /$v/name; done",
+    ];
+    assert_eq!(run(&sandbox, &write, None).await.unwrap().1, 0);
+    close(sandbox).await;
+    for name in names {
+        let written = home.volumes.open(name).unwrap().files().join("name");
+        assert_eq!(
+            std::fs::read_to_string(written).unwrap(),
+            format!("{name}\n")
+        );
+    }
+}
+
 /// What a guest installs to reach venus and ask it what it finds: venus's guest driver, the
 /// Vulkan loader, and `vulkaninfo`. The image carries none of it; a guest without it boots
 /// and finds no device, which is not what the GPU's tests ask.
@@ -935,6 +971,7 @@ fn main() -> ExitCode {
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
+        a_sandbox_mounting_many_volumes_reaches_each,
         a_parked_sandbox_holds_its_volume_against_removal,
         a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote,
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,

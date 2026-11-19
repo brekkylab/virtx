@@ -160,7 +160,7 @@ pipx run virtx login https://virtx.example            # uvxでも動きます
 npx -y @brekkylab/virtx login https://virtx.example
 ```
 
-`virtx`をインストールして使う場合は[CLI](https://virtx.sh/docs/reference/cli/)を参照してください。
+`virtx`をインストールして使う場合は[CLI](https://virtx.sh/docs/reference/cli/#installing)を参照してください。
 
 <details open>
 <summary><b>Python</b></summary>

@@ -161,7 +161,7 @@ pipx run virtx login https://virtx.example            # uvx also works
 npx -y @brekkylab/virtx login https://virtx.example
 ```
 
-To install `virtx` instead, see [CLI](https://virtx.sh/docs/reference/cli/).
+To install `virtx` instead, see [CLI](https://virtx.sh/docs/reference/cli/#installing).
 
 <details open>
 <summary><b>Python</b></summary>

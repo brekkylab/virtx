@@ -162,7 +162,7 @@ pipx run virtx login https://virtx.example            # 也可以用 uvx
 npx -y @brekkylab/virtx login https://virtx.example
 ```
 
-若要安裝 `virtx`，請參閱 [CLI](https://virtx.sh/docs/reference/cli/)。
+若要安裝 `virtx`，請參閱 [CLI](https://virtx.sh/docs/reference/cli/#installing)。
 
 <details open>
 <summary><b>Python</b></summary>

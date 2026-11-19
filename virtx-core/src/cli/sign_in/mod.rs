@@ -23,10 +23,11 @@
 //! refused the token it had, it refreshes whatever it has.
 //!
 //! `command.rs` is the commands and how each runs, `provider.rs` the provider, and `session.rs`
-//! what is kept between runs. Its HTTP is blocking, so it runs before the images' runtime does.
+//! what is kept between runs. The commands are the `virtx` parser's own, and run before any
+//! runtime starts, since their HTTP blocks.
 
 mod command;
 mod provider;
 mod session;
 
-pub(super) use command::{main, names};
+pub(super) use command::{ProviderArgs, SignInCommand, run};

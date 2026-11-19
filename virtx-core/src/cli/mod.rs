@@ -35,11 +35,12 @@ use std::ffi::OsString;
 
 /// Run `virtx` with `argv`, its program name first, and answer its exit code.
 pub fn main(argv: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> u8 {
-    let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
-    // Signing in blocks on its own HTTP, which a runtime's thread may not.
-    if sign_in::names(&argv) {
-        return sign_in::main(argv);
-    }
+    let (server, command) = match command::parse(argv) {
+        Ok(command::Asked::Images(server, command)) => (server, command),
+        // Signing in blocks on its own HTTP, which a runtime's thread may not.
+        Ok(command::Asked::SignIn(provider, command)) => return sign_in::run(&provider, command),
+        Err(code) => return code,
+    };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -50,7 +51,7 @@ pub fn main(argv: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> u8 {
             return 1;
         }
     };
-    runtime.block_on(command::run(argv))
+    runtime.block_on(command::run(server, command))
 }
 
 #[cfg(feature = "ffi")]

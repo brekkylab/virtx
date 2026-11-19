@@ -1,10 +1,9 @@
-use std::ffi::OsString;
 use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Subcommand};
 use serde_json::json;
 
 use super::provider::{self, Asked, Provider, Tokens};
@@ -14,28 +13,24 @@ use super::session::{self, Kept, Session, SignIn};
 /// it runs out in which an SDK asks for another.
 const FRESH_FOR: u64 = 120;
 
-#[derive(Parser)]
-#[command(
-    name = "virtx",
-    version,
-    about = "Sign in to a virtx server's provider"
-)]
-struct Cli {
+/// Which provider and client a command of signing in is of, where not the one a server names
+/// or the one last signed in to. Global, so they go before or after the command.
+#[derive(Debug, Args)]
+#[command(next_help_heading = "Signing in")]
+pub(in crate::cli) struct ProviderArgs {
     /// The OpenID Connect provider: the `issuer` of the server's `oidc`.
     #[arg(long, global = true, env = "VIRTX_OIDC_ISSUER")]
-    issuer: Option<String>,
+    pub(in crate::cli) issuer: Option<String>,
     /// The client to sign in as: the `client_id` of the server's `oidc`.
     #[arg(long, global = true, env = "VIRTX_OIDC_CLIENT_ID")]
-    client_id: Option<String>,
+    pub(in crate::cli) client_id: Option<String>,
     /// The client's secret, for a provider that gives its public clients one.
     #[arg(long, global = true, env = "VIRTX_OIDC_CLIENT_SECRET")]
-    client_secret: Option<String>,
-    #[command(subcommand)]
-    command: Command,
+    pub(in crate::cli) client_secret: Option<String>,
 }
 
-#[derive(Subcommand)]
-enum Command {
+#[derive(Debug, PartialEq, Subcommand)]
+pub(in crate::cli) enum SignInCommand {
     /// Sign in, approving the code shown.
     Login {
         /// The server to sign in to, which says who its provider is.
@@ -56,37 +51,21 @@ enum Command {
     Logout,
 }
 
-/// The commands of signing in, as the first argument names them; any other is the images'.
-const SIGNING_IN: [&str; 4] = ["login", "token", "whoami", "logout"];
-
-/// Whether `argv`, its program name first, is a command of signing in.
-pub(in crate::cli) fn names(argv: &[OsString]) -> bool {
-    argv.get(1)
-        .and_then(|first| first.to_str())
-        .is_some_and(|first| SIGNING_IN.contains(&first))
-}
-
-/// Run the command of signing in `argv` names, and answer its exit code.
-pub(in crate::cli) fn main(argv: Vec<OsString>) -> u8 {
-    let cli = match Cli::try_parse_from(argv) {
-        Ok(cli) => cli,
-        Err(e) => {
-            let _ = e.print();
-            return u8::try_from(e.exit_code()).unwrap_or(2);
-        }
-    };
+/// Run `command` of `provider`, and answer its exit code. Its HTTP blocks, so it runs on no
+/// runtime's thread.
+pub(in crate::cli) fn run(provider: &ProviderArgs, command: SignInCommand) -> u8 {
     let run = || {
         let dir = session::dir()?;
-        let server = match &cli.command {
-            Command::Login { url, .. } => url.as_deref(),
+        let server = match &command {
+            SignInCommand::Login { url, .. } => url.as_deref(),
             _ => None,
         };
-        let sign_in = sign_in(&cli, server, &dir)?;
+        let sign_in = sign_in(provider, server, &dir)?;
         let refused = std::env::var_os("VIRTX_TOKEN_REFUSED").is_some();
-        match cli.command {
-            Command::Login { scope, .. } => login(&dir, &sign_in, &scope, true, open),
-            Command::Token { json } => {
-                let kept = token(&dir, &sign_in, refused, true)?;
+        match command {
+            SignInCommand::Login { scope, .. } => login(&dir, &sign_in, &scope, open),
+            SignInCommand::Token { json } => {
+                let kept = token(&dir, &sign_in, refused)?;
                 match json {
                     true => {
                         let expires_in = kept.expires_at.saturating_sub(now());
@@ -99,12 +78,12 @@ pub(in crate::cli) fn main(argv: Vec<OsString>) -> u8 {
                 }
                 Ok(())
             }
-            Command::Whoami => {
-                let kept = token(&dir, &sign_in, false, true)?;
+            SignInCommand::Whoami => {
+                let kept = token(&dir, &sign_in, false)?;
                 println!("{}", who(&kept.token));
                 Ok(())
             }
-            Command::Logout => logout(&dir, &sign_in, true),
+            SignInCommand::Logout => logout(&dir, &sign_in),
         }
     };
     match run() {
@@ -116,10 +95,10 @@ pub(in crate::cli) fn main(argv: Vec<OsString>) -> u8 {
     }
 }
 
-/// The provider `cli` names, or else the one `server` says to sign in to, or else the one
+/// The provider `provider` names, or else the one `server` says to sign in to, or else the one
 /// last signed in to.
-fn sign_in(cli: &Cli, server: Option<&str>, dir: &Path) -> anyhow::Result<SignIn> {
-    let (issuer, client_id) = match (&cli.issuer, &cli.client_id, server) {
+fn sign_in(provider: &ProviderArgs, server: Option<&str>, dir: &Path) -> anyhow::Result<SignIn> {
+    let (issuer, client_id) = match (&provider.issuer, &provider.client_id, server) {
         (Some(issuer), Some(client_id), _) => (issuer.clone(), client_id.clone()),
         (None, None, Some(server)) => provider::advertised(server)?
             .with_context(|| format!("{server} names no provider to sign in to"))?,
@@ -132,7 +111,7 @@ fn sign_in(cli: &Cli, server: Option<&str>, dir: &Path) -> anyhow::Result<SignIn
     Ok(SignIn {
         issuer,
         client_id,
-        client_secret: cli.client_secret.clone(),
+        client_secret: provider.client_secret.clone(),
     })
 }
 
@@ -193,13 +172,7 @@ fn announce(code: &str, page: &str, open: impl FnOnce(&str)) {
 
 /// Sign in to `sign_in`'s provider asking for `scope`, the page to approve the code on opened
 /// by `open`.
-fn login(
-    dir: &Path,
-    sign_in: &SignIn,
-    scope: &str,
-    keychain: bool,
-    open: impl FnOnce(&str),
-) -> anyhow::Result<()> {
+fn login(dir: &Path, sign_in: &SignIn, scope: &str, open: impl FnOnce(&str)) -> anyhow::Result<()> {
     let provider = discover(sign_in)?;
     let codes = provider.device(scope)?;
     let page = codes
@@ -216,7 +189,7 @@ fn login(
             Asked::Pending => {}
             Asked::SlowDown => interval += Duration::from_secs(5),
             Asked::Issued(tokens) => {
-                let session = Session::new(dir, sign_in, keychain);
+                let session = Session::new(dir, sign_in);
                 let _lock = session.lock()?;
                 // Another session's tokens are not this one's to refresh with.
                 session.forget()?;
@@ -232,8 +205,8 @@ fn login(
 
 /// An ID token: the one kept while it has more than [`FRESH_FOR`] left and the server has not
 /// `refused` it, or else one refreshed from the session kept. All under the lock.
-fn token(dir: &Path, sign_in: &SignIn, refused: bool, keychain: bool) -> anyhow::Result<Kept> {
-    let session = Session::new(dir, sign_in, keychain);
+fn token(dir: &Path, sign_in: &SignIn, refused: bool) -> anyhow::Result<Kept> {
+    let session = Session::new(dir, sign_in);
     let _lock = session.lock()?;
     if !refused
         && let Some(kept) = session.kept_id()
@@ -253,8 +226,8 @@ fn token(dir: &Path, sign_in: &SignIn, refused: bool, keychain: bool) -> anyhow:
     }
 }
 
-fn logout(dir: &Path, sign_in: &SignIn, keychain: bool) -> anyhow::Result<()> {
-    let session = Session::new(dir, sign_in, keychain);
+fn logout(dir: &Path, sign_in: &SignIn) -> anyhow::Result<()> {
+    let session = Session::new(dir, sign_in);
     let _lock = session.lock()?;
     if let Some(refresh) = session.kept()?
         && let Ok(provider) = discover(sign_in)
@@ -314,23 +287,23 @@ mod tests {
 
         let mut opened = None;
         let open = |page: &str| opened = Some(page.to_owned());
-        login(&dir, &sign_in, "openid", false, open).unwrap();
+        login(&dir, &sign_in, "openid", open).unwrap();
         // The page the provider answered, a web page.
         assert_eq!(opened, Some(format!("{}/approve", sign_in.issuer)));
         assert_eq!(session::signed_in(&dir).unwrap().issuer, sign_in.issuer);
 
         // The one signing in issued has a minute left: refreshed, and the one after it kept.
-        let first = token(&dir, &sign_in, false, false).unwrap();
+        let first = token(&dir, &sign_in, false).unwrap();
         assert_eq!(who(&first.token), "test@example.com");
         assert!(first.expires_at - now() > FRESH_FOR);
-        let again = token(&dir, &sign_in, false, false).unwrap();
+        let again = token(&dir, &sign_in, false).unwrap();
         assert_eq!(again.token, first.token);
         // Another client of the provider has a session of its own: none, not signed in as it.
         let another = SignIn {
             client_id: "another".into(),
             ..sign_in.clone()
         };
-        let unsigned = token(&dir, &another, false, false).err().unwrap();
+        let unsigned = token(&dir, &another, false).err().unwrap();
         assert!(unsigned.to_string().contains("not signed in"));
         // The server takes it.
         let listed = reqwest::blocking::Client::new()
@@ -344,13 +317,13 @@ mod tests {
             .unwrap();
         assert_eq!(listed.status(), 200);
         // Refused by a server, it is refreshed whatever it has left.
-        let renewed = token(&dir, &sign_in, true, false).unwrap();
+        let renewed = token(&dir, &sign_in, true).unwrap();
         assert_ne!(renewed.token, first.token);
 
         // Signing out ends the session at the provider too.
-        let session = Session::new(&dir, &sign_in, false);
+        let session = Session::new(&dir, &sign_in);
         let refresh = session.kept().unwrap().unwrap();
-        logout(&dir, &sign_in, false).unwrap();
+        logout(&dir, &sign_in).unwrap();
         assert!(
             discover(&sign_in)
                 .unwrap()
@@ -358,7 +331,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let ended = token(&dir, &sign_in, false, false).err().unwrap();
+        let ended = token(&dir, &sign_in, false).err().unwrap();
         assert!(ended.to_string().contains("not signed in"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -391,9 +364,9 @@ mod tests {
         let (_, sign_in) = fixture();
         let dir = std::env::temp_dir().join(format!("virtx-cli-ended-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let session = Session::new(&dir, &sign_in, false);
+        let session = Session::new(&dir, &sign_in);
         session.keep("r-stale").unwrap();
-        let ended = token(&dir, &sign_in, false, false).err().unwrap();
+        let ended = token(&dir, &sign_in, false).err().unwrap();
         assert!(ended.to_string().contains("the session has ended"));
         let _ = std::fs::remove_dir_all(&dir);
     }

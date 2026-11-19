@@ -308,7 +308,10 @@ impl Serialize for PortSpec {
 impl<'de> Deserialize<'de> for PortSpec {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(untagged)]
+        #[serde(
+            untagged,
+            expecting = r#"a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}"#
+        )]
         enum Either {
             Port(u16),
             Spec(PortSpecObject),
@@ -393,6 +396,15 @@ mod tests {
                 protocol: PortProtocol::default(),
                 address: None,
             }]
+        );
+    }
+
+    #[test]
+    fn a_port_that_is_neither_form_is_refused_saying_what_a_port_is() {
+        let refused = serde_json::from_value::<PortSpec>(json!({"port": "5900"})).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            r#"a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}"#
         );
     }
 

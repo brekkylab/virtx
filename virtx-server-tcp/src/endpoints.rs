@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, FromRequest, FromRequestParts, Query, Request};
+use axum::extract::{Extension, FromRequest, FromRequestParts, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use futures_util::future::BoxFuture;
@@ -1336,7 +1336,7 @@ fn volume(home: &Home, name: String) -> Result<VolumeListOutputItem, Refused> {
     })
 }
 
-async fn volume_list(Extension(home): Extension<Arc<Home>>, page: Query<Page>) -> Answer {
+async fn volume_list(Extension(home): Extension<Arc<Home>>, Query(page): Query<Page>) -> Answer {
     if let Some(keeping) = &home.keeping {
         let kept = keeping
             .list(Kind::Volume, page.after.as_deref(), page.limit)
@@ -1526,8 +1526,12 @@ struct Named {
     name: Option<String>,
 }
 
+impl Params for Named {
+    const TAKES: &[(&str, &str)] = &[("name", "a sandbox's name")];
+}
+
 /// Every sandbox; `?name=` those named so, one at most.
-async fn sandbox_list(Extension(home): Extension<Arc<Home>>, named: Query<Named>) -> Answer {
+async fn sandbox_list(Extension(home): Extension<Arc<Home>>, Query(named): Query<Named>) -> Answer {
     Ok(json(&home.sandboxes.list(named.name.as_deref())))
 }
 
@@ -1734,6 +1738,13 @@ struct Page {
     limit: Option<u32>,
 }
 
+impl Params for Page {
+    const TAKES: &[(&str, &str)] = &[
+        ("after", "a name"),
+        ("limit", "a whole number up to 4294967295"),
+    ];
+}
+
 impl Page {
     /// `items`, in order by name as `name` reads it, cut to this page.
     fn of<T>(&self, mut items: Vec<T>, name: impl Fn(&T) -> &str) -> Vec<T> {
@@ -1852,6 +1863,59 @@ where
             Err(e) => Err(invalid(format!("the path: {}", e.body_text()))),
         }
     }
+}
+
+/// A query read as a `T`: refused `400` `invalid` when it does not read as one, naming the
+/// parameter and what it takes ([`Params`]).
+struct Query<T>(T);
+
+/// The parameters a query takes, as a client is told them when it does not read.
+trait Params {
+    /// Each parameter, and what it takes: `("limit", "a whole number")`.
+    const TAKES: &[(&str, &str)];
+}
+
+impl<T, S> FromRequestParts<S> for Query<T>
+where
+    T: DeserializeOwned + Params,
+    S: Send + Sync,
+{
+    type Rejection = Refused;
+
+    async fn from_request_parts(parts: &mut http::request::Parts, _: &S) -> Result<Self, Refused> {
+        let query = parts.uri.query().unwrap_or_default();
+        serde_urlencoded::from_str(query)
+            .map(Query)
+            .map_err(|_| invalid(unread_query::<T>(query)))
+    }
+}
+
+/// Why `query` does not read as a `T`: the first parameter that does not read alone, or one
+/// given twice.
+fn unread_query<T: DeserializeOwned + Params>(query: &str) -> String {
+    let Ok(pairs) = serde_urlencoded::from_str::<Vec<(String, String)>>(query) else {
+        return "the query does not read".to_owned();
+    };
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        if pairs[..i].iter().any(|(earlier, _)| earlier == key) {
+            return format!("{key}: given twice");
+        }
+        let alone = serde_urlencoded::to_string([(key, value)]).unwrap_or_default();
+        if serde_urlencoded::from_str::<T>(&alone).is_ok() {
+            continue;
+        }
+        return match T::TAKES.iter().find(|(param, _)| param == key) {
+            Some((_, takes)) => format!("{key}: {takes}, not {value:?}"),
+            None => {
+                let params: Vec<_> = T::TAKES.iter().map(|(param, _)| *param).collect();
+                format!(
+                    "{key}: not a parameter; the parameters are {}",
+                    params.join(", ")
+                )
+            }
+        };
+    }
+    "the query does not read".to_owned()
 }
 
 /// `request` read as a `T`.

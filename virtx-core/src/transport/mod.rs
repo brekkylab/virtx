@@ -2,11 +2,13 @@
 //! or one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
 //! shares on it: a JSON request and its refusal ([`http`]), a job's log as an event stream
 //! ([`sse`], whose server end keeps the log too), and the files of a volume or a sandbox over
-//! WebDAV ([`webdav`]).
+//! WebDAV ([`webdav`]); and, on the server's end, a request's body read as its args ([`args`]).
 //!
 //! The client end is the `client` feature, the server end the `server` feature; the types
 //! [`webdav`]'s requests name are always built.
 
+#[cfg(feature = "server")]
+mod args;
 #[cfg(feature = "client")]
 mod client;
 #[cfg(feature = "client")]
@@ -16,6 +18,8 @@ mod server;
 pub(crate) mod sse;
 pub(crate) mod webdav;
 
+#[cfg(feature = "server")]
+pub use args::{described_type, from_body};
 #[cfg(feature = "client")]
 pub(crate) use client::{Body, full};
 #[cfg(feature = "client")]

@@ -1414,6 +1414,82 @@ mod tests {
         assert_eq!(response.status(), 201);
     }
 
+    /// A body or a path that does not read is refused `400` `invalid` in the server's words:
+    /// the member or segment, what it takes, and what was sent.
+    #[tokio::test]
+    async fn a_body_or_a_path_that_does_not_read_is_refused_naming_what_it_takes() {
+        let server = Server::spawn("unread").await;
+        let (app, _) = app(&server.root).await.unwrap();
+        let image = r#""image": {"type": "tag", "tag": "alpine"}"#;
+        let ports = format!(r#"{{{image}, "ports": ["5900"]}}"#);
+        for (method, path, body, said) in [
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                "not json",
+                r#"the body: JSON, not "not json""#,
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                "[]",
+                "the body: an object, not []",
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                "",
+                "the body: a JSON object, and none was sent",
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                r#"{"cmd": "ls"}"#,
+                r#"cmd: a list, not "ls""#,
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/j/signal",
+                r#"{"signl": "TERM"}"#,
+                "signl: not a member; the members are `signal`",
+            ),
+            (
+                "POST",
+                "/images/jobs/pull/",
+                "x",
+                r#"the body: JSON, not "x""#,
+            ),
+            (
+                "POST",
+                "/sandboxes/",
+                &ports,
+                r#"ports[0]: a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+            ),
+            (
+                "GET",
+                "/sandboxes/%FF",
+                "",
+                "id: UTF-8 once its escapes are read, and it is not",
+            ),
+        ] {
+            let request = http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap();
+            let Ok(response) = app.clone().oneshot(request).await;
+            let how = format!("{method} {path} {body}");
+            assert_eq!(response.status(), 400, "{how}");
+            let answer = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let answer: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+            assert_eq!(answer["error"]["code"], "invalid", "{how}");
+            assert_eq!(answer["error"]["message"], said, "{how}");
+        }
+    }
+
     /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
     /// `too_large`, one at the limit is not, and one that breaks off is `400` `invalid`, each in
     /// the envelope. The body is refused before the handler looks anything up, so no sandbox,

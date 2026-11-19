@@ -139,8 +139,13 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
         matches!(started, Err(SandboxError::NotStarted(_))),
         "{started:?}"
     );
-    let timed = run(&sandbox, &["sleep", "10"], Some(Duration::from_millis(200))).await;
-    assert_eq!(timed.unwrap().1, 137);
+    // The child in the background holds the job's output open: the job ends once it goes too.
+    let forks = ["sh", "-c", "sleep 10 & sleep 10"];
+    let timed = run(&sandbox, &forks, Some(Duration::from_millis(200)));
+    let timed = tokio::time::timeout(Duration::from_secs(5), timed).await;
+    assert_eq!(timed.expect("its timeout ends it").unwrap().1, 137);
+    let left = ["sh", "-c", "ps | grep -c '[s]leep 10'"];
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
     // A line past what a frame carries comes in pieces, and the machine goes on.
     let long = ["sh", "-c", "head -c 20000000 /dev/zero | tr '\\0' '\\1'"];
     let (lines, code) = run(&sandbox, &long, None).await.unwrap();
@@ -150,8 +155,17 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
 
 async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
-    let cmd = ["sleep", "30"].map(String::from).to_vec();
+    // With the child it started, once it has said so.
+    let cmd = ["sh", "-c", "sleep 30 & echo started; sleep 30"]
+        .map(String::from)
+        .to_vec();
     let job = sandbox.exec(cmd, None).await.unwrap();
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    let first = String::from_utf8(first.to_vec()).unwrap();
+    let data = first.lines().find_map(|line| line.strip_prefix("data: "));
+    let first: SandboxJobEntry = serde_json::from_str(data.unwrap()).unwrap();
+    assert_eq!(first, SandboxJobEntry::Stdout("started".into()));
     assert!(job.get().running);
     sandbox.remove_job(&job.get().id).unwrap();
     assert!(sandbox.job(&job.get().id).is_err());
@@ -169,11 +183,20 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
     let sandbox = home.sandbox(&small(), park).await;
     // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
     let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
-    let still = ["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"];
+    let hashed = "sha256sum /root/a /root/b";
+    let still = format!("{hashed}; ps | grep -c '[s]leep 1000'");
 
-    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
-        .await
-        .unwrap();
+    // Written whole, over in scattered blocks, zeroed in place, and cut short.
+    let write = "dd if=/dev/urandom of=/root/a bs=1M count=64 2>/dev/null \
+                 && dd if=/dev/urandom of=/root/b bs=1M count=8 2>/dev/null \
+                 && for at in 3 97 512 1500 2047; do \
+                 dd if=/dev/urandom of=/root/b bs=4k count=1 seek=$at conv=notrunc 2>/dev/null; \
+                 done \
+                 && dd if=/dev/zero of=/root/a bs=1M count=4 seek=10 conv=notrunc 2>/dev/null \
+                 && truncate -s 50M /root/a";
+    let wrote = run(&sandbox, &["sh", "-c", write], None).await.unwrap();
+    assert_eq!(wrote.1, 0);
+    let (written, _) = run(&sandbox, &["sh", "-c", hashed], None).await.unwrap();
     run(&sandbox, &behind, None).await.unwrap();
     // A job that runs keeps it up, however long.
     let held = ["sh", "-c", "sleep 2; ps | grep -c '[s]leep 1000'"];
@@ -182,10 +205,12 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         (vec!["1".into()], 0)
     );
 
-    // Idle, it stops; a job boots it again, over what it wrote.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let (lines, _) = run(&sandbox, &still, None).await.unwrap();
-    assert_eq!(lines, ["kept", "0"]);
+    // Idle, it stops; a job boots it again, over what it wrote, whole.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (lines, _) = run(&sandbox, &["sh", "-c", still.as_str()], None)
+        .await
+        .unwrap();
+    assert_eq!(lines, [written, vec!["0".into()]].concat());
 
     // Its own upper disk goes with it.
     close(sandbox).await;
@@ -290,38 +315,28 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     }
 }
 
-async fn a_job_ended_takes_every_process_it_started_with_it(home: Home) {
+async fn a_signal_ends_a_job_with_every_process_it_started(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     // The child in the background holds the job's output open: the job ends once it goes too.
-    let forks = ["sh", "-c", "sleep 60 & sleep 60"];
-    let left = ["sh", "-c", "ps | grep -c '[s]leep 60'"];
-    let limit = Duration::from_secs(10);
-
-    let timed = run(&sandbox, &forks, Some(Duration::from_millis(500)));
-    let timed = tokio::time::timeout(limit, timed).await;
-    assert_eq!(timed.expect("its timeout ends it").unwrap().1, 137);
-    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
-
-    let job = sandbox
-        .exec(forks.map(String::from).to_vec(), None)
-        .await
-        .unwrap();
+    let cmd = ["sh", "-c", "sleep 60 & echo started; sleep 60"]
+        .map(String::from)
+        .to_vec();
+    let job = sandbox.exec(cmd, None).await.unwrap();
+    // Once it has started its child.
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    let first = String::from_utf8(first.to_vec()).unwrap();
+    let data = first.lines().find_map(|line| line.strip_prefix("data: "));
+    let first: SandboxJobEntry = serde_json::from_str(data.unwrap()).unwrap();
+    assert_eq!(first, SandboxJobEntry::Stdout("started".into()));
     let term = virtx_uvm::signal_number("SIGTERM").unwrap();
     sandbox.signal(&job.get().id, term).unwrap();
-    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
-    let read = tokio::time::timeout(limit, async {
+    let read = tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(Ok(_)) = events.next().await {}
     });
     read.await.expect("a signal ends it");
     assert_eq!(job.get().code, Some(128 + term));
-    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
-
-    let job = sandbox
-        .exec(forks.map(String::from).to_vec(), None)
-        .await
-        .unwrap();
-    sandbox.remove_job(&job.get().id).unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let left = ["sh", "-c", "ps | grep -c '[s]leep 60'"];
     assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
     close(sandbox).await;
 }
@@ -357,35 +372,6 @@ async fn a_job_s_log_ends_with_its_end_when_its_sandbox_is_closed(home: Home) {
         matches!(last, Some(SandboxJobEntry::End(ref end)) if end.code == 137),
         "{last:?}"
     );
-}
-
-async fn what_a_sandbox_wrote_is_whole_when_its_machine_boots_again(home: Home) {
-    let park = Some(Duration::from_millis(500));
-    let sandbox = home.sandbox(&small(), park).await;
-    // Written whole, over in scattered blocks, zeroed in place, and cut short.
-    let write = "dd if=/dev/urandom of=/root/a bs=1M count=64 2>/dev/null \
-                 && dd if=/dev/urandom of=/root/b bs=1M count=8 2>/dev/null \
-                 && for at in 3 97 512 1500 2047; do \
-                 dd if=/dev/urandom of=/root/b bs=4k count=1 seek=$at conv=notrunc 2>/dev/null; \
-                 done \
-                 && dd if=/dev/zero of=/root/a bs=1M count=4 seek=10 conv=notrunc 2>/dev/null \
-                 && truncate -s 50M /root/a";
-    assert_eq!(
-        run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
-        0
-    );
-    let hashed = ["sha256sum", "/root/a", "/root/b"];
-    let (before, _) = run(&sandbox, &hashed, None).await.unwrap();
-    // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
-    let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
-    run(&sandbox, &behind, None).await.unwrap();
-
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let (after, _) = run(&sandbox, &hashed, None).await.unwrap();
-    assert_eq!(after, before);
-    let still = ["sh", "-c", "ps | grep -c '[s]leep 1000'"];
-    assert_eq!(run(&sandbox, &still, None).await.unwrap().0, ["0"]);
-    close(sandbox).await;
 }
 
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
@@ -1084,10 +1070,9 @@ fn main() -> ExitCode {
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
-        a_job_ended_takes_every_process_it_started_with_it,
+        a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
         a_job_s_log_ends_with_its_end_when_its_sandbox_is_closed,
-        what_a_sandbox_wrote_is_whole_when_its_machine_boots_again,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,

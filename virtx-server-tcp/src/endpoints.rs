@@ -34,11 +34,11 @@ use virtx_core::{
     VolumeMountListOutputItem, described_type, from_body,
 };
 use virtx_uvm::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, HostPaths,
-    ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
-    MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
-    RegistryServer, Sandbox, SandboxError, UnknownSandbox, VolumeError, VolumeStore, build_step,
-    park_after, signal_number,
+    Activity, BuildError, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
+    HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
+    MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryError,
+    RegistryProxy, RegistryServer, Sandbox, SandboxError, UnknownSandbox, VolumeError, VolumeStore,
+    build_step, park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -620,7 +620,7 @@ where
             },
             Err(e) => ImageJobEnd {
                 digest: None,
-                error: Some(e.to_string()),
+                error: Some(failed(e)),
             },
         };
         ended.end(
@@ -640,6 +640,45 @@ where
         format!("/images/jobs/{id}"),
         &*job.job.lock().unwrap(),
     ))
+}
+
+/// Why an image job failed with `e`, as the job says it: a failure on the server's files by its
+/// kind, and a machine that did not start as its process told it, with the account of either,
+/// which can name the server's paths, on the server's stderr; the rest as it says itself.
+fn failed(e: Failure) -> String {
+    let e = match e.downcast::<BuildError>() {
+        Ok(e) => {
+            if let BuildError::Io { source, .. }
+            | BuildError::Fstree(FstreeError::Io { source, .. }) = &*e
+            {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                BuildError::Store(e) => Refused::from(e).2,
+                BuildError::Machine(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    let e = match e.downcast::<RegistryError>() {
+        Ok(e) => {
+            if let RegistryError::Io { source, .. }
+            | RegistryError::Fstree(FstreeError::Io { source, .. }) = &*e
+            {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                RegistryError::Store(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    match e.downcast::<ImageStoreError>() {
+        Ok(e) => Refused::from(*e).2,
+        Err(e) => e.to_string(),
+    }
 }
 
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
@@ -1498,5 +1537,76 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["code"], "boot_failed");
         assert_eq!(body["error"]["message"], told.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_failed_image_job_says_why_without_the_server_s_paths() {
+        const CONTEXT: &str = "opening /home/virtx/project/a/images/rootfs/sha256/a.vmdk";
+        let source = || io::Error::new(io::ErrorKind::PermissionDenied, "under /home/virtx");
+        let store = move || ImageStoreError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let tree = move || FstreeError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let on_files: [Failure; 6] = [
+            Box::new(BuildError::Io {
+                context: CONTEXT.into(),
+                source: source(),
+            }),
+            Box::new(BuildError::Store(store())),
+            Box::new(BuildError::Fstree(tree())),
+            Box::new(RegistryError::Store(store())),
+            Box::new(RegistryError::Fstree(tree())),
+            Box::new(store()),
+        ];
+        for e in on_files {
+            assert_eq!(failed(e), "the server's files: permission denied");
+        }
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let machine = BuildError::Machine(MachineError::DidNotStart {
+            account: format!("{why}; last logged:\n{CONTEXT}"),
+            told: why.into(),
+        });
+        assert_eq!(failed(Box::new(machine)), why);
+        let base = "base alpine:3.20: no image here is tagged alpine:3.20";
+        assert_eq!(failed(base.into()), base);
+
+        let root = std::env::temp_dir().join(format!("virtx-tcp-image-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let images = ImageStore::new(root.join("images")).unwrap();
+        let registry = Arc::new(RegistryServer::new(images.clone(), "/images").unwrap());
+        let home = Arc::new(Home::new(images, registry, &root).unwrap());
+        let started = image_job(
+            &home,
+            ImageJobKind::Build,
+            "app".into(),
+            move |_| async move { Err(Failure::from(store())) },
+        );
+        assert!(started.is_ok());
+        let job = Arc::clone(&home.image_jobs.lock().unwrap().values().next().unwrap().0);
+        let ended = async {
+            loop {
+                if let ImageJob {
+                    running: false,
+                    error,
+                    ..
+                } = &*job.job.lock().unwrap()
+                {
+                    break error.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let error = tokio::time::timeout(Duration::from_secs(10), ended)
+            .await
+            .unwrap();
+        assert_eq!(
+            error.as_deref(),
+            Some("the server's files: permission denied")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

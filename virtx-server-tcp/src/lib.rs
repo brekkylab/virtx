@@ -10,7 +10,8 @@
 //!   [`virtx_uvm::ProjectStore`], each home in the project's directory.
 //! - [`keeping::Keeping`]: where a home's disks, volumes and images are kept past it.
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in,
-//!   and serve the projects themselves ([`endpoints::projects`]).
+//!   and serve the projects themselves ([`serve::projects`]); a server that keeps its projects
+//!   elsewhere merges none of those.
 //! - [`virtx_uvm::set_admission`]: room for its machines, every project's together. A sandbox
 //!   or a build there is none for is refused `503` `capacity`, nothing of it made. The binary
 //!   sets none, and every machine boots.

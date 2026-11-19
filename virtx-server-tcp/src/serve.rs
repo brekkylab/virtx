@@ -61,7 +61,7 @@ pub fn become_machine_if_spawned() {
 
 /// The server `config` alone makes: its [`Access::configured`] behind [`router`], and beside it
 /// where a client signs in for its tokens, answered without any -- the provider and the client
-/// to sign in as.
+/// to sign in as -- and the projects themselves ([`projects`]).
 pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
     let access = Arc::new(Access::configured(config).await?);
     let oidc = &config.oidc;
@@ -72,22 +72,27 @@ pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::R
         [(header::CONTENT_TYPE, "application/json")],
         advertised.to_string(),
     );
-    // The projects themselves, which a server built on this one may keep elsewhere and serve
-    // none of: beside the server's routes here, not among them.
     let own = axum::Router::new()
         .route(
             "/auth",
             axum::routing::get(move || async move { advertised }),
         )
-        .merge(endpoints::projects().layer(Extension(Arc::clone(&access))));
+        .merge(projects(&access));
     let router = router(Arc::clone(&access), own);
     Ok((access, router))
 }
 
-/// Everything served, each request checked against `access`: the endpoints, in the home a
-/// request reaches, the images' registry at `/images/oci/v2/`, the ports, and the CORS a
+/// The projects themselves, and their members, as `access`'s membership answers them: for a
+/// server to merge into the routes it gives [`router`], where it serves them. One that keeps its
+/// projects elsewhere, and serves them there, merges none.
+pub fn projects(access: &Arc<Access>) -> axum::Router {
+    endpoints::projects().layer(Extension(Arc::clone(access)))
+}
+
+/// Everything served in a project, each request checked against `access`: the endpoints, in the
+/// home a request reaches, the images' registry at `/images/oci/v2/`, the ports, and the CORS a
 /// browser at one of its origins has -- with `own` beside them, routes that take no home and
-/// check for themselves.
+/// check for themselves, such as the projects themselves ([`projects`]).
 pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
     let origins = access.origins().to_vec();
     let registry = format!("{}/v2", access::REGISTRY_PATH);
@@ -698,8 +703,7 @@ mod tests {
                 Arc::new(store),
             );
             let access = Arc::new(access);
-            let projects = crate::endpoints::projects().layer(axum::Extension(Arc::clone(&access)));
-            super::router(access, projects)
+            super::router(Arc::clone(&access), super::projects(&access))
         })
         .await;
         let send = async |method: &str, path: &str, token: &str, body: Value| {
@@ -833,6 +837,46 @@ mod tests {
         assert!(!dir.exists());
         assert_eq!(status("GET", &project, "alice", none).await, 403);
         assert_eq!(listed("alice").await, [(json!("default"), json!("alice"))]);
+    }
+
+    /// A server built on this one serves the projects only where it merges them: one that keeps
+    /// them elsewhere answers none of its own.
+    #[tokio::test]
+    async fn the_projects_are_served_only_where_a_server_merges_them() {
+        let served = Served::spawn("unmerged").await;
+        let (status, body) = served.send("GET", "projects/", None, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let (status, _) = served.send("GET", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Its endpoints in a project answer as before.
+        let (status, _) = served.send("GET", "volumes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let served = Served::spawn_over("merged", async |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            let access = Arc::new(access);
+            super::router(Arc::clone(&access), super::projects(&access))
+        })
+        .await;
+        let (status, body) = served.send("GET", "projects/", None, "").await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: Vec<Value> = serde_json::from_str(&body).unwrap();
+        assert!(
+            listed.iter().any(|project| project["name"] == "demo"),
+            "{body}"
+        );
     }
 
     #[tokio::test]

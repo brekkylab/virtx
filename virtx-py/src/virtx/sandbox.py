@@ -275,6 +275,9 @@ class SandboxJobEndReason(str, Enum):
     VM_EXITED = "vm_exited"
     """Its sandbox's VM exited on its own under it."""
 
+    RESTARTED = "restarted"
+    """Its server restarted while it ran, keeping its sandbox."""
+
 
 @dataclass(frozen=True)
 class SandboxJob:

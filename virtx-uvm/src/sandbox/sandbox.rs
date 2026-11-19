@@ -234,12 +234,15 @@ impl Sandbox {
             true => State::Exited,
             false => State::Parked,
         };
+        // Its jobs as it was last kept, by a server before this one: each ended.
+        let jobs = std::mem::take(&mut *record.jobs.lock().unwrap());
+        let jobs = jobs.into_iter().map(|job| (job.id.clone(), Job::kept(job)));
         Arc::new(Sandbox {
             record,
             shared,
             state: Mutex::new(state),
             turn: tokio::sync::Mutex::new(()),
-            jobs: Mutex::default(),
+            jobs: Mutex::new(jobs.collect()),
             ports: Ports::default(),
             listening: Mutex::default(),
             active: AtomicUsize::new(0),
@@ -372,13 +375,16 @@ impl Sandbox {
         )
     }
 
-    /// Its record written where it is kept, as it is now, unless it is deleted.
+    /// Its record written where it is kept, as it is now -- its jobs with it -- unless it is
+    /// deleted.
     pub(super) fn keep(&self) {
         if self.is_deleted() {
             return;
         }
         let path = self.shared.kept.join(format!("{}.json", self.record.id));
-        let written = serde_json::to_vec_pretty(&self.record.kept())
+        let mut kept = self.record.kept();
+        kept.jobs = self.jobs();
+        let written = serde_json::to_vec_pretty(&kept)
             .map_err(io::Error::other)
             .and_then(|json| std::fs::write(&path, json));
         if let Err(e) = written {
@@ -661,18 +667,31 @@ impl Sandbox {
     /// `run`'s machine stopped, and every job in it ended as cancelling it does: the jobs stay.
     /// Blocks while the guest puts what it wrote on its disk.
     fn halt(&self, run: &Run) {
+        self.halt_for(run, SandboxJobEndReason::Cancelled);
+    }
+
+    /// As [`halt`](Self::halt), each job that runs ended for `reason`: said before its machine
+    /// stops, so that whatever sees a job end first ends it so.
+    fn halt_for(&self, run: &Run, reason: SandboxJobEndReason) {
+        for job in self.jobs.lock().unwrap().values() {
+            job.killing(reason);
+        }
         run.machine.stop();
         for job in self.jobs.lock().unwrap().values() {
-            job.cut(SandboxJobEndReason::Cancelled);
+            job.cut(reason);
         }
         run.release();
     }
 
-    /// As [`park_anyway`](Self::park_anyway), blocking: not on an async runtime's thread.
+    /// As [`park_anyway`](Self::park_anyway), blocking: not on an async runtime's thread. Its
+    /// server is ending ([`Sandboxes::close_all`]): each job that runs ends `restarted`, and is
+    /// kept so for the server started again.
+    ///
+    /// [`Sandboxes::close_all`]: super::Sandboxes::close_all
     pub(super) fn park_blocking(&self) {
         let _turn = self.turn.blocking_lock();
         if let Ok(Some(run)) = self.take_run() {
-            self.halt(&run);
+            self.halt_for(&run, SandboxJobEndReason::Restarted);
             self.keep();
         }
     }
@@ -798,6 +817,7 @@ impl Sandbox {
         }
         job.cut(SandboxJobEndReason::Cancelled);
         job.remove();
+        self.keep();
         Ok(())
     }
 
@@ -998,6 +1018,11 @@ impl Sandbox {
                         running.insert(pid, Arc::clone(&job));
                         job
                     });
+                    // Kept with it: a server started again after this one ended under it knows
+                    // the job, ended by that.
+                    if started.is_ok() {
+                        self.keep();
+                    }
                     let _ = waiter.send(started);
                 }
                 CtrlResp::Stdout { id, line } => {
@@ -1014,6 +1039,7 @@ impl Sandbox {
                     if let Some(job) = running.remove(&id) {
                         self.used();
                         job.end(code);
+                        self.keep();
                     }
                 }
                 CtrlResp::Log { level, message } => {

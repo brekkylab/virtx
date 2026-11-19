@@ -283,6 +283,7 @@ The job says why it ended where the process did not end by itself: its `reason`,
 | `timeout` | Its `timeout_ms` ran out. |
 | `cancelled` | Its job was removed while it ran, or its sandbox was stopped or removed under it. |
 | `vm_exited` | Its sandbox's machine exited on its own under it. |
+| `restarted` | Its server ended while it ran, keeping its sandbox: the server started again knows the job ended so. |
 
 ## Signal or cancel a job
 

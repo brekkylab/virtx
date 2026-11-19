@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use virtx_core::{SandboxCreateArgs, SandboxPort};
+use virtx_core::{SandboxCreateArgs, SandboxJob, SandboxPort};
 
 use crate::{Digest, ImageHold, ImageStore, Snapshot};
 
@@ -39,6 +39,11 @@ pub(super) struct Record {
     /// Its machine as resized: booted so from its next boot on. None for what was never
     /// resized, whose `args` say it.
     pub(super) resized: Mutex<Resized>,
+    /// Its jobs as it was last kept, read back with it, until its sandbox takes them: each that
+    /// ran then, known again as ended by its server's restart ([`Job::kept`]).
+    ///
+    /// [`Job::kept`]: super::job::Job::kept
+    pub(super) jobs: Mutex<Vec<SandboxJob>>,
 }
 
 /// A sandbox's machine as resized since it was made.
@@ -75,6 +80,10 @@ pub(super) struct Kept {
     /// [`Record::resized`].
     #[serde(default)]
     pub(super) resized: Resized,
+    /// Its jobs as they were as it was last kept: as a job starts or ends, and as its machine
+    /// is parked or ends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) jobs: Vec<SandboxJob>,
 }
 
 impl Record {
@@ -94,6 +103,7 @@ impl Record {
             exited: Mutex::new(kept.exited),
             disk_gib: Mutex::new(kept.disk_gib),
             resized: Mutex::new(kept.resized),
+            jobs: Mutex::new(kept.jobs),
         })
     }
 
@@ -174,6 +184,7 @@ impl Record {
             exited: *self.exited.lock().unwrap(),
             disk_gib: *self.disk_gib.lock().unwrap(),
             resized: *self.resized.lock().unwrap(),
+            jobs: Vec::new(),
         }
     }
 

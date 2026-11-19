@@ -455,9 +455,10 @@ export interface SandboxExecOptions {
 /**
  * Why a process did not end by itself: the server killed it, as `SIGKILL` does, its code `137`.
  * `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it ran, or its
- * sandbox parked or removed under it; `vm_exited`, its sandbox's VM exited on its own under it.
+ * sandbox parked or removed under it; `vm_exited`, its sandbox's VM exited on its own under it;
+ * `restarted`, its server restarted while it ran, keeping its sandbox.
  */
-export type SandboxJobEndReason = 'timeout' | 'cancelled' | 'vm_exited'
+export type SandboxJobEndReason = 'timeout' | 'cancelled' | 'vm_exited' | 'restarted'
 
 /** What the server answers about a process started in a sandbox. */
 export interface SandboxJobInfo {

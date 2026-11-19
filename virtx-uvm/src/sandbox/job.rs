@@ -47,6 +47,24 @@ impl Job {
         })
     }
 
+    /// `job`, as its sandbox was last kept, known again by a server started again over it:
+    /// ended as it ended, or -- one that ran then -- killed by its server's restart. Its log is
+    /// its end alone.
+    pub(super) fn kept(mut job: SandboxJob) -> Arc<Job> {
+        if job.running || job.code.is_none() {
+            job.code = Some(128 + SIGKILL);
+            job.reason = Some(SandboxJobEndReason::Restarted);
+        }
+        job.running = false;
+        let end = SandboxJobEnd {
+            code: job.code.unwrap_or(128 + SIGKILL),
+            reason: job.reason,
+        };
+        let kept = Job::new(job, false);
+        kept.end_as(end);
+        kept
+    }
+
     /// The job as it is now.
     pub fn get(&self) -> SandboxJob {
         self.job.lock().unwrap().clone()

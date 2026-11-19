@@ -309,6 +309,7 @@ impl Sandboxes {
                 exited: Mutex::new(false),
                 disk_gib: Mutex::new(None),
                 resized: Mutex::new(Resized::default()),
+                jobs: Mutex::default(),
             };
             let sandbox = Sandbox::new(record, Arc::clone(shared));
             all.insert(id, Arc::clone(&sandbox));

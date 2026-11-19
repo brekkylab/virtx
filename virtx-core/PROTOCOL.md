@@ -414,13 +414,14 @@ In each of the last three, it and every process it started are killed, as `SIGKI
 A server MAY say which, in its end and in its job, with `reason`:
 
 - `"timeout"`: its `timeout_ms` ran out.
-- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed, or by its sandbox [parked](#parking) or [deleted](#deleting) under it, as a server that ends parks its sandboxes.
+- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed, or by its sandbox [parked](#parking) or [deleted](#deleting) under it.
 - `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
+- `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
 
 A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed: a sandbox parked ends its jobs and keeps them.
 A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
-A sandbox [kept](#sandboxes) across its server's end has none of its jobs once the server is started again.
+A sandbox [kept](#sandboxes) across its server's end keeps its jobs, as many as the server keeps: started again, the server knows each that had ended as it ended, and each that ran as killed then, its `code` `137` and its `reason` `"restarted"`. A job so kept has its `end` alone for its log.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

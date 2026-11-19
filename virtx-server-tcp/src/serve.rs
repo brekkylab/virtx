@@ -1777,6 +1777,61 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
+    /// A sandbox a server before this one kept is known again with its jobs: each that had
+    /// ended as it ended, and each that ran then ended `restarted`, its log that end alone. No
+    /// machine boots for it.
+    #[tokio::test]
+    async fn a_kept_sandbox_s_jobs_are_known_again_each_that_ran_ended_restarted() {
+        let served = Served::spawn_with_projects("kept-jobs").await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = json!({
+            "id": "kept",
+            "image": digest,
+            "args": { "image": { "type": "digest", "digest": digest } },
+            "used": 1_762_300_000,
+            "jobs": [
+                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+                { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
+            ],
+        });
+        std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
+
+        let (status, jobs) = served
+            .send("GET", "sandboxes/kept/jobs/", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{jobs}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&jobs).unwrap(),
+            json!([
+                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+                {
+                    "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"],
+                    "running": false, "code": 137, "reason": "restarted",
+                },
+            ])
+        );
+        let (status, log) = served
+            .send("GET", "sandboxes/kept/jobs/ran/events", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            log,
+            "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
+        );
+        let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&got).unwrap()["running"],
+            true
+        );
+    }
+
     /// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.
     #[tokio::test]
     async fn a_port_is_a_websocket_behind_its_capability() {

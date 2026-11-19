@@ -840,6 +840,47 @@ async fn a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good(home: Home)
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
+/// A server that ends parks its sandboxes and keeps their jobs: a server started again over the
+/// same home knows each, the one that had ended as it ended, the one that ran ended `restarted`,
+/// its log that end alone.
+async fn a_sandbox_s_jobs_are_kept_past_its_server_each_that_ran_ended_restarted(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    let cmd = vec!["sleep".to_owned(), "600".to_owned()];
+    let sleeping = sandbox.exec(cmd, false, None).await.unwrap().get().id;
+    let closing = home.sandboxes.clone();
+    tokio::task::spawn_blocking(move || closing.close_all_blocking())
+        .await
+        .unwrap();
+
+    let other = sandboxes(home.sandboxes.images(), &home.root, None);
+    let there = other.get(sandbox.id()).unwrap();
+    let ended: Vec<_> = there
+        .jobs()
+        .into_iter()
+        .map(|job| (job.id == sleeping, job.running, job.code, job.reason))
+        .collect();
+    let restarted = Some(SandboxJobEndReason::Restarted);
+    assert_eq!(ended.len(), 2, "{ended:?}");
+    assert!(ended.contains(&(false, false, Some(0), None)), "{ended:?}");
+    assert!(
+        ended.contains(&(true, false, Some(137), restarted)),
+        "{ended:?}"
+    );
+    let job = there.job(&sleeping).unwrap();
+    let log = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let log: Vec<_> = log.collect().await;
+    let log: Vec<_> = log
+        .into_iter()
+        .map(|event| String::from_utf8(event.unwrap().to_vec()).unwrap())
+        .collect();
+    assert_eq!(
+        log,
+        ["id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"]
+    );
+    other.delete(sandbox.id()).await.unwrap();
+}
+
 async fn a_running_sandbox_s_disk_is_held_against_another_server(home: Home) {
     let sandbox = home.sandbox(&small()).await;
     run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
@@ -1448,6 +1489,7 @@ fn main() -> ExitCode {
         each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
         a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good,
+        a_sandbox_s_jobs_are_kept_past_its_server_each_that_ran_ended_restarted,
         a_running_sandbox_s_disk_is_held_against_another_server,
         a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
         a_guest_that_halts_ends_its_machine_and_its_jobs,

@@ -919,6 +919,82 @@ mod tests {
         assert_eq!(error["code"], "invalid", "{error}");
     }
 
+    /// A body or a path that does not read is refused `400` `invalid` in the server's words:
+    /// the member or segment, what it takes, and what was sent.
+    #[tokio::test]
+    async fn a_body_or_a_path_that_does_not_read_is_refused_naming_what_it_takes() {
+        let served = Served::spawn("unread").await;
+        let image = r#""image": {"type": "tag", "tag": "alpine"}"#;
+        let ports = format!(r#"{{{image}, "ports": ["5900"]}}"#);
+        for (method, path, body, said) in [
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                "not json",
+                r#"the body: JSON, not "not json""#,
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                "[]",
+                "the body: an object, not []",
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                "",
+                "the body: a JSON object, and none was sent",
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                r#"{"cmd": "ls"}"#,
+                r#"cmd: a list, not "ls""#,
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/j/signal",
+                r#"{"signl": "TERM"}"#,
+                "signl: not a member; the members are `signal`",
+            ),
+            (
+                "POST",
+                "images/jobs/pull/",
+                "x",
+                r#"the body: JSON, not "x""#,
+            ),
+            (
+                "POST",
+                "sandboxes/",
+                &ports,
+                r#"ports[0]: a whole number up to 65535, not "5900""#,
+            ),
+            (
+                "GET",
+                "sandboxes/%FF",
+                "",
+                "id: UTF-8 once its escapes are read, and it is not",
+            ),
+        ] {
+            let response = reqwest::Client::new()
+                .request(
+                    Method::from_bytes(method.as_bytes()).unwrap(),
+                    format!("{}{path}", served.url),
+                )
+                .header("virtx-project", "demo")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(body.to_owned())
+                .send()
+                .await
+                .unwrap();
+            let how = format!("{method} {path} {body}");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{how}");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["code"], "invalid", "{how}");
+            assert_eq!(body["error"]["message"], said, "{how}");
+        }
+    }
+
     /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
     /// `too_large`, one at the limit is not, each in the envelope. The body is refused before
     /// the handler looks anything up, so no sandbox, volume or job has to be there.

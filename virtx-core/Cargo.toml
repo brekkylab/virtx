@@ -31,6 +31,8 @@ http-body-util = { version = "0.1", optional = true }
 # Every body is JSON; a job's log is a `text/event-stream`, read and written as SSE.
 serde_json = { version = "1", optional = true }
 sse-stream = { version = "0.2", optional = true }
+# Which member of a request's body did not read, for the server's refusal of it.
+serde_path_to_error = { version = "0.1", optional = true }
 # `Stream`, which a job's log is, and the macro that writes one.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
 async-stream = { version = "0.3", optional = true }
@@ -113,6 +115,7 @@ server = [
     "dep:http-body",
     "dep:tokio",
     "dep:serde_json",
+    "dep:serde_path_to_error",
     "dep:futures-util",
 ]
 ffi = ["client"]

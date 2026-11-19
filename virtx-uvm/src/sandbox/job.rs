@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry};
 
@@ -10,6 +11,9 @@ pub struct Job {
     log: Arc<Log<SandboxJobEntry>>,
     /// Why the server kills it, once it has set out to: what its end says if it is killed.
     killing: Mutex<Option<SandboxJobEndReason>>,
+    /// When it ended, once it has: of the ended jobs a sandbox keeps, the one that ended first
+    /// goes first.
+    ended_at: Mutex<Option<Instant>>,
 }
 
 impl Job {
@@ -18,7 +22,26 @@ impl Job {
             job: Mutex::new(job),
             log: Log::new(LOG_LIMIT, SandboxJobEntry::Truncated {}),
             killing: Mutex::new(None),
+            ended_at: Mutex::new(None),
         })
+    }
+
+    /// `job`, as a sandbox kept past its process had it, known again: ended as it ended, or,
+    /// one that ran then, as killed for its server's restart. Its log is its end alone.
+    pub(super) fn kept(mut job: SandboxJob) -> Arc<Job> {
+        if job.running {
+            (job.running, job.code) = (false, Some(128 + SIGKILL));
+            job.reason = Some(SandboxJobEndReason::Restarted);
+        }
+        let end = SandboxJobEnd {
+            code: job.code.unwrap_or(128 + SIGKILL),
+            reason: job.reason,
+        };
+        let kept = Job::new(job);
+        kept.log.end(SandboxJobEntry::End(end), || {
+            *kept.ended_at.lock().unwrap() = Some(Instant::now());
+        });
+        kept
     }
 
     /// The job as it is now.
@@ -68,7 +91,13 @@ impl Job {
         self.log.end(SandboxJobEntry::End(end), || {
             let mut job = self.job.lock().unwrap();
             (job.running, job.code, job.reason) = (false, Some(code), reason);
+            *self.ended_at.lock().unwrap() = Some(Instant::now());
         });
+    }
+
+    /// When it ended, once it has.
+    pub(super) fn ended_at(&self) -> Option<Instant> {
+        *self.ended_at.lock().unwrap()
     }
 
     pub(super) fn remove(&self) {

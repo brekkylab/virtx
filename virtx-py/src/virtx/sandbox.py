@@ -68,6 +68,10 @@ class Sandbox(Files):
     abins: list[str] = field(default_factory=list)
     """virtx's own programs it has at ``/abin``."""
 
+    error: str | None = None
+    """Why it takes nothing but ``remove``, for one its server could not know again after a
+    restart."""
+
     @classmethod
     def from_dict(cls, client: Client, value: Mapping[str, Any]) -> Sandbox:
         return cls(
@@ -77,6 +81,7 @@ class Sandbox(Files):
             value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
             list(value.get("abins", ())),
+            value.get("error"),
         )
 
     @property
@@ -133,6 +138,9 @@ class SandboxJobEndReason(str, Enum):
 
     VM_EXITED = "vm_exited"
     """Its sandbox's VM exited on its own under it."""
+
+    RESTARTED = "restarted"
+    """Its server restarted while it ran, keeping its sandbox."""
 
 
 @dataclass(frozen=True)

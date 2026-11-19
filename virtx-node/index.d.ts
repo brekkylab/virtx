@@ -16,6 +16,11 @@ export class VirtxError extends Error {
    * exist, `409` for what is in use or has ended, and the like.
    */
   status: number | null
+  /**
+   * The protocol's code the server refused the request with, where it answered one:
+   * `not_found`, `in_use` and the like -- what to branch on, not the message.
+   */
+  code: string | null
   /** The server's response body, where it was not a JSON error. */
   body: string | null
 }
@@ -335,6 +340,8 @@ export interface SandboxInfo {
   ports?: SandboxPort[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
+  /** Why it takes nothing but `remove`, for one its server could not know again after a restart. */
+  error?: string
 }
 
 /**
@@ -349,6 +356,7 @@ export class Sandbox extends Files implements SandboxInfo {
   running: boolean
   ports?: SandboxPort[]
   abins?: string[]
+  error?: string
   /** Start `cmd` in it: the job, and its output as the job's `log`. */
   exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   /** Every job in it. */
@@ -392,9 +400,10 @@ export interface SandboxExecOptions {
 /**
  * Why a process did not end by itself: the server killed it, as `SIGKILL` does, its code `137`.
  * `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it ran, or its
- * sandbox removed under it; `vm_exited`, its sandbox's VM exited on its own under it.
+ * sandbox removed under it; `vm_exited`, its sandbox's VM exited on its own under it;
+ * `restarted`, its server restarted while it ran, keeping its sandbox.
  */
-export type SandboxJobEndReason = 'timeout' | 'cancelled' | 'vm_exited'
+export type SandboxJobEndReason = 'timeout' | 'cancelled' | 'vm_exited' | 'restarted'
 
 /** What the server answers about a process started in a sandbox. */
 export interface SandboxJobInfo {
@@ -555,9 +564,9 @@ export class Client {
   listImage(): Promise<ImageListOutputItem[]>
   /** Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or `name@algorithm:hex`), moving it if it is in use. */
   tagImage(source: string, target: string): Promise<void>
-  /** Remove the tag `reference` (`name:tag`), leaving the image it points at. */
+  /** Remove the tag `reference` (`name:tag`), leaving the image it points at. The last tag of an image a sandbox or a build uses is refused `409`, and kept. */
   untagImage(reference: string): Promise<void>
-  /** Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on it in that name. */
+  /** Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on it in that name. An image a sandbox or a build uses is refused `409`, with nothing removed. */
   removeImage(reference: string): Promise<void>
   /** Write the image `reference` names to `path`, as an OCI image layout in a tar archive, replacing what is there once all of it is written. Its events are a line of log a blob, then what it wrote. */
   downloadImage(reference: string, path: string): AsyncGenerator<Event<ImageDownloadOutput, string>>

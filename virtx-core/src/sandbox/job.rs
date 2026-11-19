@@ -146,6 +146,10 @@ pub enum SandboxJobEndReason {
 
     /// Its sandbox's VM exited on its own under it.
     VmExited,
+
+    /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
+    /// each that ran then is ended so.
+    Restarted,
 }
 
 #[cfg(test)]
@@ -186,6 +190,13 @@ mod tests {
                     reason: Some(SandboxJobEndReason::VmExited),
                 }),
                 json!({"end": {"code": 137, "reason": "vm_exited"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Restarted),
+                }),
+                json!({"end": {"code": 137, "reason": "restarted"}}),
             ),
         ];
         for (entry, value) in cases {

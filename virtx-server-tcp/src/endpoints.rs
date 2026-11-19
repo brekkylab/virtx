@@ -4,15 +4,16 @@
 //! ([`projects`]), answered from the [`Access`] there.
 //!
 //! Beside the protocol, what virtx cloud's node needs of a home ([`Home`]'s `pub` methods): its
-//! storage kept past this server ([`Keeping`]), room for its machines ([`Admission`]), its
+//! storage kept past this server ([`Keeping`]), its
 //! sandboxes themselves -- to count, park, move to another node or copy the disk of
 //! ([`Home::sandboxes`]) -- a sandbox resized or its disk grown as it next boots
 //! (`PUT /sandboxes/{id}/resources`, `/disk`), and the volumes listed a page at a time,
 //! `?limit=&after=` -- the cloud's extension, which a client that sends neither does not see.
 //!
 //! A home's sandboxes are [`virtx_uvm::Sandboxes`], their disks snapshots of its store named
-//! by their ids; what the home adds to them -- its keeping, room for their machines
-//! ([`Admission`]), its ports' capabilities -- it plugs in as their [`Hooks`].
+//! by their ids; what the home adds to them -- its keeping, its ports' capabilities -- it plugs
+//! in as their [`Hooks`]. Room for their machines is `virtx-uvm`'s
+//! ([`virtx_uvm::set_admission`]).
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -63,33 +64,6 @@ use crate::keeping::{Keeping, Kind, MakeKeeping, Refusal};
 use crate::project::Project;
 
 pub use virtx_uvm::sandbox::cloned;
-
-/// What decides whether a machine may boot now, answered in this crate's [`Refused`]: an
-/// embedder's [`virtx_uvm::Admission`] written against this crate. [`set_admission`] sets it
-/// as `virtx-uvm`'s, the seam every sandbox's and build's boot asks.
-pub trait Admission: Send + Sync {
-    /// Room for a machine of `spec` -- a sandbox's, or a build's `RUN` step's -- held until
-    /// what this answers drops: refused, as the request that asked for it is answered, where
-    /// there is none.
-    fn admit(&self, spec: &MachineSpec) -> Result<Held, Refused>;
-}
-
-/// An [`Admission`] as `virtx-uvm` asks one: what it refuses, no room.
-struct Admitting(Arc<dyn Admission>);
-
-impl virtx_uvm::Admission for Admitting {
-    fn admit(&self, spec: &MachineSpec) -> Result<virtx_uvm::Room, NoRoom> {
-        self.0
-            .admit(spec)
-            .map_err(|Refused(_, _, message)| NoRoom(message))
-    }
-}
-
-/// Ask `admission` for room for every machine this process boots, from now on, as
-/// [`virtx_uvm::set_admission`] does.
-pub fn set_admission(admission: Arc<dyn Admission>) {
-    virtx_uvm::set_admission(Arc::new(Admitting(admission)));
-}
 
 /// Docker Hub's mirror for a home whose access names none
 /// ([`Access::mirroring`](crate::access::Access::mirroring)): what an embedder that sets no

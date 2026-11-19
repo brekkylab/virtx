@@ -40,6 +40,108 @@ use wire::{
 /// never interleave.
 type Out = Arc<Mutex<File>>;
 
+/// The cgroup every command run here goes under -- each in one of its own within it -- its
+/// processes held to [`AGENT_PIDS`] fewer than the kernel's threads or pids, its memory to all
+/// but [`AGENT_MEMORY`], and its CPU weighed under one of this agent's threads: so that a
+/// command forking without end -- a fork bomb -- leaves this agent the processes, the memory and
+/// the CPU it needs to answer the host and to stop, and a command run beside it the CPU of one
+/// command, not one of the bomb's thousands of processes. None where the kernel has no cgroup2
+/// or no `pids` controller.
+static JOBS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+/// What of the kernel's threads the commands may not take: this agent's.
+const AGENT_PIDS: u64 = 256;
+/// What of the machine's memory the commands may not take, for this agent and the kernel: an
+/// eighth of it, up to this.
+const AGENT_MEMORY: u64 = 128 << 20;
+/// What of the commands' memory one command may not take, for another to start beside it: a
+/// sixteenth of the machine's, up to this. Without it, one that takes all there is leaves every
+/// other reclaiming beside it to start.
+const JOB_ROOM: u64 = 64 << 20;
+/// The most memory one command may take, where the kernel has the `memory` controller.
+static JOB_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// The next command's cgroup.
+static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The cgroup for commands, made: its `pids.max` the kernel's threads or pids, the fewer, less
+/// [`AGENT_PIDS`]; its `memory.max` the machine's less [`AGENT_MEMORY`], and each command's that
+/// less [`JOB_ROOM`].
+fn jobs_cgroup() -> Option<PathBuf> {
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    std::fs::write(root.join("cgroup.subtree_control"), "+pids").ok()?;
+    // And the CPU: every command together weighs a tenth of one of this agent's threads, which
+    // so answers the host while they take the rest -- all of it, when this agent waits, as it
+    // mostly does. Without the controller, the pids alone.
+    let weighed = std::fs::write(root.join("cgroup.subtree_control"), "+cpu").is_ok();
+    let memory = std::fs::write(root.join("cgroup.subtree_control"), "+memory").is_ok();
+    let jobs = root.join("jobs");
+    std::fs::create_dir_all(&jobs).ok()?;
+    // The kernel's own default for its pids, where it was built with fewer: a machine's
+    // processes held by its memory (`threads-max`), not by 4096 whatever its size.
+    let _ = std::fs::write("/proc/sys/kernel/pid_max", "32768");
+    let read =
+        |path: &str| -> Option<u64> { std::fs::read_to_string(path).ok()?.trim().parse().ok() };
+    // Whichever runs out first: threads, or pids.
+    let threads = read("/proc/sys/kernel/threads-max")?.min(read("/proc/sys/kernel/pid_max")?);
+    let most = threads.saturating_sub(AGENT_PIDS).max(64);
+    std::fs::write(jobs.join("pids.max"), most.to_string()).ok()?;
+    if weighed {
+        let _ = std::fs::write(jobs.join("cpu.weight"), "10");
+        let _ = std::fs::write(jobs.join("cgroup.subtree_control"), "+cpu");
+    }
+    let _ = std::fs::write(jobs.join("cgroup.subtree_control"), "+pids");
+    if memory && let Some(total) = memory_total() {
+        let together = total - (total / 8).min(AGENT_MEMORY);
+        let limited = std::fs::write(jobs.join("memory.max"), together.to_string()).is_ok();
+        if limited && std::fs::write(jobs.join("cgroup.subtree_control"), "+memory").is_ok() {
+            let _ = JOB_MEMORY.set(together - (total / 16).min(JOB_ROOM));
+        }
+    }
+    Some(jobs)
+}
+
+/// The machine's memory, in bytes: `MemTotal` in `/proc/meminfo`.
+fn memory_total() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib << 10)
+}
+
+/// `command`'s process put in a cgroup of its own under [`JOBS`] before it starts, if there is
+/// one: what is answered is that cgroup's `cgroup.procs`, to be held open until the process has
+/// started. Those of commands ended, with nothing left in them, are removed first.
+fn in_jobs(command: &mut Command) -> Option<File> {
+    let jobs = JOBS.get()?.as_ref()?;
+    if let Ok(entries) = std::fs::read_dir(jobs) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                // Refused for one with a process in it still.
+                let _ = std::fs::remove_dir(entry.path());
+            }
+        }
+    }
+    let n = NEXT_JOB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let own = jobs.join(n.to_string());
+    std::fs::create_dir(&own).ok()?;
+    if let Some(most) = JOB_MEMORY.get() {
+        let _ = std::fs::write(own.join("memory.max"), most.to_string());
+    }
+    let procs = File::options()
+        .write(true)
+        .open(own.join("cgroup.procs"))
+        .ok()?;
+    let fd = procs.as_raw_fd();
+    // SAFETY: `write` is async-signal-safe; `fd` is open until the process has started. One
+    // that fails leaves the process where it is.
+    unsafe {
+        command.pre_exec(move || {
+            libc::write(fd, b"0".as_ptr().cast(), 1);
+            Ok(())
+        });
+    }
+    Some(procs)
+}
+
 /// The stdin of each process started with one, by pid.
 type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 
@@ -192,6 +294,7 @@ fn serve() -> io::Result<()> {
 
     send(&out, &CtrlResp::Ready(Vec::new()));
     let stdins = Stdins::default();
+    JOBS.get_or_init(jobs_cgroup);
     while let Some(message) = wire::recv(&mut input)? {
         match message {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
@@ -249,13 +352,15 @@ fn find(name: &str) -> io::Result<PathBuf> {
 /// Start `cmd` in a process group of its own, its stdin a pipe if `stdin`, answer the host with
 /// its pid -- before anything it writes, which goes after -- and send how it ended once it has.
 fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
-    let started = Command::new(&cmd[0])
+    let mut command = Command::new(&cmd[0]);
+    command
         .args(&cmd[1..])
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn();
+        .process_group(0);
+    let _cgroup = in_jobs(&mut command);
+    let started = command.spawn();
     let mut child = match started {
         Ok(child) => child,
         Err(e) => {

@@ -9,7 +9,7 @@ use std::time::Duration;
 use virtx_core::{ImageName, SandboxCreateArgs, SandboxPort};
 
 use super::hooks::{Hooks, Wanted, Written};
-use super::record::{Record, Resized};
+use super::record::{Record, Resized, Unknown};
 use super::sandbox::{Shared, label_fits, pick, spec_of};
 use super::{Error, Sandbox};
 use crate::{Digest, ImageStore, ImageStoreError, Reference, SnapshotStore, VolumeStore};
@@ -50,6 +50,8 @@ struct Inner {
     shared: Arc<Shared>,
     /// Every sandbox, by id.
     all: Mutex<HashMap<String, Arc<Sandbox>>>,
+    /// Each kept here that this server could not know again, by id, until it is deleted.
+    unknown: Mutex<HashMap<String, Unknown>>,
 }
 
 impl Sandboxes {
@@ -69,7 +71,7 @@ impl Sandboxes {
         let kept = root.join("sandbox");
         std::fs::create_dir_all(&kept)?;
         forget_unrecorded(&snapshots, root);
-        let records = Record::load_all(&kept, &images);
+        let (records, unknown) = Record::load_all(&kept, &images);
         let shared = Arc::new(Shared {
             images,
             snapshots,
@@ -83,9 +85,11 @@ impl Sandboxes {
         for record in records {
             all.insert(record.id.clone(), Sandbox::new(record, Arc::clone(&shared)));
         }
+        let unknown = unknown.into_iter().map(|u| (u.id.clone(), u)).collect();
         Ok(Sandboxes(Arc::new(Inner {
             shared,
             all: Mutex::new(all),
+            unknown: Mutex::new(unknown),
         })))
     }
 
@@ -106,24 +110,44 @@ impl Sandboxes {
         &self.0.shared.vm
     }
 
-    /// The sandbox `id`, whether its machine is up or not.
+    /// The sandbox `id`, whether its machine is up or not. One kept here and not known again
+    /// takes nothing: [`Ended`](Error::Ended).
     pub fn get(&self, id: &str) -> Result<Arc<Sandbox>, Error> {
-        self.0
-            .all
-            .lock()
-            .unwrap()
-            .get(id)
-            .cloned()
-            .ok_or_else(|| Error::NotFound(format!("no sandbox here has the id {id}")))
+        if let Some(sandbox) = self.0.all.lock().unwrap().get(id) {
+            return Ok(Arc::clone(sandbox));
+        }
+        match self.0.unknown.lock().unwrap().contains_key(id) {
+            true => Err(Error::Ended),
+            false => Err(Error::NotFound(format!("no sandbox here has the id {id}"))),
+        }
     }
 
-    /// Every sandbox, as the protocol answers each; those named `name` alone, given one.
+    /// The sandbox `id`, as the protocol answers it: one not known again too, not running and
+    /// with why.
+    pub fn answer(&self, id: &str) -> Result<virtx_core::Sandbox, Error> {
+        if let Some(unknown) = self.0.unknown.lock().unwrap().get(id) {
+            return Ok(unknown.answer());
+        }
+        Ok(self.get(id)?.answer(false))
+    }
+
+    /// Every sandbox, as the protocol answers each, those not known again among them; those
+    /// named `name` alone, given one.
     pub fn list(&self, name: Option<&str>) -> Vec<virtx_core::Sandbox> {
         let all: Vec<_> = self.0.all.lock().unwrap().values().cloned().collect();
-        all.iter()
+        let mut listed: Vec<_> = all
+            .iter()
             .filter(|sandbox| name.is_none() || sandbox.name() == name)
             .map(|sandbox| sandbox.answer(false))
-            .collect()
+            .collect();
+        let unknown = self.0.unknown.lock().unwrap();
+        listed.extend(
+            unknown
+                .values()
+                .filter(|unknown| name.is_none() || unknown.name.as_deref() == name)
+                .map(Unknown::answer),
+        );
+        listed
     }
 
     /// Every sandbox whose machine is up.
@@ -252,20 +276,27 @@ impl Sandboxes {
         let moved = given.is_some();
         let sandbox = {
             let mut all = self.0.all.lock().unwrap();
+            let unknown = self.0.unknown.lock().unwrap();
             if let Some(name) = &args.name
-                && all.values().any(|sandbox| sandbox.name() == Some(name))
+                && (all.values().any(|sandbox| sandbox.name() == Some(name))
+                    || unknown.values().any(|u| u.name.as_deref() == Some(name)))
             {
                 return Err(Error::Exists(format!(
                     "a sandbox here is named {name} already"
                 )));
             }
             let id = match given {
-                Some(id) if all.contains_key(&id) => {
+                Some(id) if all.contains_key(&id) || unknown.contains_key(&id) => {
                     return Err(Error::Exists(format!("a sandbox here is {id} already")));
                 }
                 Some(id) => id,
-                None => pick(|id| all.contains_key(id) || shared.snapshots.open(id).is_ok()),
+                None => pick(|id| {
+                    all.contains_key(id)
+                        || unknown.contains_key(id)
+                        || shared.snapshots.open(id).is_ok()
+                }),
             };
+            drop(unknown);
             let record = Record {
                 id: id.clone(),
                 name: args.name.clone(),
@@ -373,9 +404,34 @@ impl Sandboxes {
     /// Sandbox `id` deleted: its machine stopped first if it is up, its jobs removed, and its
     /// disk removed. Its volumes stay.
     pub async fn delete(&self, id: &str) -> Result<(), Error> {
+        if self.0.unknown.lock().unwrap().contains_key(id) {
+            return self.delete_unknown(id).await;
+        }
         let sandbox = self.get(id)?;
         sandbox.delete().await?;
         self.0.all.lock().unwrap().remove(id);
+        Ok(())
+    }
+
+    /// Sandbox `id`, kept here and not known again, deleted: what is kept of it elsewhere
+    /// first, then its disk and its record.
+    async fn delete_unknown(&self, id: &str) -> Result<(), Error> {
+        let shared = &self.0.shared;
+        shared.hooks.deleting(id).await?;
+        match shared.snapshots.remove(id) {
+            Ok(()) | Err(crate::SnapshotError::Unknown(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        match std::fs::remove_file(shared.kept.join(format!("{id}.json"))) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::Failed(format!(
+                    "removing sandbox {id}'s record: {e}"
+                )));
+            }
+        }
+        self.0.unknown.lock().unwrap().remove(id);
         Ok(())
     }
 

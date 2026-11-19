@@ -97,28 +97,45 @@ impl Record {
         })
     }
 
-    /// Every record kept under `dir`, each holding its image in `images`; one whose image is
-    /// gone, or that does not read, is said and left out.
-    pub(super) fn load_all(dir: &Path, images: &ImageStore) -> Vec<Record> {
-        let mut records = Vec::new();
+    /// Every record kept under `dir`, each holding its image in `images`; and each sandbox kept
+    /// there whose record does not read, or whose image is gone, said and [not known](Unknown).
+    pub(super) fn load_all(dir: &Path, images: &ImageStore) -> (Vec<Record>, Vec<Unknown>) {
+        let (mut records, mut unknown) = (Vec::new(), Vec::new());
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return records;
+            return (records, unknown);
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let loaded = std::fs::read(&path)
+            let Some(id) = path.file_stem().and_then(|id| id.to_str()) else {
+                continue;
+            };
+            let json = std::fs::read(&path).unwrap_or_default();
+            let loaded = serde_json::from_slice::<Kept>(&json)
                 .map_err(|e| e.to_string())
-                .and_then(|json| serde_json::from_slice::<Kept>(&json).map_err(|e| e.to_string()))
                 .and_then(|kept| Record::of(kept, images));
             match loaded {
                 Ok(record) => records.push(record),
-                Err(e) => eprintln!("sandbox at {} not read: {e}", path.display()),
+                Err(why) => {
+                    eprintln!("sandbox at {} not known again: {why}", path.display());
+                    // What can be read of it, for it to be listed by.
+                    let read: serde_json::Value = serde_json::from_slice(&json).unwrap_or_default();
+                    let image = read["image"]
+                        .as_str()
+                        .or_else(|| read["args"]["image"]["digest"].as_str())
+                        .unwrap_or_default();
+                    unknown.push(Unknown {
+                        id: id.to_owned(),
+                        name: read["name"].as_str().map(str::to_owned),
+                        image: image.to_owned(),
+                        why,
+                    });
+                }
             }
         }
-        records
+        (records, unknown)
     }
 
     /// What it was made with, as resized since: what it boots as.
@@ -173,6 +190,35 @@ impl Record {
                 false => Vec::new(),
             },
             abins: self.args.abins.clone(),
+            error: None,
+        }
+    }
+}
+
+/// A sandbox kept here that a server started again cannot know: its record not read, or its
+/// image gone. Listed, not running, with why, until it is deleted; it takes nothing else.
+pub(super) struct Unknown {
+    pub(super) id: String,
+    pub(super) name: Option<String>,
+    /// The digest its record names, if it names one.
+    pub(super) image: String,
+    pub(super) why: String,
+}
+
+impl Unknown {
+    /// It, as the protocol answers a sandbox: not running, and why in `error`.
+    pub(super) fn answer(&self) -> virtx_core::Sandbox {
+        virtx_core::Sandbox {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            image: self.image.clone(),
+            running: false,
+            ports: Vec::new(),
+            abins: Vec::new(),
+            error: Some(format!(
+                "not known again since its server restarted: {}",
+                self.why
+            )),
         }
     }
 }

@@ -774,7 +774,7 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandboxes.get(&id)?.answer(false)))
+    Ok(json(&home.sandboxes.answer(&id)?))
 }
 
 async fn sandbox_remove(

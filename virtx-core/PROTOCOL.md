@@ -301,7 +301,7 @@ Its disk lasts until the sandbox is deleted: the server MAY [park](#parking) its
 | `GET /sandboxes/{id}` | | `200`, the sandbox |
 | `DELETE /sandboxes/{id}` | | `204` |
 
-A sandbox is `{id, name?, image, running, abins?}`, and in the answer to its `POST`, `ports` too:
+A sandbox is `{id, name?, image, running, abins?, error?}`, and in the answer to its `POST`, `ports` too:
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
@@ -344,6 +344,7 @@ One whose VM has exited is still held until then.
 
 A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
 It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
+One it kept and cannot know again, such as one whose image is gone, it MAY still list until its `DELETE`, with `running` `false` and an `error`, a string saying why: every other request about it is refused `409`, `ended`, and its `DELETE` removes what it kept of it.
 
 #### Ports
 

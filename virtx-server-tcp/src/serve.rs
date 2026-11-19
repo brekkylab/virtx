@@ -539,6 +539,20 @@ mod tests {
         /// As [`Served::spawn`], its image jobs connecting to registries through `registries`
         /// where given.
         async fn spawn_through(name: &str, registries: Option<Arc<dyn RegistryProxy>>) -> Served {
+            Served::spawn_serving(name, registries, false).await
+        }
+
+        /// As [`Served::spawn`], the projects themselves served too, as the binary serves them.
+        async fn spawn_with_projects(name: &str) -> Served {
+            Served::spawn_serving(name, None, true).await
+        }
+
+        /// As [`Served::spawn_through`], the projects themselves served too if `with_projects`.
+        async fn spawn_serving(
+            name: &str,
+            registries: Option<Arc<dyn RegistryProxy>>,
+            with_projects: bool,
+        ) -> Served {
             Served::spawn_over(name, async |home| {
                 let projects = TcpMembership::new(home);
                 let tester = Principal::new("tester");
@@ -556,7 +570,12 @@ mod tests {
                 if let Some(registries) = registries {
                     access = access.through(registries);
                 }
-                super::router(Arc::new(access), axum::Router::new())
+                let access = Arc::new(access);
+                let own = match with_projects {
+                    true => super::projects(&access),
+                    false => axum::Router::new(),
+                };
+                super::router(access, own)
             })
             .await
         }
@@ -1677,6 +1696,85 @@ mod tests {
             std::io::ErrorKind::WouldBlock,
             "the registry was connected to"
         );
+    }
+
+    /// A sandbox a server before this one kept that this one cannot know again -- its record
+    /// not read, or its image gone -- is listed, not running, with why in `error`. Every other
+    /// request about it is refused `409` `ended`, and it keeps its project from being removed
+    /// until its `DELETE` removes it, its disk and record with it.
+    #[tokio::test]
+    async fn a_sandbox_not_known_again_is_listed_with_why_until_its_delete() {
+        let served = Served::spawn_with_projects("unknown").await;
+        let demo = served.project("demo").await;
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = format!("sha256:{}", "0".repeat(64));
+        let image = json!({ "type": "digest", "digest": gone });
+        let record = json!({ "args": { "image": image } }).to_string();
+        for (id, record) in [("unread", "not json".to_owned()), ("lost", record)] {
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            std::fs::write(dir.join(format!("{id}.json")), record).unwrap();
+        }
+
+        let (status, listed) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+        listed.sort_by_key(|sandbox| sandbox["id"].as_str().unwrap().to_owned());
+        let errors: Vec<_> = listed
+            .iter_mut()
+            .map(|sandbox| sandbox.as_object_mut().unwrap().remove("error"))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                json!({ "id": "lost", "image": gone, "running": false }),
+                json!({ "id": "unread", "image": "", "running": false }),
+            ]
+        );
+        for error in errors {
+            let error = error.expect("an error says why");
+            assert!(
+                error.as_str().unwrap().starts_with("not known again"),
+                "{error}"
+            );
+        }
+        let (status, got) = served
+            .send("GET", "sandboxes/unread", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&got).unwrap()["running"],
+            false
+        );
+
+        let exec = r#"{"cmd": ["true"]}"#;
+        let used = [
+            ("POST", "sandboxes/unread/jobs/exec/", exec),
+            ("GET", "sandboxes/unread/jobs/", ""),
+            ("GET", "sandboxes/unread/files/", ""),
+        ];
+        for (method, path, body) in used {
+            let (status, refused) = served.send(method, path, Some("demo"), body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{method} {path}");
+            let refused: Value = serde_json::from_str(&refused).unwrap();
+            assert_eq!(refused["error"]["code"], "ended", "{method} {path}");
+        }
+        let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::CONFLICT, "its sandboxes keep it");
+
+        for id in ["unread", "lost"] {
+            let path = format!("sandboxes/{id}");
+            let (status, _) = served.send("DELETE", &path, Some("demo"), "").await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{id}");
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
+        let (status, _) = served
+            .send("GET", "sandboxes/unread", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     /// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.

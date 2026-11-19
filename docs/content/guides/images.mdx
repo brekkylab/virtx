@@ -91,7 +91,7 @@ Awaiting the started value gives the job, whose log can be read again with `job.
 
 ## Tagging
 
-A tag is a `name:tag` that points at an image. `tag_image` points a new tag at an image, named by a tag or by `name@algorithm:hex`, moving the tag if it already points elsewhere. `untag_image` removes a tag and leaves the image. `list_image` lists every tag and the digest it points at. `remove_image` removes the image a reference names and every tag on it in that name. While a sandbox uses an image, removing it, or its last tag, is refused with `409` and leaves every tag as it was.
+A tag is a `name:tag` that points at an image. `tag_image` points a new tag at an image, named by a tag or by `name@algorithm:hex`, moving the tag if it already points elsewhere. `untag_image` removes a tag and leaves the image. `list_image` lists every tag and the digest it points at. `remove_image` removes the image a reference names and every tag on it in that name. While a sandbox or a build uses an image, removing it, or its last tag, is refused with `409` and leaves every tag as it was.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">

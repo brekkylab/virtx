@@ -459,30 +459,26 @@ impl RegistryServer {
 
     /// A tag takes only itself away; a digest takes every tag naming its image in this
     /// repository, and the image too once no tag in any other names it. Either is refused
-    /// `409 DENIED`, with nothing removed, where it would leave an image a sandbox stands on
-    /// named by no tag.
+    /// `409 DENIED`, with nothing removed, where it would leave an image a sandbox or a build
+    /// stands on named by no tag.
     fn delete_manifest(&self, name: &str, reference: &str) -> Result<Response<Body>> {
         let unknown = || refusal(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", reference);
         let in_use = |image: &Digest| {
             refusal(
                 StatusCode::CONFLICT,
                 "DENIED",
-                format!("in use: a sandbox stands on {image}, and no other tag names it"),
+                format!(
+                    "in use: a sandbox or a build stands on {image}, and no other tag names it"
+                ),
             )
         };
         if !reference.contains(':') {
-            let tag = tagged(name, reference)?;
-            let image = self.store.get_tag(&tag)?.ok_or_else(unknown)?;
-            let named_otherwise = self
-                .store
-                .tags()?
-                .iter()
-                .any(|(other, named)| *named == image && *other != tag);
-            if !named_otherwise && self.store.image_held(&image)? {
-                return Err(in_use(&image));
-            }
-            self.store.remove_tag(&tag)?.ok_or_else(unknown)?;
-            return Ok(empty(StatusCode::ACCEPTED));
+            return match self.store.remove_tag(&tagged(name, reference)?) {
+                Ok(Some(_)) => Ok(empty(StatusCode::ACCEPTED)),
+                Ok(None) => Err(unknown()),
+                Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
+                Err(e) => Err(e.into()),
+            };
         }
         let digest = reference
             .parse::<Digest>()
@@ -501,20 +497,14 @@ impl RegistryServer {
         if tags_here.is_empty() && !tags_elsewhere.is_empty() {
             return Err(unknown());
         }
-        if tags_elsewhere.is_empty() && self.store.image_held(&digest)? {
-            return Err(in_use(&digest));
+        match self
+            .store
+            .remove_image_tagged(&digest, |tag| repository(tag) == here)
+        {
+            Ok(_) => Ok(empty(StatusCode::ACCEPTED)),
+            Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
+            Err(e) => Err(e.into()),
         }
-        for (tag, _) in tags_here {
-            self.store.remove_tag(&tag)?;
-        }
-        if !tags_elsewhere.is_empty() {
-            return Ok(empty(StatusCode::ACCEPTED));
-        }
-        self.store.remove_image(&digest).map_err(|e| match e {
-            store::Error::InUse(..) => refusal(StatusCode::CONFLICT, "DENIED", e.to_string()),
-            e => e.into(),
-        })?;
-        Ok(empty(StatusCode::ACCEPTED))
     }
 
     /// A layer, streamed from its file, or a config.

@@ -107,9 +107,9 @@ does: see [`sandbox`](src/sandbox/sandbox.rs). The devices a machine has, and wh
 A machine ends when its guest does: a reboot, a power-off -- through ACPI's sleep register on
 an x86_64 Linux host, PSCI on aarch64 -- or silence. Once the guest is up, the machine's process
 pings its agent every five seconds, and a guest that has answered nothing for
-`VIRTX_GUEST_SILENCE` seconds, a minute unless it says otherwise, is ended: one halted, as
-`halt -f` leaves it or a Windows host's guest that powers off, whose idle vCPUs no host sees,
-and one too stuck to answer. Its jobs end as killed, as on a power-off. A busy guest answers
+`VIRTX_GUEST_SILENCE` seconds, a minute unless it says otherwise (`0` for never, and never
+less than ten), is ended: one halted, as `halt -f` leaves it or a Windows host's guest that
+powers off, whose idle vCPUs no host sees, and one too stuck to answer. Its jobs end as killed, as on a power-off. A busy guest answers
 within moments; a minute is as long as the host waits on a guest's files.
 
 **The stacking happens in the guest**, because overlayfs is a kernel filesystem

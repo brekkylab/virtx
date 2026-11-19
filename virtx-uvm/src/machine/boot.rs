@@ -165,15 +165,18 @@ fn prefault_memory() -> bool {
 const PING_EVERY: Duration = Duration::from_secs(5);
 
 /// How long the agent may say nothing, pings unanswered, before its guest is taken to have
-/// stopped and the machine is ended: `VIRTX_GUEST_SILENCE`, in seconds, or a minute. A guest
-/// that halts, as `halt -f` does or a power-off without ACPI, leaves its vCPUs idle and its
-/// process running, and nothing else ends it. A busy guest answers within moments; a minute is
-/// as long as the host waits on a guest's files ([`IO_TIMEOUT`](super::IO_TIMEOUT)).
+/// stopped and the machine is ended: `VIRTX_GUEST_SILENCE`, in seconds, `0` for never, or a
+/// minute, and no less than two pings apart. A guest that halts, as `halt -f` does or a
+/// power-off without ACPI, leaves its vCPUs idle and its process running, and nothing else ends
+/// it. A busy guest answers within moments; a minute is as long as the host waits on a guest's
+/// files ([`IO_TIMEOUT`](super::IO_TIMEOUT)).
 fn guest_silence() -> Duration {
-    std::env::var("VIRTX_GUEST_SILENCE")
-        .ok()
-        .and_then(|seconds| seconds.parse().ok())
-        .map_or(Duration::from_secs(60), Duration::from_secs)
+    match std::env::var("VIRTX_GUEST_SILENCE").map(|seconds| seconds.parse::<u64>()) {
+        // No time elapsed is past it.
+        Ok(Ok(0)) => Duration::MAX,
+        Ok(Ok(seconds)) => Duration::from_secs(seconds).max(2 * PING_EVERY),
+        _ => Duration::from_secs(60),
+    }
 }
 
 /// `ctrlout`, once this process [holds](hold) it.

@@ -355,8 +355,8 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
 }
 
 /// A machine with more virtio-mmio devices than the 16 legacy interrupt lines hold boots, and
-/// each answers: five volumes over the nine devices a machine always has, the guest agent's
-/// filesystem last of all on a line past 15.
+/// each answers: five volumes over the eight devices this sandbox has without them, the last
+/// volume and the guest agent's filesystem on lines past 15.
 async fn a_sandbox_mounting_many_volumes_reaches_each(home: Home) {
     let names = ["v1", "v2", "v3", "v4", "v5"];
     for name in names {

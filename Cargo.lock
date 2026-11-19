@@ -4389,6 +4389,7 @@ version = "0.2.0"
 dependencies = [
  "futures-core",
  "libloading",
+ "log",
  "reqwest",
  "serde",
  "serde_json",

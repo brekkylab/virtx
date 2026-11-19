@@ -28,6 +28,10 @@ use virtx_uvm::{
 /// What this binary is spawned with to be a machine.
 const MACHINE: &str = "vm";
 
+/// What it is spawned with to be a machine whose guest is taken to have stopped once it has
+/// answered nothing for 10 s (`VIRTX_GUEST_SILENCE`), not a minute: what a test of that waits on.
+const MACHINE_HEARD_BRIEFLY: &str = "vm-heard-briefly";
+
 /// The image every sandbox here is made of.
 const ALPINE: &str = "alpine:3.20";
 
@@ -199,6 +203,42 @@ async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home
     let off = ["sh", "-c", "sleep 1; poweroff -f"];
     let ended = tokio::time::timeout(Duration::from_secs(60), run(&sandbox, &off, None)).await;
     // Its job never says it ended: it ends as killed, with the machine.
+    assert_eq!(ended.expect("the machine ends").unwrap().1, 137);
+    assert!(sandbox.idle().is_some());
+    let after = run(&sandbox, &["true"], None).await;
+    assert!(matches!(after, Err(SandboxError::Ended)), "{after:?}");
+    close(sandbox).await;
+}
+
+/// A guest that halts rather than powering off, as `halt -f` does, leaves the machine's
+/// process running and answers nothing: once it has been silent past the bound, its machine is
+/// ended and its jobs with it, as on a power-off. One that is up answers, however long its
+/// job runs quietly and however busy it keeps it.
+async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
+    let vm = vec![
+        env::current_exe().unwrap().into(),
+        OsString::from(MACHINE_HEARD_BRIEFLY),
+    ];
+    let park_after = Some(Duration::from_millis(500));
+    let args = small();
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm,
+        park_after,
+    );
+    let sandbox = sandbox.await.unwrap();
+    let busy = [
+        "sh",
+        "-c",
+        "for i in 1 2; do timeout 15 sh -c 'while :; do :; done' & done; wait; true",
+    ];
+    let lived = run(&sandbox, &busy, None).await;
+    assert_eq!(lived.unwrap().1, 0, "a busy guest is ended");
+    let halt = ["sh", "-c", "sleep 1; halt -f"];
+    let ended = tokio::time::timeout(Duration::from_secs(60), run(&sandbox, &halt, None)).await;
     assert_eq!(ended.expect("the machine ends").unwrap().1, 137);
     assert!(sandbox.idle().is_some());
     let after = run(&sandbox, &["true"], None).await;
@@ -930,6 +970,15 @@ fn main() -> ExitCode {
         let Err(_) = virtx_uvm::enter_machine();
         std::process::exit(1);
     }
+    if env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == MACHINE_HEARD_BRIEFLY)
+    {
+        // SAFETY: nothing else runs in this process yet.
+        unsafe { env::set_var("VIRTX_GUEST_SILENCE", "10") };
+        let Err(_) = virtx_uvm::enter_machine();
+        std::process::exit(1);
+    }
 
     let scratch = env::temp_dir().join(format!("virtx-uvm-machine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
@@ -966,6 +1015,7 @@ fn main() -> ExitCode {
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
+        a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         sandboxes_made_at_once_each_run_their_own,
@@ -977,7 +1027,8 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
-    // The Windows guest kernel has no ACPI, so its guest halts rather than powers off.
+    // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
+    // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {
         tests.extend(tests![
             a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs

@@ -71,6 +71,7 @@ use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use krun::{
     BalloonDevice, BlockDevice, ConsoleDevice, DiskFormat, FreePageReportingMode, FsDevice,
@@ -158,6 +159,21 @@ pub(super) struct BootArgs {
 /// runner to turn on, and nothing else.
 fn prefault_memory() -> bool {
     std::env::var_os("VIRTX_PREFAULT_MEMORY").is_some_and(|v| v == "1")
+}
+
+/// How often the agent is [pinged](CtrlReq::Ping) once it is up.
+const PING_EVERY: Duration = Duration::from_secs(5);
+
+/// How long the agent may say nothing, pings unanswered, before its guest is taken to have
+/// stopped and the machine is ended: `VIRTX_GUEST_SILENCE`, in seconds, or a minute. A guest
+/// that halts, as `halt -f` does or a power-off without ACPI, leaves its vCPUs idle and its
+/// process running, and nothing else ends it. A busy guest answers within moments; a minute is
+/// as long as the host waits on a guest's files ([`IO_TIMEOUT`](super::IO_TIMEOUT)).
+fn guest_silence() -> Duration {
+    std::env::var("VIRTX_GUEST_SILENCE")
+        .ok()
+        .and_then(|seconds| seconds.parse().ok())
+        .map_or(Duration::from_secs(60), Duration::from_secs)
 }
 
 /// `ctrlout`, once this process [holds](hold) it.
@@ -309,8 +325,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // host's messages are written into for the agent to read, one it writes into for this
     // process to pass on. The I/O port goes to the host's own two. Their port ends leaked,
     // because the console borrows them for the rest of the process.
-    let (to_guest, mut for_guest) =
-        io::pipe().map_err(|e| Error::io("making the agent's input", e))?;
+    let (to_guest, for_guest) = io::pipe().map_err(|e| Error::io("making the agent's input", e))?;
     let (mut from_guest, of_guest) =
         io::pipe().map_err(|e| Error::io("making the agent's output", e))?;
     let to_guest: &'static io::PipeReader = Box::leak(Box::new(to_guest));
@@ -398,8 +413,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .ram_mib(machine.spec.ram_mib)
         .map_err(|e| Error::vmm(format!("{} MiB of memory", machine.spec.ram_mib), e))?;
     // A guest that powers off ends the machine: on x86_64 through the sleep register ACPI
-    // names, without which it halts and its process runs on; aarch64 through PSCI. The Windows
-    // guest kernel has no ACPI.
+    // names, without which it halts and is ended only once it has been silent; aarch64 through
+    // PSCI. The Windows guest kernel has no ACPI.
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     let vmm = vmm
         .acpi(true)
@@ -417,23 +432,62 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // as the host would, killed if it has not ended by `STOP_TIMEOUT`. An agent that has
     // stopped, or said something unreadable, takes no more commands, and the machine ends so
     // the host sees it has.
+    //
+    // Once the agent is up it is pinged, and a guest it has said nothing from for
+    // `guest_silence` -- halted, or too stuck to answer -- is ended, as one that powered off.
+    // The check writes nothing: a guest that reads nothing can leave a write waiting.
     let mut ctrlin = ctrlin;
-    std::thread::spawn(move || {
-        while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
-            let _ = wire::send(&mut for_guest, &message);
+    let for_guest = Arc::new(Mutex::new(for_guest));
+    let heard = Arc::new(Mutex::new(None::<Instant>));
+    std::thread::spawn({
+        let for_guest = Arc::clone(&for_guest);
+        move || {
+            while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
+                let _ = wire::send(&mut *for_guest.lock().unwrap(), &message);
+            }
+            let _ = wire::send(&mut *for_guest.lock().unwrap(), &CtrlReq::Shutdown);
+            std::thread::sleep(STOP_TIMEOUT);
+            std::process::exit(1);
         }
-        let _ = wire::send(&mut for_guest, &CtrlReq::Shutdown);
-        std::thread::sleep(STOP_TIMEOUT);
-        std::process::exit(1);
     });
-    std::thread::spawn(move || {
-        while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
-            let _ = send(&match message {
-                CtrlResp::Ready(_) => CtrlResp::Ready(addresses.clone()),
-                message => message,
-            });
+    std::thread::spawn({
+        let heard = Arc::clone(&heard);
+        move || {
+            while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
+                *heard.lock().unwrap() = Some(Instant::now());
+                let _ = match message {
+                    CtrlResp::Ready(_) => send(&CtrlResp::Ready(addresses.clone())),
+                    CtrlResp::Pong => Ok(()),
+                    message => send(&message),
+                };
+            }
+            std::process::exit(1);
         }
-        std::process::exit(1);
+    });
+    std::thread::spawn({
+        let heard = Arc::clone(&heard);
+        move || {
+            loop {
+                std::thread::sleep(PING_EVERY);
+                if heard.lock().unwrap().is_some() {
+                    let _ = wire::send(&mut *for_guest.lock().unwrap(), &CtrlReq::Ping);
+                }
+            }
+        }
+    });
+    let silence = guest_silence();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            if heard
+                .lock()
+                .unwrap()
+                .is_some_and(|heard| heard.elapsed() > silence)
+            {
+                log::error!("the guest has answered nothing for {silence:?}: it is ended");
+                std::process::exit(1);
+            }
+        }
     });
 
     // Held for as long as the machine runs -- which is the rest of the process, whose end is

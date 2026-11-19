@@ -102,8 +102,20 @@ Each sandbox makes an upper disk of its own, named by the sandbox's id and gone 
 stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
 unless it says otherwise, `0` for never) and booted again over the same upper disk when something
 does: see [`sandbox`](src/sandbox/sandbox.rs). Each machine's coming up and going down, with when, is told in order
-to whoever embeds the crate ([`runs`](src/sandbox/runs.rs)). The devices a machine has, and why each, are in
+to whoever embeds the crate ([`runs`](src/sandbox/runs.rs)). A sandbox made with keys, as `virtx-server-tcp`
+makes each, is kept past its process too: a record beside its upper disk, `<id>.json`, says what
+it boots as, and the next server over the same root knows it again, parked
+(`Sandbox::kept`), or, where it cannot be -- its record not read, its image gone -- holds what it
+kept as `Unknown` until it is removed; `virtx-stdio`'s go with it. The devices a machine has, and why each, are in
 [`machine/boot.rs`](src/machine/boot.rs).
+
+A machine ends when its guest does: a reboot, a power-off -- through ACPI's sleep register on
+an x86_64 Linux host, PSCI on aarch64 -- or silence. Once the guest is up, the machine's process
+pings its agent every five seconds, and a guest that has answered nothing for
+`VIRTX_GUEST_SILENCE` seconds, a minute unless it says otherwise (`0` for never, and never
+less than ten), is ended: one halted, as `halt -f` leaves it or a Windows host's guest that
+powers off, whose idle vCPUs no host sees, and one too stuck to answer. Its jobs end as killed, as on a power-off. A busy guest answers
+within moments; a minute is as long as the host waits on a guest's files.
 
 **The stacking happens in the guest**, because overlayfs is a kernel filesystem
 and the host has no way to mount one — let alone an EROFS a macOS kernel cannot
@@ -867,9 +879,13 @@ virtio-mmio devices before the fix and nineteen after — with the nine a machin
 always has, two user mounts and ten.
 
 **Not a Windows bug**, although this is where it was found: the MP table and
-the IRQ range are both generic x86_64, so a Linux host on x86_64 has the same
-ceiling. macOS is aarch64, where the interrupt controller is a GIC and
-`IRQ_BASE`/`IRQ_MAX` are 32 and 159, and never reaches it.
+the IRQ range are both generic x86_64. A Linux host on x86_64 describes the
+machine in ACPI instead (`VmmBuilder::acpi`), which writes no MP table and gives
+each virtio-mmio device's GSI as an `Interrupt` resource in the DSDT, so the
+table is the Windows host's alone now. `a_sandbox_mounting_many_volumes_reaches_each`
+in `tests/machine.rs` boots a machine past GSI 15 on either. macOS is aarch64,
+where the interrupt controller is a GIC and `IRQ_BASE`/`IRQ_MAX` are 32 and
+159, and never reaches it.
 
 ### libkrun commit `whp-prefault`
 

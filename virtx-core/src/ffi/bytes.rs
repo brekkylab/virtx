@@ -9,14 +9,17 @@ use crate::{Error, Source};
 
 /// Why a call failed, as C reads it: `{"message": "...", "source": "server"}`, `source` where
 /// it failed (`server`, `job`, `transport` or `client`), with `"status": 404` beside it when
-/// the server refused the request with that HTTP status, and `"body"` where the refusal had a
-/// body that was not a JSON error.
+/// the server refused the request with that HTTP status, `"code"` the protocol's where it
+/// answered its error as the protocol does (`not_found`, `in_use`), and `"body"` where the
+/// refusal had a body that was not a JSON error.
 #[derive(Debug, Serialize)]
 pub(crate) struct Failure {
     message: String,
     source: Source,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
 }
@@ -32,6 +35,7 @@ impl From<Error> for Failure {
             message: error.to_string(),
             source: error.source_kind(),
             status,
+            code: error.code().map(str::to_owned),
             body,
         }
     }
@@ -114,6 +118,7 @@ mod tests {
                 "message": "the server answered 404 Not Found: not_found: no such file",
                 "source": "server",
                 "status": 404,
+                "code": "not_found",
             })
         );
         assert_eq!(

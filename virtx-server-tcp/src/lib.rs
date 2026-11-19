@@ -14,6 +14,9 @@
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.
+//! - [`access::Access::mirroring`]: Docker Hub's mirror, which its anonymous pulls of Docker
+//!   Hub's images go to first. The binary's is its config's `registry_mirror`; without one,
+//!   none.
 
 pub mod access;
 pub mod config;

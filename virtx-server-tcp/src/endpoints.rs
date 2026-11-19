@@ -206,22 +206,23 @@ impl Home {
         });
     }
 
-    /// Its sandboxes, whether each one's machine is up or not: for routes of a server's own
-    /// ([`serve::router`](crate::serve::router)'s `own`), which may count them or park them.
-    pub fn sandboxes(&self) -> Vec<Arc<Sandbox>> {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .values()
-            .map(|held| Arc::clone(&held.sandbox))
-            .collect()
+    /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
+    /// ([`serve::router`](crate::serve::router)'s `own`) and its work between requests, which
+    /// may find, count or park them.
+    pub fn sandboxes(&self) -> Sandboxes<'_> {
+        Sandboxes(self)
     }
 
     /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
     /// was used, side by side; those in use are left as they are.
     pub async fn park_unused(&self) {
-        let parked = self.sandboxes().into_iter().map(|sandbox| async move {
-            let _ = sandbox.park().await;
-        });
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                let _ = sandbox.park().await;
+            });
         futures_util::future::join_all(parked).await;
     }
 
@@ -229,9 +230,13 @@ impl Home {
     /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
     /// used.
     pub async fn park_all(&self) {
-        let parked = self.sandboxes().into_iter().map(|sandbox| async move {
-            sandbox.park_anyway().await;
-        });
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                sandbox.park_anyway().await;
+            });
         futures_util::future::join_all(parked).await;
     }
 
@@ -275,6 +280,40 @@ impl Home {
             ));
         }
         Err(not_found(format!("no sandbox here has the id {id}")))
+    }
+}
+
+/// A home's sandboxes, as each is when it is asked: those the home knows, each whether its
+/// machine is up or not ([`Home::sandboxes`]). One kept in the home and not known again, which
+/// takes only its `DELETE`, is none of them.
+pub struct Sandboxes<'a>(&'a Home);
+
+impl Sandboxes<'_> {
+    /// Each of them, in no set order.
+    pub fn list(&self) -> Vec<Arc<Sandbox>> {
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes
+            .values()
+            .map(|held| Arc::clone(&held.sandbox))
+            .collect()
+    }
+
+    /// The sandbox `id`, if it is one of them.
+    pub fn get(&self, id: &str) -> Option<Arc<Sandbox>> {
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes.get(id).map(|held| Arc::clone(&held.sandbox))
+    }
+
+    /// How many there are, and how many of those have their machine up now.
+    pub fn counts(&self) -> (usize, usize) {
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        let up = sandboxes.values().filter(|held| held.sandbox.is_up());
+        (sandboxes.len(), up.count())
+    }
+
+    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk.
+    pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
+        self.get(id).filter(|sandbox| sandbox.is_up())
     }
 }
 

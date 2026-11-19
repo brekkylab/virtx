@@ -11,8 +11,8 @@
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
 //! - [`endpoints::Home::sandboxes`], [`park_unused`](endpoints::Home::park_unused) and
 //!   [`park_all`](endpoints::Home::park_all), and [`access::Access::homes`]: a home's sandboxes,
-//!   for routes of its own to count, or to park -- each one's machine stopped, the sandbox
-//!   kept -- as it needs the host back.
+//!   for routes of its own to find, count -- all, and those whose machine is up -- or park --
+//!   each one's machine stopped, the sandbox kept -- as it needs the host back.
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.

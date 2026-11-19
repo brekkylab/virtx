@@ -112,12 +112,19 @@ pub trait StorageBackend: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
-    /// The image `wanted` names made ready in the home's image store before a sandbox is made of
-    /// it, if it is kept and not here yet: tagged here as it is kept, and the image stored. One
-    /// that is not kept is left for the store here to answer for.
+    /// The image `wanted` names made ready in the home's image store, if it is kept and not here
+    /// yet: tagged here as it is kept, and the image stored. Asked before a sandbox is made of
+    /// it, and before the home's registry answers a manifest by its tag or digest. One that is
+    /// not kept is left for the store here to answer for.
     fn want<'a>(&'a self, wanted: Wanted<'a>) -> BoxFuture<'a, anyhow::Result<()>> {
         let _ = wanted;
         Box::pin(async { Ok(()) })
+    }
+
+    /// The tags kept and not here yet: what the home's registry lists beside its own, in its
+    /// catalog and its tag lists, each [wanted](Self::want) once a request names it.
+    fn tags(&self) -> BoxFuture<'_, anyhow::Result<Vec<Reference>>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }
 
@@ -125,6 +132,13 @@ pub trait StorageBackend: Send + Sync {
 /// sandboxes, which take it as they next need it, and given once.
 #[derive(Clone, Default)]
 pub struct Backing(Arc<OnceLock<Arc<dyn StorageBackend>>>);
+
+impl std::fmt::Debug for Backing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let backed = self.get().is_some();
+        f.debug_struct("Backing").field("backed", &backed).finish()
+    }
+}
 
 impl Backing {
     /// Back it with `backend` from now on: `false`, and nothing changed, where it was already.

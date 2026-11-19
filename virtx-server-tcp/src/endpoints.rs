@@ -109,7 +109,8 @@ impl Home {
             std::env::current_exe()?.into(),
             crate::serve::MACHINE_SUBCOMMAND.into(),
         ];
-        let backing = Backing::default();
+        // One with the registry's: its images are kept where the rest of the home is.
+        let backing = registry.backing().clone();
         let kept = Sandbox::kept(&images, root, &volumes, vm.clone(), park_after(), &backing);
         let unknown = kept
             .unknown
@@ -150,8 +151,9 @@ impl Home {
 
     /// This, its project's data kept beyond this machine by `backend` as well, its own stores
     /// the backend's cache from now on: each of its sandboxes, those known again as it was made
-    /// among them, takes its disk and volumes from the backend as its machine boots, and its
-    /// volumes and their files are made, listed, read, written and removed through it. Said
+    /// among them, takes its disk and volumes from the backend as its machine boots, its
+    /// volumes and their files are made, listed, read, written and removed through it, and its
+    /// registry lists the tags kept there and brings a manifest it is asked for here. Said
     /// once, as it is made, before any request reaches it. A home given none -- a server on its
     /// own -- keeps nothing beyond its stores. See [`StorageBackend`].
     pub fn backed_by(self, backend: Arc<dyn StorageBackend>) -> Home {

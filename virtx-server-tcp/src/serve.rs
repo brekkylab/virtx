@@ -297,7 +297,9 @@ mod tests {
     //! `virtx-core`'s client given it at connect -- and to the projects themselves. Who a
     //! provider's token is, is `virtx-rs`'s `tests/projects.rs`, against the fixture's.
 
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
 
     use reqwest::{Method, StatusCode, Url};
     use serde_json::{Value, json};
@@ -305,8 +307,12 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+    use virtx_core::VolumeListOutputItem;
     use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
-    use virtx_uvm::{FsTree, ImageStore, PublicRegistries, RegistryProxy};
+    use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
+    use virtx_uvm::{
+        FsTree, ImageStore, ProjectId, PublicRegistries, RegistryProxy, StorageBackend, VolumeStore,
+    };
 
     use std::sync::Arc;
 
@@ -314,7 +320,7 @@ mod tests {
 
     use virtx_uvm::ProjectStore;
 
-    use crate::access::{Access, Identity, Principal, TokenIsUser};
+    use crate::access::{Access, Homes, Identity, Principal, TokenIsUser};
     use crate::config::Config;
     use crate::project::{Membership as _, TcpMembership};
 
@@ -1451,5 +1457,371 @@ mod tests {
             let read = a.read_file(&root, "read", 0, None).await.unwrap();
             assert!(read == *landed, "round {round}: not the write that landed");
         }
+    }
+
+    /// A storage backend that keeps a home's volumes in a store of its own beside the home, as
+    /// a server beside this one would find them: each brought here as it is read or written, and
+    /// kept there again once a write lets go of it. It refuses what `held` names as held
+    /// elsewhere, says what it removed, and keeps nothing of a sandbox's disk but files the empty
+    /// image here as it is wanted.
+    struct Beyond {
+        kept: VolumeStore,
+        here: VolumeStore,
+        images: ImageStore,
+        held: Mutex<HashSet<String>>,
+        removed: Mutex<Vec<String>>,
+    }
+
+    impl Beyond {
+        fn refuse(&self, name: &str) -> Result<(), Refusal> {
+            match self.held.lock().unwrap().contains(name) {
+                true => Err(Refusal::InUse(format!("{name} is held elsewhere"))),
+                false => Ok(()),
+            }
+        }
+    }
+
+    /// Volume `name`'s files in `from` copied over those in `to`, made there if it is not.
+    fn copy_volume(from: &VolumeStore, to: &VolumeStore, name: &str) {
+        let files = to.open(name).or_else(|_| to.create(name)).unwrap().files();
+        for file in std::fs::read_dir(from.open(name).unwrap().files()).unwrap() {
+            let file = file.unwrap();
+            std::fs::copy(file.path(), files.join(file.file_name())).unwrap();
+        }
+    }
+
+    /// Kept beyond again as it drops: a volume's write let go of.
+    struct KeptAgain(VolumeStore, VolumeStore, String);
+
+    impl Drop for KeptAgain {
+        fn drop(&mut self) {
+            copy_volume(&self.0, &self.1, &self.2);
+        }
+    }
+
+    impl StorageBackend for Beyond {
+        fn made<'a>(&'a self, what: Stored<'a>, _: u64) -> BoxFuture<'a, Result<(), Refusal>> {
+            Box::pin(async move {
+                let Stored::Volume(name) = what else {
+                    return Ok(());
+                };
+                if self.kept.open(name).is_ok() {
+                    return Err(Refusal::Exists(format!("{name} is kept already")));
+                }
+                self.kept
+                    .create(name)
+                    .map_err(|e| Refusal::Failed(e.into()))?;
+                Ok(())
+            })
+        }
+
+        fn take<'a>(&'a self, what: Stored<'a>) -> BoxFuture<'a, Result<Held, Refusal>> {
+            Box::pin(async move {
+                let Stored::Volume(name) = what else {
+                    return Ok(Box::new(()) as Held);
+                };
+                self.refuse(name)?;
+                self.bring_up(what).await?;
+                let (here, kept) = (self.here.clone(), self.kept.clone());
+                Ok(Box::new(KeptAgain(here, kept, name.to_owned())) as Held)
+            })
+        }
+
+        fn bring_up<'a>(&'a self, what: Stored<'a>) -> BoxFuture<'a, Result<(), Refusal>> {
+            Box::pin(async move {
+                let Stored::Volume(name) = what else {
+                    return Ok(());
+                };
+                if self.kept.open(name).is_err() {
+                    return Err(Refusal::Unknown(format!("no volume {name} is kept")));
+                }
+                copy_volume(&self.kept, &self.here, name);
+                Ok(())
+            })
+        }
+
+        fn remove<'a>(&'a self, what: Stored<'a>) -> BoxFuture<'a, Result<(), Refusal>> {
+            Box::pin(async move {
+                let (Stored::Volume(name) | Stored::Disk(name)) = what;
+                self.refuse(name)?;
+                if let Stored::Volume(name) = what {
+                    self.kept
+                        .remove(name)
+                        .map_err(|_| Refusal::Unknown(format!("no volume {name} is kept")))?;
+                }
+                self.removed.lock().unwrap().push(name.to_owned());
+                Ok(())
+            })
+        }
+
+        fn volumes(&self) -> BoxFuture<'_, anyhow::Result<Option<Vec<VolumeListOutputItem>>>> {
+            Box::pin(async move {
+                let mut listed: Vec<_> = (self.kept.list()?.into_iter())
+                    .map(|name| VolumeListOutputItem {
+                        size: self.kept.open(&name).unwrap().size(),
+                        name,
+                    })
+                    .collect();
+                listed.sort_by(|a, b| a.name.cmp(&b.name));
+                Ok(Some(listed))
+            })
+        }
+
+        fn want<'a>(&'a self, wanted: Wanted<'a>) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                if let Wanted::Image(_) = wanted {
+                    empty_image(&self.images);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// File an empty image in `images`: the same digest in every store.
+    fn empty_image(images: &ImageStore) -> virtx_uvm::Digest {
+        let layer = images.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_str(
+            r#"{"architecture": "arm64", "os": "linux", "rootfs": {"type": "layers", "diff_ids": []}}"#,
+        )
+        .unwrap();
+        images.insert_image(&config, &[layer]).unwrap()
+    }
+
+    /// Each home in the project's directory, backed by a [`Beyond`] in its `beyond/`.
+    #[derive(Default)]
+    struct BackedHomes {
+        store: OnceLock<ProjectStore>,
+        made: Mutex<Vec<(Arc<Beyond>, PathBuf)>>,
+    }
+
+    impl Homes for BackedHomes {
+        fn make<'a>(
+            &'a self,
+            id: &'a ProjectId,
+        ) -> BoxFuture<'a, anyhow::Result<Option<crate::endpoints::Home>>> {
+            Box::pin(async move {
+                let store = self.store.get().unwrap();
+                let home = Homes::make(store, id).await?.unwrap();
+                let beyond = Arc::new(Beyond {
+                    kept: VolumeStore::new(home.root.join("beyond"))?,
+                    here: home.volumes().clone(),
+                    images: home.images().clone(),
+                    held: Mutex::default(),
+                    removed: Mutex::default(),
+                });
+                let root = home.root.clone();
+                self.made.lock().unwrap().push((Arc::clone(&beyond), root));
+                Ok(Some(home.backed_by(beyond)))
+            })
+        }
+    }
+
+    /// The status and the error's code `refused` is answered with.
+    async fn refused_with(refused: crate::endpoints::Refused) -> (StatusCode, String) {
+        let response = axum::response::IntoResponse::into_response(refused);
+        let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+        let body: Value = serde_json::from_slice(&body.unwrap()).unwrap();
+        (status, body["error"]["code"].as_str().unwrap().to_owned())
+    }
+
+    /// A home backed beyond this machine answers its volumes from there, each as one here is
+    /// answered: made there, refused where one of its name is kept already; listed and read from
+    /// there; brought here to be read, held there while it is written and kept there again
+    /// after; removed there first. What the backend holds elsewhere is refused `409` `in_use`,
+    /// and over WebDAV `423`, with nothing changed.
+    #[tokio::test]
+    async fn a_backed_home_s_volumes_are_kept_beyond_it() {
+        let homes = Arc::new(BackedHomes::default());
+        let made = Arc::clone(&homes);
+        let served = Served::spawn_over("backed", async move |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            made.store.set(store.clone()).unwrap();
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store,
+                made,
+            );
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
+        let client = served.connect();
+        client.create_volume(Some("data")).await.unwrap();
+        let (beyond, root) = homes.made.lock().unwrap()[0].clone();
+        assert!(beyond.kept.open("data").is_ok(), "made there too");
+
+        let away = beyond.kept.create("away").unwrap().files();
+        std::fs::write(away.join("note"), "hi").unwrap();
+        assert!(beyond.here.open("away").is_err());
+        let (status, listed) = served.send("GET", "volumes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&listed).unwrap(),
+            json!([{ "name": "away", "size": 2 }, { "name": "data", "size": 0 }])
+        );
+        let got = client.get_volume("away").await.unwrap();
+        assert_eq!((got.name.as_str(), got.size), ("away", 2));
+        assert_eq!(self::status(client.get_volume("none").await), 404);
+
+        // Read, it is brought here; written, kept there once the write is done.
+        let (status, read) = served
+            .send("GET", "volumes/away/files/note", Some("demo"), "")
+            .await;
+        assert_eq!((status, read.as_str()), (StatusCode::OK, "hi"));
+        assert!(root.join("volume/away/files/note").is_file());
+        let (status, _) = served
+            .send("PUT", "volumes/away/files/note", Some("demo"), "there")
+            .await;
+        assert!(status.is_success(), "{status}");
+        assert_eq!(std::fs::read_to_string(away.join("note")).unwrap(), "there");
+
+        // Held elsewhere: a write refused `423`, a removal `409` `in_use`, and nothing changed.
+        beyond.held.lock().unwrap().insert("away".into());
+        let (status, _) = served
+            .send("PUT", "volumes/away/files/note", Some("demo"), "no")
+            .await;
+        assert_eq!(status, StatusCode::LOCKED);
+        let (status, refused) = served
+            .send("DELETE", "volumes/away", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let refused: Value = serde_json::from_str(&refused).unwrap();
+        assert_eq!(refused["error"]["code"], "in_use");
+        assert_eq!(std::fs::read_to_string(away.join("note")).unwrap(), "there");
+        assert!(beyond.here.open("away").is_ok());
+        beyond.held.lock().unwrap().clear();
+
+        // One of a name kept already is refused, and nothing is left of it here.
+        beyond.kept.create("taken").unwrap();
+        assert_eq!(self::status(client.create_volume(Some("taken")).await), 409);
+        assert!(beyond.here.open("taken").is_err());
+
+        client.remove_volume("away").await.unwrap();
+        assert!(beyond.kept.open("away").is_err());
+        assert!(beyond.here.open("away").is_err());
+        assert_eq!(*beyond.removed.lock().unwrap(), ["away"]);
+        assert_eq!(self::status(client.remove_volume("away").await), 404);
+    }
+
+    /// A sandbox whose record and disk are put in a home is taken in, its image wanted from the
+    /// home's backend: parked, behind its port URLs, and taken in once. Let go of, no request
+    /// reaches it, and its record and disk stay for it to be taken in again; in use, it is not
+    /// let go of. Deleted, its disk is removed beyond this machine first, and where that is
+    /// refused it stays.
+    #[tokio::test]
+    async fn a_sandbox_is_taken_in_and_let_go_of() {
+        let homes = Arc::new(BackedHomes::default());
+        let made = Arc::clone(&homes);
+        let access = Arc::new(OnceLock::new());
+        let kept = Arc::clone(&access);
+        let served = Served::spawn_over("moved", async move |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            made.store.set(store.clone()).unwrap();
+            let made = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store,
+                made,
+            );
+            let made = Arc::new(made);
+            let _ = kept.set(Arc::clone(&made));
+            super::router(made, axum::Router::new())
+        })
+        .await;
+        let (status, _) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let home = access.get().unwrap().homes().pop().unwrap();
+        let beyond = Arc::clone(&homes.made.lock().unwrap()[0].0);
+
+        // Its image is not here: the backend files it as it is wanted.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let digest = empty_image(&ImageStore::new(elsewhere.path()).unwrap()).to_string();
+        let dir = home.root.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let image = json!({ "type": "digest", "digest": digest });
+        let record = json!({ "args": { "image": image, "ports": [8080] }, "keys": { capability.clone(): 8080 } });
+        std::fs::write(dir.join("moved.ext4"), b"").unwrap();
+        std::fs::write(dir.join("moved.json"), record.to_string()).unwrap();
+        let (status, _) = served
+            .send("GET", "sandboxes/moved", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "not taken in yet");
+
+        let taken = home.take_in("moved").await.ok().unwrap();
+        assert_eq!(
+            (taken.id.as_str(), taken.image.as_str()),
+            ("moved", digest.as_str())
+        );
+        assert!(taken.running);
+        let (status, got) = served
+            .send("GET", "sandboxes/moved", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&got).unwrap()["image"],
+            digest
+        );
+        let port = served.port_url(&format!("ports/{capability}"));
+        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
+        let again = home.take_in("moved").await.err().unwrap();
+        assert_eq!(
+            refused_with(again).await,
+            (StatusCode::CONFLICT, "exists".into())
+        );
+        let none = home.take_in("none").await.err().unwrap();
+        assert_eq!(refused_with(none).await.0, StatusCode::NOT_FOUND);
+
+        // In use, it stays; let go of, it is reached no more, and its record and disk stay.
+        let tunnel = home.tunnel(&capability).unwrap();
+        let in_use = home.let_go("moved").await.err().unwrap();
+        assert_eq!(
+            refused_with(in_use).await,
+            (StatusCode::CONFLICT, "in_use".into())
+        );
+        drop(tunnel);
+        home.let_go("moved").await.ok().unwrap();
+        let (status, _) = served
+            .send("GET", "sandboxes/moved", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            Served::open(&port, Some("virtx.tcp")).await.err(),
+            Some(404)
+        );
+        assert!(dir.join("moved.ext4").is_file() && dir.join("moved.json").is_file());
+        let gone = home.let_go("moved").await.err().unwrap();
+        assert_eq!(refused_with(gone).await.0, StatusCode::NOT_FOUND);
+        home.take_in("moved").await.ok().unwrap();
+
+        // Held beyond this machine, its delete is refused and it stays; let, it goes there first.
+        beyond.held.lock().unwrap().insert("moved".into());
+        let (status, refused) = served
+            .send("DELETE", "sandboxes/moved", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let refused: Value = serde_json::from_str(&refused).unwrap();
+        assert_eq!(refused["error"]["code"], "in_use");
+        assert!(dir.join("moved.ext4").is_file());
+        beyond.held.lock().unwrap().clear();
+        let (status, _) = served
+            .send("DELETE", "sandboxes/moved", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(*beyond.removed.lock().unwrap(), ["moved"]);
+        assert!(!dir.join("moved.ext4").exists() && !dir.join("moved.json").exists());
     }
 }

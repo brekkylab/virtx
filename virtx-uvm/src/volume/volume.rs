@@ -284,6 +284,17 @@ impl Volume {
         Ok(Hold(lock))
     }
 
+    /// Hold it alone, as its removal does: refused [`InUse`](Error::InUse) while a sandbox or a
+    /// machine holds it.
+    pub fn hold_alone(&self) -> Result<Hold> {
+        let lock = lock(&self.dir, &self.name)?;
+        match lock.try_lock() {
+            Ok(()) => Ok(Hold(lock)),
+            Err(fs::TryLockError::WouldBlock) => Err(Error::InUse(self.name.clone())),
+            Err(fs::TryLockError::Error(e)) => Err(Error::io(format!("locking {}", self.name), e)),
+        }
+    }
+
     /// Show `source` at `path`, a directory made for it that must not be there yet.
     pub fn mount(&mut self, path: String, source: MountSource) -> Result<()> {
         let at = relative(&path)?;

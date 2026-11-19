@@ -13,17 +13,22 @@ use std::{
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use axum::body::Body;
-use futures_util::{StreamExt as _, future::join_all};
+use futures_util::{
+    StreamExt as _,
+    future::{BoxFuture, join_all},
+};
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
+use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::{
-    DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
-    VolumeStore,
+    DEFAULT_DISK_GIB, Files, ImageStore, Reference, RegistryClient, Sandbox, SandboxError,
+    StorageBackend, VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -86,7 +91,7 @@ impl Home {
         park_after: Option<Duration>,
         keys: Option<HashMap<String, u16>>,
     ) -> Result<Arc<Sandbox>, SandboxError> {
-        let sandbox = Sandbox::create(
+        Sandbox::create(
             &self.images,
             &self.root,
             &self.volumes,
@@ -94,13 +99,23 @@ impl Home {
             vm(),
             park_after,
             keys,
-        );
-        sandbox.await
+            &Backing::default(),
+        )
+        .await
     }
 
     /// The sandboxes kept here, as a server started again over this home knows them.
     fn kept(&self) -> Vec<Arc<Sandbox>> {
-        Sandbox::kept(&self.images, &self.root, &self.volumes, vm(), None).known
+        let backing = Backing::default();
+        Sandbox::kept(
+            &self.images,
+            &self.root,
+            &self.volumes,
+            vm(),
+            None,
+            &backing,
+        )
+        .known
     }
 
     /// The names under `sandbox/` of what sandboxes keep there.
@@ -261,6 +276,184 @@ async fn a_kept_sandbox_whose_making_is_cut_short_leaves_nothing(home: Home) {
     }
 }
 
+/// A storage backend that keeps nothing and says what it is asked, a line each, as what it is
+/// asked to let be written is let go too; and refuses a disk while `refusing`.
+#[derive(Default)]
+struct Told {
+    said: Arc<Mutex<Vec<String>>>,
+    refusing: AtomicBool,
+}
+
+impl Told {
+    fn say(&self, said: String) {
+        self.said.lock().unwrap().push(said);
+    }
+
+    /// What it was asked since it was last read.
+    fn read(&self) -> Vec<String> {
+        std::mem::take(&mut *self.said.lock().unwrap())
+    }
+}
+
+/// Says it is let go of as it drops.
+struct LetGo(Arc<Mutex<Vec<String>>>, String);
+
+impl Drop for LetGo {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().push(std::mem::take(&mut self.1));
+    }
+}
+
+impl StorageBackend for Told {
+    fn made<'a>(&'a self, what: Stored<'a>, size: u64) -> BoxFuture<'a, Result<(), Refusal>> {
+        self.say(format!("made {what:?} {size}"));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn take<'a>(&'a self, what: Stored<'a>) -> BoxFuture<'a, Result<Held, Refusal>> {
+        Box::pin(async move {
+            if matches!(what, Stored::Disk(_)) && self.refusing.load(Ordering::SeqCst) {
+                return Err(Refusal::InUse(format!("{what:?} is held elsewhere")));
+            }
+            self.say(format!("take {what:?}"));
+            let said = Arc::clone(&self.said);
+            Ok(Box::new(LetGo(said, format!("let go {what:?}"))) as Held)
+        })
+    }
+
+    fn bring_up<'a>(&'a self, what: Stored<'a>) -> BoxFuture<'a, Result<(), Refusal>> {
+        self.say(format!("bring up {what:?}"));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn want<'a>(&'a self, wanted: Wanted<'a>) -> BoxFuture<'a, anyhow::Result<()>> {
+        self.say(match wanted {
+            Wanted::Tag(tag) => format!("want {tag}"),
+            Wanted::Image(digest) => format!("want {digest}"),
+        });
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// What a backend is asked as a sandbox is made, booted, parked, let go of and taken in again
+/// over it: its image wanted, its volumes brought up, and its disk made there; its disk and the
+/// volume it writes taken as its machine boots, and let go of once it is parked, the one it
+/// reads brought up. Refused, its machine does not boot.
+async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs(home: Home) {
+    for name in ["rw", "ro"] {
+        home.volumes.create(name).unwrap();
+    }
+    let told = Arc::new(Told::default());
+    let backing = Backing::default();
+    assert!(backing.set(Arc::clone(&told) as Arc<dyn StorageBackend>));
+    let mut args = small();
+    args.volumes = vec![
+        SandboxVolume {
+            volume: "rw".into(),
+            path: "/rw".into(),
+            readonly: false,
+        },
+        SandboxVolume {
+            volume: "ro".into(),
+            path: "/ro".into(),
+            readonly: true,
+        },
+    ];
+    let park = Some(Duration::from_millis(500));
+    let keys = Some(HashMap::new());
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm(),
+        park,
+        keys,
+        &backing,
+    );
+    let sandbox = sandbox.await.unwrap();
+    let disk = format!("{:?}", Stored::Disk(sandbox.id()));
+    let tag: Reference = ALPINE.parse().unwrap();
+    assert_eq!(
+        told.read(),
+        [
+            format!("want {tag}"),
+            "bring up Volume(\"rw\")".into(),
+            "bring up Volume(\"ro\")".into(),
+            format!("made {disk} {}", u64::from(DEFAULT_DISK_GIB) << 30),
+            format!("take {disk}"),
+            "take Volume(\"rw\")".into(),
+            "bring up Volume(\"ro\")".into(),
+        ]
+    );
+    let write = ["sh", "-c", "echo kept > /root/kept && echo kept > /rw/kept"];
+    assert_eq!(run(&sandbox, &write, None).await.unwrap().1, 0);
+
+    // Parked, what it took is let go of.
+    let let_go = [format!("let go {disk}"), "let go Volume(\"rw\")".into()];
+    let parked = async {
+        while told.said.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), parked)
+        .await
+        .expect("parked");
+    assert_eq!(told.read(), let_go);
+
+    // Refused its disk, it does not boot; let, it does.
+    told.refusing.store(true, Ordering::SeqCst);
+    let refused = run(&sandbox, &["true"], None).await;
+    assert!(
+        matches!(refused, Err(SandboxError::Backend(Refusal::InUse(_)))),
+        "{refused:?}"
+    );
+    assert_eq!(told.read(), Vec::<String>::new());
+    told.refusing.store(false, Ordering::SeqCst);
+
+    // Let go of while it runs, and taken in again: its image wanted by its digest, its volumes
+    // brought up; parked, with what it wrote.
+    let id = sandbox.id().to_owned();
+    let image = sandbox.answer().image;
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    assert_eq!(told.read().len(), 3, "taken again as it boots");
+    leave(sandbox).await;
+    assert_eq!(told.read(), let_go);
+    let take_in = || {
+        Sandbox::take_in(
+            &home.images,
+            &home.root,
+            &home.volumes,
+            vm(),
+            None,
+            &backing,
+            &id,
+        )
+    };
+    let again = take_in().await.unwrap();
+    assert_eq!(again.id(), id);
+    assert!(again.answer().running);
+    assert_eq!(
+        told.read(),
+        [
+            format!("want {image}"),
+            "bring up Volume(\"rw\")".into(),
+            "bring up Volume(\"ro\")".into(),
+        ]
+    );
+    let read = ["cat", "/root/kept", "/rw/kept"];
+    let (lines, _) = run(&again, &read, None).await.unwrap();
+    assert_eq!(lines, ["kept", "kept"]);
+    let refused = take_in().await;
+    assert!(
+        matches!(refused, Err(SandboxError::NotFound(_))),
+        "one this process knows is taken in once: {:?}",
+        refused.err()
+    );
+    close(again).await;
+    assert_eq!(home.left(), Vec::<String>::new());
+}
+
 async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let (mut lines, code) = run(
@@ -366,8 +559,11 @@ async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
         &args,
         vm,
         park_after,
-    );
-    let sandbox = sandbox.await.unwrap();
+        None,
+        &Backing::default(),
+    )
+    .await;
+    let sandbox = sandbox.unwrap();
     let busy = [
         "sh",
         "-c",
@@ -1202,6 +1398,7 @@ fn main() -> ExitCode {
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,
         a_kept_sandbox_whose_machine_ends_on_its_own_has_exited_past_its_server,
         a_kept_sandbox_whose_making_is_cut_short_leaves_nothing,
+        a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,
         a_parked_sandbox_holds_its_volume_against_removal,

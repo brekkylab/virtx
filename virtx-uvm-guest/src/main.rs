@@ -141,6 +141,7 @@ fn in_jobs(command: &mut Command) -> Option<File> {
     }
     Some(procs)
 }
+
 /// The stdin of each process started with one, by pid.
 type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 

@@ -217,6 +217,43 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
+async fn a_fork_bomb_leaves_the_sandbox_answering(home: Home) {
+    // Large enough for more threads than the kernel's pids, as most are.
+    answered_beside_a_bomb(&home, 2048, "f(){ f & f & wait; }; f").await;
+}
+
+async fn a_fork_bomb_out_of_memory_leaves_the_sandbox_answering(home: Home) {
+    // Each of its processes holding 600 KB of its own: the memory runs out long before the
+    // pids do, in a machine of any size.
+    let bomb = r#"s=$(head -c 300000 /dev/zero | tr "\0" x); f(){ y="$s$s"; f & f & wait; }; f"#;
+    answered_beside_a_bomb(&home, 1024, bomb).await;
+}
+
+/// A command run in a sandbox of `memory_mib` answered beside `bomb`, a script forking without
+/// end, as it goes on.
+async fn answered_beside_a_bomb(home: &Home, memory_mib: u32, bomb: &str) {
+    let mut args = small();
+    args.memory_mib = Some(memory_mib);
+    let sandbox = home.sandbox(&args).await;
+    let started = format!("sh -c '{bomb}' >/dev/null 2>&1 </dev/null & echo started");
+    let (lines, _) = run(&sandbox, &["sh", "-c", &started], None).await.unwrap();
+    assert_eq!(lines, ["started"]);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Answered while the bomb goes on: how soon is not what is tried, and the timeout only
+    // keeps a sandbox that never answers from holding the suite. The processes are counted by
+    // the shell's own glob: no fork, which the bomb may starve.
+    let counted = ["sh", "-c", "echo alive; set -- /proc/[0-9]*; echo $#"];
+    let answered = tokio::time::timeout(Duration::from_secs(120), run(&sandbox, &counted, None));
+    let (lines, _) = answered
+        .await
+        .expect("a command answered beside the bomb")
+        .unwrap();
+    assert_eq!(lines[0], "alive", "{lines:?}");
+    let processes: u32 = lines[1].parse().unwrap_or(0);
+    assert!(processes > 100, "the bomb went on beside it: {lines:?}");
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
 async fn a_job_ends_with_its_process_not_with_what_it_left_running(home: Home) {
     let sandbox = home.sandbox(&small()).await;
     // A program left running with the job's own output: the job ends with its shell, and the
@@ -879,6 +916,8 @@ fn main() -> ExitCode {
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         a_job_ends_with_its_process_not_with_what_it_left_running,
+        a_fork_bomb_leaves_the_sandbox_answering,
+        a_fork_bomb_out_of_memory_leaves_the_sandbox_answering,
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote,

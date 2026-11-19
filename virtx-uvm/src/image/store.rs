@@ -165,6 +165,16 @@ impl Store {
         Ok(Store { root })
     }
 
+    /// The store at `root`, where one is, making nothing: none where none is. For reading one
+    /// that may be on its way out, such as another project's, without making it again.
+    pub fn open(root: impl Into<PathBuf>) -> Option<Store> {
+        let root = root.into();
+        root.join("image")
+            .join("sha256")
+            .is_dir()
+            .then_some(Store { root })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -258,6 +268,32 @@ impl Store {
             let _ = fs::remove_file(&part);
             Error::io(format!("moving {} into place", path.display()), e)
         })
+    }
+
+    /// The image registry manifest `origin` became in `from`, filed here too, with its origin:
+    /// its layers [linked](Store::link_layer), and its manifest and config and the registry's as
+    /// `from` keeps them. None where `from` has no image of `origin`. An image `from` removes
+    /// meanwhile fails it, and may leave a layer here for a prune.
+    pub fn share_from(&self, from: &Store, origin: &Digest) -> Result<Option<Digest>> {
+        let Some(OriginFile::Image {
+            image,
+            manifest: served,
+            config: served_config,
+        }) = read_filed::<OriginFile>(&from.shelf("origin", origin, "json"))?
+        else {
+            return Ok(None);
+        };
+        let (Some((_, layers)), Some((manifest, config))) =
+            (from.get_image(&image)?, from.get_image_manifest(&image)?)
+        else {
+            return Ok(None);
+        };
+        for layer in &layers {
+            self.link_layer(&from.layer_path(layer), layer)?;
+        }
+        let filed = self.insert_image_manifest(&manifest, &config)?;
+        self.insert_image_origin(origin, served.as_bytes(), served_config.as_bytes(), &filed)?;
+        Ok(Some(filed))
     }
 
     /// Make `layer` young again, if it is here: a prune's grace spares it for the image being

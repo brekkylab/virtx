@@ -28,25 +28,7 @@ pub(crate) fn log<'a, E: DeserializeOwned + Send + 'a>(
     after: Option<u64>,
 ) -> impl Stream<Item = Result<LogEntry<E>, Error>> + Send + use<'a, E> {
     async_stream::try_stream! {
-        let response = open(client, &path, after).await?;
-        let mut entries = std::pin::pin!(resumed(client, response, path, after));
-        while let Some(entry) = entries.next().await {
-            yield entry?;
-        }
-    }
-}
-
-/// The entries of `response`, a log of the job at `path` answered after its `after`th entry
-/// if given -- and, where its connection breaks, those the log at `path` answers after the last
-/// one read, as [`log`] reads on.
-pub(crate) fn resumed<'a, E: DeserializeOwned + Send + 'a>(
-    client: &'a TransportClient,
-    response: http::Response<Body>,
-    path: String,
-    after: Option<u64>,
-) -> impl Stream<Item = Result<LogEntry<E>, Error>> + Send + use<'a, E> {
-    async_stream::try_stream! {
-        let mut response = Some(response);
+        let mut response = Some(open(client, &path, after).await?);
         let (mut after, mut broken) = (after, 0);
         loop {
             let opened = match response.take() {
@@ -109,9 +91,9 @@ async fn open(
     Ok(response)
 }
 
-/// The entries of `response`, a log answered from `path`, each read as an `E`. A connection
-/// broken on the way is an [`Error::Transport`].
-fn entries<'a, E: DeserializeOwned + Send + 'a>(
+/// The entries of `response`, a log answered from `path`, each read as an `E`, until the body
+/// ends. A connection broken on the way is an [`Error::Transport`].
+pub(crate) fn entries<'a, E: DeserializeOwned + Send + 'a>(
     response: http::Response<Body>,
     path: &'a str,
 ) -> impl Stream<Item = Result<LogEntry<E>, Error>> + Send + 'a {

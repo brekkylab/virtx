@@ -395,7 +395,7 @@ class StartedJob extends Promise {
 
   // `start()`, the request that answers the job, sent as the call returns, as a promise's work
   // is; `log`, its log by the job. Given `run()`, one iterated at once -- before that -- starts
-  // the job and reads its log as one: `run` yields `{ job }` first, then the log's entries.
+  // the job and reads its log as one: `run` settles the job, and yields the log's entries.
   static of(start, log, run = null) {
     let started = null
     let settle = null
@@ -1051,7 +1051,7 @@ class Sandbox extends Files {
 
   // Starts `cmd` in it, its stdin open for `writeStdin` if `stdin`, killed after `timeoutMs` if
   // given: the job, and its output as its `log`. Iterated at once, the job is started and its
-  // log read as one request.
+  // log read as one request, where the server answers so.
   exec(cmd, options = {}) {
     const { client, id } = this
     const args = { ...options, sandbox: id, cmd }

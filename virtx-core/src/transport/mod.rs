@@ -311,98 +311,6 @@ mod tests {
         served.await.unwrap().unwrap();
     }
 
-    /// An exec answered with its log, whose connection breaks after its first entry, and the
-    /// job's log, answered whole after the `Last-Event-ID` it is sent -- broken too the first time
-    /// it is asked for, unless `asked` holds something: each request's `Last-Event-ID` kept.
-    fn breaking_exec(asked: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>) -> Router {
-        use axum::{
-            body::Body,
-            routing::{get, post},
-        };
-        let entries = [
-            r#"{"stdout":"one"}"#,
-            r#"{"stdout":"two"}"#,
-            r#"{"end":{"code":0}}"#,
-        ];
-        let events = move |after: u64, upto: usize, broken: bool| {
-            use futures_util::StreamExt as _;
-            let parts: Vec<Result<String, std::io::Error>> = entries
-                .iter()
-                .enumerate()
-                .skip(after as usize)
-                .take(upto)
-                .map(|(i, data)| Ok(format!("id: {}\ndata: {data}\n\n", i + 1)))
-                .collect();
-            // Broken a while after what it sent, once that has reached the client.
-            let gone = futures_util::stream::once(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                Err(std::io::Error::other("the server went away"))
-            })
-            .take(usize::from(broken));
-            Body::from_stream(futures_util::stream::iter(parts).chain(gone))
-        };
-        let log = {
-            let asked = asked.clone();
-            move |headers: HeaderMap| async move {
-                let after = headers
-                    .get("last-event-id")
-                    .map(|h| h.to_str().unwrap().to_owned());
-                let first = {
-                    let mut asked = asked.lock().unwrap();
-                    asked.push(after.clone());
-                    asked.len() == 1
-                };
-                let after: u64 = after.map_or(0, |a| a.parse().unwrap());
-                let body = if first {
-                    events(after, 1, true)
-                } else {
-                    events(after, 3, false)
-                };
-                ([("content-type", "text/event-stream")], body)
-            }
-        };
-        let exec = {
-            let asked = asked.clone();
-            move || async move {
-                asked.lock().unwrap().push(Some("exec".into()));
-                (
-                    [
-                        ("content-type", "text/event-stream"),
-                        (
-                            "virtx-job",
-                            r#"{"id":"j","kind":"exec","pid":1,"cmd":["x"],"running":true}"#,
-                        ),
-                    ],
-                    events(0, 1, true),
-                )
-            }
-        };
-        Router::new()
-            .route("/sandboxes/s/jobs/j/events", get(log))
-            .route("/sandboxes/s/jobs/exec/", post(exec))
-    }
-
-    /// An exec answered with its log, whose connection breaks, is read on from the job's log
-    /// after its last entry.
-    #[tokio::test]
-    async fn an_exec_answered_with_its_log_is_read_on_after_its_last_entry() {
-        use futures_util::TryStreamExt as _;
-        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        asked.lock().unwrap().push(None); // the job's log, asked for next, answered whole
-        let url = serve(breaking_exec(asked.clone())).await;
-        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
-        let args = crate::sandbox::SandboxExecArgs::new(["x"]);
-        let read: Vec<_> = crate::sandbox::client::exec_log(&client, "s", &args)
-            .try_collect()
-            .await
-            .unwrap();
-        assert_eq!(read.len(), 4, "the job, then its three entries");
-        assert_eq!(
-            asked.lock().unwrap()[1..],
-            [Some("exec".to_owned()), Some("1".to_owned())]
-        );
-    }
-
     #[tokio::test]
     async fn a_file_s_path_goes_resolved_and_one_above_its_root_goes_nowhere() {
         use std::sync::{Arc, Mutex};
@@ -773,5 +681,118 @@ mod tests {
                 Some("name=s1".to_owned())
             ]
         );
+    }
+
+    /// An exec is read with its log in one request from a server that answers it so, the job in
+    /// `virtx-job`; from one that answers the job alone, in two; and where the answer breaks, the
+    /// job's log is read on after the last entry read.
+    #[tokio::test]
+    async fn an_exec_is_read_with_its_log_in_one_request_or_two() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{body::Body, routing::post};
+        use futures_util::{StreamExt as _, TryStreamExt as _};
+
+        use crate::{SandboxExecArgs, SandboxExecItem, SandboxJobEntry};
+
+        const JOB: &str = r#"{"id":"j","kind":"exec","pid":1,"cmd":["x"],"running":true}"#;
+        let entries = |from: u64, to: u64| -> String {
+            (from..=to)
+                .map(|id| match id {
+                    3 => format!("id: {id}\ndata: {{\"end\":{{\"code\":0}}}}\n\n"),
+                    _ => format!("id: {id}\ndata: {{\"stdout\":\"{id}\"}}\n\n"),
+                })
+                .collect()
+        };
+        // `mode`: `log`, answered with all of it; `job`, with the job alone; `broken`, with the
+        // first entry and then a broken body.
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let router = |mode: &'static str| {
+            let asked = asked.clone();
+            let exec = {
+                let asked = asked.clone();
+                move |headers: HeaderMap| async move {
+                    let accept = headers["accept"].to_str().unwrap().to_owned();
+                    asked.lock().unwrap().push(format!("exec {accept}"));
+                    let log = |body: Body| {
+                        axum::response::Response::builder()
+                            .status(201)
+                            .header("content-type", "text/event-stream")
+                            .header("location", "/sandboxes/s/jobs/j")
+                            .header("virtx-job", JOB)
+                            .body(body)
+                            .unwrap()
+                    };
+                    match mode {
+                        "log" => log(Body::from(entries(1, 3))),
+                        "broken" => {
+                            // Broken a while after the first entry, once that has reached the
+                            // client.
+                            let first = futures_util::stream::iter([Ok(entries(1, 1))]);
+                            let gone = futures_util::stream::once(async {
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                Err(std::io::Error::other("gone"))
+                            });
+                            log(Body::from_stream(first.chain(gone)))
+                        }
+                        _ => axum::response::Response::builder()
+                            .status(201)
+                            .header("content-type", "application/json")
+                            .body(Body::from(JOB))
+                            .unwrap(),
+                    }
+                }
+            };
+            let events = move |headers: HeaderMap| async move {
+                let after: u64 = headers
+                    .get("last-event-id")
+                    .map_or(0, |after| after.to_str().unwrap().parse().unwrap());
+                asked.lock().unwrap().push(format!("events after {after}"));
+                (
+                    [("content-type", "text/event-stream")],
+                    entries(after + 1, 3),
+                )
+            };
+            Router::new()
+                .route("/sandboxes/s/jobs/exec/", post(exec))
+                .route("/sandboxes/s/jobs/j/events", get(events))
+        };
+        let args = SandboxExecArgs::new(["x"]);
+        for (mode, requests) in [
+            ("log", vec!["exec text/event-stream, application/json"]),
+            (
+                "job",
+                vec!["exec text/event-stream, application/json", "events after 0"],
+            ),
+            (
+                "broken",
+                vec!["exec text/event-stream, application/json", "events after 1"],
+            ),
+        ] {
+            asked.lock().unwrap().clear();
+            let url = serve(router(mode)).await;
+            let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+            let read: Vec<_> = crate::sandbox::client::exec_log(&client, "s", &args)
+                .try_collect()
+                .await
+                .unwrap();
+            assert!(
+                matches!(&read[0], SandboxExecItem::Job(job) if job.id == "j"),
+                "{mode}: {read:?}"
+            );
+            let ids: Vec<_> = read[1..]
+                .iter()
+                .map(|item| match item {
+                    SandboxExecItem::Log(entry) => entry.id,
+                    SandboxExecItem::Job(_) => panic!("{mode}: a job after the first"),
+                })
+                .collect();
+            assert_eq!(ids, [1, 2, 3], "{mode}");
+            assert!(matches!(
+                read.last(),
+                Some(SandboxExecItem::Log(entry)) if matches!(entry.entry, SandboxJobEntry::End(_))
+            ));
+            assert_eq!(*asked.lock().unwrap(), requests, "{mode}");
+        }
     }
 }

@@ -55,9 +55,6 @@ type ImageJobOf = Job<ImageJob, ImageJobEntry>;
 /// flight has put it there and not yet pointed a reference at it.
 const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
-/// The header an exec answered with its log carries its job in, as JSON.
-const JOB_HEADER: &str = "virtx-job";
-
 /// What the endpoints answer from, for one project: the stores, and the sandboxes and jobs made
 /// from them.
 pub struct Home {
@@ -795,9 +792,9 @@ async fn sandbox_job_list(
     Ok(json(&home.sandboxes.get(&id)?.jobs()))
 }
 
-/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to one that accepts
-/// `text/event-stream`, `201` with the job's log as the body, the job in [`JOB_HEADER`] and
-/// its path in `Location`: its output and end with no second request.
+/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
+/// `text/event-stream`, `201` with the job's log as the body, the job in [`JOB_HEADER`] and its
+/// path in `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -817,25 +814,32 @@ async fn sandbox_exec(
         .get(header::ACCEPT)
         .and_then(|accept| accept.to_str().ok())
         .is_some_and(|accept| accept.contains("text/event-stream"));
-    if !streamed {
+    let said = ascii(&serde_json::to_string(&answered).map_err(internal)?);
+    // A job too long for a header is answered alone, and its log read with a request of its own.
+    if !streamed || said.len() > JOB_HEADER_MOST {
         return Ok(created(location, &answered));
     }
-    let said = ascii(&serde_json::to_string(&answered).expect("a job serializes"));
     let mut log = events(job.log(), &HeaderMap::new());
     *log.status_mut() = StatusCode::CREATED;
-    let header = |value: &str| header::HeaderValue::from_str(value).map_err(internal);
+    let value = |value: &str| header::HeaderValue::from_str(value).map_err(internal);
     log.headers_mut()
-        .insert(header::LOCATION, header(&location)?);
-    log.headers_mut().insert(JOB_HEADER, header(&said)?);
+        .insert(header::LOCATION, value(&location)?);
+    log.headers_mut().insert(JOB_HEADER, value(&said)?);
     Ok(log)
 }
 
-/// `json` with every character past ASCII escaped, `\uXXXX` as JSON writes one: the same
-/// JSON, and a header value.
+/// Where an exec answered with its log says its job.
+const JOB_HEADER: &str = "virtx-job";
+
+/// The longest job, as JSON, [`JOB_HEADER`] carries.
+const JOB_HEADER_MOST: usize = 8 << 10;
+
+/// `json` with every character past ASCII, and `DEL`, escaped, `\uXXXX` as JSON writes one:
+/// the same JSON, and a header's value.
 fn ascii(json: &str) -> String {
     let mut escaped = String::with_capacity(json.len());
     for c in json.chars() {
-        if c.is_ascii() {
+        if c.is_ascii() && c != '\u{7f}' {
             escaped.push(c);
         } else {
             for unit in c.encode_utf16(&mut [0; 2]) {

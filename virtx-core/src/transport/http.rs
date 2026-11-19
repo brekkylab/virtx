@@ -152,22 +152,19 @@ async fn send(
         .map_err(|e| Error::Transport(format!("reading the response: {e}")))
 }
 
-/// The body of `response`, a success, read as a `T`.
-pub(crate) async fn json<T: DeserializeOwned>(
-    response: ::http::Response<Body>,
-) -> Result<T, Error> {
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .map(|body| body.to_bytes())
-        .map_err(|e| Error::Transport(format!("reading the response: {e}")))?;
-    read(&bytes)
-}
-
 /// `bytes` read as a `T`.
 fn read<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(|e| Error::Client(e.to_string()))
+}
+
+/// The body of `response`, a success, read as a `T`.
+pub(crate) async fn json<T: DeserializeOwned>(response: http::Response<Body>) -> Result<T, Error> {
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| Error::Transport(format!("reading the response: {e}")))?;
+    read(&body.to_bytes())
 }
 
 /// What `GET path` answers.

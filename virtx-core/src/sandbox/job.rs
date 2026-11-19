@@ -148,6 +148,43 @@ pub enum SandboxJobEndReason {
     VmExited,
 }
 
+/// What an exec read with its log yields
+/// ([`Client::exec_sandbox_with_log`](crate::Client::exec_sandbox_with_log)): its job, once,
+/// first; then each entry of its log, until its end. As JSON, `{"job": {...}}`, or the entry as
+/// a log's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ExecItem", into = "ExecItem")]
+pub enum SandboxExecItem {
+    Job(SandboxJob),
+    Log(crate::LogEntry<SandboxJobEntry>),
+}
+
+/// [`SandboxExecItem`] as JSON has it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ExecItem {
+    Job { job: SandboxJob },
+    Log(crate::LogEntry<SandboxJobEntry>),
+}
+
+impl From<ExecItem> for SandboxExecItem {
+    fn from(item: ExecItem) -> Self {
+        match item {
+            ExecItem::Job { job } => SandboxExecItem::Job(job),
+            ExecItem::Log(entry) => SandboxExecItem::Log(entry),
+        }
+    }
+}
+
+impl From<SandboxExecItem> for ExecItem {
+    fn from(item: SandboxExecItem) -> Self {
+        match item {
+            SandboxExecItem::Job(job) => ExecItem::Job { job },
+            SandboxExecItem::Log(entry) => ExecItem::Log(entry),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -257,40 +294,22 @@ mod tests {
             json!({"cmd": ["cat"], "stdin": true, "timeout_ms": 5})
         );
     }
-}
 
-/// What an exec read with its log yields (`Client::exec_sandbox_with_log`): its job, once,
-/// first; then each entry of its log, until its end. As JSON, `{"job": {...}}` or the entry as
-/// a log's.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "ExecItem", into = "ExecItem")]
-pub enum SandboxExecItem {
-    Job(SandboxJob),
-    Log(crate::LogEntry<SandboxJobEntry>),
-}
-
-/// [`SandboxExecItem`] as JSON has it.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum ExecItem {
-    Job { job: SandboxJob },
-    Log(crate::LogEntry<SandboxJobEntry>),
-}
-
-impl From<ExecItem> for SandboxExecItem {
-    fn from(item: ExecItem) -> Self {
-        match item {
-            ExecItem::Job { job } => SandboxExecItem::Job(job),
-            ExecItem::Log(entry) => SandboxExecItem::Log(entry),
-        }
-    }
-}
-
-impl From<SandboxExecItem> for ExecItem {
-    fn from(item: SandboxExecItem) -> Self {
-        match item {
-            SandboxExecItem::Job(job) => ExecItem::Job { job },
-            SandboxExecItem::Log(entry) => ExecItem::Log(entry),
-        }
+    #[test]
+    fn an_exec_read_with_its_log_is_its_job_then_its_entries() {
+        let job = json!({"id": "j", "kind": "exec", "pid": 1, "cmd": ["x"], "running": true});
+        let item: SandboxExecItem = serde_json::from_value(json!({"job": job})).unwrap();
+        assert!(matches!(&item, SandboxExecItem::Job(job) if job.id == "j"));
+        assert_eq!(serde_json::to_value(&item).unwrap(), json!({"job": job}));
+        let entry = json!({"id": 2, "end": {"code": 0}});
+        let item: SandboxExecItem = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!(
+            item,
+            SandboxExecItem::Log(crate::LogEntry {
+                id: 2,
+                entry: SandboxJobEntry::End(SandboxJobEnd::exited(0)),
+            })
+        );
+        assert_eq!(serde_json::to_value(&item).unwrap(), entry);
     }
 }

@@ -51,9 +51,8 @@ impl Sandbox {
     }
 
     /// Start a process in it as `args` says, and read its log: its job, once, first, then each
-    /// entry until its `end`. One request where the server answers an exec with its log (virtx
-    /// cloud's), two elsewhere; [`exec`](Self::exec)'s log is always two. Dropping it leaves
-    /// the job running.
+    /// entry until its `end`. One request where the server answers an exec with its log, two
+    /// elsewhere; [`exec`](Self::exec)'s log is always two. Dropping it leaves the job running.
     pub fn exec_with_log(&self, args: &SandboxExecArgs) -> Events<SandboxExecItem> {
         self.client.exec_sandbox_with_log(&self.info.id, args)
     }

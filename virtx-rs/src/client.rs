@@ -926,8 +926,7 @@ impl Client {
 
     /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
     /// first, then each entry until its `end`. One request where the server answers an exec
-    /// with its log (virtx cloud's), two elsewhere; [`exec_sandbox`](Self::exec_sandbox)'s
-    /// log is always two. Dropping it leaves the job running.
+    /// with its log, two elsewhere. Dropping it leaves the job running.
     pub(crate) fn exec_sandbox_with_log(
         &self,
         id: impl AsRef<str>,

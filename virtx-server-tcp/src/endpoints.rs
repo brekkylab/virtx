@@ -1626,12 +1626,9 @@ async fn sandbox_job_list(
     Ok(json(&home.sandbox(&id)?.jobs()))
 }
 
-/// The header an exec answered with its log carries its job in, as JSON.
-pub const JOB_HEADER: &str = "virtx-job";
-
-/// `POST /sandboxes/{id}/jobs/exec/`. One that accepts `text/event-stream` is answered `201`
-/// with the job's log as the body, the job in [`JOB_HEADER`] and its path in `Location`: its
-/// output and end with no second request. Any other is answered with the job.
+/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
+/// `text/event-stream`, `201` with the job's log as the body, the job in [`JOB_HEADER`] and its
+/// path in `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -1652,17 +1649,40 @@ async fn sandbox_exec(
         .get(header::ACCEPT)
         .and_then(|accept| accept.to_str().ok())
         .is_some_and(|accept| accept.contains("text/event-stream"));
-    if !streamed {
+    let said = ascii(&serde_json::to_string(&answered).map_err(internal)?);
+    // A job too long for a header is answered alone, and its log read with a request of its own.
+    if !streamed || said.len() > JOB_HEADER_MOST {
         return Ok(created(location, &answered));
     }
-    let said = ascii(&serde_json::to_string(&answered).expect("a job serializes"));
     let mut log = events(job.log(), &HeaderMap::new());
     *log.status_mut() = StatusCode::CREATED;
-    let header = |value: &str| header::HeaderValue::from_str(value).map_err(internal);
+    let value = |value: &str| header::HeaderValue::from_str(value).map_err(internal);
     log.headers_mut()
-        .insert(header::LOCATION, header(&location)?);
-    log.headers_mut().insert(JOB_HEADER, header(&said)?);
+        .insert(header::LOCATION, value(&location)?);
+    log.headers_mut().insert(JOB_HEADER, value(&said)?);
     Ok(log)
+}
+
+/// Where an exec answered with its log says its job.
+const JOB_HEADER: &str = "virtx-job";
+
+/// The longest job, as JSON, [`JOB_HEADER`] carries.
+const JOB_HEADER_MOST: usize = 8 << 10;
+
+/// `json` with every character past ASCII, and `DEL`, escaped, `\uXXXX` as JSON writes one:
+/// the same JSON, and a header's value.
+fn ascii(json: &str) -> String {
+    let mut escaped = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() && c != '\u{7f}' {
+            escaped.push(c);
+        } else {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                escaped.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    escaped
 }
 
 async fn sandbox_job_get(
@@ -1818,22 +1838,6 @@ impl Page {
             None => items.collect(),
         }
     }
-}
-
-/// `json` with every character past ASCII escaped, `\uXXXX` as JSON writes one: the same
-/// JSON, and a header value.
-fn ascii(json: &str) -> String {
-    let mut escaped = String::with_capacity(json.len());
-    for c in json.chars() {
-        if c.is_ascii() {
-            escaped.push(c);
-        } else {
-            for unit in c.encode_utf16(&mut [0; 2]) {
-                escaped.push_str(&format!("\\u{unit:04x}"));
-            }
-        }
-    }
-    escaped
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.
@@ -2347,6 +2351,17 @@ mod tests {
 #[cfg(test)]
 mod failures {
     use super::*;
+
+    /// A job with a command past ASCII, and `DEL`, is said in its header as the same JSON.
+    #[test]
+    fn a_job_past_ascii_is_said_in_a_header_as_the_same_json() {
+        let json = serde_json::json!({"cmd": ["echo", "héllo 😀", "a\u{7f}b"]}).to_string();
+        let said = ascii(&json);
+        assert!(header::HeaderValue::from_str(&said).is_ok(), "{said}");
+        assert!(said.contains(r"h\u00e9llo \ud83d\ude00"), "{said}");
+        let read: serde_json::Value = serde_json::from_str(&said).unwrap();
+        assert_eq!(read.to_string(), json);
+    }
 
     #[tokio::test]
     async fn a_failure_on_the_server_s_files_is_answered_without_their_paths() {

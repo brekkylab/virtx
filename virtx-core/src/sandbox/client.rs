@@ -1,9 +1,7 @@
 //! The client's end of `/sandboxes/` and the jobs in each sandbox.
 
-use futures_util::Stream;
-
 use ::http::header;
-use futures_util::StreamExt as _;
+use futures_util::{Stream, StreamExt as _};
 
 use super::{
     Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
@@ -14,8 +12,7 @@ use crate::{
     transport::{LogEntry, TransportClient, full, http, segment, sse},
 };
 
-/// Where a server that answers an exec with its log says its job: virtx cloud's, beside the
-/// protocol.
+/// Where a server that answers an exec with its log says its job.
 const JOB_HEADER: &str = "virtx-job";
 
 /// The path of the sandbox `id`.
@@ -78,7 +75,7 @@ pub(crate) async fn exec(
 /// Start a process in the sandbox `id`, as `args` says, and read its log: its job, then each
 /// entry, until its end. Asked of the server in one request where it answers an exec with its
 /// log -- accepting `text/event-stream`, the job in [`JOB_HEADER`] -- and in two, the job and
-/// then its log, where it answers with the job alone, as the protocol says.
+/// then its log, where it answers with the job alone.
 pub(crate) fn exec_log<'a>(
     client: &'a TransportClient,
     id: &str,
@@ -91,7 +88,7 @@ pub(crate) fn exec_log<'a>(
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "text/event-stream, application/json")
             .body(full(body?))
-            .map_err(|e| Error::Transport(format!("not a request: {e}")))?;
+            .map_err(|e| Error::Client(format!("not a request: {e}")))?;
         let response = client.send(request).await?;
         if !response.status().is_success() {
             Err::<(), _>(http::refused(response).await)?;
@@ -100,12 +97,13 @@ pub(crate) fn exec_log<'a>(
         let with_log = response
             .headers()
             .get(header::CONTENT_TYPE)
-            .and_then(|c| c.to_str().ok())
-            .is_some_and(|c| c.starts_with("text/event-stream"));
+            .and_then(|kind| kind.to_str().ok())
+            .is_some_and(|kind| kind.starts_with("text/event-stream"));
         if !with_log {
             let job: SandboxJob = http::json(response).await?;
-            yield SandboxExecItem::Job(job.clone());
-            let mut log = std::pin::pin!(job_log(client, &id, &job.id, None));
+            let job_id = job.id.clone();
+            yield SandboxExecItem::Job(job);
+            let mut log = std::pin::pin!(job_log(client, &id, &job_id, None));
             while let Some(entry) = log.next().await {
                 yield SandboxExecItem::Log(entry?);
             }
@@ -114,14 +112,28 @@ pub(crate) fn exec_log<'a>(
         let job: SandboxJob = response
             .headers()
             .get(JOB_HEADER)
-            .and_then(|j| j.to_str().ok())
+            .and_then(|job| job.to_str().ok())
             .ok_or_else(|| Error::Transport(format!("{path} answered its log without its job")))
-            .and_then(|j| serde_json::from_str(j).map_err(|e| Error::Client(e.to_string())))?;
-        // Its log, from this answer; and, where the connection breaks, from the job's log
-        // after the last entry read.
+            .and_then(|job| serde_json::from_str(job).map_err(|e| Error::Client(e.to_string())))?;
         let at = format!("{}/events", self::job(&id, &job.id));
+        let job_id = job.id.clone();
         yield SandboxExecItem::Job(job);
-        let mut log = std::pin::pin!(sse::client::resumed(client, response, at, None));
+        // Its log, from this answer, until the body ends or breaks.
+        let mut after = None;
+        let mut entries = std::pin::pin!(sse::client::entries(response, &at));
+        loop {
+            match entries.next().await {
+                None => return,
+                Some(Ok(entry)) => {
+                    after = Some(entry.id);
+                    yield SandboxExecItem::Log(entry);
+                }
+                Some(Err(Error::Transport(_))) => break,
+                Some(Err(e)) => Err(e)?,
+            }
+        }
+        // The answer broke: the job's log, after the last entry read.
+        let mut log = std::pin::pin!(job_log(client, &id, &job_id, after));
         while let Some(entry) = log.next().await {
             yield SandboxExecItem::Log(entry?);
         }

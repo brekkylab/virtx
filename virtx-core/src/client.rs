@@ -478,7 +478,7 @@ impl Client {
 
     /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
     /// first, then each entry until its `end`. One request where the server answers an exec
-    /// with its log (virtx cloud's), two elsewhere. Dropping it leaves the job running.
+    /// with its log, two elsewhere. Dropping it leaves the job running.
     pub fn exec_sandbox_with_log(
         &self,
         id: &str,
@@ -1893,6 +1893,40 @@ pub(crate) mod ffi {
         })
     }
 
+    /// Starts a process as `virtx_client_exec_sandbox` does, given the same, and reads its log:
+    /// its first item is `{"job": {...}}`, the job as that answers it, and the rest are the
+    /// log's entries as `virtx_client_sandbox_job_log` gives them. One request where the server
+    /// answers an exec with its log, two elsewhere. Freeing it leaves the job as it is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_exec_sandbox_log(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<Exec>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let (sandbox, args) = match args {
+                    Ok(Exec { sandbox, cmd, stdin, timeout_ms }) => {
+                        (sandbox, SandboxExecArgs { cmd, stdin, timeout_ms })
+                    }
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut items = client.exec_sandbox_with_log(&sandbox, &args);
+                while let Some(item) = items.next().await {
+                    yield item;
+                }
+            }
+        })
+    }
+
     /// Answers with the job `job` in the sandbox `sandbox`, given
     /// `{"sandbox": "...", "job": "..."}`, as `virtx_client_exec_sandbox` answers one.
     ///
@@ -2026,40 +2060,6 @@ pub(crate) mod ffi {
                 let mut log = client.sandbox_job_log(&sandbox, &job, after);
                 while let Some(entry) = log.next().await {
                     yield entry;
-                }
-            }
-        })
-    }
-
-    /// Starts a process as `virtx_client_exec_sandbox` does, given the same, and reads its log:
-    /// its first item is `{"job": {...}}`, the job as that answers it, and the rest are the
-    /// log's entries as `virtx_client_sandbox_job_log` gives them. One request where the server
-    /// answers an exec with its log, two elsewhere. Freeing it leaves the job as it is.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_exec_sandbox_log(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxStream {
-        let args = unsafe { json::<Exec>(args, args_len) };
-        unsafe { &(*client).0 }.stream(|client| {
-            async_stream::stream! {
-                let (sandbox, args) = match args {
-                    Ok(Exec { sandbox, cmd, stdin, timeout_ms }) => {
-                        (sandbox, SandboxExecArgs { cmd, stdin, timeout_ms })
-                    }
-                    Err(error) => {
-                        yield Err(error);
-                        return;
-                    }
-                };
-                let mut items = client.exec_sandbox_with_log(&sandbox, &args);
-                while let Some(item) = items.next().await {
-                    yield item;
                 }
             }
         })

@@ -37,7 +37,9 @@ pub(crate) async fn list(client: &TransportClient) -> Result<Vec<Sandbox>, Error
 pub(crate) async fn find(client: &TransportClient, name: &str) -> Result<Option<Sandbox>, Error> {
     let found: Vec<Sandbox> =
         http::get(client, &format!("/sandboxes/?name={}", segment(name))).await?;
-    Ok(found.into_iter().next())
+    Ok(found
+        .into_iter()
+        .find(|sandbox| sandbox.name.as_deref() == Some(name)))
 }
 
 /// Make a sandbox as `args` says.

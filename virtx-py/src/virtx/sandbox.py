@@ -168,7 +168,7 @@ class Sandbox(Files):
     id: str
 
     name: str | None
-    """The name it was given, which ``find_sandbox`` finds it by."""
+    """The name it was made with, which ``find_sandbox`` finds it by."""
 
     image: str
     """The digest of the image it stands on, as ``algorithm:hex``: what its VM boots every

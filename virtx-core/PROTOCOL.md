@@ -296,6 +296,7 @@ Its disk lasts until the sandbox is deleted: the server MAY [park](#parking) its
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /sandboxes/` | | `200`, array of sandboxes |
+| `GET /sandboxes/?name={name}` | | `200`, array of the one named so, or of none |
 | `POST /sandboxes/` | `{image, name?, disk_gib?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, the sandbox, with `ports` |
 | `GET /sandboxes/{id}` | | `200`, the sandbox |
 | `DELETE /sandboxes/{id}` | | `204` |
@@ -303,7 +304,7 @@ Its disk lasts until the sandbox is deleted: the server MAY [park](#parking) its
 A sandbox is `{id, name?, image, running, abins?}`, and in the answer to its `POST`, `ports` too:
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
-- `name`, if given, names it among its project's sandboxes, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
+- `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM is parked is `true`.
 - `disk_gib` is how much it may write to its root filesystem over its image, in GiB. Without it the server picks it, and `0` is refused.
 - `network` is whether its processes reach a network at all, and is `true` without it.

@@ -18,11 +18,11 @@ numbered for ``after`` to resume from, until its end entry. A download or upload
 ``Progress``, each with a line of its log as its ``content``, then its ``Output``.
 
 A sandbox, a volume, a sandbox job and an image job are answered as a ``Sandbox``, a ``Volume``,
-a ``SandboxJob`` and an ``ImageJob``, each carrying the client its requests go through: what
-acts on one is the handle, so it is all a caller hands on. The client lists, makes and gets
-them; one known by its id or name is had with ``get_sandbox``, ``find_sandbox``,
-``get_volume``, ``get_image_job`` or ``Sandbox.job``. The two with files read and write them as
-``Files``: ``await volume.read_file("a.txt")``.
+a ``SandboxJob`` and an ``ImageJob``, each carrying the client its requests go through: what acts
+on one is the handle, so it is all a caller hands on. The client lists, makes and gets them; one
+known by its id or name is had with ``get_sandbox``, ``find_sandbox``, ``get_volume``,
+``get_image_job`` or ``Sandbox.job``. The two with files read and write them as ``Files``:
+``await volume.read_file("a.txt")``.
 
 A project is answered as a ``Project``, carrying its client the same way: its members, and its
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.

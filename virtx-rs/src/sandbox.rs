@@ -33,7 +33,7 @@ impl Sandbox {
         &self.info.id
     }
 
-    /// The name it was given, which finds it again ([`Client::find_sandbox`]).
+    /// The name it was made with, which finds it again ([`Client::find_sandbox`]).
     pub fn name(&self) -> Option<&str> {
         self.info.name.as_deref()
     }

@@ -141,6 +141,24 @@ describe('against virtx-stdio', () => {
     await assert.rejects(client.createSandbox(ALPINE, { ports: [ssh] }), { status: 400 })
   })
 
+  test('a sandbox is found by its name, which no other has', async () => {
+    await alpine(client)
+    const name = unique('named')
+    const made = await client.createSandbox(ALPINE, { name })
+    assert.equal(made.name, name)
+    const found = await client.findSandbox(name)
+    assert.ok(found instanceof virtx.Sandbox)
+    assert.equal(found.id, made.id)
+    assert.equal(found.name, name)
+    assert.equal(await client.findSandbox(unique('nobody')), undefined)
+    await assert.rejects(client.createSandbox(ALPINE, { name }), {
+      source: 'server',
+      status: 409,
+    })
+    await made.remove()
+    assert.equal(await client.findSandbox(name), undefined)
+  })
+
   test('a job reads its stdin until it is closed', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)

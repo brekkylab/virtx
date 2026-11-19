@@ -335,7 +335,7 @@ export class Volume extends Files implements VolumeInfo {
 /** What the server answers about a sandbox. */
 export interface SandboxInfo {
   id: string
-  /** The name it was given, which `findSandbox` finds it by. */
+  /** The name it was made with, which `findSandbox` finds it by. */
   name?: string
   /** The digest of the image it stands on: what its VM boots every time. */
   image: string
@@ -424,7 +424,7 @@ export interface InboundRule {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  /** A name to find it again by, with `findSandbox`. */
+  /** A name to find it again by, with `findSandbox`, rather than keeping its id; one another sandbox has is refused with `409`. */
   name?: string
   network?: boolean
   /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev', protocol: 'http' }]`. */
@@ -647,7 +647,7 @@ export class Client {
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
   getSandbox(id: string): Promise<Sandbox>
-  /** The sandbox named `name`, if one is. */
+  /** The sandbox named `name`, without its ports, or `undefined` if none is. */
   findSandbox(name: string): Promise<Sandbox | undefined>
 }
 

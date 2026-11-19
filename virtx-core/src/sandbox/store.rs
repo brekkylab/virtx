@@ -14,7 +14,8 @@ pub struct Sandbox {
     /// The sandbox's id, which every request about it names it by.
     pub id: String,
 
-    /// The name it was given, which finds it again ([`Client::find_sandbox`](crate::Client::find_sandbox)).
+    /// The name it was made with, which finds it again
+    /// ([`Client::find_sandbox`](crate::Client::find_sandbox)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
@@ -48,8 +49,8 @@ pub struct SandboxCreateArgs {
     /// The image its root filesystem is built on.
     pub image: ImageName,
 
-    /// A name to find it again by, unique among the sandboxes its credentials reach. One
-    /// another sandbox has is refused.
+    /// A name to find it again by, rather than keeping its id: unique among the sandboxes a
+    /// listing answers, so one another sandbox has is refused, until that one is removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
@@ -445,6 +446,7 @@ mod tests {
             "cell": "c1",
         });
         let sandbox: Sandbox = serde_json::from_value(value).unwrap();
+        assert_eq!(sandbox.name, None);
         assert_eq!(
             sandbox.ports,
             [SandboxPort {
@@ -485,6 +487,7 @@ mod tests {
     #[test]
     fn each_method_sets_its_field() {
         let args = SandboxCreateArgs::new("img:latest")
+            .name("work")
             .network(false)
             .port(80)
             .port(443)
@@ -496,6 +499,7 @@ mod tests {
             .volume("a", "/a")
             .readonly_volume("b", "/a/b");
         let mut expected = SandboxCreateArgs::new("img:latest");
+        expected.name = Some("work".into());
         expected.network = false;
         expected.ports = vec![80.into(), 443.into()];
         expected.vcpus = Some(2);
@@ -608,5 +612,22 @@ mod tests {
             })
         );
         assert_eq!(serde_json::to_value(&port).unwrap(), value);
+    }
+
+    #[test]
+    fn a_sandbox_named_says_its_name_and_one_unnamed_says_none() {
+        let named: Sandbox = serde_json::from_value(
+            json!({"id": "s", "name": "work", "image": "sha256:00", "running": true}),
+        )
+        .unwrap();
+        assert_eq!(named.name.as_deref(), Some("work"));
+        let value = serde_json::to_value(&named).unwrap();
+        assert_eq!(value["name"], "work");
+        let unnamed = Sandbox {
+            name: None,
+            ..named
+        };
+        let value = serde_json::to_value(&unnamed).unwrap();
+        assert!(value.get("name").is_none(), "{value}");
     }
 }

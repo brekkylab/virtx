@@ -760,7 +760,7 @@ class Client {
     return new Sandbox(this, await this._call('virtx_client_get_sandbox', { id }))
   }
 
-  // The sandbox named `name`, or `undefined` if none is.
+  // `undefined` where no sandbox has the name.
   async findSandbox(name) {
     const info = await this._call('virtx_client_find_sandbox', { name })
     return info ? new Sandbox(this, info) : undefined

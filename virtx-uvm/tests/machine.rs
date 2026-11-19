@@ -552,6 +552,53 @@ async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: H
     assert_eq!(home.kept(), 0);
 }
 
+async fn a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway(home: Home) {
+    // Never parked by itself: only as it is asked.
+    let sandbox = home.sandbox(&small()).await;
+    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await
+        .unwrap();
+    let used = sandbox.last_used();
+    assert!(used <= std::time::SystemTime::now());
+
+    // Unused, it is parked; parked, asked again, nothing is done.
+    assert!(sandbox.up());
+    sandbox.park().await.unwrap();
+    assert!(!sandbox.up());
+    sandbox.park().await.unwrap();
+
+    // A job boots it again, over what it wrote; while one runs, it is refused.
+    let cmd = ["sleep", "30"].map(String::from).to_vec();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
+    assert!(sandbox.up());
+    assert!(matches!(sandbox.park().await, Err(SandboxError::InUse(_))));
+    assert!(sandbox.up());
+    assert!(job.get().running);
+
+    // Parked anyway, what ran in it ends, killed.
+    sandbox.park_anyway().await.unwrap();
+    assert!(!sandbox.up());
+    // Its end is read off its log, which the machine's going down ends.
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let ended = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            if let Some(data) = event.lines().find_map(|line| line.strip_prefix("data: "))
+                && let Ok(SandboxJobEntry::End(end)) = serde_json::from_str(data)
+            {
+                return end.code;
+            }
+        }
+        panic!("a job's log ends with its end")
+    });
+    assert_eq!(ended.await.expect("the job went on"), 128 + 9);
+    assert!(!job.get().running);
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert!(sandbox.last_used() >= used);
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
 async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home: Home) {
     let (_, before, _) = runs::since(0);
     let home = home.parking();
@@ -1128,6 +1175,7 @@ fn main() -> ExitCode {
         a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good,
         a_running_sandbox_s_disk_is_held_against_another_server,
+        a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
         a_sandbox_parked_as_it_is_parked_unused_has_synced,
         a_disk_a_parked_machine_left_reads_as_its_kernel_committed,
         sandboxes_made_at_once_each_run_their_own,

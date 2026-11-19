@@ -527,6 +527,19 @@ impl Home {
         &self.sandboxes
     }
 
+    /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
+    /// was used, side by side; those in use are left as they are.
+    pub async fn park_unused(&self) {
+        self.sandboxes.park_unused().await;
+    }
+
+    /// Park every sandbox here, in use or not ([`Sandbox::park_anyway`]), side by side: what
+    /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
+    /// used.
+    pub async fn park_all(&self) {
+        self.sandboxes.park_all().await;
+    }
+
     /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
     /// one of, its machine up or not: a connection through it to a parked sandbox's port is
     /// refused, and does not boot it.

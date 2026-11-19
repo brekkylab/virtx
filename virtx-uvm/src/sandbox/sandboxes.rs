@@ -417,25 +417,27 @@ impl Sandboxes {
             .collect()
     }
 
-    /// Park every sandbox, in use or not: what runs in each ends, as cancelling it does, and
-    /// its disk is kept as its machine stopped.
+    /// Park every sandbox, in use or not, side by side: what runs in each ends, as cancelling
+    /// it does, and its disk is kept as its machine stopped.
     pub async fn park_all(&self) {
-        for sandbox in self.up() {
+        let parked = self.up().into_iter().map(|sandbox| async move {
             if let Err(e) = sandbox.park_anyway().await {
                 eprintln!("sandbox {} not parked: {e}", sandbox.id());
             }
-        }
+        });
+        futures_util::future::join_all(parked).await;
     }
 
     /// Park every sandbox that nothing uses now ([`Sandbox::park`]), however recently it was
-    /// used.
+    /// used, side by side; those in use are left as they are.
     pub async fn park_unused(&self) {
-        for sandbox in self.up() {
+        let parked = self.up().into_iter().map(|sandbox| async move {
             match sandbox.park().await {
                 Ok(()) | Err(Error::InUse(_)) => {}
                 Err(e) => eprintln!("sandbox {}, unused, not parked: {e}", sandbox.id()),
             }
-        }
+        });
+        futures_util::future::join_all(parked).await;
     }
 
     /// Park every sandbox in a thread of its own: what they wrote is on their disks once each

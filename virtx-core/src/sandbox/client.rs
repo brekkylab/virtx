@@ -118,21 +118,25 @@ pub(crate) fn exec_log<'a>(
         let at = format!("{}/events", self::job(&id, &job.id));
         let job_id = job.id.clone();
         yield SandboxExecItem::Job(job);
-        // Its log, from this answer, until the body ends or breaks.
+        // Its log, from this answer, until its end, or until the body ends or breaks before it.
         let mut after = None;
         let mut entries = std::pin::pin!(sse::client::entries(response, &at));
         loop {
             match entries.next().await {
-                None => return,
-                Some(Ok(entry)) => {
+                None => break,
+                Some(Ok((entry, end))) => {
                     after = Some(entry.id);
                     yield SandboxExecItem::Log(entry);
+                    if end {
+                        return;
+                    }
                 }
                 Some(Err(Error::Transport(_))) => break,
                 Some(Err(e)) => Err(e)?,
             }
         }
-        // The answer broke: the job's log, after the last entry read.
+        // The answer ended before its end: the job's log, after the last entry read, read on as
+        // a log is.
         let mut log = std::pin::pin!(job_log(client, &id, &job_id, after));
         while let Some(entry) = log.next().await {
             yield SandboxExecItem::Log(entry?);

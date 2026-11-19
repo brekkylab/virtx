@@ -46,12 +46,24 @@ fn retry_after(response: &http::Response<Body>) -> Option<Duration> {
     ))
 }
 
-/// `response`, a `429` or a `503`, and whether it is one to send again after a wait, as
-/// `PROTOCOL.md`'s Refused for now says: a `429` unless it is a `quota` whose `reason` is other than
-/// `requests`, which frees up only as the caller closes or deletes something; a `503` to a
-/// request that makes something (`makes`) only where it is `capacity`, nothing made, since any
-/// other may have come after the making began. Its body read, and given back whole.
-async fn for_now(response: http::Response<Body>, makes: bool) -> (http::Response<Body>, bool) {
+/// What a `429` or a `503` says of the request it answers, as `PROTOCOL.md`'s Refused for now
+/// has it.
+struct ForNow {
+    /// Whether to send the request again after a wait: a `429` unless it is a `quota` whose
+    /// `reason` is other than `requests`, which frees up only as the caller closes or deletes
+    /// something; a `503` where it is `capacity`, or where the request is `repeatable`.
+    again: bool,
+    /// Whether nothing of the request was done: a `429`, or a `503` that is `capacity`. Any
+    /// other `503` may have come after it was carried out.
+    undone: bool,
+}
+
+/// `response`, a `429` or a `503`, and what it says of a request that is `repeatable` or not
+/// ([`TransportClient::send`]). Its body read, and given back whole.
+async fn for_now(
+    response: http::Response<Body>,
+    repeatable: bool,
+) -> (http::Response<Body>, ForNow) {
     let status = response.status();
     let (parts, body) = response.into_parts();
     let bytes = body
@@ -61,11 +73,20 @@ async fn for_now(response: http::Response<Body>, makes: bool) -> (http::Response
         .unwrap_or_default();
     let said: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
     let error = &said["error"];
-    let again = match status {
-        StatusCode::TOO_MANY_REQUESTS => error["code"] != "quota" || error["reason"] == "requests",
-        _ => !makes || error["code"] == "capacity",
+    let said = match status {
+        StatusCode::TOO_MANY_REQUESTS => ForNow {
+            again: error["code"] != "quota" || error["reason"] == "requests",
+            undone: true,
+        },
+        _ => {
+            let undone = error["code"] == "capacity";
+            ForNow {
+                again: undone || repeatable,
+                undone,
+            }
+        }
     };
-    (http::Response::from_parts(parts, full(bytes)), again)
+    (http::Response::from_parts(parts, full(bytes)), said)
 }
 
 /// How a client reaches the server's endpoints.
@@ -174,8 +195,10 @@ impl TransportClient {
     /// after its `Retry-After` or else a wait that doubles, for [`PATIENCE`] at most, its
     /// answers' time counted with the waits; and a `401`, at once and once, when the token is a
     /// command's, which prints a new one. A refusal that waiting does not change is answered at
-    /// once, and one that may have come after a making began is never sent again, so a retry
-    /// makes no second of what the first made ([`for_now`]).
+    /// once, and one that may have come after the request was carried out is sent again only
+    /// where a second sending leaves what the first did: a `GET`, `HEAD`, `OPTIONS`, `PUT`,
+    /// `DELETE` or `PROPFIND` with no `If-Match` or `If-None-Match` ([`for_now`]). Such a
+    /// `DELETE` that then finds nothing, `404`, is answered `204`: what it names is gone.
     pub(crate) async fn send(
         &self,
         request: http::Request<Body>,
@@ -198,9 +221,18 @@ impl TransportClient {
             .map_err(|e| Error::Transport(e.to_string()))?
             .to_bytes();
         let started = tokio::time::Instant::now();
-        let makes = matches!(parts.method, http::Method::POST | http::Method::PATCH);
+        let conditional = [http::header::IF_MATCH, http::header::IF_NONE_MATCH]
+            .iter()
+            .any(|condition| parts.headers.contains_key(condition));
+        let repeatable = !conditional
+            && matches!(
+                parts.method.as_str(),
+                "GET" | "HEAD" | "OPTIONS" | "PUT" | "DELETE" | "PROPFIND"
+            );
         let mut backoff = FIRST_WAIT;
         let mut renewed = false;
+        // Whether a sending before may have been carried out.
+        let mut maybe_done = false;
         loop {
             let mut request = http::Request::new(full(bytes.clone()));
             *request.method_mut() = parts.method.clone();
@@ -215,17 +247,25 @@ impl TransportClient {
                 answered => answered?,
             };
             let status = response.status();
+            if status == StatusCode::NOT_FOUND && maybe_done && parts.method == http::Method::DELETE
+            {
+                return Ok(http::Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body(full(Bytes::new()))
+                    .expect("a valid response"));
+            }
             if status != StatusCode::TOO_MANY_REQUESTS && status != StatusCode::SERVICE_UNAVAILABLE
             {
                 return Ok(response);
             }
-            let (response, again) = for_now(response, makes).await;
+            let (response, said) = for_now(response, repeatable).await;
             let wait = retry_after(&response)
                 .unwrap_or(backoff)
                 .clamp(FIRST_WAIT, PATIENCE);
-            if !again || started.elapsed() + wait > PATIENCE {
+            if !said.again || started.elapsed() + wait > PATIENCE {
                 return Ok(response);
             }
+            maybe_done |= !said.undone;
             tokio::time::sleep(wait).await;
             backoff *= 2;
         }

@@ -294,9 +294,9 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?}` |
+| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?, error?}` |
 | `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?, error?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
@@ -304,7 +304,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
-- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
+- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM the server stopped, as below, is `true`.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
@@ -315,6 +315,10 @@ One whose VM has exited is still held until then.
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
 Everything written to its root filesystem is kept across that, as it is for as long as the sandbox lives; what was left running in it, apart from a job, is not.
 A connection to one of its ports while its VM is stopped is closed, as one to a port nothing listens on is, and does not boot it.
+
+A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
+It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
+One it kept and cannot know again, such as one whose image is gone, it MAY still list until its `DELETE`, with `running` `false` and an `error`, a string saying why: every other request about it is refused `409`, `ended`, and its `DELETE` removes what it kept of it.
 
 #### Ports
 
@@ -343,12 +347,13 @@ A sandbox job is a process in a [sandbox](#sandboxes), run beside whatever else 
 | `POST /sandboxes/{id}/jobs/{job}/stdin` | `{data?, eof?}` | `204` |
 | `GET /sandboxes/{id}/jobs/{job}/events` | | `200`, its [log](#events) |
 
-A sandbox job is `{id, kind, pid, cmd, running, code?}`:
+A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 
 - `kind` is `"exec"`.
 - `pid` is its process's pid in the sandbox. The job is named by `id`, not by it, so a pid the sandbox gives again never names another job.
 - `cmd` is the argv it was started with, with no shell: `["sh", "-c", "..."]` for one. An empty one is refused.
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
+- `reason`, once it has ended, is why, where the process did not end by itself and the server says, as below.
 
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
 
@@ -356,12 +361,17 @@ Its log's entries are each an object with one member:
 
 - `{"stdout": "..."}` or `{"stderr": "..."}`: a line the process wrote there, without its line ending, decoded as UTF-8 with each invalid sequence replaced by U+FFFD. A line longer than the server's limit is sent in parts, an entry each.
 - `{"truncated": {}}`, as [Events](#events) says.
-- `{"end": {"code": n}}`, last.
+- `{"end": {"code": n}}`, or `{"end": {"code": 137, "reason": "..."}}`, last: its `code`, and `reason`, as the job has them.
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
 The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
+A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
+A sandbox [kept](#sandboxes) across its server's end keeps its jobs, as many as the server keeps: started again, the server knows each that had ended as it ended, and each that ran as killed then, its `code` `137` and its `reason` `"restarted"`. A job so kept has its `end` alone for its log.
+A server MAY say why it killed a process with `reason`, in its end and in its job:
+
+- `"restarted"`: its server ended, keeping its sandbox, while it ran.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

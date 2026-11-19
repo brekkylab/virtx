@@ -37,8 +37,8 @@ use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, Network, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
-    RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore, build_step, park_after,
-    signal_number,
+    RegistryServer, Sandbox, SandboxError, UnknownSandbox, VolumeError, VolumeStore, build_step,
+    park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -75,6 +75,9 @@ pub struct Home {
     vm: Vec<OsString>,
     /// The sandboxes, by id, until each is removed.
     sandboxes: Mutex<HashMap<String, Held>>,
+    /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
+    /// with why, and refused all but its `DELETE`.
+    unknown: Mutex<HashMap<String, UnknownSandbox>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
@@ -84,16 +87,42 @@ pub struct Home {
 
 impl Home {
     /// The images in `images`, which `registry` answers for, and the volumes and the
-    /// sandboxes' upper disks under `root`. Its image jobs connect to registries on public
+    /// sandboxes' upper disks under `root`, with each sandbox a server before it kept there
+    /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
-    /// is made for says otherwise ([`Access::through`]).
+    /// is made for says otherwise ([`Access::through`]). Blocking work, as knowing each
+    /// sandbox again is.
     pub fn new(
         images: ImageStore,
         registry: Arc<RegistryServer>,
         root: &Path,
     ) -> anyhow::Result<Home> {
-        Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
+        let vm: Vec<OsString> = vec![
+            std::env::current_exe()?.into(),
+            crate::serve::MACHINE_SUBCOMMAND.into(),
+        ];
+        let kept = Sandbox::kept(&images, root, &volumes, vm.clone(), park_after());
+        let unknown = kept
+            .unknown
+            .into_iter()
+            .map(|unknown| (unknown.id().to_owned(), unknown))
+            .collect();
+        let sandboxes = kept
+            .known
+            .into_iter()
+            .map(|sandbox| {
+                let capabilities = sandbox.keys();
+                let id = sandbox.id().to_owned();
+                (
+                    id,
+                    Held {
+                        sandbox,
+                        capabilities,
+                    },
+                )
+            })
+            .collect();
         Ok(Home {
             images,
             registry,
@@ -102,11 +131,9 @@ impl Home {
             files: Files::new(volumes.clone()),
             root: root.to_owned(),
             volumes,
-            vm: vec![
-                std::env::current_exe()?.into(),
-                crate::serve::MACHINE_SUBCOMMAND.into(),
-            ],
-            sandboxes: Mutex::default(),
+            vm,
+            sandboxes: Mutex::new(sandboxes),
+            unknown: Mutex::new(unknown),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
@@ -179,12 +206,46 @@ impl Home {
         });
     }
 
+    /// Cancel every image job here, and let go of every sandbox as this server ends, side by
+    /// side, each kept for the next server over this home ([`Sandbox::leave`]): blocks until
+    /// each machine has stopped and synced what it wrote.
+    pub fn leave_all(&self) {
+        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
+            cancel(&job, &task);
+        }
+        let left: Vec<_> = self
+            .sandboxes
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, held)| held.sandbox)
+            .collect();
+        std::thread::scope(|scope| {
+            for sandbox in &left {
+                scope.spawn(|| sandbox.leave());
+            }
+        });
+    }
+
+    /// The sandbox `id`: refused `409`, `ended`, for one not known again, which takes only its
+    /// `DELETE`.
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .get(id)
-            .map(|held| Arc::clone(&held.sandbox))
-            .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))
+        if let Some(held) = sandboxes.get(id) {
+            return Ok(Arc::clone(&held.sandbox));
+        }
+        if let Some(unknown) = self.unknown.lock().unwrap().get(id) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "ended",
+                format!(
+                    "sandbox {id} was not known again since its server restarted, and takes only \
+                     its DELETE: {}",
+                    unknown.why()
+                ),
+            ));
+        }
+        Err(not_found(format!("no sandbox here has the id {id}")))
     }
 }
 
@@ -871,28 +932,22 @@ async fn sandbox_files(
 
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
     let sandboxes = home.sandboxes.lock().unwrap();
-    let listed: Vec<_> = sandboxes
+    let mut listed: Vec<_> = sandboxes
         .values()
         .map(|held| held.sandbox.answer())
         .collect();
+    let unknown = home.unknown.lock().unwrap();
+    listed.extend(unknown.values().map(UnknownSandbox::answer));
     Ok(json(&listed))
 }
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-    let sandbox = Sandbox::create(
-        &home.images,
-        &home.root,
-        &home.volumes,
-        &args,
-        home.vm.clone(),
-        park_after(),
-    )
-    .await?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
-    // what reaches this server from outside is not this server's to know.
+    // what reaches this server from outside is not this server's to know. Kept with the
+    // sandbox, so that its URLs reach it across this server's restart.
     let mut opened = Vec::new();
     let mut capabilities = HashMap::new();
     for &port in &args.ports {
@@ -907,6 +962,16 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         });
         capabilities.insert(capability, port);
     }
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        home.vm.clone(),
+        park_after(),
+        Some(capabilities.clone()),
+    )
+    .await?;
 
     let id = sandbox.id().to_owned();
     let held = Held {
@@ -936,6 +1001,9 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
+    if let Some(unknown) = home.unknown.lock().unwrap().get(&id) {
+        return Ok(json(&unknown.answer()));
+    }
     Ok(json(&home.sandbox(&id)?.answer()))
 }
 
@@ -943,6 +1011,11 @@ async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
+    let unknown = home.unknown.lock().unwrap().remove(&id);
+    if let Some(unknown) = unknown {
+        tokio::task::spawn_blocking(move || unknown.remove()).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
     let removed = home.sandboxes.lock().unwrap().remove(&id);
     let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
     tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;

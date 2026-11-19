@@ -20,6 +20,7 @@ use axum::body::Body;
 use futures_util::{StreamExt as _, future::join_all};
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
+use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
     DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
     VolumeStore,
@@ -190,6 +191,50 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         .unwrap()
         .count();
     assert_eq!(left, 0);
+}
+
+async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home: Home) {
+    let (_, before, _) = runs::since(0);
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let first = sandbox.up_since().expect("up as it is made");
+    run(&sandbox, &["true"], None).await.unwrap();
+    // Idle, it is parked; a job boots it again; closed, it is down for good.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(sandbox.up_since(), None, "parked");
+    run(&sandbox, &["true"], None).await.unwrap();
+    let second = sandbox.up_since().expect("up again");
+    assert!(second > first);
+    let id = sandbox.id().to_owned();
+    close(Arc::clone(&sandbox)).await;
+    assert_eq!(sandbox.up_since(), None, "closed");
+
+    let (told, last, all) = runs::since(before);
+    assert!(all);
+    assert_eq!(told.last().map(|run| run.seq), Some(last));
+    let ours: Vec<_> = told
+        .into_iter()
+        .filter(|run| run.root == home.root)
+        .collect();
+    assert!(ours.iter().all(|run| run.sandbox == id));
+    assert!(ours.windows(2).all(|two| two[0].seq < two[1].seq));
+    let ran: Vec<_> = ours.into_iter().map(|run| run.ran).collect();
+    let [
+        Ran::Up { at: up },
+        Ran::Down { started, ended },
+        Ran::Up { at: again },
+        Ran::Down {
+            started: started_again,
+            ended: ended_again,
+        },
+    ] = ran[..]
+    else {
+        panic!("up, down, up and down, not {ran:?}");
+    };
+    assert_eq!((up, started), (first, first));
+    assert_eq!((again, started_again), (second, second));
+    assert!(started < ended && ended <= again && again < ended_again);
 }
 
 async fn a_sandbox_closed_while_its_machine_stops_leaves_nothing(home: Home) {
@@ -916,6 +961,7 @@ fn main() -> ExitCode {
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
+        each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         sandboxes_made_at_once_each_run_their_own,

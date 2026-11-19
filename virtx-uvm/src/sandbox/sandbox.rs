@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest as _, Sha256};
 
@@ -122,6 +122,10 @@ enum State {
 pub struct Sandbox {
     /// Its upper disk's name, and so its own.
     id: String,
+    /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
+    root: PathBuf,
+    /// When its machine came up, while it is up.
+    up_since: Mutex<Option<SystemTime>>,
     /// The image it was made from, as the store names it, and held there for as long as the
     /// sandbox is.
     image: Digest,
@@ -337,6 +341,8 @@ impl Sandbox {
         };
         let sandbox = Arc::new(Sandbox {
             id: upper.id.clone(),
+            root: root.to_owned(),
+            up_since: Mutex::default(),
             image: digest,
             _held: held_image,
             abins: args.abins.clone(),
@@ -364,6 +370,11 @@ impl Sandbox {
     /// What it is named by, which no other sandbox over the same root has while it is there.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// When its machine came up, while it is up; `None` while it is parked or has exited.
+    pub fn up_since(&self) -> Option<SystemTime> {
+        *self.up_since.lock().unwrap()
     }
 
     /// The sandbox as the server answers it, with no ports: only its making answers those.
@@ -506,6 +517,7 @@ impl Sandbox {
         let _turn = self.turn.blocking_lock();
         if let State::Up(machine) = state {
             machine.stop();
+            self.went_down();
         }
         self.volume_holds.lock().unwrap().clear();
         drop(self.upper.lock().unwrap().take());
@@ -533,6 +545,10 @@ impl Sandbox {
             let closed = matches!(*state, State::Exited);
             if !closed {
                 *state = State::Up(Arc::clone(&machine));
+                // Told while the state is held, so its going down, however soon, is told after.
+                let at = SystemTime::now();
+                *self.up_since.lock().unwrap() = Some(at);
+                super::runs::up(&self.id, &self.root, at);
             }
             closed
         };
@@ -563,6 +579,16 @@ impl Sandbox {
             machine
         };
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
+        self.went_down();
+    }
+
+    /// Its machine told down, once it is, if it was told up: called by whatever took it out of
+    /// [`State::Up`], once, and before another can boot -- a park and a close hold the turn
+    /// while they do -- so that each machine's going down is told once and in its order.
+    fn went_down(&self) {
+        if let Some(started) = self.up_since.lock().unwrap().take() {
+            super::runs::down(&self.id, &self.root, started);
+        }
     }
 
     /// Its machine while one runs.
@@ -641,6 +667,7 @@ impl Sandbox {
             let mut state = self.state.lock().unwrap();
             if matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine)) {
                 *state = State::Exited;
+                self.went_down();
             }
         }
         starting.clear();

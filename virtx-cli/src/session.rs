@@ -2,9 +2,10 @@
 //! to (`oidc.json`), and for each client of a provider signed in as, the session's refresh
 //! token -- in the OS's keychain, or where the OS has none in `<client_id>@<issuer>.token` --
 //! and the ID token last issued (`<client_id>@<issuer>.id`). The directory is its owner's
-//! alone, and each of those files is written readable by its owner alone: another user who
-//! could write the directory could put a file of their own in place of one kept there, and
-//! `virtx token` would then act with that user's session.
+//! alone, each of those files is written readable by its owner alone, and one the directory's
+//! owner does not own is not read: another user who could write the directory could put a
+//! file of their own in place of one kept there, or leave one there before the directory was
+//! made its owner's alone, and `virtx token` would then act with that user's session.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -48,7 +49,7 @@ pub fn dir() -> anyhow::Result<PathBuf> {
 
 /// The provider last signed in to, as kept in `dir`.
 pub fn signed_in(dir: &Path) -> Option<SignIn> {
-    serde_json::from_slice(&std::fs::read(dir.join("oidc.json")).ok()?).ok()
+    serde_json::from_slice(&read_ours(&dir.join("oidc.json")).ok()??).ok()
 }
 
 pub fn keep_sign_in(dir: &Path, sign_in: &SignIn) -> anyhow::Result<()> {
@@ -98,7 +99,7 @@ impl Session {
     }
 
     pub fn kept_id(&self) -> Option<Kept> {
-        serde_json::from_slice(&std::fs::read(self.file("id")).ok()?).ok()
+        serde_json::from_slice(&read_ours(&self.file("id")).ok()??).ok()
     }
 
     pub fn keep_id(&self, kept: &Kept) -> anyhow::Result<()> {
@@ -131,10 +132,9 @@ impl Session {
         {
             return Ok(Some(refresh));
         }
-        match std::fs::read_to_string(self.file("token")) {
-            Ok(refresh) => Ok(Some(refresh.trim().to_owned())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+        match read_ours(&self.file("token"))? {
+            Some(refresh) => Ok(Some(String::from_utf8(refresh)?.trim().to_owned())),
+            None => Ok(None),
         }
     }
 
@@ -151,6 +151,32 @@ fn remove(path: &Path) -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// What the file at `path` holds, or `None` where there is none or its owner is not its
+/// directory's: a file another user left there while the directory was open to them is not
+/// opened. On Windows, read any file there.
+fn read_ours(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match std::fs::symlink_metadata(path) {
+            Ok(file) => {
+                let dir = path.parent().expect("a directory");
+                // The link's owner, not its target's: a link another user left there is theirs.
+                if file.uid() != std::fs::metadata(dir)?.uid() {
+                    return Ok(None);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -279,5 +305,42 @@ mod tests {
             "nothing left beside them"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_its_directory_s_owner_does_not_own_is_not_read() {
+        use std::os::unix::fs::MetadataExt as _;
+        let owner = |path: &Path| std::fs::symlink_metadata(path).unwrap().uid();
+        // `/tmp` is root's, and the files made in it here are not, as files another user left
+        // in a directory once open to them are not the directory's owner's.
+        let tmp = Path::new("/tmp");
+        let sign_in = SignIn {
+            client_id: format!("virtx-cli-test-{}", std::process::id()),
+            ..sign_in()
+        };
+        let session = Session::new(tmp, &sign_in, false);
+        let id = session.file("id");
+        let token = session.file("token");
+        let left = Kept {
+            token: "id-left".into(),
+            expires_at: u64::MAX,
+        };
+        std::fs::write(&id, serde_json::to_vec(&left).unwrap()).unwrap();
+        // A link of their own to a file root owns.
+        std::os::unix::fs::symlink("/etc/hosts", &token).unwrap();
+        for file in [&id, &token] {
+            // Run as root, the test gives them to another user.
+            if owner(file) == owner(tmp) {
+                std::os::unix::fs::lchown(file, Some(1), None).unwrap();
+            }
+        }
+
+        let read = (
+            session.kept_id().map(|kept| kept.token),
+            session.kept().map_err(|e| e.to_string()),
+        );
+        let _ = std::fs::remove_file(&id);
+        let _ = std::fs::remove_file(&token);
+        assert_eq!(read, (None, Ok(None)));
     }
 }

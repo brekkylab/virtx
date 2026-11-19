@@ -141,62 +141,65 @@ fn in_jobs(command: &mut Command) -> Option<File> {
     }
     Some(procs)
 }
-/// The stdin of each process started with one, by pid: its [`Input`].
+/// The stdin of each process started with one, by pid.
 type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 
-/// How many writes to one process's input are queued at most. The host sends the next only once
-/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, one is said
-/// written, and dropped, rather than the loop waiting.
+/// How many writes to one process's stdin are queued at most. The host sends the next only once
+/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, one is dropped
+/// and said not written, rather than the loop waiting.
 const INPUT_QUEUED: usize = 4;
 
-/// What one write to a process's input asks: `data`, then its stdin closed if `eof`.
+/// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`.
 struct Queued {
     data: String,
     eof: bool,
 }
 
-/// A process's stdin, written on a thread of its own, each write said
-/// [`Written`](CtrlResp::Written) once it is (issue #159). The loop that takes the host's
-/// requests never waits on a process's reading, and what a process has not read is never more
-/// than [`INPUT_QUEUED`] writes: the host holds the next back until the last is written.
-/// Dropped, what is queued is still written, and then its input closed.
+/// A process's stdin, written on a thread of its own, each write answered
+/// [`Written`](CtrlResp::Written) once it is, or once it never will be: the loop that takes the host's requests never
+/// waits on a process's reading, and what a process has not read is never more than
+/// [`INPUT_QUEUED`] writes. Dropped, what is queued is still written, and then its stdin closed.
 struct Input(std::sync::mpsc::SyncSender<Queued>);
 
 impl Input {
-    /// The input of process `id`, written to `to`.
+    /// The stdin of process `id`, written to `to`.
     fn start(out: &Out, id: u32, to: impl io::Write + Send + 'static) -> Input {
         let (queued, taken) = std::sync::mpsc::sync_channel::<Queued>(INPUT_QUEUED);
         let out = Arc::clone(out);
         thread::spawn(move || {
             let mut to = Some(to);
             while let Ok(Queued { data, eof }) = taken.recv() {
-                if let Some(writer) = &mut to
-                    && !data.is_empty()
-                    && writer.write_all(data.as_bytes()).is_err()
-                {
-                    // Its reader gone: nothing more is written.
+                let written = match &mut to {
+                    Some(writer) => data.is_empty() || writer.write_all(data.as_bytes()).is_ok(),
+                    None => false,
+                };
+                // Its reader gone, or its stdin closed: nothing more is written.
+                if !written || eof {
                     to = None;
                 }
-                if eof {
-                    to = None;
-                }
-                send(&out, &CtrlResp::Written { id });
+                send(&out, &CtrlResp::Written { id, written });
             }
         });
         Input(queued)
     }
 
-    /// `queued` queued, for process `id`: said written at once -- and dropped -- where the queue
-    /// is full or the writer is gone.
+    /// `queued` queued, for process `id`: dropped, and said not written, where the queue is full
+    /// or the writer is gone.
     fn put(&self, out: &Out, id: u32, queued: Queued) {
         if let Err(e) = self.0.try_send(queued) {
             if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
                 eprintln!(
-                    "{}: process {id}'s input past {INPUT_QUEUED} writes: one dropped",
+                    "{}: process {id}'s stdin past {INPUT_QUEUED} writes: one dropped",
                     env!("CARGO_BIN_NAME")
                 );
             }
-            send(out, &CtrlResp::Written { id });
+            send(
+                out,
+                &CtrlResp::Written {
+                    id,
+                    written: false,
+                },
+            );
         }
     }
 }
@@ -295,12 +298,18 @@ fn serve() -> io::Result<()> {
         match message {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
             // Handed to its writer, never written here: a process not reading holds up no other.
-            // Each answered `Written` -- at once, for a process with no input here.
+            // Answered not `Written` at once for a process with no stdin here.
             CtrlReq::Stdin { id, data, eof } => {
                 let mut stdins = stdins.lock().unwrap();
                 match stdins.get(&id) {
                     Some(input) => input.put(&out, id, Queued { data, eof }),
-                    None => send(&out, &CtrlResp::Written { id }),
+                    None => send(
+                        &out,
+                        &CtrlResp::Written {
+                            id,
+                            written: false,
+                        },
+                    ),
                 }
                 if eof {
                     stdins.remove(&id);
@@ -346,8 +355,8 @@ fn find(name: &str) -> io::Result<PathBuf> {
     ))
 }
 
-/// Start `cmd` in a process group of its own, answer the host with its pid -- before anything
-/// it writes, which goes after -- and send how it ended once it has.
+/// Start `cmd` in a process group of its own, its stdin a pipe if `stdin`, answer the host with
+/// its pid -- before anything it writes, which goes after -- and send how it ended once it has.
 fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     let mut command = Command::new(&cmd[0]);
     command

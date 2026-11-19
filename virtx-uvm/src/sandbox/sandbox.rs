@@ -153,10 +153,12 @@ enum State {
     Deleted,
 }
 
-/// A command sent to a sandbox's machine, not yet answered: what it is, and who waits for its
-/// job.
+/// A command sent to a sandbox's machine, not yet answered: what it is, whether it was started
+/// with a stdin, and who waits for its job.
 struct Starting {
     cmd: Vec<String>,
+    /// Whether it was started with a stdin.
+    stdin: bool,
     waiter: oneshot::Sender<Result<Arc<Job>, String>>,
 }
 
@@ -183,37 +185,9 @@ pub(super) struct Run {
     pub(super) synced: Mutex<Option<oneshot::Sender<()>>>,
     pub(super) marked: Mutex<Option<Waiting>>,
     pub(super) rebased: Mutex<Option<Waiting>>,
-    /// Its jobs started with a stdin still open, by id.
-    stdins: Mutex<HashSet<String>>,
-    /// Who waits for each write to a process's stdin to be [`Written`](CtrlResp::Written), by
-    /// pid, in the order sent; and each process's turn to write, one write at a time
-    /// ([`Run::write_stdin`]).
-    written: Mutex<HashMap<u32, VecDeque<oneshot::Sender<()>>>>,
-    turns: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Run {
-    /// `data` written to the stdin of process `pid`, closed after if `eof`, answered once the
-    /// guest has written it (issue #159): one write at a time for each process, so a process
-    /// that does not read holds back whoever writes to it, as PROTOCOL.md says of a job's stdin,
-    /// and what it has not read never piles up in the guest.
-    /// Refused as ended once the process, or the machine, is.
-    async fn write_stdin(&self, pid: u32, data: String, eof: bool) -> Result<(), Error> {
-        let turn = Arc::clone(self.turns.lock().unwrap().entry(pid).or_default());
-        let _turn = turn.lock().await;
-        let written = {
-            // Sent and waited for in one order: the guest answers each process's in turn.
-            let mut waiting = self.written.lock().unwrap();
-            self.machine.write_stdin(pid, data, eof)?;
-            let (told, written) = oneshot::channel();
-            waiting.entry(pid).or_default().push_back(told);
-            written
-        };
-        written
-            .await
-            .map_err(|_| Error::JobEnded("the job has ended"))
-    }
-
     /// What it held let go of: its machine has ended, its run told as ended, once.
     fn release(&self) {
         if let Some(held) = self.held.lock().unwrap().take() {
@@ -556,9 +530,6 @@ impl Sandbox {
             synced: Mutex::default(),
             marked: Mutex::default(),
             rebased: Mutex::default(),
-            stdins: Mutex::default(),
-            written: Mutex::default(),
-            turns: Mutex::default(),
         });
         *self.state.lock().unwrap() = State::Up(Arc::clone(&run));
         super::runs::up(&run.sandbox, run.started);
@@ -776,15 +747,12 @@ impl Sandbox {
                 return Err(Error::Ended);
             }
             run.machine.exec(cmd.clone(), stdin)?;
-            starting.push_back(Starting { cmd, waiter });
+            starting.push_back(Starting { cmd, stdin, waiter });
         }
         let job = started
             .await
             .map_err(|_| Error::Ended)?
             .map_err(Error::NotStarted)?;
-        if stdin {
-            run.stdins.lock().unwrap().insert(job.id());
-        }
         if let Some(timeout) = timeout {
             let (run, job) = (Arc::downgrade(&run), Arc::clone(&job));
             tokio::spawn(async move {
@@ -833,26 +801,22 @@ impl Sandbox {
     }
 
     /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
-    /// answered once it is written, so a job that does not read holds the writer back
-    /// ([`Run::write_stdin`]).
+    /// answered once it is written, so a job that does not read holds the writer back.
     pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
-        let (pid, running) = self.job(id)?.pid();
-        let ended = Error::JobEnded(
-            "the job has ended, or its stdin is closed, or it was started without one",
-        );
-        let Some(run) = self.run().filter(|_| running) else {
-            return Err(ended);
+        let ended = || {
+            Error::JobEnded(
+                "the job has ended, or its stdin is closed, or it was started without one",
+            )
         };
-        {
-            let mut stdins = run.stdins.lock().unwrap();
-            if !stdins.contains(id) {
-                return Err(ended);
-            }
-            if eof {
-                stdins.remove(id);
-            }
+        let job = self.job(id)?;
+        let (pid, running) = job.pid();
+        // A job that runs keeps the machine it runs in up.
+        let run = self.run().filter(|_| running).ok_or_else(ended)?;
+        let send = || Ok(run.machine.write_stdin(pid, data, eof)?);
+        match job.write_stdin(eof, send).await? {
+            true => Ok(()),
+            false => Err(ended()),
         }
-        run.write_stdin(pid, data, eof).await
     }
 
     /// The port key `key` names, if it is one of its own.
@@ -998,7 +962,8 @@ impl Sandbox {
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some(Starting { cmd, waiter }) = run.starting.lock().unwrap().pop_front()
+                    let Some(Starting { cmd, stdin, waiter }) =
+                        run.starting.lock().unwrap().pop_front()
                     else {
                         continue;
                     };
@@ -1007,15 +972,18 @@ impl Sandbox {
                         let mut jobs = self.jobs.lock().unwrap();
                         keep_ended(&mut jobs, KEEP_ENDED);
                         let id = pick(|id| jobs.contains_key(id));
-                        let job = Job::new(SandboxJob {
-                            id: id.clone(),
-                            kind: SandboxJobKind::Exec,
-                            pid,
-                            cmd,
-                            running: true,
-                            code: None,
-                            reason: None,
-                        });
+                        let job = Job::new(
+                            SandboxJob {
+                                id: id.clone(),
+                                kind: SandboxJobKind::Exec,
+                                pid,
+                                cmd,
+                                running: true,
+                                code: None,
+                                reason: None,
+                            },
+                            stdin,
+                        );
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
                         job
@@ -1033,9 +1001,6 @@ impl Sandbox {
                     }
                 }
                 CtrlResp::Exited { id, code } => {
-                    // Its writes not yet written never will be: their writers told so.
-                    run.written.lock().unwrap().remove(&id);
-                    run.turns.lock().unwrap().remove(&id);
                     if let Some(job) = running.remove(&id) {
                         self.used();
                         job.end(code);
@@ -1065,11 +1030,9 @@ impl Sandbox {
                         let _ = told.send(rebased);
                     }
                 }
-                CtrlResp::Written { id } => {
-                    if let Some(waiting) = run.written.lock().unwrap().get_mut(&id)
-                        && let Some(told) = waiting.pop_front()
-                    {
-                        let _ = told.send(());
+                CtrlResp::Written { id, written } => {
+                    if let Some(job) = running.get(&id) {
+                        job.written(written);
                     }
                 }
                 CtrlResp::Ready(_) => {}
@@ -1080,7 +1043,6 @@ impl Sandbox {
         run.up.store(false, Ordering::Relaxed);
         starting.clear();
         drop(starting);
-        run.written.lock().unwrap().clear();
         // Ended on its own, not parked: exited, for good, its disk kept as it was left.
         let ended = {
             let mut state = self.state.lock().unwrap();

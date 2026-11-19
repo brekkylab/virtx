@@ -102,9 +102,9 @@ pub enum CtrlResp {
     /// could not be built or broke, logged as an error as the process's last word -- so a
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
-    /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: what it
-    /// asked is written -- or will never be, the process or its input gone.
-    Written { id: u32 },
+    /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: whether
+    /// what it asked was written, or never will be, the process or its stdin gone.
+    Written { id: u32, written: bool },
     /// The answer to a [`Mark`](CtrlReq::Mark): whether its disk is marked so -- not one
     /// with no disk kept, or why it could not be.
     Marked {

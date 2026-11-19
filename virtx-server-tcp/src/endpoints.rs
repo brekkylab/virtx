@@ -1640,7 +1640,7 @@ async fn sandbox_job_signal(
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
-    request: Bytes,
+    Whole(request): Whole,
 ) -> Answer {
     let args: SandboxStdinArgs = body(&request)?;
     let sandbox = home.sandbox(&id)?;

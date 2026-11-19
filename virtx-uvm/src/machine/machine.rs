@@ -220,9 +220,8 @@ impl Machine {
 
     /// Start `cmd` in the guest, beside whatever else runs there. Answered by a
     /// [`Started`](CtrlResp::Started) from [`recv`](Machine::recv), each `exec` in turn,
-    /// with its pid there: the id its output and its end come back under.
-    /// Its stdin a pipe to write with [`write_stdin`](Machine::write_stdin) if `stdin`, empty if
-    /// not.
+    /// with its pid there: the id its output and its end come back under. Its stdin a pipe to
+    /// write with [`write_stdin`](Machine::write_stdin) if `stdin`, empty if not.
     pub fn exec(&self, cmd: Vec<String>, stdin: bool) -> Result<()> {
         if cmd.is_empty() {
             return Err(Error::NoCommand);

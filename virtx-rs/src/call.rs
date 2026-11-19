@@ -207,6 +207,8 @@ struct Failure {
     message: String,
     source: virtx_core::Source,
     status: Option<u16>,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// # Safety
@@ -228,8 +230,13 @@ unsafe fn take_with<T>(
                 Ok(Failure {
                     message,
                     status: Some(status),
+                    code,
                     ..
-                }) => Error::Status(status, message),
+                }) => Error::Status {
+                    status,
+                    code,
+                    message,
+                },
                 Ok(Failure {
                     message, source, ..
                 }) => Error::Call(source, message),

@@ -363,8 +363,31 @@ export class Sandbox extends Files implements SandboxInfo {
   jobs(): Promise<SandboxJob[]>
   /** The job `id` in it. */
   job(id: string): Promise<SandboxJob>
+  /**
+   * Resize it: its vCPUs and memory from its VM's next boot on, and its disk grown, never shrunk,
+   * as its VM next boots. A VM up and unused is stopped for its vCPUs or memory to change, and
+   * one in use is refused `409`. What is left out stays as it is.
+   */
+  resize(options?: SandboxResizeOptions): Promise<SandboxResources>
   /** Stop it, end its jobs and forget it, with everything it wrote outside its volumes. */
   remove(): Promise<void>
+}
+
+/** What `Sandbox.resize` changes; whatever is left out stays as it is. */
+export interface SandboxResizeOptions {
+  vcpus?: number
+  memoryMib?: number
+  /** How much it may write over its image, in GiB, at most 1024: grown, never shrunk. */
+  diskGib?: number
+}
+
+/** A sandbox's size as `Sandbox.resize` answers it: what its VM boots with from its next boot on. */
+export interface SandboxResources {
+  vcpus: number
+  memoryMib: number
+  diskGib: number
+  /** Whether its VM is up now, the size it booted with until it boots again. */
+  up: boolean
 }
 
 /** A TCP port opened in a sandbox, and where it is reached from. */

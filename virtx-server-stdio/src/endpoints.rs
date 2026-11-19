@@ -28,9 +28,9 @@ use tokio::task::{AbortHandle, JoinSet};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
-    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxSignalArgs, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem, described_type,
-    from_body,
+    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxResizeArgs, SandboxSignalArgs,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    described_type, from_body,
 };
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
@@ -226,7 +226,12 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}/files/", any(sandbox_files))
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
-        .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
+        .route(
+            "/sandboxes/{id}",
+            get(sandbox_get)
+                .patch(sandbox_resize)
+                .delete(sandbox_remove),
+        )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
         .route(
@@ -763,6 +768,18 @@ async fn sandbox_get(
     Ok(json(&home.sandbox(&id)?.answer()))
 }
 
+/// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
+/// if it is up and nothing uses it, and refused `409`, `in_use`, if something does; its disk
+/// grown, never shrunk, as its VM next boots.
+async fn sandbox_resize(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(id): Segments<String>,
+    Whole(request): Whole,
+) -> Answer {
+    let args: SandboxResizeArgs = body(&request)?;
+    Ok(json(&home.sandbox(&id)?.resize(&args).await?))
+}
+
 async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -1096,6 +1113,7 @@ impl From<SandboxError> for Refused {
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
             SandboxError::Image(e) => e.into(),
             SandboxError::Io { .. } => internal(e),
             SandboxError::Volume(e) => e.into(),

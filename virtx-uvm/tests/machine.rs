@@ -20,7 +20,10 @@ use std::{
 use axum::body::Body;
 use futures_util::{StreamExt as _, future::join_all};
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
+use virtx_core::{
+    SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxResizeArgs, SandboxResources,
+    SandboxVolume,
+};
 use virtx_uvm::{
     DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
     VolumeStore,
@@ -420,6 +423,103 @@ async fn a_sandbox_s_writable_layer_is_as_large_as_asked(home: Home) {
         );
         close(sandbox).await;
     }
+}
+
+async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Home) {
+    let mut args = small();
+    args.vcpus = Some(2);
+    args.disk_gib = Some(1);
+    let sandbox = home.making(&args, None, Some(HashMap::new())).await;
+    let sandbox = sandbox.unwrap();
+    let said = async |sandbox: &Arc<Sandbox>, cmd: &str| -> String {
+        let (lines, _) = run(sandbox, &["sh", "-c", cmd], None).await.unwrap();
+        lines.join("\n")
+    };
+    // `df -k /`'s size, in GiB, rounded: the overlay's, whose size is its writable layer's.
+    let disk = async |sandbox: &Arc<Sandbox>| -> u64 {
+        let kib: u64 = said(sandbox, "df -k / | awk 'NR==2 {print $2}'")
+            .await
+            .parse()
+            .unwrap();
+        (kib + (1 << 19)) >> 20
+    };
+    let resize = |vcpus, memory_mib, disk_gib| SandboxResizeArgs {
+        vcpus,
+        memory_mib,
+        disk_gib,
+    };
+    assert_eq!(said(&sandbox, "nproc").await, "2");
+    assert_eq!(disk(&sandbox).await, 1);
+    // Written over its image, and taken from it: both as they were once it is grown.
+    let write = "echo kept > /root/kept && chmod 700 /root/kept && rm /etc/alpine-release";
+    said(&sandbox, write).await;
+
+    // In use: its vCPUs and memory refused, and its disk grown as it next boots.
+    let sleeping = sandbox.exec(vec!["sleep".into(), "600".into()], None);
+    let sleeping = sleeping.await.unwrap().get().id;
+    let refused = sandbox.resize(&resize(Some(3), None, None)).await;
+    assert!(
+        matches!(refused, Err(SandboxError::InUse(_))),
+        "{refused:?}"
+    );
+    let grown = sandbox.resize(&resize(None, None, Some(3))).await.unwrap();
+    let up = SandboxResources {
+        vcpus: 2,
+        memory_mib: 1024,
+        disk_gib: 3,
+        up: true,
+    };
+    assert_eq!(grown, up);
+    assert_eq!(disk(&sandbox).await, 1, "the size it booted with");
+
+    // Unused: parked, and booted so.
+    sandbox.remove_job(&sleeping).unwrap();
+    let resized = sandbox.resize(&resize(Some(3), Some(1536), None)).await;
+    let parked = SandboxResources {
+        vcpus: 3,
+        memory_mib: 1536,
+        disk_gib: 3,
+        up: false,
+    };
+    assert_eq!(resized.unwrap(), parked);
+    assert_eq!(said(&sandbox, "nproc").await, "3");
+    let meminfo = "awk '/MemTotal/ {print $2}' /proc/meminfo";
+    let kib: u64 = said(&sandbox, meminfo).await.parse().unwrap();
+    assert!((1300 << 10..=1536 << 10).contains(&kib), "{kib} KiB");
+    assert_eq!(disk(&sandbox).await, 3);
+    assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
+    assert_eq!(said(&sandbox, "stat -c %a /root/kept").await, "700");
+    let release = "test -e /etc/alpine-release && echo there || echo gone";
+    assert_eq!(said(&sandbox, release).await, "gone");
+
+    // Never shrunk, and no size a sandbox is not made with.
+    for refused in [
+        resize(None, None, Some(2)),
+        resize(Some(0), None, None),
+        resize(None, Some(32), None),
+        resize(None, None, Some(1025)),
+    ] {
+        let answered = sandbox.resize(&refused).await;
+        assert!(
+            matches!(answered, Err(SandboxError::Invalid(_))),
+            "{refused:?}: {answered:?}"
+        );
+    }
+
+    // Kept so past its server, and grown again there.
+    leave(sandbox).await;
+    let known = home.kept();
+    let again = &known[0];
+    assert_eq!(said(again, "nproc").await, "3");
+    let grown = again.resize(&resize(None, None, Some(4))).await.unwrap();
+    assert_eq!((grown.disk_gib, grown.up), (4, true));
+    leave(Arc::clone(again)).await;
+    let known = home.kept();
+    let again = &known[0];
+    assert_eq!(disk(again).await, 4);
+    assert_eq!(said(again, "cat /root/kept").await, "kept");
+    close(Arc::clone(again)).await;
+    assert_eq!(home.left(), Vec::<String>::new());
 }
 
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
@@ -1198,6 +1298,7 @@ fn main() -> ExitCode {
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
+        a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,

@@ -81,11 +81,12 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
+| `resize(vcpus, memory_mib, disk_gib)` | `SandboxResources` | Its vCPUs and memory from its VM's next boot on, its VM stopped now if nothing uses it and refused `409` if something does; its disk grown, never shrunk, as its VM next boots. Answers `vcpus`, `memory_mib`, `disk_gib` and `up`, whether its VM is up now. See [Resize a sandbox](/docs/guides/setting-sandboxes/#resize-a-sandbox). |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.
 
-In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `running` and `ports`.
+In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `running` and `ports`, and `resize` takes a `SandboxResizeArgs`, chained from `SandboxResizeArgs::default()`.
 
 A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.
 

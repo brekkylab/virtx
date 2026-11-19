@@ -19,6 +19,10 @@ pub enum Error {
     #[error("{0}")]
     NotStarted(String),
 
+    /// What was asked cannot be done while the sandbox is in use, with why.
+    #[error("{0}")]
+    InUse(String),
+
     /// The sandbox's machine has exited, and takes nothing more.
     #[error("the sandbox's machine has exited")]
     Ended,

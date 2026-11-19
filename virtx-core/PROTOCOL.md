@@ -297,6 +297,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 | `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?, error?}` |
 | `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
 | `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?, error?}` |
+| `PATCH /sandboxes/{id}` | `{vcpus?, memory_mib?, disk_gib?}` | `200`, `{vcpus, memory_mib, disk_gib, up}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
@@ -307,6 +308,15 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM the server stopped, as below, is `true`.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
+
+#### Resizing
+
+A server MAY resize a sandbox with its `PATCH`, and one that does not answers it `405`, `method_not_allowed`.
+Each member is held to what `POST` holds it to, and one left out stays as it is.
+
+- `vcpus` and `memory_mib` are what its VM boots with from its next boot on. A VM is the size it booted with: the server stops one that is up and in which nothing runs, as below, to boot it again so for what next needs it, and refuses one in use with `409`, `in_use`, changing nothing.
+- `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there. One smaller than it is now is refused with `400`, `invalid`: a disk is grown, never shrunk.
+- The answer is its size as it is to be, each member as the server gives it, and `up`, whether its VM is up now: one that is, the size it booted with until it boots again.
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
 Either stops its VM, ends every job in it as a cancellation does, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.

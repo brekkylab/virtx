@@ -23,7 +23,7 @@ use crate::{
     },
     sandbox::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEntry,
-        SandboxSignalArgs, SandboxStdinArgs,
+        SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
     },
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
@@ -449,6 +449,17 @@ impl Client {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
+    /// Resize the sandbox `id` as `args` says: its vCPUs and memory from its VM's next boot on,
+    /// and its disk grown, never shrunk, to as large as its VM next boots with. Answers its size
+    /// as it is to be, and whether its VM is up now, the size it booted with until it boots again.
+    pub async fn resize_sandbox(
+        &self,
+        id: impl AsRef<str>,
+        args: &SandboxResizeArgs,
+    ) -> Result<SandboxResources, Error> {
+        sandbox::client::resize(&self.inner, id.as_ref(), args).await
+    }
+
     /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
     /// its volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
@@ -564,7 +575,7 @@ pub(crate) mod ffi {
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
         project::{ProjectCreateArgs, Role},
-        sandbox::{SandboxCreateArgs, SandboxExecArgs},
+        sandbox::{SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs},
         transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
@@ -591,6 +602,17 @@ pub(crate) mod ffi {
     #[serde(deny_unknown_fields)]
     struct Id {
         id: String,
+    }
+
+    /// What resizing a sandbox takes: `{"id": "...", "vcpus": n, "memory_mib": n,
+    /// "disk_gib": n}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SandboxResize {
+        id: String,
+        vcpus: Option<u8>,
+        memory_mib: Option<u32>,
+        disk_gib: Option<u32>,
     }
 
     /// What reading an image job's log takes: `{"id": "...", "after": n}`.
@@ -1788,6 +1810,36 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move { client.get_sandbox(args?.id).await })
+    }
+
+    /// Resizes the sandbox `id`, given `{"id": "...", "vcpus": n, "memory_mib": n,
+    /// "disk_gib": n}`, all but `id` optional. Answers with its size as it is to be, as
+    /// `{"vcpus": n, "memory_mib": n, "disk_gib": n, "up": bool}`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_resize_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<SandboxResize>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let SandboxResize {
+                id,
+                vcpus,
+                memory_mib,
+                disk_gib,
+            } = args?;
+            let args = SandboxResizeArgs {
+                vcpus,
+                memory_mib,
+                disk_gib,
+            };
+            client.resize_sandbox(id, &args).await
+        })
     }
 
     /// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers

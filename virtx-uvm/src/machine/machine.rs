@@ -78,6 +78,32 @@ pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
     Ok(())
 }
 
+/// Grow the upper disk at `path`, which no machine runs over, to `gib` GiB, with what is on it
+/// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
+/// no room to grow in place, which a kernel will not grow either -- is read whole and written
+/// again at the new size: at `part`, moved over it once whole, so a failure leaves it as it
+/// was. What it costs is what is written to it, not `gib`.
+pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
+    let size = u64::from(gib) << 30;
+    let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);
+    if std::fs::metadata(path).map_err(read)?.len() >= size {
+        return Ok(());
+    }
+    let tree = FsTree::from_ext4(io::BufReader::new(File::open(path).map_err(read)?))?;
+    let _ = std::fs::remove_file(part);
+    let written = File::create_new(part)
+        .map_err(|e| Error::io(format!("creating {}", part.display()), e))
+        .and_then(|file| Ok(tree.to_ext4(sparse(file), size)?))
+        .and_then(|()| {
+            std::fs::rename(part, path)
+                .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(part);
+    }
+    written
+}
+
 /// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not an
 /// allocation.
 ///
@@ -461,6 +487,32 @@ mod tests {
         assert_eq!(paths, [b"".to_vec(), b"lost+found".to_vec()]);
         assert!(matches!(create_upper(&path, 2), Err(Error::Io { .. })));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks() {
+        use crate::fstree::{Entry, Meta};
+        let dir = tempfile::tempdir().unwrap();
+        let (path, part) = (dir.path().join("w.ext4"), dir.path().join("w.ext4.part"));
+        let mut tree = FsTree::new();
+        let meta = Meta {
+            mode: 0o700,
+            ..Meta::default()
+        };
+        let data = b"kept\n".to_vec();
+        tree.insert(b"kept", Entry::File { meta, data }).unwrap();
+        tree.to_ext4(File::create_new(&path).unwrap(), 1 << 30)
+            .unwrap();
+        let before = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+
+        grow_upper(&path, &part, 3).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
+        let after = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+        assert_eq!(after.digest(), before.digest());
+        assert!(!part.exists());
+
+        grow_upper(&path, &part, 2).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
     }
 
     /// What the machine's process is handed is what the parent wrote.

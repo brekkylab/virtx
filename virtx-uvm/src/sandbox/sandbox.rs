@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -12,7 +12,10 @@ use sha2::{Digest as _, Sha256};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
+use virtx_core::{
+    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind, SandboxResizeArgs,
+    SandboxResources,
+};
 
 use super::record::Record;
 use super::upper::Upper;
@@ -165,9 +168,12 @@ pub struct Sandbox {
     /// Its volumes, held against removal for each of its machines and between them, until it
     /// is closed.
     volume_holds: Mutex<Vec<VolumeHold>>,
-    /// What each of its machines boots, and the process each runs as.
-    config: MachineConfig,
+    /// What each of its machines boots, as large as it was last [resized](Sandbox::resize) to,
+    /// and the process each runs as.
+    config: Mutex<MachineConfig>,
     vm: Vec<OsString>,
+    /// How large its upper disk is to be, in GiB: grown to it as its machine next boots.
+    disk_gib: AtomicU32,
     state: Mutex<State>,
     /// Held while its machine boots or stops, so one does at a time.
     turn: tokio::sync::Mutex<()>,
@@ -233,33 +239,11 @@ impl Sandbox {
                 volume.volume, volume.path
             )));
         }
-        match args.disk_gib {
-            Some(0) => {
-                return Err(Error::Invalid(
-                    "disk_gib: 0 is a disk nothing fits on".into(),
-                ));
-            }
-            Some(gib) if gib > MAX_DISK_GIB => {
-                return Err(Error::Invalid(format!(
-                    "disk_gib: {gib} is over the {MAX_DISK_GIB} a sandbox may have"
-                )));
-            }
-            _ => {}
-        }
-        for (what, given) in [
-            ("vcpus", args.vcpus.map(u32::from)),
-            ("gpu_memory_mib", args.gpu_memory_mib),
-        ] {
-            if given == Some(0) {
-                return Err(Error::Invalid(format!(
-                    "{what}: 0 is a machine nothing runs on"
-                )));
-            }
-        }
-        if let Some(mib) = args.memory_mib.filter(|mib| *mib < MIN_MEMORY_MIB) {
-            return Err(Error::Invalid(format!(
-                "memory_mib: {mib} is under the {MIN_MEMORY_MIB} a machine boots in"
-            )));
+        check_size(args.vcpus, args.memory_mib, args.disk_gib)?;
+        if args.gpu_memory_mib == Some(0) {
+            return Err(Error::Invalid(
+                "gpu_memory_mib: 0 is a machine nothing runs on".into(),
+            ));
         }
         let gpu = args.gpu.unwrap_or(false);
         if gpu && !cfg!(feature = "gpu") {
@@ -426,6 +410,7 @@ impl Sandbox {
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.clone(),
         };
+        let disk_gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
         let exited = record.as_ref().is_some_and(|record| record.exited);
         let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());
         let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
@@ -439,8 +424,9 @@ impl Sandbox {
             upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
             volume_holds: Mutex::new(volume_holds),
-            config,
+            config: Mutex::new(config),
             vm,
+            disk_gib: AtomicU32::new(disk_gib),
             state: Mutex::new(match exited {
                 true => State::Exited,
                 false => State::Parked,
@@ -615,6 +601,8 @@ impl Sandbox {
     /// and the volume's own directory.
     pub(crate) fn mounts(&self) -> Vec<(String, PathBuf)> {
         self.config
+            .lock()
+            .unwrap()
             .volumes
             .iter()
             .filter(|mount| !mount.read_only)
@@ -630,6 +618,67 @@ impl Sandbox {
             return None;
         }
         Some(self.used.lock().unwrap().elapsed())
+    }
+
+    /// Resize it as `args` says, answered as it is to be: its vCPUs and memory those its
+    /// machine boots with from its next boot on, and its upper disk grown, never shrunk, as its
+    /// machine next boots. A machine is the size it booted with: one up whose vCPUs or memory
+    /// change is parked now if nothing uses it, and refused [`InUse`](Error::InUse) if something
+    /// does. One kept past its process keeps its size in its record.
+    pub async fn resize(
+        self: &Arc<Self>,
+        args: &SandboxResizeArgs,
+    ) -> Result<SandboxResources, Error> {
+        check_size(args.vcpus, args.memory_mib, args.disk_gib)?;
+        // Not booted meanwhile, nor parked.
+        let _turn = self.turn.lock().await;
+        if matches!(*self.state.lock().unwrap(), State::Exited) {
+            return Err(Error::Ended);
+        }
+        let spec = self.config.lock().unwrap().spec.clone();
+        let disk_gib = self.disk_gib.load(Ordering::Relaxed);
+        if args.disk_gib.is_some_and(|gib| gib < disk_gib) {
+            return Err(Error::Invalid(format!(
+                "disk_gib: a disk is grown, never shrunk -- it is {disk_gib} GiB"
+            )));
+        }
+        let vcpus = args.vcpus.unwrap_or(spec.vcpus);
+        let memory_mib = args.memory_mib.unwrap_or(spec.ram_mib);
+        let disk_gib = args.disk_gib.unwrap_or(disk_gib);
+        if (vcpus, memory_mib) != (spec.vcpus, spec.ram_mib) && self.up().is_some() {
+            if self.idle().is_none() {
+                return Err(Error::InUse(format!(
+                    "sandbox {} is in use: its vCPUs and memory change once nothing uses it",
+                    self.id
+                )));
+            }
+            self.park_now().await;
+        }
+        if let Some(record) = &mut *self.record.lock().unwrap() {
+            let mut resized = record.clone();
+            resized.args.vcpus = Some(vcpus);
+            resized.args.memory_mib = Some(memory_mib);
+            resized.args.disk_gib = Some(disk_gib);
+            resized
+                .write(&self.dir, &self.id)
+                .map_err(|source| Error::Io {
+                    context: format!("writing sandbox {}'s record", self.id),
+                    source,
+                })?;
+            *record = resized;
+        }
+        {
+            let mut config = self.config.lock().unwrap();
+            config.spec.vcpus = vcpus;
+            config.spec.ram_mib = memory_mib;
+        }
+        self.disk_gib.store(disk_gib, Ordering::Relaxed);
+        Ok(SandboxResources {
+            vcpus,
+            memory_mib,
+            disk_gib,
+            up: self.up().is_some(),
+        })
     }
 
     /// Stop its machine for good, end and remove every job in it, as cancelling each does, and
@@ -680,9 +729,17 @@ impl Sandbox {
             State::Exited => return Err(Error::Ended),
             State::Parked => {}
         }
-        // Booting is blocking work, until the guest takes commands.
-        let (config, vm) = (self.config.clone(), self.vm.clone());
-        let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
+        // Booting is blocking work, until the guest takes commands: its disk grown first to as
+        // large as it was last resized to.
+        let (config, vm) = (self.config.lock().unwrap().clone(), self.vm.clone());
+        let (booting, gib) = (Arc::clone(self), self.disk_gib.load(Ordering::Relaxed));
+        let machine = tokio::task::spawn_blocking(move || {
+            if let Some(upper) = &*booting.upper.lock().unwrap() {
+                upper.grow(gib)?;
+            }
+            Ok::<_, Error>(Machine::start(config, &vm)?)
+        });
+        let machine = machine.await??;
         let machine = Arc::new(machine);
         let closed = {
             let mut state = self.state.lock().unwrap();
@@ -714,6 +771,12 @@ impl Sandbox {
         if self.idle().is_none_or(|idle| idle < after) {
             return;
         }
+        self.park_now().await;
+    }
+
+    /// Stop its machine, if one is up, to boot again when it is next needed. Called under its
+    /// turn.
+    async fn park_now(&self) {
         let machine = {
             let mut state = self.state.lock().unwrap();
             let State::Up(machine) = &*state else {
@@ -1124,6 +1187,39 @@ impl Unknown {
     pub fn remove(mut self) {
         self.upper.kept = false;
     }
+}
+
+/// Refuse a size no machine is given: `0` of anything, memory under what a machine boots in,
+/// and a disk over what a sandbox may have.
+fn check_size(
+    vcpus: Option<u8>,
+    memory_mib: Option<u32>,
+    disk_gib: Option<u32>,
+) -> Result<(), Error> {
+    match disk_gib {
+        Some(0) => {
+            return Err(Error::Invalid(
+                "disk_gib: 0 is a disk nothing fits on".into(),
+            ));
+        }
+        Some(gib) if gib > MAX_DISK_GIB => {
+            return Err(Error::Invalid(format!(
+                "disk_gib: {gib} is over the {MAX_DISK_GIB} a sandbox may have"
+            )));
+        }
+        _ => {}
+    }
+    if vcpus == Some(0) {
+        return Err(Error::Invalid(
+            "vcpus: 0 is a machine nothing runs on".into(),
+        ));
+    }
+    if let Some(mib) = memory_mib.filter(|mib| *mib < MIN_MEMORY_MIB) {
+        return Err(Error::Invalid(format!(
+            "memory_mib: {mib} is under the {MIN_MEMORY_MIB} a machine boots in"
+        )));
+    }
+    Ok(())
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.

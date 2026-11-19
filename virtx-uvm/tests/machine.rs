@@ -192,6 +192,20 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
     assert_eq!(left, 0);
 }
 
+async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home) {
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let off = ["sh", "-c", "sleep 1; poweroff -f"];
+    let ended = tokio::time::timeout(Duration::from_secs(60), run(&sandbox, &off, None)).await;
+    // Its job never says it ended: it ends as killed, with the machine.
+    assert_eq!(ended.expect("the machine ends").unwrap().1, 137);
+    assert!(sandbox.idle().is_some());
+    let after = run(&sandbox, &["true"], None).await;
+    assert!(matches!(after, Err(SandboxError::Ended)), "{after:?}");
+    close(sandbox).await;
+}
+
 async fn a_sandbox_closed_while_its_machine_stops_leaves_nothing(home: Home) {
     // The machine is parked about 500 ms after its last job ends, and syncs for a hundred or
     // so: one close per delay across that.
@@ -926,6 +940,12 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
+    // The Windows guest kernel has no ACPI, so its guest halts rather than powers off.
+    if cfg!(not(windows)) {
+        tests.extend(tests![
+            a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs
+        ]);
+    }
     if gpu {
         tests.extend(tests![
             a_gpu_sandbox_finds_the_host_s_gpu_through_venus,

@@ -12,7 +12,9 @@ use sha2::{Digest as _, Sha256};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
+use virtx_core::{
+    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+};
 
 use super::upper::Upper;
 use super::{Error, Job};
@@ -93,7 +95,7 @@ const SIGNALS: [&str; 31] = [
     "SIGPWR",
     "SIGSYS",
 ];
-const SIGKILL: i32 = 9;
+pub(super) const SIGKILL: i32 = 9;
 
 /// The signal `name`, such as `SIGTERM`, as Linux numbers it.
 pub fn signal_number(name: &str) -> Option<i32> {
@@ -404,7 +406,7 @@ impl Sandbox {
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
                 if let Some(sandbox) = sandbox.upgrade() {
-                    let _ = sandbox.kill(&job);
+                    let _ = sandbox.kill(&job, SandboxJobEndReason::Timeout);
                 }
             });
         }
@@ -424,11 +426,13 @@ impl Sandbox {
             .ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))
     }
 
-    /// Kill the job `id` if it runs, and remove it.
+    /// Kill the job `id` if it runs, ending it as cancelled, and remove it: what reads its log
+    /// reads on to that end.
     pub fn remove_job(&self, id: &str) -> Result<(), Error> {
         let removed = self.jobs.lock().unwrap().remove(id);
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
-        self.kill(&job)?;
+        self.kill(&job, SandboxJobEndReason::Cancelled)?;
+        job.cut(SandboxJobEndReason::Cancelled);
         job.remove();
         Ok(())
     }
@@ -511,7 +515,7 @@ impl Sandbox {
         drop(self.upper.lock().unwrap().take());
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
-            job.end(128 + SIGKILL);
+            job.cut(SandboxJobEndReason::Cancelled);
             job.remove();
         }
     }
@@ -578,10 +582,11 @@ impl Sandbox {
         matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, machine))
     }
 
-    /// Kill `job` if it runs.
-    fn kill(&self, job: &Job) -> Result<(), Error> {
+    /// Kill `job` if it runs, for `reason`.
+    fn kill(&self, job: &Job, reason: SandboxJobEndReason) -> Result<(), Error> {
         let (pid, running) = job.pid();
         if let Some(machine) = self.up().filter(|_| running) {
+            job.killing(reason);
             machine.signal(pid, SIGKILL)?;
         }
         Ok(())
@@ -608,6 +613,7 @@ impl Sandbox {
                             cmd,
                             running: true,
                             code: None,
+                            reason: None,
                         });
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
@@ -634,18 +640,25 @@ impl Sandbox {
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } => {}
             }
         }
-        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,
-        // nothing ran; otherwise it ended on its own, and nothing boots it again.
+        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked or
+        // closed, it was stopped under them; otherwise it ended on its own, and nothing boots it
+        // again.
         let mut starting = self.starting.lock().unwrap();
-        {
+        let exited = {
             let mut state = self.state.lock().unwrap();
-            if matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine)) {
+            let exited = matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine));
+            if exited {
                 *state = State::Exited;
             }
-        }
+            exited
+        };
         starting.clear();
+        let reason = match exited {
+            true => SandboxJobEndReason::VmExited,
+            false => SandboxJobEndReason::Cancelled,
+        };
         for job in running.into_values() {
-            job.end(128 + SIGKILL);
+            job.cut(reason);
         }
     }
 }

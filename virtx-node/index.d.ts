@@ -389,6 +389,13 @@ export interface SandboxExecOptions {
   timeoutMs?: number
 }
 
+/**
+ * Why a process did not end by itself: the server killed it, as `SIGKILL` does, its code `137`.
+ * `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it ran, or its
+ * sandbox removed under it; `vm_exited`, its sandbox's VM exited on its own under it.
+ */
+export type SandboxJobEndReason = 'timeout' | 'cancelled' | 'vm_exited'
+
 /** What the server answers about a process started in a sandbox. */
 export interface SandboxJobInfo {
   id: string
@@ -398,6 +405,8 @@ export interface SandboxJobInfo {
   running: boolean
   /** Its exit code, once it has ended. */
   code?: number
+  /** Why it ended, once it has, if it did not end by itself. */
+  reason?: SandboxJobEndReason
 }
 
 /**
@@ -417,6 +426,7 @@ export class SandboxJob implements SandboxJobInfo {
   cmd: string[]
   running: boolean
   code?: number
+  reason?: SandboxJobEndReason
   /** It as the server has it now. */
   get(): Promise<SandboxJob>
   /** Send `signal`, a name such as `'SIGTERM'`, to its process and every one it started. */
@@ -439,8 +449,14 @@ export type SandboxJobEntry = { id: number } & (
   | { stdout: string }
   | { stderr: string }
   | { truncated: Record<string, never> }
-  | { end: { code: number } }
+  | { end: SandboxJobEnd }
 )
+
+/** How a process ended, last in its log: its exit code, and why, if it did not end by itself. */
+export interface SandboxJobEnd {
+  code: number
+  reason?: SandboxJobEndReason
+}
 
 /** How a job's `complete` follows it. */
 export interface CompleteOptions {

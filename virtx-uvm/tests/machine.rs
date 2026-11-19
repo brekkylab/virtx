@@ -19,10 +19,12 @@ use std::{
 use axum::body::Body;
 use futures_util::{StreamExt as _, future::join_all};
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use virtx_core::{SandboxCreateArgs, SandboxJobEntry, SandboxVolume};
+use virtx_core::{
+    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
+};
 use virtx_uvm::{
-    DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
-    VolumeStore,
+    DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, SandboxJob,
+    VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -35,6 +37,10 @@ const ALPINE: &str = "alpine:3.20";
 /// guest driver (`mesa-vulkan-virtio`); no stable branch does yet. Pulled only for the GPU's
 /// test.
 const GPU_IMAGE: &str = "alpine:edge";
+
+/// How long a test waits on what should come before it fails, rather than holding the suite:
+/// a guard against a hang, not a time anything is held to.
+const HANG: Duration = Duration::from_secs(60);
 
 /// A sandbox of [`ALPINE`] with 1 GiB of memory: enough for what these tests run in it, and little
 /// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
@@ -158,6 +164,74 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
         .await
         .unwrap();
     assert_eq!(lines, ["0"]);
+    close(sandbox).await;
+}
+
+async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let start = async |cmd: &[&str], timeout: Option<Duration>| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        sandbox.exec(cmd, timeout).await.unwrap()
+    };
+    // The last entry of `job`'s log, read to its end.
+    let end = async |job: &SandboxJob| {
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => end,
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Its own exit, 137 too: no reason.
+    for code in [0, 137] {
+        let job = start(&["sh", "-c", &format!("exit {code}")], None).await;
+        assert_eq!(end(&job).await, SandboxJobEnd::exited(code));
+        assert_eq!(job.get().reason, None);
+    }
+    // `SIGKILL` sent it: its own end, as the signal made it.
+    let job = start(&["sleep", "300"], None).await;
+    sandbox.signal(&job.get().id, 9).unwrap();
+    assert_eq!(end(&job).await, SandboxJobEnd::exited(137));
+    // Past its timeout: killed, for its timeout.
+    let job = start(&["sleep", "300"], Some(Duration::from_millis(200))).await;
+    let timed_out = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(end(&job).await, timed_out);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::Timeout));
+    // Removed while it runs: its log, read from before, reads on to its end, cancelled.
+    let job = start(&["sleep", "300"], None).await;
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    sandbox.remove_job(&job.get().id).unwrap();
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let cancelled = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Cancelled),
+    };
+    assert_eq!(read.unwrap(), cancelled);
+    // Its machine ended under it -- reset, which every arch takes: killed with it.
+    let job = start(&["sh", "-c", "sleep 1; sync; reboot -f"], None).await;
+    let ended = tokio::time::timeout(HANG, end(&job))
+        .await
+        .expect("the machine ends");
+    let exited = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::VmExited),
+    };
+    assert_eq!(ended, exited);
+    assert!(!sandbox.answer().running);
     close(sandbox).await;
 }
 
@@ -915,6 +989,7 @@ fn main() -> ExitCode {
     let mut tests = Vec::from(tests![
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
+        a_job_s_end_says_why_the_server_ended_it_and_only_then,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,

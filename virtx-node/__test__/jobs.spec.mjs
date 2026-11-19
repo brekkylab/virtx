@@ -119,7 +119,19 @@ describe('against virtx-stdio', () => {
     const end = (await Array.fromAsync(sleep.log())).at(-1)
     assert.deepEqual(end.end, { code: 128 + 15 })
     assert.equal(await sleep.complete(), 128 + 15)
-    assert.equal((await (await client.getSandbox(sandbox.id)).job(sleep.id)).running, false)
+    const ended = await (await client.getSandbox(sandbox.id)).job(sleep.id)
+    assert.deepEqual([ended.running, ended.reason], [false, undefined])
+    await sandbox.remove()
+  })
+
+  test('a process past its timeout ends with the reason', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const sleep = await sandbox.exec(['sleep', '60'], { timeoutMs: 200 })
+    const end = (await Array.fromAsync(sleep.log())).at(-1)
+    assert.deepEqual(end.end, { code: 137, reason: 'timeout' })
+    const ended = await sleep.get()
+    assert.deepEqual([ended.code, ended.reason], [137, 'timeout'])
     await sandbox.remove()
   })
 

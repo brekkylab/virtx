@@ -26,7 +26,7 @@ use http::HeaderMap;
 use tower::ServiceExt as _;
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
 use virtx_uvm::{
-    ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
+    HostPaths, ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
     RegistryServer, Sandbox,
 };
 
@@ -204,7 +204,8 @@ impl Host {
         }
         let dir = self.store.path(id);
         let images = ImageStore::new(dir.join("images"))?;
-        let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+        let registry = RegistryServer::new(images.clone(), REGISTRY_PATH)?;
+        let registry = Arc::new(registry.with_host_paths(HostPaths::Named));
         let home = Arc::new(Home::new(images, registry, &dir)?);
         homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))

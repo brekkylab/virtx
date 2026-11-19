@@ -31,7 +31,8 @@ use tokio_util::io::ReaderStream;
 
 use super::registry_client::Reference;
 use super::store::{self, Store};
-use crate::fstree::FsTree;
+use crate::HostPaths;
+use crate::fstree::{self, FsTree};
 
 /// What a response carries.
 pub type Body = UnsyncBoxBody<Bytes, io::Error>;
@@ -55,6 +56,7 @@ pub struct RegistryServer {
     /// Each blob being pushed, until it is whole, and each whole one that is not a layer, until
     /// a manifest names it: in the temp directory, and gone with this.
     uploads: PathBuf,
+    host_paths: HostPaths,
 }
 
 impl Drop for RegistryServer {
@@ -68,6 +70,9 @@ struct Refusal {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// The kind of the failure on this host's files `message` is the account of, which can name
+    /// its paths and is said as the server's [`HostPaths`] say.
+    on_host: Option<io::ErrorKind>,
 }
 
 fn refusal(status: StatusCode, code: &'static str, message: impl Into<String>) -> Refusal {
@@ -75,18 +80,33 @@ fn refusal(status: StatusCode, code: &'static str, message: impl Into<String>) -
         status,
         code,
         message: message.into(),
+        on_host: None,
+    }
+}
+
+/// `e`, an operation on this host's files that failed with an error of `kind`, refused.
+fn failed_on_host(kind: io::ErrorKind, e: impl ToString) -> Refusal {
+    Refusal {
+        on_host: Some(kind),
+        ..refusal(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", e.to_string())
     }
 }
 
 impl From<io::Error> for Refusal {
     fn from(e: io::Error) -> Refusal {
-        refusal(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", e.to_string())
+        failed_on_host(e.kind(), e)
     }
 }
 
 impl From<store::Error> for Refusal {
     fn from(e: store::Error) -> Refusal {
-        refusal(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", e.to_string())
+        match &e {
+            store::Error::Io { source, .. }
+            | store::Error::Fstree(fstree::Error::Io { source, .. }) => {
+                failed_on_host(source.kind(), &e)
+            }
+            _ => refusal(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", e.to_string()),
+        }
     }
 }
 
@@ -99,7 +119,8 @@ impl From<tokio::task::JoinError> for Refusal {
 type Result<T> = std::result::Result<T, Refusal>;
 
 impl RegistryServer {
-    /// The registry of `store`, its `/v2/` under `base`: `/images` serves `/images/v2/`.
+    /// The registry of `store`, its `/v2/` under `base`: `/images` serves `/images/v2/`. It
+    /// names none of this host's paths.
     pub fn new(store: Store, base: impl Into<String>) -> io::Result<RegistryServer> {
         static SERVERS: AtomicU64 = AtomicU64::new(0);
         let uploads = std::env::temp_dir().join(format!(
@@ -112,7 +133,14 @@ impl RegistryServer {
             store,
             base: base.into(),
             uploads,
+            host_paths: HostPaths::Hidden,
         })
+    }
+
+    /// This registry, naming this host's paths as `host_paths` says.
+    pub fn with_host_paths(mut self, host_paths: HostPaths) -> RegistryServer {
+        self.host_paths = host_paths;
+        self
     }
 
     /// Answer one request, whose path is under the base.
@@ -123,10 +151,16 @@ impl RegistryServer {
     {
         let mut response = match self.answer(request).await {
             Ok(response) => response,
-            Err(refused) => json_response(
-                refused.status,
-                &json!({"errors": [{"code": refused.code, "message": refused.message}]}),
-            ),
+            Err(refused) => {
+                let message = match refused.on_host {
+                    Some(kind) => self.host_paths.told(kind, &refused.message),
+                    None => refused.message,
+                };
+                json_response(
+                    refused.status,
+                    &json!({"errors": [{"code": refused.code, "message": message}]}),
+                )
+            }
         };
         response.headers_mut().insert(
             "docker-distribution-api-version",
@@ -1372,5 +1406,32 @@ mod tests {
         let (status, _, body) = send(server, Method::POST, &wrong, &tar).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(String::from_utf8_lossy(&body).contains("DIGEST_INVALID"));
+    }
+
+    #[tokio::test]
+    async fn a_failure_on_this_host_s_files_is_refused_by_its_kind() {
+        let scratch = Scratch::new("host-paths");
+        let tags = scratch.0.root().join("tag");
+        std::fs::remove_dir_all(&tags).unwrap();
+        std::fs::write(&tags, b"not a directory").unwrap();
+
+        for host_paths in [HostPaths::Hidden, HostPaths::Named] {
+            let server = RegistryServer::new(scratch.0.clone(), "/images")
+                .unwrap()
+                .with_host_paths(host_paths);
+            let (status, _, body) =
+                send(&server, Method::GET, "/images/v2/app/tags/list", b"").await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["errors"][0]["code"], "UNKNOWN", "{body}");
+            let message = body["errors"][0]["message"].as_str().unwrap();
+            let named = format!("reading {}", tags.display());
+            match host_paths {
+                HostPaths::Hidden => {
+                    assert_eq!(message, "the server's files: not a directory")
+                }
+                HostPaths::Named => assert!(message.starts_with(&named), "{message}"),
+            }
+        }
     }
 }

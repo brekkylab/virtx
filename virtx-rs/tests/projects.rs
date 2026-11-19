@@ -304,6 +304,15 @@ fn a_user_makes_a_project_brings_another_in_and_removes_it() {
 
     theirs.remove_member("bob@example.com").wait().unwrap();
     assert_eq!(refused(bob.list_volume().wait()), Some(403));
+    // Not while a sandbox lives in it: refused, with what is in it kept.
+    common::alpine(&alice);
+    let sandbox = alice
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    assert_eq!(refused(made.remove().wait()), Some(409));
+    assert!(alice.get_volume(volume.name()).wait().is_ok());
+    sandbox.remove().wait().unwrap();
     made.remove().wait().unwrap();
     assert_eq!(refused(alice.get_project(made.id()).wait()), Some(403));
     assert_eq!(refused(alice.list_volume().wait()), Some(403));

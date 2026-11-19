@@ -883,6 +883,67 @@ mod tests {
         not_connected(&other);
     }
 
+    /// A server given Docker Hub's mirror: a pull and a build's base of Docker Hub's image
+    /// each connect to the mirror first.
+    #[tokio::test]
+    async fn docker_hub_s_images_are_pulled_from_the_mirror_a_server_is_given() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mirror = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = mirror.local_addr().unwrap().to_string();
+        // The mirror: each connection counted, and closed once it has said anything.
+        let reached = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reached);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = mirror.accept().await {
+                if stream.read_u8().await.is_ok() {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        let registries = PublicRegistries::new([&host]).unwrap();
+        let served = Served::spawn_over("mirror", async |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            )
+            .through(Arc::new(registries))
+            .mirroring(Some(&host));
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
+        let client = served.connect();
+        // A name no one has, so that each job fails once it has been to the mirror and to
+        // Docker Hub.
+        let missing = "virtx-test-no-such/image:1";
+
+        let job = client.pull_image(missing, None).await.unwrap();
+        failed(&client, job).await;
+        assert!(
+            reached.swap(0, Ordering::SeqCst) > 0,
+            "the pull did not reach the mirror"
+        );
+
+        let job = client
+            .build_image(Recipe::new(missing), "built:1")
+            .await
+            .unwrap();
+        failed(&client, job).await;
+        assert!(
+            reached.load(Ordering::SeqCst) > 0,
+            "the build did not reach the mirror"
+        );
+    }
+
     /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
     /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
     /// and a path whose segment does not read as one is `400` `invalid`.
@@ -920,6 +981,82 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(kind.to_str().unwrap(), "application/json");
         assert_eq!(error["code"], "invalid", "{error}");
+    }
+
+    /// A body or a path that does not read is refused `400` `invalid` in the server's words:
+    /// the member or segment, what it takes, and what was sent.
+    #[tokio::test]
+    async fn a_body_or_a_path_that_does_not_read_is_refused_naming_what_it_takes() {
+        let served = Served::spawn("unread").await;
+        let image = r#""image": {"type": "tag", "tag": "alpine"}"#;
+        let ports = format!(r#"{{{image}, "ports": ["5900"]}}"#);
+        for (method, path, body, said) in [
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                "not json",
+                "the body: JSON, which it stops being at line 1, column 2",
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                "[]",
+                "the body: an object, not a list",
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                "",
+                "the body: a JSON object, and none was sent",
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/exec/",
+                r#"{"cmd": "ls"}"#,
+                r#"cmd: a list, not "ls""#,
+            ),
+            (
+                "POST",
+                "sandboxes/nobody/jobs/j/signal",
+                r#"{"signl": "TERM"}"#,
+                "signl: not a member; the members are `signal`",
+            ),
+            (
+                "POST",
+                "images/jobs/pull/",
+                "x",
+                "the body: JSON, which it stops being at line 1, column 1",
+            ),
+            (
+                "POST",
+                "sandboxes/",
+                &ports,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+            ),
+            (
+                "GET",
+                "sandboxes/%FF",
+                "",
+                "id: UTF-8 once its escapes are read, and it is not",
+            ),
+        ] {
+            let response = reqwest::Client::new()
+                .request(
+                    Method::from_bytes(method.as_bytes()).unwrap(),
+                    format!("{}{path}", served.url),
+                )
+                .header("virtx-project", "demo")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(body.to_owned())
+                .send()
+                .await
+                .unwrap();
+            let how = format!("{method} {path} {body}");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{how}");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["code"], "invalid", "{how}");
+            assert_eq!(body["error"]["message"], said, "{how}");
+        }
     }
 
     /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`
@@ -1097,6 +1234,184 @@ mod tests {
         assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);
+    }
+
+    /// What a server before this one kept of a project's sandboxes is known again as the project
+    /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
+    /// was made with, with its jobs, one that ran then ended `restarted`; what no sandbox keeps
+    /// is deleted. No machine boots for it.
+    #[tokio::test]
+    async fn a_project_s_sandboxes_are_kept_across_a_restart() {
+        let served = Served::spawn("kept").await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let jobs = json!([
+            { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
+            { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+        ]);
+        let kept = [
+            ("kept", json!({ capability.clone(): 8080 }), false, jobs),
+            ("ended", json!({}), true, json!([])),
+        ];
+        for (id, keys, exited, jobs) in kept {
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let image = json!({ "type": "digest", "digest": digest });
+            let args = json!({ "image": image, "ports": [8080] });
+            let record = json!({ "args": args, "keys": keys, "exited": exited, "jobs": jobs });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        // What a making cut short before its record leaves, and a record whose disk is gone.
+        std::fs::write(dir.join("cut.ext4"), b"").unwrap();
+        std::fs::write(dir.join("gone.json"), b"{}").unwrap();
+
+        let (status, listed) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+        listed.sort_by_key(|sandbox| sandbox["id"].as_str().unwrap().to_owned());
+        assert_eq!(
+            listed,
+            [
+                json!({ "id": "ended", "image": digest, "running": false }),
+                json!({ "id": "kept", "image": digest, "running": true }),
+            ]
+        );
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let kept_files =
+            |id: &str| [".ext4", ".ext4.lock", ".json"].map(|end| format!("{id}{end}"));
+        assert_eq!(left, [kept_files("ended"), kept_files("kept")].concat());
+
+        let (status, jobs) = served
+            .send("GET", "sandboxes/kept/jobs/", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let jobs: Value = serde_json::from_str(&jobs).unwrap();
+        assert_eq!(
+            jobs,
+            json!([
+                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+                {
+                    "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"],
+                    "running": false, "code": 137, "reason": "restarted",
+                },
+            ])
+        );
+        let (status, log) = served
+            .send("GET", "sandboxes/kept/jobs/ran/events", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            log,
+            "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
+        );
+
+        // Its port's URL reaches it as it did: parked, nothing listens there.
+        let port = served.port_url(&format!("ports/{capability}"));
+        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
+
+        let (status, _) = served
+            .send("DELETE", "sandboxes/kept", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            kept_files("kept")
+                .iter()
+                .all(|file| !dir.join(file).exists())
+        );
+        let (status, _) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            Served::open(&port, Some("virtx.tcp")).await.err(),
+            Some(404)
+        );
+    }
+
+    /// A sandbox a server before this one kept that this one cannot know again -- its record
+    /// not read, or its image gone -- is listed, not running, with why in `error`. Every other
+    /// request about it is refused `409` `ended`, and it keeps its project from being removed
+    /// until its `DELETE` removes it, its disk and record with it.
+    #[tokio::test]
+    async fn a_sandbox_not_known_again_is_listed_with_why_until_its_delete() {
+        let served = Served::spawn("unknown").await;
+        let demo = served.project("demo").await;
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = format!("sha256:{}", "0".repeat(64));
+        let image = json!({ "type": "digest", "digest": gone });
+        let record = json!({ "args": { "image": image } }).to_string();
+        for (id, record) in [("unread", "not json".to_owned()), ("lost", record)] {
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            std::fs::write(dir.join(format!("{id}.json")), record).unwrap();
+        }
+
+        let (status, listed) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+        listed.sort_by_key(|sandbox| sandbox["id"].as_str().unwrap().to_owned());
+        let errors: Vec<_> = listed
+            .iter_mut()
+            .map(|sandbox| sandbox.as_object_mut().unwrap().remove("error"))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                json!({ "id": "lost", "image": gone, "running": false }),
+                json!({ "id": "unread", "image": "", "running": false }),
+            ]
+        );
+        for error in errors {
+            let error = error.expect("an error says why");
+            assert!(
+                error.as_str().unwrap().starts_with("not known again"),
+                "{error}"
+            );
+        }
+        let (status, got) = served
+            .send("GET", "sandboxes/unread", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&got).unwrap()["running"],
+            false
+        );
+
+        let exec = r#"{"cmd": ["true"]}"#;
+        let used = [
+            ("POST", "sandboxes/unread/jobs/exec/", exec),
+            ("GET", "sandboxes/unread/jobs/", ""),
+            ("GET", "sandboxes/unread/files/", ""),
+        ];
+        for (method, path, body) in used {
+            let (status, refused) = served.send(method, path, Some("demo"), body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{method} {path}");
+            let refused: Value = serde_json::from_str(&refused).unwrap();
+            assert_eq!(refused["error"]["code"], "ended", "{method} {path}");
+        }
+        let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::CONFLICT, "its sandboxes keep it");
+
+        for id in ["unread", "lost"] {
+            let path = format!("sandboxes/{id}");
+            let (status, _) = served.send("DELETE", &path, Some("demo"), "").await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{id}");
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(left.is_empty(), "{left:?}");
+        let (status, _) = served
+            .send("GET", "sandboxes/unread", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     /// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.

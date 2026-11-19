@@ -140,14 +140,25 @@ A request that fails is answered with an HTTP error status and a body:
 
 | Status | `code` | When |
 | --- | --- | --- |
-| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. |
+| `400 Bad Request` | `invalid` | The body is not JSON, or not what the request takes, such as a missing or unknown member; or a path segment does not read as what the path takes. Its `message` names the member or segment, what it takes and what was sent, as `cmd: a list, not "ls"`; an object or a list sent is named by its kind alone. A failure inside a member that names its own kind, such as `image`, `auth` or `source`, is told at that member. A body that is not JSON is told where it stops being JSON, with none of it shown. |
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication), [Projects](#projects) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
-| `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method. |
+| `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method, such as a `PATCH` of a file, under [Files](#files). |
 | `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |
 | `413 Content Too Large` | `too_large` | The body is over the server's limit, which is at least 2 MiB. A file's body, under [Files](#files), has none. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
+| `429 Too Many Requests` | `quota` | The request is past a limit of the server's, which `reason` names. See [Refused for now](#refused-for-now). |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
+| `503 Service Unavailable` | `capacity` | The server has no room for what the request makes, for now, and made none of it. See [Refused for now](#refused-for-now). |
+
+### Refused for now
+
+A server MAY turn a request away for now, with `429` or `503` and a `Retry-After` of the seconds to wait before it is sent again:
+
+- `429`, `quota`, has `reason` beside `code` and `message`, naming the limit the request is past. `requests`, the rate of requests, frees up by itself, and a client MAY send the request again after `Retry-After`. Any other `reason`, such as a count of sandboxes, frees up only as the caller closes or deletes something: a client answers it at once rather than waiting.
+- `503`, `capacity`, says nothing was made, so a request that makes something MAY be sent again after `Retry-After`. A `503` with another code or none, such as a proxy's own page, may have come after the request was carried out: a client MAY send it again only where a second sending leaves what the first did -- a `GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE` or `PROPFIND` with no `If-Match` or `If-None-Match` -- and takes a `DELETE` so sent again that is answered `404` as done.
+
+virtx's client sends a request again so for 30 seconds at most, its answers' time and the waits between them together, and then answers the last refusal.
 
 ### Jobs
 
@@ -178,6 +189,7 @@ data: {"end": {"code": 0}}
 
 Every reader gets the whole log, from its first entry, as the job writes it.
 A client that sends `Last-Event-ID: n` gets the entries after the `n`th only, so a client whose stream dropped picks up where it left off.
+virtx's client does so by itself over TCP: a stream that breaks, or a `502` to `504` asking for it again, has it asked for after the last entry read, up to five times in a row. A stream that ends before its `end` entry, over either transport, is asked for again at once after the last entry read, where it sent any: a stream cut on the way reads on, and one whose job was removed is answered `404`. One that ends with no entry past where it was asked is asked for again only while the job is `running`, as a broken one is: a job removed is answered `404`, and a log of an ended job asked for after its last entry has nothing more, and ends there.
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.
 A job that has ended answers its whole log at once, and ends there.
@@ -282,9 +294,9 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?}` |
+| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?, error?}` |
 | `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?, error?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
@@ -292,7 +304,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
-- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
+- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM the server stopped, as below, is `true`.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
@@ -303,6 +315,10 @@ One whose VM has exited is still held until then.
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
 Everything written to its root filesystem is kept across that, as it is for as long as the sandbox lives; what was left running in it, apart from a job, is not.
 A connection to one of its ports while its VM is stopped is closed, as one to a port nothing listens on is, and does not boot it.
+
+A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
+It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
+One it kept and cannot know again, such as one whose image is gone, it MAY still list until its `DELETE`, with `running` `false` and an `error`, a string saying why: every other request about it is refused `409`, `ended`, and its `DELETE` removes what it kept of it.
 
 #### Ports
 
@@ -338,12 +354,13 @@ A sandbox job is a process in a [sandbox](#sandboxes), run beside whatever else 
 | `POST /sandboxes/{id}/jobs/{job}/stdin` | `{data?, eof?}` | `204` |
 | `GET /sandboxes/{id}/jobs/{job}/events` | | `200`, its [log](#events) |
 
-A sandbox job is `{id, kind, pid, cmd, running, code?}`:
+A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 
 - `kind` is `"exec"`.
 - `pid` is its process's pid in the sandbox. The job is named by `id`, not by it, so a pid the sandbox gives again never names another job.
 - `cmd` is the argv it was started with, with no shell: `["sh", "-c", "..."]` for one. An empty one is refused.
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
+- `reason`, once it has ended, is why, where the process did not end by itself and the server says, as below.
 
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
 
@@ -351,12 +368,17 @@ Its log's entries are each an object with one member:
 
 - `{"stdout": "..."}` or `{"stderr": "..."}`: a line the process wrote there, without its line ending, decoded as UTF-8 with each invalid sequence replaced by U+FFFD. A line longer than the server's limit is sent in parts, an entry each.
 - `{"truncated": {}}`, as [Events](#events) says.
-- `{"end": {"code": n}}`, last.
+- `{"end": {"code": n}}`, or `{"end": {"code": 137, "reason": "..."}}`, last: its `code`, and `reason`, as the job has them.
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
 The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
+A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
+A sandbox [kept](#sandboxes) across its server's end keeps its jobs, as many as the server keeps: started again, the server knows each that had ended as it ended, and each that ran as killed then, its `code` `137` and its `reason` `"restarted"`. A job so kept has its `end` alone for its log.
+A server MAY say why it killed a process with `reason`, in its end and in its job:
+
+- `"restarted"`: its server ended, keeping its sandbox, while it ran.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.
@@ -395,6 +417,8 @@ Images are listed, tagged and removed with the specification's requests:
 | Export an image | `GET` its manifest, and each blob it names |
 | Import an image | Push each blob, then `PUT` its manifest by tag |
 
+A sandbox stands on the image it was made from, from its `POST` until its `DELETE`, its VM parked or not, and a build on its base while it runs.
+A `DELETE` that would leave an image a sandbox or a build stands on with no tag -- the image's removal, or the untagging of its last tag -- is refused with `409 Conflict` and the code `DENIED`, and removes nothing.
 A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time.
 A client pushing an image therefore puts its manifest by tag, not by digest alone.
 
@@ -424,7 +448,7 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 | Copy | `COPY`, with `Overwrite` |
 
 - `PROPFIND` answers at least `resourcetype`, `getcontentlength`, `getlastmodified` and `getetag`. The server MAY refuse `Depth: infinity`, as RFC 4918 lets it.
-- `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read. A `getetag` is an entity-tag in quotes, the same as the file's `ETag` header, and is sent in `If-Match` as it was read. One with `If-None-Match: *` is refused with `412` when anything is at the path: how a client creates a file only if no other did. A `PUT` that answers an `ETag` answers the one a `GET` of the file it wrote does, so a client can send it as `If-Match` on its next write without reading the file again.
+- `PUT` replaces the whole file, and creates it if it does not exist. A `PUT` with `Content-Range` is refused with `400 Bad Request`, and a `PATCH` of any kind, such as SabreDAV's partial update, with `405 Method Not Allowed`, `method_not_allowed`, and the `Allow` an `OPTIONS` of its path answers, which leaves `PATCH` out: a file is written whole, and lands whole. Until all of the body has arrived, what was at the path is what is read there, and a `PUT` broken off leaves it. A `PUT` with `If-Match` is refused with `412 Precondition Failed` unless the file's `getetag` is among the tags given, as RFC 9110 says: how a client writes only over the file it read. A `getetag` is an entity-tag in quotes, the same as the file's `ETag` header, and is sent in `If-Match` as it was read. One with `If-None-Match: *` is refused with `412` when anything is at the path: how a client creates a file only if no other did. A `PUT` that answers an `ETag` answers the one a `GET` of the file it wrote does, so a client can send it as `If-Match` on its next write without reading the file again.
 - A `PUT` with `If-Match` or `If-None-Match` to a volume or a sandbox is checked before its body is read, and again once all of it has arrived, against the file as it is then, and lands in the same step, so no other write with a condition lands between the two: none from another client of the server, and, to a volume, none from another server over one home. Of two sent at once to one file, one lands, and the other is checked against what it wrote and refused `412` if its condition no longer holds: read the file again, and retry. On one server, the one whose body has all arrived first, and to a sandbox been sent on to it, is checked first. A write to a sandbox holds each volume the sandbox mounts writable as well, so a file in such a volume is held the same whether it is written through the sandbox's files or the volume's, and a `PUT` to a path in it is checked against the volume's own files as it lands. The rest is checked as the sandbox sees the file, which can trail a write through the volume's files by a few seconds: the check before a `PUT`'s body is read, the condition of a `DELETE`, `MOVE` or `COPY`, and a `PUT` to a path the volume's files do not answer for, such as one through a symbolic link. For those few seconds after such a write, a `DELETE` or `MOVE` naming the replaced file's tag can go through, and a `PUT` naming the new one can be refused `412`. A `DELETE`, `MOVE` or `COPY` with either condition is held the same way while it is answered, but one of a directory that fails on a member, answered `207`, may go on with the rest after. A sandbox's processes write its files without asking, and a write without a condition is not held, so either may land between the check and the write.
 - `PUT` and `MKCOL` under a directory that does not exist are refused with `409 Conflict`, as RFC 4918 says. `MKCOL` creates one directory, not its parents.
 - `DELETE` of a directory removes everything in it. A `DELETE`, `COPY` or `MOVE` of a directory that fails in part answers `207 Multi-Status`, with the status of each path that failed, as RFC 4918 says. `DELETE` or `MOVE` of the root, and `MOVE` or `COPY` onto it, are refused with `403 Forbidden` before anything in it is touched: a volume or sandbox is removed through [Resources](#resources).

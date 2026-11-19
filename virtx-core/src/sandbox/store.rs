@@ -26,6 +26,11 @@ pub struct Sandbox {
     /// virtx's own programs it has at `/abin`, as it was made with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abins: Vec<String>,
+
+    /// Why it takes nothing but its `DELETE`, for one a server could not know again after it
+    /// restarted: not `running`, and every other request about it refused `409`, `ended`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// What making a sandbox takes: `POST /sandboxes/`'s body.
@@ -345,7 +350,7 @@ impl<'de> Deserialize<'de> for PortSpec {
         #[derive(Deserialize)]
         #[serde(
             untagged,
-            expecting = r#"a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}"#
+            expecting = r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
         )]
         enum Either {
             Port(u16),
@@ -518,7 +523,7 @@ mod tests {
         let refused = serde_json::from_value::<PortSpec>(json!({"port": "5900"})).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            r#"a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}"#
+            r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
         );
     }
 

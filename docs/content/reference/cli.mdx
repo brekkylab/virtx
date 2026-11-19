@@ -67,7 +67,8 @@ A local server, which `Client.spawn()` starts, needs no signing in.
 | `virtx whoami` | Says who is signed in. |
 | `virtx logout` | Signs out: the session is forgotten on this machine, and where it was signed in to is asked to end it. |
 
-A client given a command for its token runs it each time it needs one: `uvx virtx token --json` (or `pipx run virtx token --json`, without uv) or `npx -y @brekkylab/virtx token --json` with nothing installed, or `virtx token --json` where an installed `virtx` is on `PATH`.
+A client given a command for its token runs it each time it needs one: `uvx virtx token --json` (or `pipx run virtx token --json`, without uv) or `npx -y @brekkylab/virtx token --json` with nothing installed, or `virtx token --json` where an installed `virtx` is on `PATH`.  
+On Windows, where npm installs a command as a `.cmd`, the program is `npx.cmd`, or `virtx.cmd` for one `npm install -g` installed.
 
 A command is of the provider it names with `--issuer` and `--client-id`, or the one the server `login` is given names, and otherwise of what was signed in to last.
 

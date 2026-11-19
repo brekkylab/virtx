@@ -166,6 +166,11 @@ pub struct ProxyRefusal {
 /// from its registry: virtx cloud's nodes, between projects. Only an anonymous pull asks it or
 /// tells it anything ([`RegistryClient::with_public`]): what one fetches anyone may, and what a
 /// pull with credentials fetches is private.
+///
+/// What one store's pull put here makes another's faster, so how long a pull takes says whether
+/// someone sharing it pulled that image before. An embedder shares only between stores whose
+/// owners may know that of each other, and none across a boundary meant to share nothing, such
+/// as between organizations.
 pub trait PublicImages: Send + Sync {
     /// The image registry manifest `origin` became, filed in `store` from where it is shared,
     /// with its origin recorded there: none, where it is not shared. An error is said in the

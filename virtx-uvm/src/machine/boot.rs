@@ -692,9 +692,10 @@ fn executable(dir: &Path) {
 ///
 /// In front rather than behind: `/abin` is what virtx undertakes to provide, and an image's own
 /// `index` should not be what a caller reading `abin/skills/` ends up running.
-/// The directory the image's process starts in: its config's `WorkingDir`, or the root where the
-/// config names none -- unset, or set empty, as images built by older tools leave it.
-fn workdir(config: &Config) -> String {
+/// The directory the image's process starts in -- a machine's, and a build step's: its config's
+/// `WorkingDir`, or the root where the config names none -- unset, or set empty, as images built
+/// by older tools leave it.
+pub(crate) fn workdir(config: &Config) -> String {
     config
         .working_dir()
         .as_deref()

@@ -25,7 +25,7 @@ use virtx_uvm::disks::{Disks, DynStorage, Held, MachineDisk};
 use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::sandbox::{NoHooks, Sandboxes};
 use virtx_uvm::{
-    Admission, FsTree, ImageStore, MachineSpec, NoRoom, RegistryClient, Room, Sandbox,
+    Admission, Files, FsTree, ImageStore, MachineSpec, NoRoom, RegistryClient, Room, Sandbox,
     SandboxError, SandboxJob, SnapshotStore, VolumeError, VolumeStore,
 };
 
@@ -1310,6 +1310,54 @@ async fn gpu_sandboxes_made_at_once_each_compute_their_own(home: Home) {
     .await;
 }
 
+/// A `PATCH` of a sandbox's file is not allowed, `405` with the `Allow` an `OPTIONS` of it
+/// answers, and leaves the file as it was, whether its machine is up or parked; a directory is
+/// not read with a `GET`.
+async fn a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it(home: Home) {
+    use axum::body::Body;
+    use http::{Method, Request, StatusCode, header};
+    use http_body_util::BodyExt as _;
+    let sandbox = home.sandbox(&small()).await;
+    let files = Files::new(home.volumes.clone());
+    let id = sandbox.id().to_owned();
+    let sent = async |method: Method, path: &str, body: &'static str| {
+        let request = Request::builder()
+            .method(method)
+            .uri(format!("/sandboxes/{id}/files/{path}"))
+            .body(Body::from(body))
+            .unwrap();
+        let response = files.sandbox(&sandbox, request).await.unwrap();
+        let (status, allow) = (
+            response.status(),
+            response.headers().get(header::ALLOW).cloned(),
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, allow, body)
+    };
+
+    let (status, _, _) = sent(Method::PUT, "tmp/a.txt", "0123456789").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, allow, _) = sent(Method::OPTIONS, "tmp/a.txt", "").await;
+    let allow = allow.expect("OPTIONS answers Allow");
+    assert!(!allow.to_str().unwrap().contains("PATCH"), "{allow:?}");
+    for parked in [false, true] {
+        if parked {
+            sandbox.park().await.unwrap();
+        }
+        let (status, refused, body) = sent(Method::PATCH, "tmp/a.txt", "YY").await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "parked: {parked}");
+        assert_eq!(refused.as_ref(), Some(&allow), "parked: {parked}");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "method_not_allowed", "{body}");
+        assert_eq!(sandbox.is_up(), !parked, "a PATCH does not boot it");
+    }
+    let (_, _, read) = sent(Method::GET, "tmp/a.txt", "").await;
+    assert_eq!(read, "0123456789");
+    let (status, _, _) = sent(Method::GET, "", "").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "GET of a directory");
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
 /// The test name `args` filter by, as libtest takes one: the first that is neither an option nor
 /// the value of one -- `cargo xtask test -- --include-ignored --test-threads 1` filters by
 /// nothing, not by `1`.
@@ -1411,6 +1459,7 @@ fn main() -> ExitCode {
         a_sandbox_deleted_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,
+        a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it,
     ]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.

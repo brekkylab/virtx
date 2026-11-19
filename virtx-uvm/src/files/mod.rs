@@ -86,6 +86,13 @@ impl Files {
                 return refused(status, e).into_response();
             }
         };
+        if request.method() == Method::PATCH {
+            let fs = volume::Fs {
+                volume,
+                landing: None,
+            };
+            return not_allowed(handler.filesystem(Box::new(fs)).build_handler(), request).await;
+        }
         let hold = || -> Hold {
             let serial = self.serial(format!("volume:{name}"));
             let dir = volume.path().to_owned();
@@ -123,13 +130,19 @@ impl Files {
             Ok(handler) => handler,
             Err(refusal) => return Ok(refusal.into_response()),
         };
-        if reads(&request)
+        // A `PATCH` is refused as a read is answered: from its disk while it is parked, which
+        // it does not boot.
+        let patch = request.method() == Method::PATCH;
+        if (reads(&request) || patch)
             && let Some((era, view)) = self.parked.view(sandbox).await?
         {
             let showing = Arc::clone(sandbox);
             let shown = tokio::task::spawn_blocking(move || showing.shown()).await??;
             let fs = parked::Fs::new(view, shown, Some((Arc::clone(sandbox), era)));
             let handler = handler.filesystem(Box::new(fs)).build_handler();
+            if patch {
+                return Ok(not_allowed(handler, request).await);
+            }
             let response = lingering(request, |request| handler.handle(request)).await;
             return Ok(response.map(Body::new));
         }
@@ -145,6 +158,15 @@ impl Files {
             }
         };
         let mounts: Arc<[(String, PathBuf)]> = sandbox.mounts().into();
+        if patch {
+            let fs = sandbox::Fs {
+                machine,
+                landing: None,
+                mounts,
+            };
+            let handler = handler.filesystem(Box::new(fs)).build_handler();
+            return Ok(not_allowed(handler, request).await);
+        }
         let hold = || -> Hold {
             let writing = Arc::clone(sandbox.writing());
             let mut dirs: Vec<PathBuf> = mounts.iter().map(|(_, dir)| dir.clone()).collect();
@@ -243,13 +265,11 @@ impl http_body::Body for Shared {
     }
 }
 
-/// What answers a WebDAV request under `prefix`, but its filesystem: refused for a write of part
-/// of a file -- a `PATCH`, or a `PUT` with `Content-Range` -- since a file is written whole, and
-/// for one that [takes the root](takes_root).
+/// What answers a WebDAV request under `prefix`, but its filesystem: refused for a `PUT` of part
+/// of a file, with `Content-Range`, since a file is written whole, and for one that
+/// [takes the root](takes_root). A `PATCH` is [not allowed](not_allowed).
 fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavConfig, Refusal> {
-    let partial = request.method() == Method::PATCH
-        || request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE);
-    if partial {
+    if request.method() == Method::PUT && request.headers().contains_key(header::CONTENT_RANGE) {
         return Err(refused(StatusCode::BAD_REQUEST, "a file is written whole"));
     }
     if takes_root(&prefix, request)? {
@@ -258,10 +278,43 @@ fn handler(prefix: String, request: &Request<Body>) -> Result<dav_server::DavCon
             "the root is removed through its resource",
         ));
     }
+    // `Allow`, which `OPTIONS` answers and `not_allowed` sends with its `405`, leaves `PATCH`
+    // out. Given a set of methods with `PROPFIND` in it, `dav-server` would answer a `GET` of a
+    // directory with an HTML index of it; a directory is listed with `PROPFIND`.
+    let mut methods = dav_server::DavMethodSet::all();
+    methods.remove(dav_server::DavMethod::Patch);
     Ok(DavHandler::builder()
+        .methods(methods)
+        .autoindex(false)
         .strip_prefix(prefix)
         .hide_symlinks(true)
         .read_buf_size(volume::READ))
+}
+
+/// `request`, a `PATCH`, refused `405 method_not_allowed` once its body is read, with the `Allow`
+/// that `handler` answers an `OPTIONS` of its path with: a file is written whole, by `PUT`.
+async fn not_allowed(handler: DavHandler, request: Request<Body>) -> Response {
+    let (parts, mut body) = request.into_parts();
+    while let Some(Ok(_)) = body.frame().await {}
+    let mut options = Request::new(Body::empty());
+    *options.method_mut() = Method::OPTIONS;
+    *options.uri_mut() = parts.uri;
+    let allow = handler
+        .handle(options)
+        .await
+        .headers()
+        .get(header::ALLOW)
+        .cloned();
+    let error = serde_json::json!({"error": {
+        "code": "method_not_allowed",
+        "message": "a file is written whole, by PUT",
+    }});
+    let json = [(header::CONTENT_TYPE, "application/json")];
+    let mut response = (StatusCode::METHOD_NOT_ALLOWED, json, error.to_string()).into_response();
+    if let Some(allow) = allow {
+        response.headers_mut().insert(header::ALLOW, allow);
+    }
+    response
 }
 
 /// Whether `request` would take the root at `prefix` away or write over it: a `DELETE` or `MOVE`
@@ -635,6 +688,8 @@ fn status(e: &VolumeError) -> StatusCode {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt as _;
+
     use super::*;
 
     const PREFIX: &str = "/volumes/v/files";
@@ -835,6 +890,15 @@ mod tests {
             got.await.headers()[header::ETAG].clone()
         };
 
+        let options = Request::options(path).body(Body::empty()).unwrap();
+        let allow = files.volume("v", options).await.headers()[header::ALLOW].clone();
+        let allow = allow.to_str().unwrap();
+        assert!(allow.contains("PUT"), "{allow}");
+        assert!(!allow.contains("PATCH"), "OPTIONS offers a PATCH: {allow}");
+        let root = Request::get("/volumes/v/files/").body(Body::empty());
+        let status = files.volume("v", root.unwrap()).await.status();
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "GET of a directory");
+
         let partial = [
             ("a PATCH", Method::PATCH, None),
             ("a PATCH with If-Match", Method::PATCH, Some(etag)),
@@ -844,13 +908,27 @@ mod tests {
                 .method(method)
                 .uri(path)
                 .header(header::CONTENT_TYPE, "application/x-sabredav-partialupdate")
-                .header("X-Update-Range", "bytes=2-3")
-                .header(header::CONTENT_LENGTH, 2);
+                .header("X-Update-Range", "bytes=2-17")
+                .header(header::CONTENT_LENGTH, 16);
             if let Some(etag) = if_match {
                 request = request.header(header::IF_MATCH, etag);
             }
-            let response = files.volume("v", request.body(Body::from("YY")).unwrap());
-            assert_eq!(response.await.status(), StatusCode::BAD_REQUEST, "{what}");
+            // Its body in 16 parts, each counted as it is read.
+            let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = Arc::clone(&read);
+            let parts = futures_util::stream::iter(0..16).map(move |_| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, io::Error>(bytes::Bytes::from("Y"))
+            });
+            let body = Body::from_stream(parts);
+            let response = files.volume("v", request.body(body).unwrap()).await;
+            let read = read.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(read, 16, "{what}: its body read to its end");
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{what}");
+            assert_eq!(response.headers()[header::ALLOW], allow, "{what}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], "method_not_allowed", "{what}");
         }
         let ranged = Request::put(path)
             .header(header::CONTENT_RANGE, "bytes 0-0/10")

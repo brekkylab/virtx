@@ -230,13 +230,14 @@ impl Client {
         oci::tag(&self.inner, source.as_ref(), target.as_ref()).await
     }
 
-    /// Remove the tag `reference` (`name:tag`), leaving the image it points at.
+    /// Remove the tag `reference` (`name:tag`), leaving the image it points at. The last tag of
+    /// an image a sandbox uses is refused `409`, and kept.
     pub async fn untag_image(&self, reference: impl AsRef<str>) -> Result<(), Error> {
         oci::untag(&self.inner, reference.as_ref()).await
     }
 
     /// Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on
-    /// it in that name.
+    /// it in that name. An image a sandbox uses is refused `409`, with nothing removed.
     pub async fn remove_image(&self, reference: impl AsRef<str>) -> Result<(), Error> {
         oci::remove(&self.inner, reference.as_ref()).await
     }

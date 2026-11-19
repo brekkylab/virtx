@@ -542,7 +542,7 @@ impl Store {
         removed
     }
 
-    /// Whether a machine holds `image` now ([`Store::hold_image`]): removing it would be
+    /// Whether something holds `image` now ([`Store::hold_image`]), so that removing it would be
     /// refused.
     pub fn image_held(&self, image: &Digest) -> Result<bool> {
         let lock = self.shelf("image", image, "lock");

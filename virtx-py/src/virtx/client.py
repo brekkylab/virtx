@@ -406,12 +406,14 @@ class Client:
         await self._call("virtx_client_tag_image", _args(source=source, target=target))
 
     async def untag_image(self, reference: str) -> None:
-        """Remove the tag ``reference`` (``name:tag``), leaving the image it points at."""
+        """Remove the tag ``reference`` (``name:tag``), leaving the image it points at. The last
+        tag of an image a sandbox uses is refused ``409``, and kept."""
         await self._call("virtx_client_untag_image", _args(reference=reference))
 
     async def remove_image(self, reference: str) -> None:
         """Remove the image ``reference`` names (``name:tag`` or ``name@algorithm:hex``), and
-        every tag on it in that name."""
+        every tag on it in that name. An image a sandbox uses is refused ``409``, with nothing
+        removed."""
         await self._call("virtx_client_remove_image", _args(reference=reference))
 
     def download_image(

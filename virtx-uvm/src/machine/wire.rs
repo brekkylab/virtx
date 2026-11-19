@@ -75,6 +75,9 @@ pub enum CtrlReq {
     /// ([`MachineDisk::rebase`](crate::disks::MachineDisk::rebase)).
     /// Answered with [`Rebased`](CtrlResp::Rebased).
     Rebase { mark: u64 },
+    /// Answered with [`Pong`](CtrlResp::Pong), from the machine's process to the agent: how it
+    /// hears a guest that is up. The host never sends it.
+    Ping,
 }
 
 /// What the machine's process tells the host.
@@ -117,6 +120,8 @@ pub enum CtrlResp {
         mark: u64,
         rebased: std::result::Result<bool, String>,
     },
+    /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
+    Pong,
 }
 
 /// What the host asks of the guest's files on the I/O channel, each answered with a

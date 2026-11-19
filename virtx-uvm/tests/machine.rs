@@ -32,6 +32,10 @@ use virtx_uvm::{
 /// What this binary is spawned with to be a machine.
 const MACHINE: &str = "vm";
 
+/// What it is spawned with to be a machine whose guest is taken to have stopped once it has
+/// answered nothing for 10 s (`VIRTX_GUEST_SILENCE`), not a minute: what a test of that waits on.
+const MACHINE_HEARD_BRIEFLY: &str = "vm-heard-briefly";
+
 /// The image every sandbox here is made of, and where it is pulled from: Docker Hub's official
 /// images from Google's mirror of them, as Docker Hub refuses anonymous pulls past a few an
 /// hour.
@@ -82,6 +86,18 @@ impl Home {
     }
 
     /// It, its sandboxes parked once unused for [`PARK_AFTER`]: before any is made.
+    /// This, its machines' guests taken to have stopped once silent for 10 s, not a minute
+    /// ([`MACHINE_HEARD_BRIEFLY`]).
+    fn heard_briefly(mut self) -> Home {
+        self.sandboxes = sandboxes_as(
+            self.sandboxes.images(),
+            &self.root,
+            None,
+            MACHINE_HEARD_BRIEFLY,
+        );
+        self
+    }
+
     fn parking(mut self) -> Home {
         self.sandboxes = sandboxes(self.sandboxes.images(), &self.root, Some(PARK_AFTER));
         self
@@ -124,7 +140,17 @@ impl Drop for Home {
 /// The sandboxes kept under `root`, as a server over it has them, each parked once unused for
 /// `park_after`.
 fn sandboxes(images: &ImageStore, root: &Path, park_after: Option<Duration>) -> Sandboxes {
-    let vm = vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)];
+    sandboxes_as(images, root, park_after, MACHINE)
+}
+
+/// As [`sandboxes`], each machine spawned as `machine`.
+fn sandboxes_as(
+    images: &ImageStore,
+    root: &Path,
+    park_after: Option<Duration>,
+    machine: &str,
+) -> Sandboxes {
+    let vm = vec![env::current_exe().unwrap().into(), OsString::from(machine)];
     Sandboxes::new(
         images.clone(),
         SnapshotStore::new(root).unwrap(),
@@ -855,6 +881,48 @@ async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
+/// A guest that halts rather than powering off, as `halt -f` does, leaves the machine's
+/// process running and answers nothing: once it has been silent past the bound, its machine is
+/// ended and its jobs with it, as on a power-off. One that is up answers, however long its
+/// job runs quietly and however busy it keeps it.
+async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
+    let home = home.heard_briefly();
+    let sandbox = home.sandbox(&small()).await;
+    let busy = [
+        "sh",
+        "-c",
+        "for i in 1 2; do timeout 15 sh -c 'while :; do :; done' & done; wait; true",
+    ];
+    let lived = run(&sandbox, &busy, None).await;
+    assert_eq!(lived.unwrap().1, 0, "a busy guest is ended");
+    let halt = ["sh", "-c", "sleep 1; halt -f"];
+    let ended = tokio::time::timeout(Duration::from_secs(60), run(&sandbox, &halt, None)).await;
+    assert_eq!(ended.expect("the machine ends").unwrap().1, 137);
+    assert!(until(async || !sandbox.answer(false).running).await);
+    let after = run(&sandbox, &["true"], None).await;
+    assert!(matches!(after, Err(SandboxError::Ended)), "{after:?}");
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
+/// A machine paused whole, as its disk is copied, past the silence that would end a halted
+/// guest's, is not taken for silent: it goes on once it is let go.
+async fn a_machine_paused_past_its_guest_s_silence_goes_on(home: Home) {
+    let home = home.heard_briefly();
+    let sandbox = home.sandbox(&small()).await;
+    let machine = sandbox.machine().await.unwrap();
+    {
+        let _paused = machine.pause().unwrap();
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+    let (lines, code) = run(&sandbox, &["echo", "on"], None).await.unwrap();
+    assert_eq!((lines, code), (vec!["on".to_owned()], 0));
+    // And past the silence after it, too: its silence started anew as it went on.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let (lines, _) = run(&sandbox, &["echo", "still"], None).await.unwrap();
+    assert_eq!(lines, ["still"]);
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
 async fn a_sandbox_parked_as_it_is_parked_unused_has_synced(home: Home) {
     let home = home.parking();
     // It is parked about 500 ms after its last job ends, and syncs for a hundred or so: one
@@ -984,6 +1052,42 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
     assert!(in_use());
     home.sandboxes.delete(reader.id()).await.unwrap();
     home.volumes.remove("data").unwrap();
+}
+
+/// A machine with more virtio-mmio devices than the 16 legacy interrupt lines hold boots, and
+/// each answers: five volumes over the eight devices this sandbox has without them, the last
+/// volume and the guest agent's filesystem on lines past 15.
+async fn a_sandbox_mounting_many_volumes_reaches_each(home: Home) {
+    let names = ["v1", "v2", "v3", "v4", "v5"];
+    for name in names {
+        home.volumes.create(name).unwrap();
+    }
+    let args = SandboxCreateArgs {
+        volumes: names
+            .iter()
+            .map(|name| SandboxVolume {
+                volume: name.to_string(),
+                path: format!("/{name}"),
+                readonly: false,
+            })
+            .collect(),
+        ..small()
+    };
+    let sandbox = home.sandbox(&args).await;
+    let write = [
+        "sh",
+        "-c",
+        "for v in v1 v2 v3 v4 v5; do echo $v > /$v/name; done",
+    ];
+    assert_eq!(run(&sandbox, &write, None).await.unwrap().1, 0);
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+    for name in names {
+        let written = home.volumes.open(name).unwrap().files().join("name");
+        assert_eq!(
+            std::fs::read_to_string(written).unwrap(),
+            format!("{name}\n")
+        );
+    }
 }
 
 /// What a guest installs to reach venus and ask it what it finds: venus's guest driver, the
@@ -1237,6 +1341,16 @@ fn main() -> ExitCode {
         let Err(_) = virtx_uvm::enter_machine();
         std::process::exit(1);
     }
+    if env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == MACHINE_HEARD_BRIEFLY)
+    {
+        // SAFETY: nothing else runs in this process yet.
+        unsafe { env::set_var("VIRTX_GUEST_SILENCE", "10") };
+        let Err(_) = virtx_uvm::enter_machine();
+        std::process::exit(1);
+    }
+
     let scratch = env::temp_dir().join(format!("virtx-uvm-machine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1288,14 +1402,18 @@ fn main() -> ExitCode {
         a_sandbox_whose_machine_ends_on_its_own_has_exited_for_good,
         a_running_sandbox_s_disk_is_held_against_another_server,
         a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
+        a_guest_that_halts_ends_its_machine_and_its_jobs,
+        a_machine_paused_past_its_guest_s_silence_goes_on,
         a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs,
         a_sandbox_parked_as_it_is_parked_unused_has_synced,
         a_disk_a_parked_machine_left_reads_as_its_kernel_committed,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_deleted_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
+        a_sandbox_mounting_many_volumes_reaches_each,
     ]);
-    // The Windows guest kernel has no ACPI, so its guest halts rather than powers off.
+    // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
+    // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {
         tests.extend(tests![
             a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs

@@ -216,3 +216,4 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_OIDC_CLIENT_SECRET` | CLI | That client's secret, for a provider that gives its public clients one, when `--client-secret` is not given. |
 | `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. At once by default. |
 | `VIRTX_RECLAIM_AFTER_MS` | Server | How long a sandbox is unused before it is deleted, in milliseconds; `0` for never. 30 days by default. |
+| `VIRTX_GUEST_SILENCE` | Server | How long a sandbox's guest may answer nothing before its VM is ended, as one that powered off, in seconds, and no less than ten; `0` for never: a guest that halts, as `halt -f` leaves it, or stops answering. A minute by default. |

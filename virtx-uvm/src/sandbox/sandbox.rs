@@ -1045,7 +1045,7 @@ impl Sandbox {
                         job.written(written);
                     }
                 }
-                CtrlResp::Ready(_) => {}
+                CtrlResp::Ready(_) | CtrlResp::Pong => {}
             }
         }
         // Gone, and what ran in it with it: killed, as far as anything in it can tell.

@@ -320,10 +320,16 @@ fn serve() -> io::Result<()> {
             CtrlReq::Signal { id, signal } => unsafe {
                 libc::kill(-(id as libc::pid_t), signal);
             },
+            // On a thread of its own, so a sync that takes a while -- much written, a slow
+            // disk -- leaves the agent answering pings meanwhile, and its guest is not taken
+            // for silent.
             CtrlReq::Sync => {
-                // SAFETY: `sync` takes nothing.
-                unsafe { libc::sync() };
-                send(&out, &CtrlResp::Synced);
+                let out = Arc::clone(&out);
+                thread::spawn(move || {
+                    // SAFETY: `sync` takes nothing.
+                    unsafe { libc::sync() };
+                    send(&out, &CtrlResp::Synced);
+                });
             }
             // As libkrun's init ends the machine once its workload has.
             // SAFETY: neither takes anything but plain values.
@@ -333,6 +339,7 @@ fn serve() -> io::Result<()> {
             },
             // The machine's process answers it, and never passes it on.
             CtrlReq::Mark { .. } | CtrlReq::Rebase { .. } => {}
+            CtrlReq::Ping => send(&out, &CtrlResp::Pong),
         }
     }
     Ok(())

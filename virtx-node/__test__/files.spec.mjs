@@ -111,7 +111,7 @@ describe('against virtx-stdio', () => {
     const got = await client.getVolume(name)
     assert.ok((await client.listVolume()).some((v) => v.name === name))
     await volume.remove()
-    await assert.rejects(client.getVolume(name), { status: 404 })
+    await assert.rejects(client.getVolume(name), { status: 404, code: 'not_found' })
     await assert.rejects(got.statFile('c.txt'), { status: 404 })
   })
 })

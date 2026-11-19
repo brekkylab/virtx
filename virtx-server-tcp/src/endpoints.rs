@@ -253,6 +253,22 @@ impl Home {
         Ok(sandbox.answer(true))
     }
 
+    /// Cloud only: a sandbox made of `args` under the id `id`, its ports behind `keys` (port
+    /// by key), as one made elsewhere was -- what its client holds naming it here too -- over
+    /// the disk here under that id if there is one, else a new one; booted unless not `booted`.
+    /// For one kept nowhere to [take in](Home::take_in) from: made elsewhere and lost before it
+    /// was kept.
+    pub async fn make_as(
+        &self,
+        args: SandboxCreateArgs,
+        id: String,
+        keys: HashMap<String, u16>,
+        booted: bool,
+    ) -> Result<virtx_core::Sandbox, Refused> {
+        let given = virtx_uvm::sandbox::Given { id, keys };
+        Ok(self.sandboxes.create(args, Some(given), booted).await?)
+    }
+
     /// Let go of sandbox `id` here, as this server lets go of each as it ends: its machine
     /// stopped if it is up, as parking stops it, and its record and disk left under this home's
     /// root, for a server to [take in](Home::take_in) -- another one it is moved to, this one

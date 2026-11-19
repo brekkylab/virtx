@@ -96,6 +96,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Ioctl",
     # A volume's root opened sharing deletion.
     "Win32_Storage_FileSystem",
+    # A machine's process started in a process group of its own.
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

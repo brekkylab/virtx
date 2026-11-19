@@ -204,6 +204,13 @@ impl Machine {
             [args.ctrlin, args.ctrlout, args.ioin, args.ioout],
         )
         .map_err(|e| Error::io("handing the machine its channels", e))?;
+        // A process group of its own, which ignores ctrl-c and is not sent the ctrl-break its
+        // starter's group is: its starter stops it, rather than either ending it mid-write.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(
+            &mut command,
+            windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
+        );
         let mut process = command
             .spawn()
             .map_err(|e| Error::io("starting the machine's process", e))?;

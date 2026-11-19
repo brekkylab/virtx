@@ -162,11 +162,23 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
 /// `router` served on `listener` until this process is interrupted.
 pub async fn run(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(interrupted())
         .await?;
     Ok(())
+}
+
+/// Once this process is interrupted: by ctrl-c, or on Windows by ctrl-break too, the one
+/// console event a process group of its own can be sent.
+async fn interrupted() {
+    #[cfg(windows)]
+    if let Ok(mut ctrl_break) = tokio::signal::windows::ctrl_break() {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = ctrl_break.recv() => {}
+        }
+        return;
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// What a browser at one of the config's `origins` may do here: every method the endpoints

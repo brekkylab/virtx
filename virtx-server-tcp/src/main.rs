@@ -36,9 +36,10 @@ async fn run(config: Config) -> anyhow::Result<()> {
     serve::keep_pruned(Arc::clone(&access));
     let listener = serve::bind(config.listen).await?;
     let served = serve::run(listener, router).await;
+    // Each sandbox parked and kept, for this server started again to know it.
     tokio::task::spawn_blocking(move || {
         for home in access.homes() {
-            home.close_all();
+            home.leave_all();
         }
     })
     .await?;

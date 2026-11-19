@@ -63,6 +63,9 @@ pub enum CtrlReq {
         #[serde(default)]
         eof: bool,
     },
+    /// Answered with [`Pong`](CtrlResp::Pong), from the machine's process to the agent: how it
+    /// hears a guest that is up. The host never sends it.
+    Ping,
 }
 
 /// What the machine's process tells the host.
@@ -90,6 +93,8 @@ pub enum CtrlResp {
     /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: whether
     /// what it asked was written, or never will be, the process or its stdin gone.
     Written { id: u32, written: bool },
+    /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
+    Pong,
 }
 
 /// What the host asks of the guest's files on the I/O channel, each answered with a

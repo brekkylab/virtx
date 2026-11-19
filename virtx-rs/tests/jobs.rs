@@ -40,7 +40,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
         read,
         [
             SandboxJobEntry::Stdout("hi".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
     let whole = common::entries(job.log(None));
@@ -72,10 +72,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     sleep.signal("SIGTERM").wait().unwrap();
     assert_eq!(sleep.complete(false).wait().unwrap(), 128 + 15);
     let ended = common::entries(sleep.log(None)).pop().unwrap().entry;
-    assert_eq!(
-        ended,
-        SandboxJobEntry::End(SandboxJobEnd { code: 128 + 15 })
-    );
+    assert_eq!(ended, SandboxJobEntry::End(SandboxJobEnd::exited(128 + 15)));
     let again = sandbox.job(sleep.id()).wait().unwrap();
     assert!(!again.info().running, "{again:?}");
     again.remove().wait().unwrap();
@@ -109,7 +106,7 @@ fn stdin_written_comes_back_until_it_is_closed() {
         read,
         [
             SandboxJobEntry::Stdout("a".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
     sandbox.remove().wait().unwrap();
@@ -200,7 +197,7 @@ fn a_started_job_is_read_as_its_log() {
         read,
         [
             SandboxJobEntry::Stdout("hi".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
 
@@ -218,7 +215,7 @@ fn a_started_job_is_read_as_its_log() {
         read,
         [
             SandboxJobEntry::Stdout("b".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
 

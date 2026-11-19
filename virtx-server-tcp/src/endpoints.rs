@@ -64,6 +64,8 @@ pub struct Home {
     registry: Arc<RegistryServer>,
     /// What its image jobs -- a pull, a push, a build's base -- connect to registries through.
     registries: Arc<dyn RegistryProxy>,
+    /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first.
+    mirror: Option<Arc<str>>,
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     pub root: PathBuf,
     volumes: VolumeStore,
@@ -96,6 +98,7 @@ impl Home {
             images,
             registry,
             registries: Arc::new(PublicRegistries::default()),
+            mirror: None,
             files: Files::new(volumes.clone()),
             root: root.to_owned(),
             volumes,
@@ -109,9 +112,15 @@ impl Home {
         })
     }
 
-    /// This, its image jobs connecting to registries through `registries`.
-    pub(crate) fn through(mut self, registries: Arc<dyn RegistryProxy>) -> Home {
+    /// This, its image jobs connecting to registries through `registries`, and its anonymous
+    /// pulls of Docker Hub's images going to `mirror` first.
+    pub(crate) fn through(
+        mut self,
+        registries: Arc<dyn RegistryProxy>,
+        mirror: Option<Arc<str>>,
+    ) -> Home {
         self.registries = registries;
+        self.mirror = mirror;
         self
     }
 
@@ -576,13 +585,15 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
+    let mirror = home.mirror.clone();
     image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
         move |report| async move {
-            let registry =
-                RegistryClient::new(images.clone(), args.auth).through(Some(&*registries))?;
+            let registry = RegistryClient::new(images.clone(), args.auth)
+                .with_mirror(mirror.as_deref())
+                .through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
             tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
@@ -613,15 +624,21 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         self::reference(&args.recipe.base)?;
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
-    let registries = Arc::clone(&home.registries);
+    let (registries, mirror) = (Arc::clone(&home.registries), home.mirror.clone());
     let recipe = args.recipe;
     image_job(
         &home,
         ImageJobKind::Build,
         args.reference,
         move |mut report| async move {
-            let (mut image, mut layers, _base) =
-                base(&images, &*registries, &recipe.base, &mut report).await?;
+            let (mut image, mut layers, _base) = base(
+                &images,
+                &*registries,
+                mirror.as_deref(),
+                &recipe.base,
+                &mut report,
+            )
+            .await?;
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
@@ -655,11 +672,12 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
-/// pulled into the store now, anonymously, through `registries`, and left untagged: a build
-/// tags only what it builds.
+/// pulled into the store now, anonymously, through `registries` and from `mirror` first if it
+/// is Docker Hub's, and left untagged: a build tags only what it builds.
 async fn base(
     images: &ImageStore,
     registries: &dyn RegistryProxy,
+    mirror: Option<&str>,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {
@@ -673,6 +691,7 @@ async fn base(
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
             RegistryClient::new(images.clone(), None)
+                .with_mirror(mirror)
                 .through(Some(registries))?
                 .pull(&reference, report)
                 .await?

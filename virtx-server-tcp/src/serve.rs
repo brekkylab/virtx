@@ -880,6 +880,67 @@ mod tests {
         not_connected(&other);
     }
 
+    /// A server given Docker Hub's mirror: a pull and a build's base of Docker Hub's image
+    /// each connect to the mirror first.
+    #[tokio::test]
+    async fn docker_hub_s_images_are_pulled_from_the_mirror_a_server_is_given() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mirror = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = mirror.local_addr().unwrap().to_string();
+        // The mirror: each connection counted, and closed once it has said anything.
+        let reached = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reached);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = mirror.accept().await {
+                if stream.read_u8().await.is_ok() {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        let registries = PublicRegistries::new([&host]).unwrap();
+        let served = Served::spawn_over("mirror", async |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            )
+            .through(Arc::new(registries))
+            .mirroring(Some(&host));
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
+        let client = served.connect();
+        // A name no one has, so that each job fails once it has been to the mirror and to
+        // Docker Hub.
+        let missing = "virtx-test-no-such/image:1";
+
+        let job = client.pull_image(missing, None).await.unwrap();
+        failed(&client, job).await;
+        assert!(
+            reached.swap(0, Ordering::SeqCst) > 0,
+            "the pull did not reach the mirror"
+        );
+
+        let job = client
+            .build_image(Recipe::new(missing), "built:1")
+            .await
+            .unwrap();
+        failed(&client, job).await;
+        assert!(
+            reached.load(Ordering::SeqCst) > 0,
+            "the build did not reach the mirror"
+        );
+    }
+
     /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
     /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
     /// and a path whose segment does not read as one is `400` `invalid`.

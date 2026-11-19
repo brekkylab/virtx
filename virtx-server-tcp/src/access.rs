@@ -92,6 +92,8 @@ pub struct Access {
     making: tokio::sync::Mutex<()>,
     /// What the image jobs of the homes it makes connect to registries through.
     registries: Arc<dyn RegistryProxy>,
+    /// Docker Hub's mirror, which the homes' anonymous pulls of Docker Hub's images go to first.
+    mirror: Option<Arc<str>>,
 }
 
 impl Access {
@@ -115,6 +117,7 @@ impl Access {
             homes: Mutex::default(),
             making: tokio::sync::Mutex::default(),
             registries: Arc::new(PublicRegistries::default()),
+            mirror: None,
         }
     }
 
@@ -125,8 +128,17 @@ impl Access {
         self
     }
 
+    /// This, the anonymous pulls of the homes it makes from here on -- a pull, a build's base --
+    /// of Docker Hub's images going to its mirror at `mirror` first (`mirror.gcr.io`, say),
+    /// through the registry proxy as any other connection. None is no mirror, as an access has
+    /// by default. See [`RegistryClient::with_mirror`](virtx_uvm::RegistryClient::with_mirror).
+    pub fn mirroring(mut self, mirror: Option<&str>) -> Access {
+        self.mirror = mirror.map(Arc::from);
+        self
+    }
+
     /// What `config` says: the users of its issuer, the projects kept at its home, each home in
-    /// its directory, and the registries the homes' image jobs reach. The home of each project
+    /// its directory, the registries the homes' image jobs reach, and Docker Hub's mirror. The home of each project
     /// there is made now, so that its sandboxes left from before are swept as the server starts.
     pub async fn configured(config: &Config) -> anyhow::Result<Access> {
         let store = ProjectStore::new(config.home());
@@ -137,7 +149,8 @@ impl Access {
             store.clone(),
             Arc::new(store),
         )
-        .through(Arc::new(config.registries()?));
+        .through(Arc::new(config.registries()?))
+        .mirroring(config.registry_mirror.as_deref());
         for id in access.store.list()? {
             access.home_of(&id).await?;
         }
@@ -247,7 +260,7 @@ impl Access {
         let Some(made) = self.maker.make(id).await? else {
             return Ok(None);
         };
-        let made = made.through(Arc::clone(&self.registries));
+        let made = made.through(Arc::clone(&self.registries), self.mirror.clone());
         match self.homes.lock().unwrap().entry(*id) {
             // Taken away for its removal while it was made.
             Entry::Occupied(taken) => Ok(taken.get().clone()),

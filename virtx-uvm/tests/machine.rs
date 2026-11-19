@@ -7,6 +7,7 @@
 //! its sandboxes' upper disks and its volumes under a home of its own.
 
 use std::{
+    collections::HashMap,
     env,
     ffi::OsString,
     panic::{self, AssertUnwindSafe},
@@ -70,17 +71,50 @@ impl Home {
         args: &SandboxCreateArgs,
         park_after: Option<Duration>,
     ) -> Arc<Sandbox> {
-        let vm = vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)];
+        self.making(args, park_after, None).await.unwrap()
+    }
+
+    /// Making a sandbox as `args` asks, kept past this process with `keys` where they are
+    /// given.
+    async fn making(
+        &self,
+        args: &SandboxCreateArgs,
+        park_after: Option<Duration>,
+        keys: Option<HashMap<String, u16>>,
+    ) -> Result<Arc<Sandbox>, SandboxError> {
         let sandbox = Sandbox::create(
             &self.images,
             &self.root,
             &self.volumes,
             args,
-            vm,
+            vm(),
             park_after,
+            keys,
         );
-        sandbox.await.unwrap()
+        sandbox.await
     }
+
+    /// The sandboxes kept here, as a server started again over this home knows them.
+    fn kept(&self) -> Vec<Arc<Sandbox>> {
+        Sandbox::kept(&self.images, &self.root, &self.volumes, vm(), None)
+    }
+
+    /// The names under `sandbox/` of what sandboxes keep there.
+    fn left(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("sandbox")) else {
+            return Vec::new();
+        };
+        let mut left: Vec<_> = entries
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        left
+    }
+}
+
+/// This binary, as a machine is spawned of it.
+fn vm() -> Vec<OsString> {
+    vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)]
 }
 
 impl Drop for Home {
@@ -117,6 +151,86 @@ async fn close(sandbox: Arc<Sandbox>) {
     tokio::task::spawn_blocking(move || sandbox.close())
         .await
         .unwrap();
+}
+
+/// Let go of `sandbox` as a server that ends does: it blocks while the guest syncs.
+async fn leave(sandbox: Arc<Sandbox>) {
+    tokio::task::spawn_blocking(move || sandbox.leave())
+        .await
+        .unwrap();
+}
+
+async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote(home: Home) {
+    let keys = HashMap::from([("key".to_owned(), 8080)]);
+    let kept = home.making(&small(), None, Some(keys.clone())).await;
+    let kept = kept.unwrap();
+    let gone = home.sandbox(&small(), None).await;
+    let write = ["sh", "-c", "echo kept > /root/kept"];
+    assert_eq!(run(&kept, &write, None).await.unwrap().1, 0);
+    assert!(
+        home.kept().is_empty(),
+        "one this process knows is no other's"
+    );
+
+    let id = kept.id().to_owned();
+    tokio::join!(leave(kept), leave(gone));
+    let known = home.kept();
+    assert_eq!(known.len(), 1, "the one made without keys goes");
+    let again = &known[0];
+    assert_eq!(again.id(), id);
+    assert!(again.answer().running);
+    assert_eq!(again.keys(), keys);
+    assert!(again.jobs().is_empty());
+    let (lines, _) = run(again, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+
+    // Deleted, it goes with its record.
+    close(Arc::clone(again)).await;
+    assert_eq!(home.left(), Vec::<String>::new());
+}
+
+async fn a_kept_sandbox_whose_machine_ends_on_its_own_has_exited_past_its_server(home: Home) {
+    let sandbox = home.making(&small(), None, Some(HashMap::new())).await;
+    let sandbox = sandbox.unwrap();
+    // A reset, which ends a machine on every arch.
+    let reset = run(&sandbox, &["sh", "-c", "sync; reboot -f"], None);
+    let ended = tokio::time::timeout(Duration::from_secs(60), reset).await;
+    assert_eq!(ended.expect("its machine ended").unwrap().1, 137);
+    assert!(!sandbox.answer().running);
+
+    leave(sandbox).await;
+    let known = home.kept();
+    assert_eq!(known.len(), 1);
+    assert!(!known[0].answer().running);
+    let after = run(&known[0], &["true"], None).await;
+    assert!(matches!(after, Err(SandboxError::Ended)), "{after:?}");
+    close(Arc::clone(&known[0])).await;
+    assert_eq!(home.left(), Vec::<String>::new());
+}
+
+async fn a_kept_sandbox_whose_making_is_cut_short_leaves_nothing(home: Home) {
+    // Cut short at each point of its making, from its disk to its boot.
+    let args = small();
+    for after in [20, 100, 300, 1000] {
+        let making = home.making(&args, None, Some(HashMap::new()));
+        let made = tokio::time::timeout(Duration::from_millis(after), making).await;
+        if let Ok(made) = made {
+            close(made.unwrap()).await;
+            continue;
+        }
+        assert!(home.kept().is_empty(), "cut after {after} ms");
+        // What it made goes once its machine has, as the next server's sweep finds it.
+        let mut left = home.left();
+        for _ in 0..300 {
+            Sandbox::sweep(&home.root);
+            left = home.left();
+            if left.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(left, Vec::<String>::new(), "cut after {after} ms");
+    }
 }
 
 async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Home) {
@@ -920,6 +1034,9 @@ fn main() -> ExitCode {
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
+        a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,
+        a_kept_sandbox_whose_machine_ends_on_its_own_has_exited_past_its_server,
+        a_kept_sandbox_whose_making_is_cut_short_leaves_nothing,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_parked_sandbox_holds_its_volume_against_removal,
         a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote,

@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
 
+use super::record::Record;
 use super::upper::Upper;
 use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
@@ -118,10 +119,17 @@ enum State {
 /// [parked](Sandbox::idle) for want of use, and the processes run in it.
 ///
 /// What it wrote is kept across its machine's stops, on the upper disk it made for itself, until
-/// it is closed; what ran in it is not.
+/// it is closed; what ran in it is not. One made with keys is kept past its process too, with a
+/// record beside its disk: [let go](Sandbox::leave) of as its server ends, it is known again,
+/// parked, by the next server over its root ([`Sandbox::kept`]).
 pub struct Sandbox {
     /// Its upper disk's name, and so its own.
     id: String,
+    /// Where its upper disk and its record are.
+    dir: PathBuf,
+    /// What is kept of it past its process, for one made so: `None` for one that goes with its
+    /// process, and once it is closed.
+    record: Mutex<Option<Record>>,
     /// The image it was made from, as the store names it, and held there for as long as the
     /// sandbox is.
     image: Digest,
@@ -148,6 +156,10 @@ pub struct Sandbox {
     starting: Mutex<VecDeque<Starting>>,
     /// Where its machine's ports are reached.
     ports: Ports,
+    /// How long it is in use by nothing before its machine is parked, `None` for never, and
+    /// whether that is watched for, from its first boot on.
+    park_after: Option<Duration>,
+    watching: AtomicBool,
     /// When it was made, or a job in it or an [`Activity`] on it last ended.
     used: Mutex<Instant>,
     /// How many [`Activity`]s are under way.
@@ -161,6 +173,10 @@ impl Sandbox {
     /// image to an upper disk it makes under `root`, by running `vm` as its machine's process
     /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
     /// nothing for `park_after`.
+    ///
+    /// With `keys`, the port each opens, it is kept past this process: its record is written
+    /// once it has booted, and a making cut short before then leaves nothing. Without, it goes
+    /// with this process.
     pub async fn create(
         images: &ImageStore,
         root: &Path,
@@ -168,6 +184,7 @@ impl Sandbox {
         args: &SandboxCreateArgs,
         vm: Vec<OsString>,
         park_after: Option<Duration>,
+        keys: Option<HashMap<String, u16>>,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
         let mut given = HashSet::new();
@@ -273,6 +290,56 @@ impl Sandbox {
                 images.get_image_origin(&digest)?.unwrap_or(digest)
             }
         };
+        // What it boots as every time: the image by the digest it boots now.
+        let mut args = args.clone();
+        args.image = ImageName::Digest {
+            digest: digest.to_string(),
+        };
+        let (images, root, volumes, made) = (
+            images.clone(),
+            root.to_owned(),
+            volumes.clone(),
+            args.clone(),
+        );
+        let built = move || {
+            let given = (None, None);
+            Sandbox::build(
+                &images, &root, &volumes, &made, digest, vm, park_after, given,
+            )
+        };
+        let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
+        sandbox.wake().await?;
+        if let Some(keys) = keys {
+            let record = Record {
+                args,
+                keys,
+                exited: false,
+            };
+            if let Err(e) = sandbox.keep(record) {
+                let closed = Arc::clone(&sandbox);
+                tokio::task::spawn_blocking(move || closed.close()).await?;
+                return Err(e);
+            }
+        }
+        Ok(sandbox)
+    }
+
+    /// The sandbox `args` makes, of image `digest`, parked: over the upper disk `kept` gives,
+    /// where it gives one, and otherwise over one it makes; exited where the record `kept`
+    /// gives says so. Blocking work: merging the image's layers' metadata, and formatting an
+    /// upper disk.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        args: &SandboxCreateArgs,
+        digest: Digest,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        kept: (Option<Upper>, Option<Record>),
+    ) -> Result<Sandbox, Error> {
+        let (upper, record) = kept;
         let missing = || Error::NotFound(format!("no image here is {digest}"));
         let held_image = images.hold_image(&digest).map_err(|e| match e {
             ImageStoreError::Missing(_) => missing(),
@@ -295,25 +362,26 @@ impl Sandbox {
             })
             .collect::<Result<_, Error>>()?;
 
-        // Merging the layers' metadata, and formatting an upper disk, are blocking work.
-        let store = images.clone();
-        let rootfs = tokio::task::spawn_blocking(move || store.insert_rootfs(&layers)).await??;
+        let rootfs = images.insert_rootfs(&layers)?;
+        let gpu = args.gpu.unwrap_or(false);
         let dir = root.join(SANDBOX);
-        let gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
-        let upper = tokio::task::spawn_blocking(move || {
-            loop {
-                if let Some(upper) = Upper::create(&dir, &pick(|_| false), gib)? {
-                    break Ok::<_, Error>(upper);
+        let upper = match upper {
+            Some(upper) => upper,
+            None => {
+                let gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
+                loop {
+                    if let Some(upper) = Upper::create(&dir, &pick(|_| false), gib)? {
+                        break upper;
+                    }
                 }
             }
-        })
-        .await??;
+        };
         let abin = match args.abins.is_empty() {
             true => None,
             false => {
-                let (dir, names) = (Abin::dir(root), args.abins.clone());
-                let made = move || Abin::create(&dir, &programs, &names);
-                Some(tokio::task::spawn_blocking(made).await??)
+                let programs = vm.first().and_then(|program| Path::new(program).parent());
+                let programs = programs.map(|dir| dir.join(ABIN_HOST)).unwrap_or_default();
+                Some(Abin::create(&Abin::dir(root), &programs, &args.abins)?)
             }
         };
 
@@ -335,8 +403,11 @@ impl Sandbox {
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.clone(),
         };
-        let sandbox = Arc::new(Sandbox {
+        let exited = record.as_ref().is_some_and(|record| record.exited);
+        Ok(Sandbox {
             id: upper.id.clone(),
+            dir,
+            record: Mutex::new(record),
             image: digest,
             _held: held_image,
             abins: args.abins.clone(),
@@ -345,20 +416,20 @@ impl Sandbox {
             volume_holds: Mutex::new(volume_holds),
             config,
             vm,
-            state: Mutex::new(State::Parked),
+            state: Mutex::new(match exited {
+                true => State::Exited,
+                false => State::Parked,
+            }),
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::default(),
             starting: Mutex::default(),
             ports: Ports::default(),
+            park_after,
+            watching: AtomicBool::new(false),
             used: Mutex::new(Instant::now()),
             active: AtomicUsize::new(0),
             writing: Arc::default(),
-        });
-        sandbox.wake().await?;
-        if let Some(after) = park_after {
-            tokio::spawn(park_when_idle(Arc::downgrade(&sandbox), after));
-        }
-        Ok(sandbox)
+        })
     }
 
     /// What it is named by, which no other sandbox over the same root has while it is there.
@@ -375,6 +446,33 @@ impl Sandbox {
             ports: Vec::new(),
             abins: self.abins.clone(),
         }
+    }
+
+    /// The port each of its keys opens, as it was made with them: none for one not kept past
+    /// its process.
+    pub fn keys(&self) -> HashMap<String, u16> {
+        let record = self.record.lock().unwrap();
+        record
+            .as_ref()
+            .map(|record| record.keys.clone())
+            .unwrap_or_default()
+    }
+
+    /// Keep it past this process as `record` says: written beside its upper disk, which is
+    /// left for the next process over its root from now on.
+    fn keep(&self, record: Record) -> Result<(), Error> {
+        let mut kept = self.record.lock().unwrap();
+        let mut upper = self.upper.lock().unwrap();
+        let upper = upper.as_mut().ok_or(Error::Ended)?;
+        record
+            .write(&self.dir, &self.id)
+            .map_err(|source| Error::Io {
+                context: format!("writing sandbox {}'s record", self.id),
+                source,
+            })?;
+        upper.kept = true;
+        *kept = Some(record);
+        Ok(())
     }
 
     /// Start `cmd` in it, beside whatever else runs there, and kill it after `timeout`.
@@ -495,10 +593,24 @@ impl Sandbox {
         Some(self.used.lock().unwrap().elapsed())
     }
 
-    /// Stop its machine for good, and end and remove every job in it, as cancelling each does.
-    /// Blocks while the guest shuts down, and so must not be called on an async runtime's
-    /// thread.
+    /// Stop its machine for good, end and remove every job in it, as cancelling each does, and
+    /// delete its upper disk, with its record if it is kept. Blocks while the guest shuts down,
+    /// and so must not be called on an async runtime's thread.
     pub fn close(&self) {
+        self.end(false);
+    }
+
+    /// Let go of it as its server ends: its machine stopped as parking stops it, every job in
+    /// it ended, and nothing booting it again in this process. One kept past its process is
+    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]); one not
+    /// kept is deleted, as [`close`](Sandbox::close) deletes it. Blocks as `close` does.
+    pub fn leave(&self) {
+        self.end(true);
+    }
+
+    /// Stop its machine for good, and end and remove every job in it; its upper disk deleted,
+    /// or left where it is kept and `leaving`.
+    fn end(&self, leaving: bool) {
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
         // A park or a boot under way finishes first, so its machine is down by the time this
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
@@ -508,7 +620,11 @@ impl Sandbox {
             machine.stop();
         }
         self.volume_holds.lock().unwrap().clear();
-        drop(self.upper.lock().unwrap().take());
+        // Taken first, so that a record of its machine's exit is not written after it is gone.
+        let record = self.record.lock().unwrap().take();
+        if let Some(mut upper) = self.upper.lock().unwrap().take() {
+            upper.kept = leaving && record.is_some();
+        }
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.end(128 + SIGKILL);
@@ -543,6 +659,11 @@ impl Sandbox {
         }
         let (reading, read) = (Arc::clone(self), Arc::clone(&machine));
         std::thread::spawn(move || reading.read(&read));
+        if let Some(after) = self.park_after
+            && !self.watching.swap(true, Ordering::Relaxed)
+        {
+            tokio::spawn(park_when_idle(Arc::downgrade(self), after));
+        }
         Ok(machine)
     }
 
@@ -637,15 +758,25 @@ impl Sandbox {
         // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,
         // nothing ran; otherwise it ended on its own, and nothing boots it again.
         let mut starting = self.starting.lock().unwrap();
-        {
+        let exited = {
             let mut state = self.state.lock().unwrap();
-            if matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine)) {
+            let exited = matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine));
+            if exited {
                 *state = State::Exited;
             }
-        }
+            exited
+        };
         starting.clear();
         for job in running.into_values() {
             job.end(128 + SIGKILL);
+        }
+        drop(starting);
+        // Kept so, past its process: a server started again knows it exited.
+        if exited && let Some(record) = &mut *self.record.lock().unwrap() {
+            record.exited = true;
+            if let Err(e) = record.write(&self.dir, &self.id) {
+                eprintln!("sandbox {}'s exit not kept: {e}", self.id);
+            }
         }
     }
 }
@@ -818,17 +949,58 @@ fn link(from: &Path, to: &Path) -> Result<(), Error> {
 }
 
 impl Sandbox {
-    /// Delete what sandboxes made under `root` by processes that have since ended left: a
-    /// server that was killed closed none of its own.
+    /// Delete what sandboxes made under `root` by processes that have since ended left, but
+    /// those kept past their process: a server that was killed closed none of its own.
     pub fn sweep(root: &Path) {
         Upper::sweep(&root.join(SANDBOX));
         Abin::sweep(&Abin::dir(root));
     }
 
+    /// Each sandbox kept under `root` past the process that made it or last knew it, that no
+    /// other process knows now, known again here: parked, or exited where its machine ended
+    /// on its own, with none of its jobs, and booted again as [`create`](Sandbox::create) says
+    /// for the next that needs it. What sandboxes not kept left is deleted first, as
+    /// [`sweep`](Sandbox::sweep) deletes it. One that cannot be known again -- its record not
+    /// read, or its image or a volume of it gone -- is said and left where it is. Blocking
+    /// work, as making one is.
+    pub fn kept(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+    ) -> Vec<Arc<Sandbox>> {
+        let dir = root.join(SANDBOX);
+        Upper::sweep(&dir);
+        let mut kept = Vec::new();
+        for upper in Upper::kept(&dir) {
+            let id = upper.id.clone();
+            let known = Record::read(&dir, &id).and_then(|record| {
+                let ImageName::Digest { digest } = &record.args.image else {
+                    return Err("its record names its image by no digest".into());
+                };
+                let digest = digest
+                    .parse::<Digest>()
+                    .map_err(|e| format!("{digest}: {e}"))?;
+                let (args, kept) = (record.args.clone(), (Some(upper), Some(record)));
+                let vm = vm.clone();
+                Sandbox::build(images, root, volumes, &args, digest, vm, park_after, kept)
+                    .map_err(|e| e.to_string())
+            });
+            match known {
+                Ok(sandbox) => kept.push(Arc::new(sandbox)),
+                Err(e) => eprintln!("sandbox {id} under {} not known again: {e}", dir.display()),
+            }
+        }
+        Abin::sweep(&Abin::dir(root));
+        kept
+    }
+
     /// Whether a sandbox, of this process or another, lives under `root`: one holds an upper
-    /// disk there from before its machine boots until it is closed.
+    /// disk there from before its machine boots until it is closed, and one kept past its
+    /// process lives there until it is closed.
     pub fn lives_under(root: &Path) -> bool {
-        Upper::held(&root.join(SANDBOX))
+        Upper::lives(&root.join(SANDBOX))
     }
 }
 

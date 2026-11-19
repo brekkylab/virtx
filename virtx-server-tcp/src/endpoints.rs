@@ -82,16 +82,36 @@ pub struct Home {
 
 impl Home {
     /// The images in `images`, which `registry` answers for, and the volumes and the
-    /// sandboxes' upper disks under `root`. Its image jobs connect to registries on public
+    /// sandboxes' upper disks under `root`, with each sandbox a server before it kept there
+    /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
-    /// is made for says otherwise ([`Access::through`]).
+    /// is made for says otherwise ([`Access::through`]). Blocking work, as knowing each
+    /// sandbox again is.
     pub fn new(
         images: ImageStore,
         registry: Arc<RegistryServer>,
         root: &Path,
     ) -> anyhow::Result<Home> {
-        Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
+        let vm: Vec<OsString> = vec![
+            std::env::current_exe()?.into(),
+            crate::serve::MACHINE_SUBCOMMAND.into(),
+        ];
+        let kept = Sandbox::kept(&images, root, &volumes, vm.clone(), park_after());
+        let sandboxes = kept
+            .into_iter()
+            .map(|sandbox| {
+                let capabilities = sandbox.keys();
+                let id = sandbox.id().to_owned();
+                (
+                    id,
+                    Held {
+                        sandbox,
+                        capabilities,
+                    },
+                )
+            })
+            .collect();
         Ok(Home {
             images,
             registry,
@@ -99,11 +119,8 @@ impl Home {
             files: Files::new(volumes.clone()),
             root: root.to_owned(),
             volumes,
-            vm: vec![
-                std::env::current_exe()?.into(),
-                crate::serve::MACHINE_SUBCOMMAND.into(),
-            ],
-            sandboxes: Mutex::default(),
+            vm,
+            sandboxes: Mutex::new(sandboxes),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
@@ -166,6 +183,27 @@ impl Home {
         std::thread::scope(|scope| {
             for sandbox in &closed {
                 scope.spawn(|| sandbox.close());
+            }
+        });
+    }
+
+    /// Cancel every image job here, and let go of every sandbox as this server ends, side by
+    /// side, each kept for the next server over this home ([`Sandbox::leave`]): blocks until
+    /// each machine has stopped and synced what it wrote.
+    pub fn leave_all(&self) {
+        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
+            cancel(&job, &task);
+        }
+        let left: Vec<_> = self
+            .sandboxes
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, held)| held.sandbox)
+            .collect();
+        std::thread::scope(|scope| {
+            for sandbox in &left {
+                scope.spawn(|| sandbox.leave());
             }
         });
     }
@@ -861,19 +899,11 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-    let sandbox = Sandbox::create(
-        &home.images,
-        &home.root,
-        &home.volumes,
-        &args,
-        home.vm.clone(),
-        park_after(),
-    )
-    .await?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
-    // what reaches this server from outside is not this server's to know.
+    // what reaches this server from outside is not this server's to know. Kept with the
+    // sandbox, so that its URLs reach it across this server's restart.
     let mut opened = Vec::new();
     let mut capabilities = HashMap::new();
     for &port in &args.ports {
@@ -888,6 +918,16 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         });
         capabilities.insert(capability, port);
     }
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        home.vm.clone(),
+        park_after(),
+        Some(capabilities.clone()),
+    )
+    .await?;
 
     let id = sandbox.id().to_owned();
     let held = Held {

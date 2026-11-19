@@ -292,7 +292,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
-- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again.
+- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM the server stopped, as below, is `true`.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
@@ -303,6 +303,9 @@ One whose VM has exited is still held until then.
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
 Everything written to its root filesystem is kept across that, as it is for as long as the sandbox lives; what was left running in it, apart from a job, is not.
 A connection to one of its ports while its VM is stopped is closed, as one to a port nothing listens on is, and does not boot it.
+
+A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
+It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
 
 #### Ports
 
@@ -350,6 +353,7 @@ Lines of one stream are in the order the process wrote them; lines of the two, i
 
 The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
+A sandbox [kept](#sandboxes) across its server's end has none of its jobs once the server is started again.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

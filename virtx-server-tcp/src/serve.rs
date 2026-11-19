@@ -1087,6 +1087,76 @@ mod tests {
         assert_eq!(status(client.create_sandbox(&args).await), 404);
     }
 
+    /// What a server before this one kept of a project's sandboxes is known again as the project
+    /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
+    /// was made with; what no sandbox keeps is deleted. No machine boots for it.
+    #[tokio::test]
+    async fn a_project_s_sandboxes_are_kept_across_a_restart() {
+        let served = Served::spawn("kept").await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let kept = [
+            ("kept", json!({ capability.clone(): 8080 }), false),
+            ("ended", json!({}), true),
+        ];
+        for (id, keys, exited) in kept {
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let image = json!({ "type": "digest", "digest": digest });
+            let args = json!({ "image": image, "ports": [8080] });
+            let record = json!({ "args": args, "keys": keys, "exited": exited });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        // What a making cut short before its record leaves, and a record whose disk is gone.
+        std::fs::write(dir.join("cut.ext4"), b"").unwrap();
+        std::fs::write(dir.join("gone.json"), b"{}").unwrap();
+
+        let (status, listed) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+        listed.sort_by_key(|sandbox| sandbox["id"].as_str().unwrap().to_owned());
+        assert_eq!(
+            listed,
+            [
+                json!({ "id": "ended", "image": digest, "running": false }),
+                json!({ "id": "kept", "image": digest, "running": true }),
+            ]
+        );
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let kept_files =
+            |id: &str| [".ext4", ".ext4.lock", ".json"].map(|end| format!("{id}{end}"));
+        assert_eq!(left, [kept_files("ended"), kept_files("kept")].concat());
+
+        // Its port's URL reaches it as it did: parked, nothing listens there.
+        let port = served.port_url(&format!("ports/{capability}"));
+        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
+
+        let (status, _) = served
+            .send("DELETE", "sandboxes/kept", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            kept_files("kept")
+                .iter()
+                .all(|file| !dir.join(file).exists())
+        );
+        let (status, _) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            Served::open(&port, Some("virtx.tcp")).await.err(),
+            Some(404)
+        );
+    }
+
     /// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.
     #[tokio::test]
     async fn a_port_is_a_websocket_behind_its_capability() {

@@ -72,7 +72,8 @@ impl Homes for ProjectStore {
             let dir = self.path(id);
             let images = ImageStore::new(dir.join("images"))?;
             let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
-            Ok(Some(Home::new(images, registry, &dir)?))
+            let made = move || Home::new(images, registry, &dir);
+            Ok(Some(tokio::task::spawn_blocking(made).await??))
         })
     }
 }

@@ -688,6 +688,47 @@ async fn a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote(home: H
     close(sandbox).await;
 }
 
+/// A `PATCH` of a sandbox's file is not allowed, `405` with the `Allow` an `OPTIONS` of it
+/// answers, and leaves the file as it was; a directory is not read with a `GET`.
+async fn a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it(home: Home) {
+    use http_body_util::BodyExt as _;
+    let sandbox = home.sandbox(&small(), None).await;
+    let files = Files::new(home.volumes.clone());
+    let sent = async |method: Method, path: &str, body: &'static str| {
+        let request = Request::builder()
+            .method(method)
+            .uri(format!("/sandboxes/sb/files/{path}"))
+            .body(Body::from(body))
+            .unwrap();
+        let machine = sandbox.machine().await.unwrap();
+        let response = files
+            .sandbox("sb", machine, sandbox.activity(), request)
+            .await;
+        let (status, allow) = (
+            response.status(),
+            response.headers().get(header::ALLOW).cloned(),
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, allow, body)
+    };
+
+    let (status, _, _) = sent(Method::PUT, "tmp/a.txt", "0123456789").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, allow, _) = sent(Method::OPTIONS, "tmp/a.txt", "").await;
+    let allow = allow.expect("OPTIONS answers Allow");
+    assert!(!allow.to_str().unwrap().contains("PATCH"), "{allow:?}");
+    let (status, refused, body) = sent(Method::PATCH, "tmp/a.txt", "YY").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(refused, Some(allow));
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "method_not_allowed", "{body}");
+    let (_, _, read) = sent(Method::GET, "tmp/a.txt", "").await;
+    assert_eq!(read, "0123456789");
+    let (status, _, _) = sent(Method::GET, "", "").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "GET of a directory");
+    close(sandbox).await;
+}
+
 /// Two conditional writes to one file in a sandbox at once: the second, sent while the first is
 /// still sending its body, is not held up by it and lands, and the first, checked as it lands
 /// against what the second wrote, is refused `412`. For `If-None-Match: *` to a new file, and
@@ -1024,6 +1065,7 @@ fn main() -> ExitCode {
         a_sandbox_mounting_many_volumes_reaches_each,
         a_parked_sandbox_holds_its_volume_against_removal,
         a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote,
+        a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it,
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);

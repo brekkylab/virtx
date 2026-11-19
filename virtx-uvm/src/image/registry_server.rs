@@ -458,14 +458,27 @@ impl RegistryServer {
     }
 
     /// A tag takes only itself away; a digest takes every tag naming its image in this
-    /// repository, and the image too once no tag in any other names it.
+    /// repository, and the image too once no tag in any other names it. Either is refused
+    /// `409 DENIED`, with nothing removed, where it would leave an image a sandbox or a build
+    /// stands on named by no tag.
     fn delete_manifest(&self, name: &str, reference: &str) -> Result<Response<Body>> {
         let unknown = || refusal(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", reference);
+        let in_use = |image: &Digest| {
+            refusal(
+                StatusCode::CONFLICT,
+                "DENIED",
+                format!(
+                    "in use: a sandbox or a build stands on {image}, and no other tag names it"
+                ),
+            )
+        };
         if !reference.contains(':') {
-            self.store
-                .remove_tag(&tagged(name, reference)?)?
-                .ok_or_else(unknown)?;
-            return Ok(empty(StatusCode::ACCEPTED));
+            return match self.store.remove_tag(&tagged(name, reference)?) {
+                Ok(Some(_)) => Ok(empty(StatusCode::ACCEPTED)),
+                Ok(None) => Err(unknown()),
+                Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
+                Err(e) => Err(e.into()),
+            };
         }
         let digest = reference
             .parse::<Digest>()
@@ -484,19 +497,14 @@ impl RegistryServer {
         if tags_here.is_empty() && !tags_elsewhere.is_empty() {
             return Err(unknown());
         }
-        for (tag, _) in tags_here {
-            self.store.remove_tag(&tag)?;
+        match self
+            .store
+            .remove_image_tagged(&digest, |tag| repository(tag) == here)
+        {
+            Ok(_) => Ok(empty(StatusCode::ACCEPTED)),
+            Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
+            Err(e) => Err(e.into()),
         }
-        if !tags_elsewhere.is_empty() {
-            return Ok(empty(StatusCode::ACCEPTED));
-        }
-        self.store.remove_image(&digest).map_err(|e| match e {
-            store::Error::InUse(..) => {
-                refusal(StatusCode::METHOD_NOT_ALLOWED, "DENIED", e.to_string())
-            }
-            e => e.into(),
-        })?;
-        Ok(empty(StatusCode::ACCEPTED))
     }
 
     /// A layer, streamed from its file, or a config.
@@ -1269,6 +1277,63 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND, "not alpine's any more");
         let delete = format!("/images/v2/team/app/manifests/{image}");
         let (status, _, _) = send(server, Method::DELETE, &delete, b"").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(store.get_image(&image).unwrap().is_none());
+    }
+
+    /// An image a sandbox stands on is not left named by no tag: its last tag, or its digest,
+    /// is refused `409 DENIED` with every tag kept; another tag of it may go. Let go, it may be
+    /// removed.
+    #[tokio::test]
+    async fn an_image_a_sandbox_stands_on_keeps_its_last_tag() {
+        let scratch = Scratch::new("held");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let image = store
+            .insert_image(&ImageConfiguration::default(), &[layer])
+            .unwrap();
+        for tag in ["alpine:3.21", "alpine:copy", "alpine:other"] {
+            store.insert_tag(&tag.parse().unwrap(), &image).unwrap();
+        }
+        let hold = store.hold_image(&image).unwrap();
+        let (status, _, _) = send(
+            server,
+            Method::DELETE,
+            "/images/v2/alpine/manifests/copy",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "another tag names it still");
+
+        let by_digest = format!("/images/v2/alpine/manifests/{image}");
+        let (status, _, body) = send(server, Method::DELETE, &by_digest, b"").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["errors"][0]["code"], "DENIED", "{body}");
+        assert_eq!(store.tags().unwrap().len(), 2, "its tags kept");
+
+        let (status, _, _) = send(
+            server,
+            Method::DELETE,
+            "/images/v2/alpine/manifests/other",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (status, _, body) = send(
+            server,
+            Method::DELETE,
+            "/images/v2/alpine/manifests/3.21",
+            b"",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["errors"][0]["code"], "DENIED", "{body}");
+        assert_eq!(store.tags().unwrap().len(), 1, "its last tag kept");
+
+        drop(hold);
+        let (status, _, _) = send(server, Method::DELETE, &by_digest, b"").await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert!(store.get_image(&image).unwrap().is_none());
     }

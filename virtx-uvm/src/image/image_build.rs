@@ -174,7 +174,7 @@ pub async fn build_step(
         volumes: Vec::new(),
         abin: None,
         ports: Vec::new(),
-        chunks: None,
+        sandbox_disk: None,
     };
     let vm = vm.to_vec();
     let machine =

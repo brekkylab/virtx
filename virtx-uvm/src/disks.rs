@@ -1,22 +1,37 @@
-//! How a snapshot's disk is laid out past its file, and how its machine opens it: here, a file
-//! and nothing else, which libkrun reads and writes itself. An embedder that keeps more -- what
-//! each part of the disk was restored from, fetched only as it is first read (virtx cloud's
-//! lazy disks) -- says so with [`set_disks`], once, before anything here runs: in the server's
-//! process and in each machine's, which is the same binary
-//! ([`become_machine_if_spawned`](crate::enter_machine)).
+//! What a sandbox's disk is past its file, and how its machine reads and writes it: here, a
+//! file and nothing else, which libkrun reads and writes itself. An embedder that keeps more --
+//! a disk whose data is fetched from elsewhere only as the guest first reads it (virtx cloud's
+//! lazy disks), what each part of it was restored from -- says so with [`set_disks`], once,
+//! before anything here runs: in the server's process and in each machine's, which is the same
+//! binary ([`enter_machine`](crate::enter_machine)).
+//!
+//! A build's own disk, made and thrown away with its step, is a file whatever is set.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 /// The storage a machine's block device reads and writes through, in place of its file.
 pub use krun::DynStorage;
 
-/// What a snapshot's disk is, past its file.
+/// Anything the server's process holds for a machine's disk until the machine is down.
+pub type Held = Box<dyn Send + Sync>;
+
+/// What a sandbox's disk is, past its file.
 pub trait Disks: Send + Sync {
-    /// The disk at `disk` was written again whole, or removed: whatever beside it says what it
-    /// is goes with it.
+    /// In the server's process, as a sandbox's machine is about to boot over the disk at `disk`:
+    /// what the machine fetches the disk's data from while it runs -- a path it is given, such
+    /// as a socket -- and what answers there, held until the machine is down. `None` for a disk
+    /// all in its file, or one a server's [`Hooks::chunks`](crate::sandbox::Hooks::chunks)
+    /// serves.
+    fn serve(&self, disk: &Path) -> io::Result<Option<(PathBuf, Held)>> {
+        let _ = disk;
+        Ok(None)
+    }
+
+    /// In the server's process: the disk at `disk` written again whole, or removed with its
+    /// sandbox, or as one left over: whatever beside it says what it is goes with it.
     fn forget(&self, disk: &Path) -> io::Result<()> {
         let _ = disk;
         Ok(())
@@ -36,9 +51,9 @@ pub trait Disks: Send + Sync {
         Ok(())
     }
 
-    /// The disk at `disk`, a snapshot's, opened in its machine's process as its block device is
-    /// to read it: `None` for its file as it is. `source` is what the server said the machine
-    /// fetches from, as [`Hooks::chunks`](crate::sandbox::Hooks::chunks) answered.
+    /// In the machine's process: the disk at `disk` opened as its block device is to read and
+    /// write it, `source` being what [`serve`](Disks::serve), or the server's
+    /// [`Hooks::chunks`](crate::sandbox::Hooks::chunks), answered. `None` for its file as it is.
     fn open(&self, disk: &Path, source: Option<&Path>) -> io::Result<Option<Arc<dyn MachineDisk>>> {
         let _ = (disk, source);
         Ok(None)
@@ -125,7 +140,7 @@ impl Seek for Image {
     }
 }
 
-/// A snapshot's disk as its machine has it open ([`Disks::open`]).
+/// A sandbox's disk as its machine has it open ([`Disks::open`]).
 pub trait MachineDisk: Send + Sync {
     /// What its block device reads and writes through.
     fn storage(&self) -> Box<dyn DynStorage>;
@@ -134,7 +149,7 @@ pub trait MachineDisk: Send + Sync {
     /// returns once there is nothing.
     fn background(&self) {}
 
-    /// Its machine booted: its agent is ready.
+    /// Its machine booted: the guest's agent is ready.
     fn booted(&self) {}
 
     /// Marked `mark`, as it is about to be copied while its machine runs
@@ -159,13 +174,13 @@ impl Disks for Files {}
 
 static DISKS: OnceLock<Arc<dyn Disks>> = OnceLock::new();
 
-/// Snapshots' disks are `disks` in this process, from now on: said once, before any is made or
+/// Sandboxes' disks are `disks` in this process, from now on: said once, before any is made or
 /// opened. A second is ignored.
 pub fn set_disks(disks: Arc<dyn Disks>) {
     let _ = DISKS.set(disks);
 }
 
-/// What snapshots' disks are in this process.
+/// What sandboxes' disks are in this process.
 pub(crate) fn disks() -> &'static dyn Disks {
     DISKS.get_or_init(|| Arc::new(Files)).as_ref()
 }

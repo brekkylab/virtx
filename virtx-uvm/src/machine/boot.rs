@@ -391,11 +391,12 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     lower.set_read_only(true);
 
     let upper_path = utf8(&upper)?;
-    // A snapshot's disk as the server's disks have it opened ([`crate::disks`]): read and
-    // written through what they make of it, if anything, rather than as the file is.
-    let opened = match &machine.snapshot {
-        Some(_) => crate::disks::disks()
-            .open(&upper, machine.chunks.as_deref())
+    // A sandbox's disk as the embedder's disks open it ([`crate::disks`]): read and written
+    // through what they make of it, if anything, rather than as the file is. A build's is its
+    // file.
+    let opened = match &machine.sandbox_disk {
+        Some(disk) => crate::disks::disks()
+            .open(&upper, disk.source.as_deref())
             .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
         None => None,
     };

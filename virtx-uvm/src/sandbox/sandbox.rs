@@ -18,8 +18,8 @@ use super::record::{Record, Resized};
 use super::{Error, Job};
 use crate::machine::wire::CtrlResp;
 use crate::{
-    ImageStore, Machine, MachineConfig, MachineSpec, Network, Ports, SnapshotError, SnapshotLock,
-    SnapshotStore, VolumeMount, VolumeStore,
+    ImageStore, Machine, MachineConfig, MachineSpec, Network, Ports, SandboxDisk, SnapshotError,
+    SnapshotLock, SnapshotStore, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -489,12 +489,22 @@ impl Sandbox {
         let ports = (self.record.opened.lock().unwrap().iter())
             .map(|open| open.port)
             .collect();
-        let chunks = match shared.hooks.chunks(&id, &disk.path)? {
+        // What its disk is fetched from while its machine runs, if the server's hooks or the
+        // embedder's disks say: what serves it held until the machine is down.
+        let (chunks, served) = match shared.hooks.chunks(&id, &disk.path)? {
             Some((socket, serving)) => {
                 held.push(serving);
-                Some(socket)
+                (Some(socket), None)
             }
-            None => None,
+            None => match crate::disks::disks().serve(&disk.path) {
+                Ok(Some((source, serving))) => (Some(source), Some(serving)),
+                Ok(None) => (None, None),
+                Err(e) => {
+                    return Err(Error::Failed(format!(
+                        "serving the disk of sandbox {id}: {e}"
+                    )));
+                }
+            },
         };
         let lazily = chunks.is_some();
         // The programs it was made with, as `/abin`: the same directory for every sandbox here
@@ -518,12 +528,13 @@ impl Sandbox {
             volumes,
             abin,
             ports,
-            chunks,
+            sandbox_disk: Some(SandboxDisk { source: chunks }),
         };
 
         // Booting is blocking work, until the guest takes commands.
         let vm = shared.vm.clone();
         let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
+        let machine = machine.holding(served);
         shared.hooks.booted(&id, began.elapsed(), lazily);
         let run = Arc::new(Run {
             machine: Arc::new(machine),

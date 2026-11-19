@@ -66,7 +66,7 @@ mod tests {
     //! credentials sent with each request.
 
     use ::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION};
-    use axum::{Json, Router, response::IntoResponse as _, routing::get};
+    use axum::{Json, Router, routing::get};
     use hyper::service::Service as _;
     use hyper_util::service::TowerToHyperService;
     use tokio::net::TcpListener;
@@ -311,9 +311,10 @@ mod tests {
         served.await.unwrap().unwrap();
     }
 
-    /// A job's log whose connection breaks after `upto` entries the first time it is asked for, and
-    /// is answered whole after the `Last-Event-ID` the next: each request's `Last-Event-ID` kept.
-    fn breaking_log(asked: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>) -> Router {
+    /// An exec answered with its log, whose connection breaks after its first entry, and the
+    /// job's log, answered whole after the `Last-Event-ID` it is sent -- broken too the first time
+    /// it is asked for, unless `asked` holds something: each request's `Last-Event-ID` kept.
+    fn breaking_exec(asked: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>) -> Router {
         use axum::{
             body::Body,
             routing::{get, post},
@@ -381,22 +382,15 @@ mod tests {
             .route("/sandboxes/s/jobs/exec/", post(exec))
     }
 
+    /// An exec answered with its log, whose connection breaks, is read on from the job's log
+    /// after its last entry.
     #[tokio::test]
-    async fn a_job_s_log_whose_connection_breaks_is_read_on_after_its_last_entry() {
+    async fn an_exec_answered_with_its_log_is_read_on_after_its_last_entry() {
         use futures_util::TryStreamExt as _;
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let url = serve(breaking_log(asked.clone())).await;
-        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
-        let read: Vec<_> = crate::sandbox::client::job_log(&client, "s", "j", None)
-            .try_collect()
-            .await
-            .unwrap();
-        assert_eq!(read.iter().map(|e| e.id).collect::<Vec<_>>(), [1, 2, 3]);
-        assert_eq!(*asked.lock().unwrap(), [None, Some("1".to_owned())]);
-
-        // An exec answered with its log: read on from the job's log as well.
-        asked.lock().unwrap().clear();
         asked.lock().unwrap().push(None); // the job's log, asked for next, answered whole
+        let url = serve(breaking_exec(asked.clone())).await;
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
         let args = crate::sandbox::SandboxExecArgs::new(["x"]);
         let read: Vec<_> = crate::sandbox::client::exec_log(&client, "s", &args)
             .try_collect()
@@ -407,210 +401,6 @@ mod tests {
             asked.lock().unwrap()[1..],
             [Some("exec".to_owned()), Some("1".to_owned())]
         );
-    }
-
-    /// A `429` for a quota the caller is past -- sandboxes open -- is answered at once, as waiting
-    /// frees none of it; the rate of requests, which frees up by itself, is waited out and asked
-    /// again.
-    #[tokio::test]
-    async fn a_quota_past_is_answered_at_once_and_the_rate_of_requests_waited_out() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicU32, Ordering},
-        };
-        let asked = Arc::new(AtomicU32::new(0));
-        let router = Router::new()
-            .route(
-                "/quota",
-                axum::routing::get(async || {
-                    (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        [(::http::header::RETRY_AFTER, "30")],
-                        r#"{"error":{"code":"quota","message":"the organization has 3 sandboxes open","reason":"sandboxes"}}"#,
-                    )
-                }),
-            )
-            .route(
-                "/rate",
-                axum::routing::get(async |axum::extract::State(asked): axum::extract::State<Arc<AtomicU32>>| {
-                    if asked.fetch_add(1, Ordering::SeqCst) == 0 {
-                        return (
-                            StatusCode::TOO_MANY_REQUESTS,
-                            [(::http::header::RETRY_AFTER, "1")],
-                            r#"{"error":{"code":"quota","message":"past the rate","reason":"requests"}}"#,
-                        )
-                            .into_response();
-                    }
-                    "\"answered\"".into_response()
-                }),
-            )
-            .with_state(asked.clone());
-        let url = serve(router).await;
-        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
-
-        let error = http::get::<String>(&client, "/quota").await.unwrap_err();
-        assert_eq!(error.code(), Some("quota"), "{error:?}");
-        assert!(matches!(error, Error::Status(429, _)), "{error:?}");
-
-        assert_eq!(
-            http::get::<String>(&client, "/rate").await.unwrap(),
-            "answered"
-        );
-        assert_eq!(
-            asked.load(Ordering::SeqCst),
-            2,
-            "asked again once the rate allowed"
-        );
-    }
-
-    /// A `503` to a request that makes something is sent again only where it says nothing was
-    /// made -- `capacity`, no room found -- since any other may have come after the making began
-    /// (issue #164): a create the server answered `unavailable` once its node stopped answering
-    /// is not sent again to make a second sandbox. A read is sent again as before.
-    #[tokio::test]
-    async fn a_making_turned_away_is_sent_again_only_where_nothing_was_made() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicU32, Ordering},
-        };
-        type Asked = axum::extract::State<Arc<[AtomicU32; 3]>>;
-        let asked: Arc<[AtomicU32; 3]> = Arc::default();
-        let turned_away = |code: &'static str| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(::http::header::RETRY_AFTER, "1")],
-                format!(r#"{{"error":{{"code":"{code}","message":"not now"}}}}"#),
-            )
-                .into_response()
-        };
-        let router = Router::new()
-            .route(
-                "/made",
-                axum::routing::post(async move |axum::extract::State(asked): Asked| {
-                    asked[0].fetch_add(1, Ordering::SeqCst);
-                    turned_away("unavailable")
-                }),
-            )
-            .route(
-                "/room",
-                axum::routing::post(async move |axum::extract::State(asked): Asked| {
-                    match asked[1].fetch_add(1, Ordering::SeqCst) {
-                        0 => turned_away("capacity"),
-                        _ => "\"made\"".into_response(),
-                    }
-                }),
-            )
-            .route(
-                "/read",
-                axum::routing::get(async move |axum::extract::State(asked): Asked| {
-                    match asked[2].fetch_add(1, Ordering::SeqCst) {
-                        0 => turned_away("unavailable"),
-                        _ => "\"read\"".into_response(),
-                    }
-                }),
-            )
-            .with_state(asked.clone());
-        let url = serve(router).await;
-        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
-
-        let error = http::post::<String>(&client, "/made", &serde_json::json!({}))
-            .await
-            .unwrap_err();
-        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
-        assert_eq!(asked[0].load(Ordering::SeqCst), 1, "made once at most");
-        assert_eq!(
-            http::post::<String>(&client, "/room", &serde_json::json!({}))
-                .await
-                .unwrap(),
-            "made"
-        );
-        assert_eq!(asked[1].load(Ordering::SeqCst), 2, "no room: asked again");
-        assert_eq!(http::get::<String>(&client, "/read").await.unwrap(), "read");
-        assert_eq!(asked[2].load(Ordering::SeqCst), 2, "a read: asked again");
-    }
-
-    /// A log whose connection breaks is read on after its last entry even where the first ask
-    /// again meets a proxy's own `502` page, not virtx's words -- a server gone for a moment, as
-    /// an empty `502` is (issue #162).
-    #[tokio::test]
-    async fn a_log_is_read_on_past_a_proxy_s_page_for_a_server_gone_for_a_moment() {
-        use futures_util::StreamExt as _;
-        use std::sync::{
-            Arc,
-            atomic::{AtomicU32, Ordering},
-        };
-        let asked = Arc::new(AtomicU32::new(0));
-        let router = Router::new()
-            .route(
-                "/log",
-                get(
-                    async |axum::extract::State(asked): axum::extract::State<Arc<AtomicU32>>,
-                           headers: HeaderMap| {
-                        let events = |lines: &[(u64, &str)]| -> String {
-                            lines
-                                .iter()
-                                .map(|(id, out)| {
-                                    format!("id: {id}\ndata: {{\"stdout\":\"{out}\"}}\n\n")
-                                })
-                                .collect()
-                        };
-                        match asked.fetch_add(1, Ordering::SeqCst) {
-                            // Two entries, then the connection broken.
-                            0 => {
-                                let first = bytes::Bytes::from(events(&[(1, "a"), (2, "b")]));
-                                // Cut a moment after: what was sent is read first.
-                                let body = futures_util::stream::iter([Ok(first)]).chain(
-                                    futures_util::stream::once(async {
-                                        tokio::time::sleep(std::time::Duration::from_millis(200))
-                                            .await;
-                                        Err(std::io::Error::other("cut"))
-                                    }),
-                                );
-                                (
-                                    [(::http::header::CONTENT_TYPE, "text/event-stream")],
-                                    axum::body::Body::from_stream(body),
-                                )
-                                    .into_response()
-                            }
-                            // A proxy in front of it, for the moment its server is gone.
-                            1 => (
-                                StatusCode::BAD_GATEWAY,
-                                [(::http::header::CONTENT_TYPE, "text/html")],
-                                "<html><body><h1>502 Bad Gateway</h1></body></html>",
-                            )
-                                .into_response(),
-                            _ => {
-                                assert_eq!(
-                                    headers.get("last-event-id").and_then(|v| v.to_str().ok()),
-                                    Some("2")
-                                );
-                                (
-                                    [(::http::header::CONTENT_TYPE, "text/event-stream")],
-                                    events(&[(3, "c")]),
-                                )
-                                    .into_response()
-                            }
-                        }
-                    },
-                ),
-            )
-            .with_state(asked.clone());
-        let url = serve(router).await;
-        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
-        let read: Vec<_> =
-            super::sse::client::log::<crate::SandboxJobEntry>(&client, "/log".into(), None)
-                .collect()
-                .await;
-        let read: Vec<_> = read.into_iter().map(|e| e.map(|e| e.id)).collect();
-        assert_eq!(
-            read.iter()
-                .filter_map(|e| e.as_ref().ok())
-                .collect::<Vec<_>>(),
-            [&1, &2, &3],
-            "{read:?}"
-        );
-        assert!(read.iter().all(Result::is_ok), "{read:?}");
-        assert_eq!(asked.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
@@ -683,5 +473,268 @@ mod tests {
             assert!(matches!(error, Error::Client(_)), "{error:?}");
             assert_eq!(*seen.lock().unwrap(), [] as [&str; 0]);
         }
+    }
+
+    /// Counts each request to a route, and answers the `n`th (from `0`) with `answer(n)`.
+    fn counted(
+        asked: &std::sync::Arc<std::sync::atomic::AtomicU32>,
+        answer: impl Fn(u32) -> axum::response::Response + Clone + Send + Sync + 'static,
+    ) -> axum::routing::MethodRouter {
+        let asked = asked.clone();
+        axum::routing::any(move || {
+            let n = asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = answer.clone();
+            async move { answer(n) }
+        })
+    }
+
+    /// A refusal in the protocol's shape: `status`, `error` its members, `Retry-After` if any.
+    fn turned_away(
+        status: StatusCode,
+        error: serde_json::Value,
+        retry_after: Option<&str>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        let mut response = (status, Json(serde_json::json!({ "error": error }))).into_response();
+        if let Some(seconds) = retry_after {
+            response.headers_mut().insert(
+                ::http::header::RETRY_AFTER,
+                HeaderValue::from_str(seconds).unwrap(),
+            );
+        }
+        response
+    }
+
+    /// A request the server turns away for now -- a proxy's `503` page, the rate of requests
+    /// past -- is sent again after its `Retry-After`, or a wait of its own, until it is answered.
+    #[tokio::test]
+    async fn a_request_turned_away_for_now_is_sent_again_until_it_is_answered() {
+        use axum::response::IntoResponse as _;
+        use std::sync::{Arc, atomic::Ordering};
+        let (read, written) = (Arc::default(), Arc::default());
+        let router = Router::new()
+            .route(
+                "/read",
+                counted(&read, |n| match n {
+                    0 => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [(::http::header::CONTENT_TYPE, "text/html")],
+                        "<html>503</html>",
+                    )
+                        .into_response(),
+                    1 => turned_away(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        serde_json::json!({"code": "quota", "message": "slow down", "reason": "requests"}),
+                        Some("1"),
+                    ),
+                    _ => Json("read").into_response(),
+                }),
+            )
+            .route(
+                "/written",
+                counted(&written, |n| match n {
+                    0 => turned_away(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"code": "unavailable", "message": "not now"}),
+                        Some("1"),
+                    ),
+                    _ => Json("written").into_response(),
+                }),
+            );
+        let client = piped(router);
+        assert_eq!(http::get::<String>(&client, "/read").await.unwrap(), "read");
+        assert_eq!(read.load(Ordering::SeqCst), 3);
+        // A `PUT` makes nothing a second sending makes again.
+        let body = serde_json::json!({});
+        assert_eq!(
+            http::put::<String>(&client, "/written", &body)
+                .await
+                .unwrap(),
+            "written"
+        );
+        assert_eq!(written.load(Ordering::SeqCst), 2);
+    }
+
+    /// A `429` for a quota the caller is past -- sandboxes open -- is answered at once, as
+    /// waiting frees none of it, with its code; the rate of requests, which frees up by itself,
+    /// is waited out.
+    #[tokio::test]
+    async fn a_quota_past_is_answered_at_once() {
+        use std::sync::{Arc, atomic::Ordering};
+        let asked = Arc::default();
+        let router = Router::new().route(
+            "/quota",
+            counted(&asked, |_| {
+                turned_away(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    serde_json::json!({"code": "quota", "message": "3 sandboxes open", "reason": "sandboxes"}),
+                    Some("30"),
+                )
+            }),
+        );
+        let client = piped(router);
+        let error = http::get::<String>(&client, "/quota").await.unwrap_err();
+        assert!(matches!(error, Error::Status(429, _)), "{error:?}");
+        assert_eq!(error.code(), Some("quota"));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A `503` to a request that makes something is sent again only where it says nothing was
+    /// made -- `capacity` -- since any other may have come after the making began, and a second
+    /// sending would make a second of it.
+    #[tokio::test]
+    async fn a_making_turned_away_is_sent_again_only_where_nothing_was_made() {
+        use axum::response::IntoResponse as _;
+        use std::sync::{Arc, atomic::Ordering};
+        let (made, room) = (Arc::default(), Arc::default());
+        let router = Router::new()
+            .route(
+                "/made",
+                counted(&made, |_| {
+                    turned_away(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"code": "unavailable", "message": "its machine went away"}),
+                        Some("1"),
+                    )
+                }),
+            )
+            .route(
+                "/room",
+                counted(&room, |n| match n {
+                    0 => turned_away(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"code": "capacity", "message": "no room yet"}),
+                        Some("1"),
+                    ),
+                    _ => Json("made").into_response(),
+                }),
+            );
+        let client = piped(router);
+        let body = serde_json::json!({});
+        let error = http::post::<String>(&client, "/made", &body)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert_eq!(made.load(Ordering::SeqCst), 1, "made once at most");
+        assert_eq!(
+            http::post::<String>(&client, "/room", &body).await.unwrap(),
+            "made"
+        );
+        assert_eq!(room.load(Ordering::SeqCst), 2, "nothing made: sent again");
+    }
+
+    /// The time a request is held back counts the server's answers as well as the waits between
+    /// them: a server that holds each refusal 12 s is asked three times in 30 s, not once a
+    /// second for 30 s of waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_is_held_back_its_answers_time_and_its_waits_together() {
+        use std::sync::{Arc, atomic::Ordering};
+        let asked = Arc::<std::sync::atomic::AtomicU32>::default();
+        let held = asked.clone();
+        let router = Router::new().route(
+            "/slow",
+            get(async move || {
+                held.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+                turned_away(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    serde_json::json!({"code": "capacity", "message": "no room yet"}),
+                    Some("1"),
+                )
+            }),
+        );
+        let client = piped(router);
+        let error = http::get::<String>(&client, "/slow").await.unwrap_err();
+        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+    }
+
+    /// A log at `/log` whose connection breaks after its first two entries, then is answered by a
+    /// proxy's own `502` page for the moment its server is gone, then is answered after the
+    /// `Last-Event-ID` it is sent: each request's `Last-Event-ID` kept in `asked`.
+    fn breaking_log(asked: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>) -> Router {
+        use axum::response::IntoResponse as _;
+        use futures_util::StreamExt as _;
+        let events = |lines: &[(u64, &str)]| -> String {
+            lines
+                .iter()
+                .map(|(id, data)| format!("id: {id}\ndata: {data}\n\n"))
+                .collect()
+        };
+        let log = move |headers: HeaderMap| async move {
+            let after = headers
+                .get("last-event-id")
+                .map(|v| v.to_str().unwrap().to_owned());
+            let n = {
+                let mut asked = asked.lock().unwrap();
+                asked.push(after);
+                asked.len()
+            };
+            let sse = [(::http::header::CONTENT_TYPE, "text/event-stream")];
+            match n {
+                1 => {
+                    let sent = bytes::Bytes::from(events(&[
+                        (1, r#"{"stdout":"a"}"#),
+                        (2, r#"{"stdout":"b"}"#),
+                    ]));
+                    // Cut a moment after what was sent, once that has reached the client.
+                    let cut = futures_util::stream::once(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        Err(std::io::Error::other("cut"))
+                    });
+                    let body = futures_util::stream::iter([Ok(sent)]).chain(cut);
+                    (sse, axum::body::Body::from_stream(body)).into_response()
+                }
+                2 => (
+                    StatusCode::BAD_GATEWAY,
+                    [(::http::header::CONTENT_TYPE, "text/html")],
+                    "<html><body><h1>502 Bad Gateway</h1></body></html>",
+                )
+                    .into_response(),
+                _ => (
+                    sse,
+                    events(&[(3, r#"{"stdout":"c"}"#), (4, r#"{"end":{"code":0}}"#)]),
+                )
+                    .into_response(),
+            }
+        };
+        Router::new().route("/log", get(log))
+    }
+
+    /// A log whose connection breaks is read on after its last entry, past a proxy's page for
+    /// the moment its server is gone: over TCP, where a connection is made anew. Over stdio, the
+    /// break is the caller's at once, as the server's process is gone with it.
+    #[tokio::test]
+    async fn a_log_whose_connection_breaks_is_read_on_after_its_last_entry() {
+        use futures_util::StreamExt as _;
+        use std::sync::{Arc, Mutex};
+        let read = |client: TransportClient| async move {
+            super::sse::client::log::<crate::SandboxJobEntry>(&client, "/log".into(), None)
+                .map(|entry| entry.map(|entry| entry.id))
+                .collect::<Vec<_>>()
+                .await
+        };
+
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let url = serve(breaking_log(asked.clone())).await;
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+        let ids: Vec<u64> = read(client)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, [1, 2, 3, 4]);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [None, Some("2".to_owned()), Some("2".to_owned())]
+        );
+
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let read = read(piped(breaking_log(asked.clone()))).await;
+        assert!(
+            matches!(read[..], [Ok(1), Ok(2), Err(Error::Transport(_))]),
+            "{read:?}"
+        );
+        assert_eq!(*asked.lock().unwrap(), [None]);
     }
 }

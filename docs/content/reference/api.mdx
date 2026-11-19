@@ -137,8 +137,12 @@ Its `source` says where it failed, and `status` the HTTP status when the server 
 | `transport` | none | The request or its answer did not get through: the connection failed or the session ended. |
 | `client` | none | This side failed: an argument, a file on this machine, or an answer it could not read. |
 
-Tell errors apart by `source` and `status`, not by the message.
-In Rust, `source_kind()` answers the `Source` and `status()` the status.
+Where the server answered its refusal as the protocol does, `code` is the protocol's code for it, such as `not_found` or `in_use`, and otherwise none.
+Tell errors apart by `source`, `status` and `code`, not by the message.
+In Rust, `source_kind()` answers the `Source`, `status()` the status and `code()` the code.
+
+A request the server turns away for now, such as `503` `capacity` while it has no room for a sandbox, is sent again after the wait the server asks for, for up to 30 seconds, before the call fails with it.
+A `429` `quota` for a limit that frees up only as you close or delete something, such as the sandboxes you have, fails at once.
 
 ## Volumes
 

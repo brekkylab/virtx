@@ -17,8 +17,8 @@ export class VirtxError extends Error {
    */
   status: number | null
   /**
-   * The protocol's code it refused with, where it answered one: `not_found`, `ended`,
-   * `in_use` and the like -- what to branch on, not the message.
+   * The protocol's code the server refused the request with, where it answered one:
+   * `not_found`, `in_use` and the like -- what to branch on, not the message.
    */
   code: string | null
   /** The server's response body, where it was not a JSON error. */

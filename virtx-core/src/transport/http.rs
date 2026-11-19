@@ -82,11 +82,20 @@ pub(crate) async fn refused(response: http::Response<Body>) -> Error {
         Ok(Refusal { error }) => {
             Error::Status(status, format!("{}: {}", error.code, error.message))
         }
-        // Words, as a server or a proxy in front of it may answer: said as they are, as the
-        // files client says them. A page -- a proxy's HTML -- is not words to a person.
-        Err(_) if content_type == "text/plain" && std::str::from_utf8(&body).is_ok() => {
-            let said = String::from_utf8_lossy(&body);
-            Error::Status(status, said.trim().chars().take(TEXT_MOST).collect())
+        // Words, as a server or a proxy in front of it may answer: said as they are. A page,
+        // such as a proxy's HTML, is not words to a person.
+        Err(_) if content_type.eq_ignore_ascii_case("text/plain") => {
+            match std::str::from_utf8(&body) {
+                Ok(said) => Error::Status(status, said.trim().chars().take(TEXT_MOST).collect()),
+                Err(_) => Error::Refusal {
+                    status,
+                    description: format!(
+                        "not a virtx answer ({content_type}, {} bytes)",
+                        body.len()
+                    ),
+                    body: Some(String::from_utf8_lossy(&body).into_owned()),
+                },
+            }
         }
         Err(_) => {
             let desc = if content_type.is_empty() {
@@ -108,7 +117,7 @@ pub(crate) async fn refused(response: http::Response<Body>) -> Error {
     }
 }
 
-/// The most of a plain-text refusal said as its message.
+/// The most of a plain-text refusal said as its message, in characters.
 const TEXT_MOST: usize = 1000;
 
 /// Send `method` to `path` with `body` as JSON, if any, and answer the body of a success. A
@@ -269,9 +278,8 @@ mod tests {
         );
     }
 
-    /// Plain text is said as it is, a `503` and a proxy's alike, as words to a person -- not as
-    /// "not a virtx answer" or "unreachable or restarting", of a server that answered (issue
-    /// #164).
+    /// Plain text is said as it is, a server's and a proxy's alike, as words to a person -- not
+    /// as "not a virtx answer" of a server that answered.
     #[tokio::test]
     async fn a_plain_text_refusal_is_said_as_it_is() {
         for (status, text, said) in [
@@ -282,8 +290,8 @@ mod tests {
             ),
             (
                 503,
-                "no node has room for the sandbox yet: the cell is growing",
-                "the server answered 503 Service Unavailable: no node has room for the sandbox yet: the cell is growing",
+                "no room for the sandbox yet: try again",
+                "the server answered 503 Service Unavailable: no room for the sandbox yet: try again",
             ),
         ] {
             let response = http::Response::builder()

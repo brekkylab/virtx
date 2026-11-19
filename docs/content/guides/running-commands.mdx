@@ -48,6 +48,7 @@ The value `exec` returns is three things at once.
 Completed, it answers how the job ended; iterated, it is the job's log.
 Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`, and its `reason` if it did not end by itself.
 `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
+A log read from a server over HTTP whose connection breaks, the server restarted or a proxy in front of it replaced, is read on after the last entry by itself, up to five times in a row, before its error is yours.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">

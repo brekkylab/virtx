@@ -62,7 +62,7 @@ class VirtxError(Exception):
 
     code: str | None
     """The protocol's code the server refused the request with, where it answered one:
-    ``not_found``, ``ended``, ``in_use`` and the like -- what to branch on, not the message."""
+    ``not_found``, ``in_use`` and the like -- what to branch on, not the message."""
 
     body: str | None
     """The server's response body, where it was not a JSON error."""
@@ -72,14 +72,14 @@ class VirtxError(Exception):
         message: str,
         status: int | None = None,
         body: str | None = None,
-        code: str | None = None,
         source: Source = "client",
+        code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.source = source
         self.status = status
-        self.body = body
         self.code = code
+        self.body = body
 
 
 class _Bytes(ctypes.Structure):
@@ -278,8 +278,8 @@ class Library:
                 failure["message"],
                 failure.get("status"),
                 failure.get("body"),
-                failure.get("code"),
                 failure["source"],
+                failure.get("code"),
             )
         raise VirtxError(f"unknown status {status}")
 

@@ -31,8 +31,12 @@ pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
 const REPLAYABLE: u64 = 1 << 20;
 
 /// The longest a request is held back from the server, all told -- its answers' time and the
-/// waits between them -- while it turns it away.
+/// waits between them -- while it turns it away for now.
 const PATIENCE: Duration = Duration::from_secs(30);
+
+/// The first wait before a request turned away without a `Retry-After` is sent again, each
+/// after twice the one before; and the least wait, whatever `Retry-After` asks.
+const FIRST_WAIT: Duration = Duration::from_millis(500);
 
 /// The wait `response` asks for, in seconds (`Retry-After`; never a date, from these servers).
 fn retry_after(response: &http::Response<Body>) -> Option<Duration> {
@@ -42,13 +46,13 @@ fn retry_after(response: &http::Response<Body>) -> Option<Duration> {
     ))
 }
 
-/// `response`, a `429`, and whether it is a quota's past which the caller is, as virtx cloud
-/// answers one: `{"error": {"code": "quota", "reason"}}`, its reason other than the rate of
-/// requests. Its body read, and given back whole.
-async fn past_a_quota(response: http::Response<Body>) -> (http::Response<Body>, bool) {
-    if response.status() != StatusCode::TOO_MANY_REQUESTS {
-        return (response, false);
-    }
+/// `response`, a `429` or a `503`, and whether it is one to send again after a wait, as
+/// `PROTOCOL.md`'s Refused for now says: a `429` unless it is a `quota` whose `reason` is other than
+/// `requests`, which frees up only as the caller closes or deletes something; a `503` to a
+/// request that makes something (`makes`) only where it is `capacity`, nothing made, since any
+/// other may have come after the making began. Its body read, and given back whole.
+async fn for_now(response: http::Response<Body>, makes: bool) -> (http::Response<Body>, bool) {
+    let status = response.status();
     let (parts, body) = response.into_parts();
     let bytes = body
         .collect()
@@ -56,24 +60,12 @@ async fn past_a_quota(response: http::Response<Body>) -> (http::Response<Body>, 
         .map(|b| b.to_bytes())
         .unwrap_or_default();
     let said: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-    let quota = said["error"]["code"] == "quota" && said["error"]["reason"] != "requests";
-    (http::Response::from_parts(parts, full(bytes)), quota)
-}
-
-/// `response`, a `503` to a request that makes something, and whether it says nothing was made:
-/// `{"error": {"code": "capacity"}}`, the room for it not found -- as virtx's servers and virtx
-/// cloud's gateway answer one turned away before anything is made. Any other may have come
-/// after the making began. Its body read, and given back whole.
-async fn nothing_made(response: http::Response<Body>) -> (http::Response<Body>, bool) {
-    let (parts, body) = response.into_parts();
-    let bytes = body
-        .collect()
-        .await
-        .map(|b| b.to_bytes())
-        .unwrap_or_default();
-    let said: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-    let nothing = said["error"]["code"] == "capacity";
-    (http::Response::from_parts(parts, full(bytes)), nothing)
+    let error = &said["error"];
+    let again = match status {
+        StatusCode::TOO_MANY_REQUESTS => error["code"] != "quota" || error["reason"] == "requests",
+        _ => !makes || error["code"] == "capacity",
+    };
+    (http::Response::from_parts(parts, full(bytes)), again)
 }
 
 /// How a client reaches the server's endpoints.
@@ -170,23 +162,20 @@ impl TransportClient {
         Self::new(Connection::Stdio(Stdio::over(io, None)))
     }
 
-    /// Send `request` to whichever endpoint its URI, a path under the server's base such as
-    /// `/volumes/`, names. An `Err` says why no response came, or that the server refused the
-    /// headers with a `401` or a `403`, which every endpoint's are alike.
+    /// Send `request` to whichever endpoint its URI, a path under the server's base, names. An
+    /// `Err` says why no response came, or that the server refused the headers with a `401` or
+    /// a `403`, which every endpoint's are alike. A path, or a
+    /// `Destination`, with a `.` or `..` segment still in it, a file's path that goes above its
+    /// root or a name that is one, is refused unsent: over HTTP it would be resolved before it
+    /// went, to another endpoint's path even, and the server refuses one that arrives.
     ///
     /// A request whose body is known and small ([`REPLAYABLE`]) -- every resource's, and a
-    /// registry's reads -- is sent again when the server turns it away for now: a `429` or a
-    /// `503`, after its `Retry-After` or else a wait that doubles, for [`PATIENCE`] at most, its
+    /// small file's -- is sent again when the server turns it away for now: a `429` or a `503`,
+    /// after its `Retry-After` or else a wait that doubles, for [`PATIENCE`] at most, its
     /// answers' time counted with the waits; and a `401`, at once and once, when the token is a
-    /// command's, which prints a new one. The server did nothing with a request it turned away,
-    /// so sending it again is safe -- but a `503` to one that makes something (a `POST` or a
-    /// `PATCH`) may have come after the making began: sent again only where it says nothing was
-    /// made ([`nothing_made`]), so a retry never makes a second of what the first made.
-    ///
-    /// A path, or a `Destination`, with a `.` or `..` segment still in it, a file's path that
-    /// goes above its root or a name that is one, is refused unsent: over HTTP it would be
-    /// resolved before it went, to another endpoint's path even, and the server refuses one that
-    /// arrives.
+    /// command's, which prints a new one. A refusal that waiting does not change is answered at
+    /// once, and one that may have come after a making began is never sent again, so a retry
+    /// makes no second of what the first made ([`for_now`]).
     pub(crate) async fn send(
         &self,
         request: http::Request<Body>,
@@ -210,7 +199,7 @@ impl TransportClient {
             .to_bytes();
         let started = tokio::time::Instant::now();
         let makes = matches!(parts.method, http::Method::POST | http::Method::PATCH);
-        let mut backoff = Duration::from_millis(500);
+        let mut backoff = FIRST_WAIT;
         let mut renewed = false;
         loop {
             let mut request = http::Request::new(full(bytes.clone()));
@@ -219,7 +208,7 @@ impl TransportClient {
             *request.version_mut() = parts.version;
             *request.headers_mut() = parts.headers.clone();
             let response = match self.send_once(request).await {
-                Err(Error::Status(401, _)) if !renewed && self.renews() => {
+                Err(refused) if refused.status() == Some(401) && !renewed && self.renews() => {
                     renewed = true;
                     continue;
                 }
@@ -230,22 +219,11 @@ impl TransportClient {
             {
                 return Ok(response);
             }
-            // A quota past which the caller is -- sandboxes open, storage -- frees up only as it
-            // closes or deletes something, which waiting here does not do: answered at once. The
-            // rate of requests, which frees up by itself, is waited out.
-            let (response, quota) = past_a_quota(response).await;
-            if quota {
-                return Ok(response);
-            }
-            let response = match status == StatusCode::SERVICE_UNAVAILABLE && makes {
-                true => match nothing_made(response).await {
-                    (response, true) => response,
-                    (response, false) => return Ok(response),
-                },
-                false => response,
-            };
-            let wait = retry_after(&response).unwrap_or(backoff).min(PATIENCE);
-            if started.elapsed() + wait > PATIENCE {
+            let (response, again) = for_now(response, makes).await;
+            let wait = retry_after(&response)
+                .unwrap_or(backoff)
+                .clamp(FIRST_WAIT, PATIENCE);
+            if !again || started.elapsed() + wait > PATIENCE {
                 return Ok(response);
             }
             tokio::time::sleep(wait).await;
@@ -271,6 +249,12 @@ impl TransportClient {
             return Err(refused(response).await);
         }
         Ok(response)
+    }
+
+    /// Whether a connection that breaks is made anew by the next request: over TCP. Over stdio,
+    /// the one connection is the server's process, and gone with it.
+    pub(crate) fn reconnects(&self) -> bool {
+        matches!(self.connection, Connection::Tcp(_))
     }
 
     /// Whether a token refused is printed anew: an [`Auth::Command`]'s.

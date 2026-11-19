@@ -147,7 +147,18 @@ A request that fails is answered with an HTTP error status and a body:
 | `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox or in use, or a job or a sandbox's VM that has ended. |
 | `413 Content Too Large` | `too_large` | The body is over the server's limit, which is at least 2 MiB. A file's body, under [Files](#files), has none. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
+| `429 Too Many Requests` | `quota` | The request is past a limit of the server's, which `reason` names. See [Refused for now](#refused-for-now). |
 | `500 Internal Server Error` | `internal` | The server failed on its side. |
+| `503 Service Unavailable` | `capacity` | The server has no room for what the request makes, for now, and made none of it. See [Refused for now](#refused-for-now). |
+
+### Refused for now
+
+A server MAY turn a request away for now, with `429` or `503` and a `Retry-After` of the seconds to wait before it is sent again:
+
+- `429`, `quota`, has `reason` beside `code` and `message`, naming the limit the request is past. `requests`, the rate of requests, frees up by itself, and a client MAY send the request again after `Retry-After`. Any other `reason`, such as a count of sandboxes, frees up only as the caller closes or deletes something: a client answers it at once rather than waiting.
+- `503`, `capacity`, says nothing was made, so a request that makes something MAY be sent again after `Retry-After`. A `503` with another code or none, such as a proxy's own page, may have come after the making began: a client sends a `POST` or a `PATCH` so refused no more, and MAY send any other request again.
+
+virtx's client sends a request again so for 30 seconds at most, its answers' time and the waits between them together, and then answers the last refusal.
 
 ### Jobs
 
@@ -178,6 +189,7 @@ data: {"end": {"code": 0}}
 
 Every reader gets the whole log, from its first entry, as the job writes it.
 A client that sends `Last-Event-ID: n` gets the entries after the `n`th only, so a client whose stream dropped picks up where it left off.
+virtx's client does so by itself over TCP: a stream that breaks, or a `502` to `504` asking for it again, has it asked for after the last entry read, up to five times in a row.
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.
 A job that has ended answers its whole log at once, and ends there.

@@ -44,15 +44,15 @@ const PLATFORM_PACKAGE = {
 }[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
-  constructor(message, status = null, body = null, code = null, source = 'client') {
+  constructor(message, status = null, body = null, source = 'client', code = null) {
     super(message)
     this.name = 'VirtxError'
     // Where it failed: `server`, `job`, `transport` or `client`.
     this.source = source
     // The HTTP status the server refused the request with, if it did.
     this.status = status
-    // The protocol's code it refused with, where it answered one: `not_found`, `ended`,
-    // `in_use` and the like -- what to branch on, not the message.
+    // The protocol's code it refused with, where it answered one: `not_found`, `in_use` and the
+    // like -- what to branch on, not the message.
     this.code = code
     // The server's response body, where it was not a JSON error.
     this.body = body
@@ -220,8 +220,8 @@ class Library {
         failure.message,
         failure.status ?? null,
         failure.body ?? null,
-        failure.code ?? null,
         failure.source,
+        failure.code ?? null,
       )
     }
     throw new VirtxError(`unknown status ${status}`)
@@ -958,7 +958,7 @@ class ImageJob {
         console.error("(the log reached the server's limit; the rest is not kept)")
       else if ('end' in entry) return entry.end.digest
     }
-    throw new VirtxError('the job was removed before it ended', null, null, null, 'job')
+    throw new VirtxError('the job was removed before it ended', null, null, 'job')
   }
 
   // Cancels it if it runs, and forgets it.
@@ -1163,7 +1163,7 @@ class SandboxJob {
         console.error("(the log reached the server's limit; the rest is not kept)")
       else if ('end' in entry) return entry.end.code
     }
-    throw new VirtxError('the job was removed before it ended', null, null, null, 'job')
+    throw new VirtxError('the job was removed before it ended', null, null, 'job')
   }
 
   // Cancels it if it runs, killing its process, and forgets it.

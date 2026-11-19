@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
 use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry};
 
-use super::sandbox::LOG_LIMIT;
+use super::sandbox::{LOG_LIMIT, SIGKILL};
 
 /// A process in a sandbox, as it is answered, and its log.
 pub struct Job {
@@ -83,7 +83,7 @@ impl Job {
     /// End it with `code`, as its process ended, if it runs still: killed, for why the server
     /// killed it, if it did.
     pub(super) fn end(&self, code: i32) {
-        let killed = code == 128 + super::sandbox::SIGKILL;
+        let killed = code == 128 + SIGKILL;
         let reason = killed.then(|| *self.killing.lock().unwrap()).flatten();
         self.end_as(SandboxJobEnd { code, reason });
     }
@@ -93,7 +93,7 @@ impl Job {
     pub(super) fn cut(&self, reason: SandboxJobEndReason) {
         let reason = self.killing.lock().unwrap().unwrap_or(reason);
         self.end_as(SandboxJobEnd {
-            code: 128 + super::sandbox::SIGKILL,
+            code: 128 + SIGKILL,
             reason: Some(reason),
         });
     }

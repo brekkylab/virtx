@@ -18,11 +18,13 @@ use std::{
 
 use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
-use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
+use virtx_core::{
+    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
+};
 use virtx_uvm::sandbox::{NoHooks, Sandboxes};
 use virtx_uvm::{
-    FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SnapshotStore, VolumeError,
-    VolumeStore,
+    FsTree, ImageStore, RegistryClient, Sandbox, SandboxError, SandboxJob, SnapshotStore,
+    VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -378,6 +380,74 @@ async fn stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else(home: 
         .await
         .expect("the write ends");
     assert!(matches!(written.unwrap(), Err(SandboxError::JobEnded(_))));
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
+async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    let start = async |cmd: &[&str], timeout: Option<Duration>| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        sandbox.exec(cmd, false, timeout).await.unwrap()
+    };
+    // The last entry of `job`'s log, read to its end.
+    let end = async |job: &SandboxJob| {
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => end,
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Its own exit, 137 too: no reason.
+    for code in [0, 137] {
+        let job = start(&["sh", "-c", &format!("exit {code}")], None).await;
+        assert_eq!(end(&job).await, SandboxJobEnd::exited(code));
+        assert_eq!(job.get().reason, None);
+    }
+    // `SIGKILL` sent it: its own end, as the signal made it.
+    let job = start(&["sleep", "300"], None).await;
+    sandbox.signal(&job.get().id, 9).unwrap();
+    assert_eq!(end(&job).await, SandboxJobEnd::exited(137));
+    // Past its timeout: killed, for its timeout.
+    let job = start(&["sleep", "300"], Some(Duration::from_millis(200))).await;
+    let timed_out = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(end(&job).await, timed_out);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::Timeout));
+    // Removed while it runs: its log, read from before, reads on to its end, cancelled.
+    let job = start(&["sleep", "300"], None).await;
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    sandbox.remove_job(&job.get().id).unwrap();
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let cancelled = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Cancelled),
+    };
+    assert_eq!(read.unwrap(), cancelled);
+    // Its machine ended under it -- reset, which every arch takes: killed with it.
+    let job = start(&["sh", "-c", "sleep 1; sync; reboot -f"], None).await;
+    let ended = tokio::time::timeout(HANG, end(&job))
+        .await
+        .expect("the machine ends");
+    let exited = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::VmExited),
+    };
+    assert_eq!(ended, exited);
+    assert!(!sandbox.answer(false).running);
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
@@ -918,6 +988,7 @@ fn main() -> ExitCode {
         a_job_ends_with_its_process_not_with_what_it_left_running,
         a_fork_bomb_leaves_the_sandbox_answering,
         a_fork_bomb_out_of_memory_leaves_the_sandbox_answering,
+        a_job_s_end_says_why_the_server_ended_it_and_only_then,
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote,

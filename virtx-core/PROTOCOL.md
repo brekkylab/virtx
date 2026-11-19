@@ -382,7 +382,7 @@ A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 - `pid` is its process's pid in the sandbox. The job is named by `id`, not by it, so a pid the sandbox gives again never names another job.
 - `cmd` is the argv it was started with, with no shell: `["sh", "-c", "..."]` for one. An empty one is refused.
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
-- `reason`, once it has ended, is why, where the process did not end by itself, as below.
+- `reason`, once it has ended, is why, where the process did not end by itself and the server says, as below.
 
 A job started in a sandbox whose VM is [parked](#parking) boots it first.
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
@@ -391,20 +391,20 @@ Its log's entries are each an object with one member:
 
 - `{"stdout": "..."}` or `{"stderr": "..."}`: a line the process wrote there, without its line ending, decoded as UTF-8 with each invalid sequence replaced by U+FFFD. A line longer than the server's limit is sent in parts, an entry each.
 - `{"truncated": {}}`, as [Events](#events) says.
-- `{"end": {"code": n}}`, or `{"end": {"code": 137, "reason": "..."}}`, last: its `code` and `reason` as the job has them.
+- `{"end": {"code": n}}`, or `{"end": {"code": 137, "reason": "..."}}`, last: its `code`, and `reason`, as the job has them.
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
 The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, or with its sandbox's VM.
-In each of the last three, it and every process it started are killed, as `SIGKILL` does, its `code` is `137`, and its end, and its job, say why with `reason`:
+In each of the last three, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+A server MAY say which, in its end and in its job, with `reason`:
 
 - `"timeout"`: its `timeout_ms` ran out.
-- `"cancelled"`: its job was cancelled -- by its `DELETE` while it ran, which ends its log with this end before the job is removed, or by its sandbox [parked](#parking) or [deleted](#deleting) under it, as a server that ends parks its sandboxes.
+- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed, or by its sandbox [parked](#parking) or [deleted](#deleting) under it, as a server that ends parks its sandboxes.
 - `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
 
-A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ends by itself, and has no `reason`.
-
-The job, and its log, are kept until its `DELETE` or its sandbox's deletion: a sandbox parked ends its jobs and keeps them.
+A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
+The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed: a sandbox parked ends its jobs and keeps them.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

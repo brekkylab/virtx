@@ -218,13 +218,10 @@ impl Home {
         }
     }
 
-    /// Where the project's anonymous pulls are shared: as it was made to share them
-    /// ([`Home::sharing`]), or else where its keeping shares them ([`Keeping::public`]).
+    /// Where the project's anonymous pulls are shared, as it was made to share them
+    /// ([`Home::sharing`]).
     fn public(&self) -> Option<Arc<dyn PublicImages>> {
-        self.public
-            .get()
-            .cloned()
-            .or_else(|| self.keeping.as_ref().and_then(|keeping| keeping.public()))
+        self.public.get().cloned()
     }
 
     /// Tag `reference` brought up to its storage home's index before it is used, if the image

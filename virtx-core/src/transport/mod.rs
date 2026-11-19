@@ -527,6 +527,80 @@ mod tests {
         assert_eq!(room.load(Ordering::SeqCst), 2, "nothing made: sent again");
     }
 
+    /// A `503` that may have come after the request was carried out is sent again only for a
+    /// request a second sending leaves as the first did -- not a `MOVE`, nor a `PUT` with a
+    /// condition -- and a `DELETE` sent again so that finds nothing is taken as done. Any
+    /// request goes again after `capacity`, which says nothing was done.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_a_second_sending_would_change_is_sent_again_only_where_nothing_was_done() {
+        use axum::response::IntoResponse as _;
+        use std::sync::{Arc, atomic::Ordering};
+        let proxy_s = || {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(::http::header::CONTENT_TYPE, "text/html")],
+                "<html>503</html>",
+            )
+                .into_response()
+        };
+        let (moved, put, gone, room) = (
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        );
+        let router = Router::new()
+            .route("/moved", counted(&moved, move |_| proxy_s()))
+            .route("/put", counted(&put, move |_| proxy_s()))
+            .route(
+                "/gone",
+                counted(&gone, move |n| match n {
+                    0 => proxy_s(),
+                    _ => StatusCode::NOT_FOUND.into_response(),
+                }),
+            )
+            .route(
+                "/room",
+                counted(&room, |n| match n {
+                    0 => turned_away(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        serde_json::json!({"code": "capacity", "message": "no room yet"}),
+                        Some("1"),
+                    ),
+                    _ => StatusCode::CREATED.into_response(),
+                }),
+            );
+        let client = piped(router);
+        let request = |method: &str, path: &str, headers: &[(&str, &str)]| {
+            let mut request = ::http::Request::builder().method(method).uri(path);
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request.body(super::full("")).unwrap()
+        };
+
+        let to = [("Destination", "/to")];
+        let answered = client.send(request("MOVE", "/moved", &to)).await.unwrap();
+        assert_eq!(answered.status(), 503);
+        assert_eq!(moved.load(Ordering::SeqCst), 1, "a MOVE goes once");
+        let condition = [("If-None-Match", "*")];
+        let answered = client
+            .send(request("PUT", "/put", &condition))
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), 503);
+        assert_eq!(
+            put.load(Ordering::SeqCst),
+            1,
+            "a PUT with a condition goes once"
+        );
+        http::delete(&client, "/gone").await.unwrap();
+        assert_eq!(gone.load(Ordering::SeqCst), 2, "a DELETE goes again");
+        let answered = client.send(request("MOVE", "/room", &to)).await.unwrap();
+        assert_eq!(answered.status(), 201);
+        assert_eq!(room.load(Ordering::SeqCst), 2, "nothing done: sent again");
+    }
+
     /// The time a request is held back counts the server's answers as well as the waits between
     /// them: a server that holds each refusal 12 s is asked three times in 30 s, not once a
     /// second for 30 s of waits.

@@ -156,7 +156,7 @@ A request that fails is answered with an HTTP error status and a body:
 A server MAY turn a request away for now, with `429` or `503` and a `Retry-After` of the seconds to wait before it is sent again:
 
 - `429`, `quota`, has `reason` beside `code` and `message`, naming the limit the request is past. `requests`, the rate of requests, frees up by itself, and a client MAY send the request again after `Retry-After`. Any other `reason`, such as a count of sandboxes, frees up only as the caller closes or deletes something: a client answers it at once rather than waiting.
-- `503`, `capacity`, says nothing was made, so a request that makes something MAY be sent again after `Retry-After`. A `503` with another code or none, such as a proxy's own page, may have come after the making began: a client sends a `POST` or a `PATCH` so refused no more, and MAY send any other request again.
+- `503`, `capacity`, says nothing was made, so a request that makes something MAY be sent again after `Retry-After`. A `503` with another code or none, such as a proxy's own page, may have come after the request was carried out: a client MAY send it again only where a second sending leaves what the first did -- a `GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE` or `PROPFIND` with no `If-Match` or `If-None-Match` -- and takes a `DELETE` so sent again that is answered `404` as done.
 
 virtx's client sends a request again so for 30 seconds at most, its answers' time and the waits between them together, and then answers the last refusal.
 

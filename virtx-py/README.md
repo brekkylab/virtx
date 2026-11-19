@@ -65,13 +65,13 @@ async for entry in cat.log():
     ...
 ```
 
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `create_sandbox` answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the port `create_sandbox` answered, or its `url`: an address on this machine's loopback, for any TCP client, until it is closed. `PortForwarder.open` returns at once: opening it asks nothing of the server. A connection that reaches nothing in the sandbox -- its WebSocket refused, or closed before the port sent a byte, as when nothing listens there -- is closed, and `forwarder.last_error` says why, a `VirtxError` naming the port, also logged as a warning by the `virtx` logger.
 
 ```python
 from virtx import PortForwarder
 
 sandbox = await client.create_sandbox("alpine:3.20", ports=[8000])
-with PortForwarder.open(client, sandbox.ports[0].url) as forwarder:
+with PortForwarder.open(client, sandbox.ports[0]) as forwarder:
     print("reach it at", forwarder.address)
 ```
 

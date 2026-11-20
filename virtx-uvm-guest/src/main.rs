@@ -74,7 +74,8 @@ const WORK_DIR: &str = "/upper/work";
 const NEW_ROOT: &str = "/newroot";
 
 /// Build the root the commands run in and step into it: the upper disk overlaid on the lower,
-/// the kernel's filesystems, each share where it was asked, and the resolver named.
+/// the kernel's filesystems, the resolver named on the overlay, and over it each share where
+/// it was asked.
 ///
 /// libkrun's init stays PID 1 on the boot root it started this from, which is where it tells
 /// the host how the machine ended.
@@ -121,15 +122,15 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
     let _ = std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd");
     mount(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)?;
 
-    for (tag, at) in &asked.shares {
-        fs::create_dir_all(at)?;
-        mount(Some(tag), at, Some("virtiofs"), 0, None)?;
-    }
     // An image whose `/etc/resolv.conf` cannot be written resolves no names and runs anyway.
     if let Some(nameserver) = &asked.nameserver
         && let Err(e) = fs::write("/etc/resolv.conf", format!("nameserver {nameserver}\n"))
     {
         eprintln!("{}: naming the resolver: {e}", env!("CARGO_BIN_NAME"));
+    }
+    for (tag, at) in &asked.shares {
+        fs::create_dir_all(at)?;
+        mount(Some(tag), at, Some("virtiofs"), 0, None)?;
     }
     std::env::set_current_dir(&asked.workdir)
 }

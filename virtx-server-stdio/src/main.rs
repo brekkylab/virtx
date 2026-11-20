@@ -513,14 +513,6 @@ mod tests {
         let mut args = here();
         args.vcpus = Some(0);
         assert_eq!(refused(args).await, 400);
-        // Inbound rules are virtx cloud's: refused as the protocol refuses what is invalid.
-        let mut ssh = PortSpec::new(22);
-        ssh.inbound = Some(vec![InboundRule::new("10.0.0.0/8")]);
-        let mut args = here();
-        args.ports = vec![ssh];
-        let error = server.client.create_sandbox(&args).await.unwrap_err();
-        assert_eq!((error.status(), error.code()), (Some(400), Some("invalid")));
-        assert!(error.to_string().contains("virtx cloud's"), "{error}");
         for mib in [0, 16, 32] {
             let mut args = here();
             args.memory_mib = Some(mib);

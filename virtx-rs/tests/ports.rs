@@ -229,5 +229,8 @@ fn inbound_rules_are_refused_by_a_server_that_keeps_none() {
         (Some(400), Some("invalid")),
         "{refused}"
     );
-    assert!(refused.to_string().contains("virtx cloud's"), "{refused}");
+    assert!(
+        refused.to_string().contains("not kept by this server"),
+        "{refused}"
+    );
 }

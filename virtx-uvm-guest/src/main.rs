@@ -20,11 +20,11 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
-use std::os::fd::{AsRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::UNIX_EPOCH;
@@ -150,35 +150,46 @@ type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 /// and said not written, rather than the loop waiting.
 const INPUT_QUEUED: usize = 4;
 
-/// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`.
+/// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`. `seq` is
+/// the host's number for it, which its [`Written`](CtrlResp::Written) carries back.
 struct Queued {
+    seq: u64,
     data: String,
     eof: bool,
 }
 
 /// A process's stdin, written on a thread of its own, each write answered
-/// [`Written`](CtrlResp::Written) once it is, or once it never will be: the loop that takes the host's requests never
-/// waits on a process's reading, and what a process has not read is never more than
-/// [`INPUT_QUEUED`] writes. Dropped, what is queued is still written, and then its stdin closed.
+/// [`Written`](CtrlResp::Written) once it is, or once it never will be: the loop that takes the
+/// host's requests never waits on a process's reading, and what a process has not read is never
+/// more than [`INPUT_QUEUED`] writes. Dropped, what is queued is still written, and then its
+/// stdin closed.
 struct Input(std::sync::mpsc::SyncSender<Queued>);
 
 impl Input {
     /// The stdin of process `id`, written to `to`.
-    fn start(out: &Out, id: u32, to: impl io::Write + Send + 'static) -> Input {
+    fn start(out: &Out, id: u32, to: ChildStdin) -> Input {
         let (queued, taken) = std::sync::mpsc::sync_channel::<Queued>(INPUT_QUEUED);
         let out = Arc::clone(out);
         thread::spawn(move || {
             let mut to = Some(to);
-            while let Ok(Queued { data, eof }) = taken.recv() {
-                let written = match &mut to {
-                    Some(writer) => data.is_empty() || writer.write_all(data.as_bytes()).is_ok(),
-                    None => false,
+            while let Ok(Queued { seq, data, eof }) = taken.recv() {
+                let (bytes, whole) = match &mut to {
+                    Some(pipe) => write_counted(pipe, data.as_bytes()),
+                    None => (0, false),
                 };
                 // Its reader gone, or its stdin closed: nothing more is written.
-                if !written || eof {
+                if !whole || eof {
                     to = None;
                 }
-                send(&out, &CtrlResp::Written { id, written });
+                send(
+                    &out,
+                    &CtrlResp::Written {
+                        id,
+                        seq,
+                        bytes,
+                        whole,
+                    },
+                );
             }
         });
         Input(queued)
@@ -187,6 +198,7 @@ impl Input {
     /// `queued` queued, for process `id`: dropped, and said not written, where the queue is full
     /// or the writer is gone.
     fn put(&self, out: &Out, id: u32, queued: Queued) {
+        let seq = queued.seq;
         if let Err(e) = self.0.try_send(queued) {
             if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
                 eprintln!(
@@ -194,14 +206,44 @@ impl Input {
                     env!("CARGO_BIN_NAME")
                 );
             }
-            send(
-                out,
-                &CtrlResp::Written {
-                    id,
-                    written: false,
-                },
-            );
+            send(out, &not_written(id, seq));
         }
+    }
+}
+
+/// Write `data` to `pipe`: how many bytes of it went in, and whether all did. An empty `data`
+/// writes nothing and asks whether the pipe still has a reader, which is what any write would
+/// find out.
+fn write_counted(pipe: &mut ChildStdin, data: &[u8]) -> (u64, bool) {
+    if data.is_empty() {
+        let mut poll = libc::pollfd {
+            fd: pipe.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd` of a descriptor `pipe` holds open, not waited on.
+        let polled = unsafe { libc::poll(&mut poll, 1, 0) };
+        return (0, polled >= 0 && poll.revents & libc::POLLERR == 0);
+    }
+    let mut bytes = 0;
+    while bytes < data.len() {
+        match pipe.write(&data[bytes..]) {
+            Ok(0) => break,
+            Ok(n) => bytes += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    (bytes as u64, bytes == data.len())
+}
+
+/// The answer to write `seq` to process `id` that wrote none of it.
+fn not_written(id: u32, seq: u64) -> CtrlResp {
+    CtrlResp::Written {
+        id,
+        seq,
+        bytes: 0,
+        whole: false,
     }
 }
 
@@ -300,17 +342,11 @@ fn serve() -> io::Result<()> {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
             // Handed to its writer, never written here: a process not reading holds up no other.
             // Answered not `Written` at once for a process with no stdin here.
-            CtrlReq::Stdin { id, data, eof } => {
+            CtrlReq::Stdin { id, seq, data, eof } => {
                 let mut stdins = stdins.lock().unwrap();
                 match stdins.get(&id) {
-                    Some(input) => input.put(&out, id, Queued { data, eof }),
-                    None => send(
-                        &out,
-                        &CtrlResp::Written {
-                            id,
-                            written: false,
-                        },
-                    ),
+                    Some(input) => input.put(&out, id, Queued { seq, data, eof }),
+                    None => send(&out, &not_written(id, seq)),
                 }
                 if eof {
                     stdins.remove(&id);
@@ -412,13 +448,17 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     });
 }
 
-/// One of a process's pipes, read on a thread of its own: each line sent up to what it held as
-/// its process ended, and what comes after -- a background program's -- read and dropped, so
-/// that a program writing to it is never held up by a full pipe.
+/// One of a process's pipes, read on a thread of its own: each line sent up to what was in it
+/// when its process ended, and what comes after -- a background program's -- read and dropped,
+/// so that a program writing to it is never held up by a full pipe.
 struct Piped {
-    fd: Option<i32>,
-    /// What has been read, and once its process has ended, what it had written by then:
-    /// read under the lock, so the two are counted alike.
+    /// The pipe, held here too so that [`exited`](Piped::exited) asks about it and no
+    /// descriptor that took its number after its thread let go.
+    pipe: Option<Arc<File>>,
+    /// Written a byte by [`exited`](Piped::exited), to wake its thread from waiting on the pipe.
+    wake: Option<File>,
+    /// What has been read, and once its process has ended, what was in the pipe by then: read
+    /// under the lock, so the two are counted alike.
     count: Arc<Mutex<Count>>,
 }
 
@@ -438,14 +478,18 @@ impl Piped {
         let count = Arc::new(Mutex::new(Count::default()));
         let Some(pipe) = pipe else {
             let _ = read.send(());
-            return Self { fd: None, count };
+            return Self {
+                pipe: None,
+                wake: None,
+                count,
+            };
         };
-        let fd = pipe.as_raw_fd();
-        let (out, counted) = (Arc::clone(out), Arc::clone(&count));
+        let (woken, wake) = wake_pipe().map_or((None, None), |(r, w)| (Some(r), Some(w)));
+        let pipe = Arc::new(File::from(pipe));
+        let (out, counted, reading) = (Arc::clone(out), Arc::clone(&count), Arc::clone(&pipe));
         thread::spawn(move || {
-            let pipe = File::from(pipe);
-            // Each read's lines said at once, one write for them all: each write costs the
-            // machine an exit to its host, dear under nested virtualization.
+            // Each read's lines said together, in as few writes as the device takes: each write
+            // costs the machine an exit to its host, dear under nested virtualization.
             let say = |lines: &mut Vec<Vec<u8>>| {
                 if lines.is_empty() {
                     return;
@@ -473,14 +517,15 @@ impl Piped {
                     say(&mut said);
                     let _ = told.send(());
                 }
-                // A while at most, so that its process ending is seen while nothing comes.
-                if !readable(fd, 100) {
+                // Until its process has ended, the pipe or the wake, whichever comes first; after,
+                // the pipe alone, read only to be dropped.
+                if told.is_some() && !readable(reading.as_raw_fd(), woken.as_ref()) {
                     continue;
                 }
-                // How much was read, and how much of it its process wrote before it ended.
+                // How much was read, and how much of it was in the pipe when its process ended.
                 let (n, own) = {
                     let mut count = counted.lock().unwrap();
-                    match (&pipe).read(&mut chunk) {
+                    match (&*reading).read(&mut chunk) {
                         Ok(0) | Err(_) => (0, 0),
                         Ok(n) => {
                             let before = count.read;
@@ -521,37 +566,65 @@ impl Piped {
             }
         });
         Self {
-            fd: Some(fd),
+            pipe: Some(pipe),
+            wake,
             count,
         }
     }
 
-    /// Its process has ended: what is in the pipe now is the last of what it wrote.
+    /// Its process has ended: what is in the pipe now is the last of what it wrote, as far as
+    /// the agent can tell -- a program it left running may have written there since it ended.
     fn exited(&self) {
         let mut count = self.count.lock().unwrap();
-        let waiting = self.fd.map_or(0, |fd| {
+        let waiting = self.pipe.as_ref().map_or(0, |pipe| {
             let mut n: libc::c_int = 0;
-            // SAFETY: a descriptor its thread holds open until the pipe ends, and an int.
-            match unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) } {
+            // SAFETY: a descriptor `pipe` holds open, and an int.
+            match unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &mut n) } {
                 0 => n.max(0) as u64,
                 _ => 0,
             }
         });
         count.until = Some(count.read + waiting);
+        if let Some(mut wake) = self.wake.as_ref() {
+            let _ = wake.write_all(&[0]);
+        }
     }
 }
 
-/// Whether `fd` has something to read, or has ended, within `ms` milliseconds.
-fn readable(fd: i32, ms: i32) -> bool {
-    let mut polled = libc::pollfd {
+/// A pipe to wake a [`Piped`]'s thread with: its reading end, then its writing end, neither
+/// inherited by a command.
+fn wake_pipe() -> io::Result<(File, File)> {
+    let mut fds = [0; 2];
+    // SAFETY: two ints for `pipe2` to fill.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: two descriptors just made, owned by nothing else.
+    Ok(unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) })
+}
+
+/// Waits for `fd` to have something to read, or to have ended, or for `woken` to be: whether
+/// `fd` is ready. What woke `woken` is taken from it. Without one -- the guest out of
+/// descriptors -- a tenth of a second at most, so that its process ending is still seen.
+fn readable(fd: i32, woken: Option<&File>) -> bool {
+    let pollfd = |fd| libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    // SAFETY: one `pollfd` of ours.
-    unsafe { libc::poll(&mut polled, 1, ms) > 0 }
+    let mut polled = [pollfd(fd), pollfd(woken.map_or(-1, |w| w.as_raw_fd()))];
+    let bound = if woken.is_some() { -1 } else { 100 };
+    // SAFETY: two `pollfd`s of descriptors held open, or of -1, which `poll` passes over.
+    if unsafe { libc::poll(polled.as_mut_ptr(), 2, bound) } <= 0 {
+        return false;
+    }
+    if polled[1].revents != 0
+        && let Some(mut woken) = woken
+    {
+        let _ = woken.read(&mut [0; 8]);
+    }
+    polled[0].revents != 0
 }
-
 
 /// How `child` ended: its exit code, `128 + signal` for one a signal ended.
 fn code(child: &mut Child) -> i32 {

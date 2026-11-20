@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -20,12 +20,21 @@ pub struct Job {
     writing: tokio::sync::Mutex<()>,
 }
 
-/// A job's stdin: whether it takes writes still, and who waits for each sent to be written, in
-/// the order sent.
+/// A job's stdin: whether it takes writes still, the number the next write is sent under, and
+/// who waits for each sent to be answered, by that number.
 #[derive(Default)]
 struct Stdin {
     open: bool,
-    waiting: VecDeque<oneshot::Sender<bool>>,
+    next: u64,
+    waiting: HashMap<u64, oneshot::Sender<Written>>,
+}
+
+/// What the guest answered a write to a job's stdin: how many bytes of its data went in, and
+/// whether all of it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Written {
+    pub(super) bytes: u64,
+    pub(super) whole: bool,
 }
 
 impl Job {
@@ -36,7 +45,7 @@ impl Job {
             log: Log::new(LOG_LIMIT, SandboxJobEntry::Truncated {}),
             stdin: Mutex::new(Stdin {
                 open: stdin,
-                waiting: VecDeque::new(),
+                ..Stdin::default()
             }),
             writing: tokio::sync::Mutex::new(()),
             ended_at: Mutex::new(None),
@@ -102,35 +111,41 @@ impl Job {
         (job.pid, job.running)
     }
 
-    /// Send what `send` sends to its stdin, if it is open, closing it if `eof`: done once the
-    /// guest says it is [written](Job::written), so a process that does not read holds back
-    /// whoever writes to it and nothing else. One write at a time. `false` for a stdin closed,
-    /// or never open, and for a write never written: its process gone first.
+    /// Send what `send` sends to its stdin, if it is open, under the number it is given, closing
+    /// it if `eof`: done once the guest answers it [written](Job::written), which is once it is
+    /// in the process's stdin. One write at a time. `None` for a stdin closed, or never open, and
+    /// for a write its process went away from before an answer; a write not `whole` closes it.
     pub(super) async fn write_stdin(
         &self,
         eof: bool,
-        send: impl FnOnce() -> Result<(), super::Error>,
-    ) -> Result<bool, super::Error> {
+        send: impl FnOnce(u64) -> Result<(), super::Error>,
+    ) -> Result<Option<Written>, super::Error> {
         let _turn = self.writing.lock().await;
         let written = {
             // Sent and waited for under one lock, so its answer finds it waiting.
             let mut stdin = self.stdin.lock().unwrap();
             if !stdin.open {
-                return Ok(false);
+                return Ok(None);
             }
-            send()?;
+            let seq = stdin.next;
+            send(seq)?;
+            stdin.next += 1;
             let (told, written) = oneshot::channel();
-            stdin.waiting.push_back(told);
+            stdin.waiting.insert(seq, told);
             stdin.open = !eof;
             written
         };
-        Ok(written.await.unwrap_or(false))
+        Ok(written.await.ok())
     }
 
-    /// The guest has written the oldest write to its stdin not yet answered, if `written`, or
-    /// never will.
-    pub(super) fn written(&self, written: bool) {
-        if let Some(told) = self.stdin.lock().unwrap().waiting.pop_front() {
+    /// The guest has answered the write `seq` to its stdin. One not `whole` leaves its stdin
+    /// closed: its reader is gone.
+    pub(super) fn written(&self, seq: u64, written: Written) {
+        let mut stdin = self.stdin.lock().unwrap();
+        if !written.whole {
+            stdin.open = false;
+        }
+        if let Some(told) = stdin.waiting.remove(&seq) {
             let _ = told.send(written);
         }
     }

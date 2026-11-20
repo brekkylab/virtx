@@ -8,7 +8,9 @@
  * until there is something to take, then wakes it. Or block with
  * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
  * left, and ends after an error. A port forwarder opens over a client, blocking as opening
- * one does, and forwards until it is freed or the client's last release. Free every VirtxBytes
+ * one does, and forwards until it is freed or the client's last release. What the library warns
+ * of beside an answer, such as a forwarded connection that reached nothing, goes to the
+ * function virtx_set_warn sets, and is dropped until one is. Free every VirtxBytes
  * written with virtx_bytes_free, every future with virtx_future_free, every stream with
  * virtx_stream_free, and every forwarder with virtx_port_forwarder_free.
  */
@@ -631,7 +633,8 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            size_t args_len);
 
 // Answers with the sandboxes, as
-// `[{"id": "...", "image": "algorithm:hex", "running": bool}, ...]`.
+// `[{"id": "...", "image": "algorithm:hex", "running": bool,
+// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`.
 //
 // # Safety
 //
@@ -639,13 +642,15 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
-// `{"image": {...}, "network": bool, "ports": [n],
+// `{"image": {...}, "name": "...", "network": bool,
+// "ports": [n | {"port": n, "label": "...", "protocol": "tcp" | "http", "inbound": [...]}],
 // "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
-// sandbox as `virtx_client_list_sandbox` answers each, and
-// `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.
+// sandbox as `virtx_client_list_sandbox` answers each, its
+// `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
+// with their `url`s here only.
 //
 // # Safety
 //
@@ -663,6 +668,16 @@ struct VirtxFuture *virtx_client_create_sandbox(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_get_sandbox(struct VirtxClient *client,
                                              const uint8_t *args,
                                              size_t args_len);
+
+// Answers with the sandbox named `name`, given `{"name": "..."}`, as
+// `virtx_client_list_sandbox` answers each, or `null` if none is.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_find_sandbox(struct VirtxClient *client,
+                                              const uint8_t *args,
+                                              size_t args_len);
 
 // Resizes the sandbox `id`, given `{"id": "...", "vcpus": n, "memory_mib": n,
 // "disk_gib": n}`, all but `id` optional. Answers with its size as it is to be, as
@@ -706,6 +721,18 @@ struct VirtxFuture *virtx_client_list_sandbox_job(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_exec_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
+
+// Starts a process as `virtx_client_exec_sandbox` does, given the same, and reads its log:
+// its first item is `{"job": {...}}`, the job as that answers it, and the rest are the
+// log's entries as `virtx_client_sandbox_job_log` gives them. One request where the server
+// answers an exec with its log, two elsewhere. Freeing it leaves the job as it is.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_exec_sandbox_log(struct VirtxClient *client,
+                                                  const uint8_t *args,
+                                                  size_t args_len);
 
 // Answers with the job `job` in the sandbox `sandbox`, given
 // `{"sandbox": "...", "job": "..."}`, as `virtx_client_exec_sandbox` answers one.
@@ -824,9 +851,12 @@ int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 // `stream` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_stream_free(struct VirtxStream *stream);
 
-// Forward the port a sandbox answered `url` for, given `{"url": "..."}` as
-// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the forwarder to `forwarder`, and where it is to `out`, as
-// `{"address": "127.0.0.1:n"}`, or the error's message.
+// Forward the port a sandbox answered `url` for, given `{"url": "...", "port"?: n}` as
+// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
+// forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
+// the error's message. Returns once its local address is open, which takes no request of
+// the server. A port without its `url`, as asking for a sandbox again answers one, is
+// refused.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with
 // `virtx_port_forwarder_free`.
@@ -841,12 +871,33 @@ int virtx_port_forwarder_open(struct VirtxClient *client,
                               struct VirtxPortForwarder **forwarder,
                               struct VirtxBytes *out);
 
+// Why the last connection to `forwarder` that failed did, since one last reached the port:
+// its WebSocket refused, or closed before the port sent a byte, with the server's reason if
+// it gave one. `VIRTX_OK` with `null` written to `out` while none has, or `VIRTX_ERROR` with
+// the failure written as a call's error is, its message naming the port: `{"message",
+// "status"?, "code"?}`, `status` and `code` the server's refusal of the WebSocket. Each
+// such failure is also handed to the function `virtx_set_warn` set.
+//
+// # Safety
+//
+// `forwarder` is one `virtx_port_forwarder_open` wrote, not yet freed. `out` is writable.
+int virtx_port_forwarder_last_error(const struct VirtxPortForwarder *forwarder,
+                                    struct VirtxBytes *out);
+
 // Stop `forwarder` and free it. Null does nothing.
 //
 // # Safety
 //
 // `forwarder` is null, or one `virtx_port_forwarder_open` wrote, not used again.
 void virtx_port_forwarder_free(struct VirtxPortForwarder *forwarder);
+
+// Call `warn` with each warning the library has from now on, in place of the function set
+// before: a NUL-terminated UTF-8 message for a person, valid only during the call, from
+// any thread, the library's own included. Null drops them, as the library does until this
+// is called. One for the process, as the library is.
+//
+// `warn` may block, but must not call into this library.
+void virtx_set_warn(void (*warn)(const char *message));
 
 #ifdef __cplusplus
 }  // extern "C"

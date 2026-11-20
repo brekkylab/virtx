@@ -41,13 +41,13 @@ await cat.writeStdin('hello\n', true)
 for await (const entry of cat.log()) console.log(entry)
 ```
 
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the port `createSandbox` answered, or its `url`: an address on this machine's loopback, for any TCP client, until it is closed. Only `createSandbox` answers a port's `url`, since it carries the port's credentials: a port of a sandbox got again with `getSandbox`, `findSandbox` or `listSandbox` has none, and a forwarder refuses it. A connection whose WebSocket is refused, or closed before the port sent a byte, is closed, and `forwarder.lastError` says what was seen, with the server's reason if it gave one: a `VirtxError` naming the port, also emitted as a process warning of the type `VirtxWarning`, and `null` again once a later connection's port sends a byte.
 
 ```js
 const { PortForwarder } = require('@brekkylab/virtx')
 
 const sandbox = await client.createSandbox('alpine:3.20', { ports: [8000] })
-const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+const forwarder = PortForwarder.open(client, sandbox.ports[0])
 console.log('reach it at', forwarder.address)
 forwarder.close()
 ```

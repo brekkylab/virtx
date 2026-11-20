@@ -48,6 +48,7 @@ The value `exec` returns is three things at once.
 Completed, it answers how the job ended; iterated, it is the job's log.
 Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`.
 `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
+A log read from a server over HTTP whose connection breaks, the server restarted or a proxy in front of it replaced, is read on after the last entry by itself, up to five times in a row, before its error is yours. A log that stops before the job's end is read on too, and one whose job is deleted while you read it fails with `404` rather than stopping short.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -240,7 +241,7 @@ Stdout(line='tick 4')
 SandboxJobEnd(code=0)
 ```
 
-A job left in the background runs until it ends or is removed; removing the sandbox stops every job in it.
+A job left in the background runs until it ends or is removed; removing the sandbox stops every job in it. An ended job is kept, with its log, for its output to be read: a sandbox keeps its last 100, and as another starts past them the one that ended first is removed. A job that runs is never removed so.
 
 ## Set a timeout
 

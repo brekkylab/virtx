@@ -6,7 +6,7 @@ use sse_stream::SseStream;
 
 use super::{
     Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
-    SandboxSignalArgs, SandboxStdinArgs,
+    SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
     Error,
@@ -58,6 +58,15 @@ pub(crate) async fn create(
 /// The sandbox `id`.
 pub(crate) async fn get(client: &TransportClient, id: &str) -> Result<Sandbox, Error> {
     http::get(client, &sandbox(id)).await
+}
+
+/// Resize the sandbox `id` as `args` says.
+pub(crate) async fn resize(
+    client: &TransportClient,
+    id: &str,
+    args: &SandboxResizeArgs,
+) -> Result<SandboxResources, Error> {
+    http::patch(client, &sandbox(id), args).await
 }
 
 /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside

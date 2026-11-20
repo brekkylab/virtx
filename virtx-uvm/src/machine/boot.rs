@@ -3,8 +3,9 @@
 //! # The devices, and what each is for
 //!
 //! ```text
-//! virtio-fs  /dev/root      an empty root, holding the init and the directories it mounts
-//!                           over -- replaced by the overlay before anything else runs
+//! virtio-fs  /dev/root      the boot root, holding the init, the agent and the directories
+//!                           the agent mounts over -- left for the overlay before any
+//!                           command runs
 //! virtio-blk /dev/vda       the root filesystem's disk, read-only -- the overlay's lower
 //! virtio-blk /dev/vdb       the upper disk -- the overlay's upper layer
 //! virtio-con hvc0           the guest's console, into libkrun's log, which goes to ctrlout
@@ -15,8 +16,8 @@
 //!                           ports -- see [`Network`]
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
-//! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag after the pivot
-//! virtio-fs  virtx          the agent, mounted at /.virtx after the pivot
+//! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag once the overlay is
+//!                           the root
 //! ```
 //!
 //! **Attach order is what fixes the two disk names**, and the guest is told which is which
@@ -28,24 +29,24 @@
 //!
 //! A [`VolumeMount`] is one share for the volume's own files, and one more for each remote
 //! store mounted in it, at its path under the volume's. They go on after both disks, since a
-//! share takes no name from the order, and the init mounts each by its tag once the overlay
+//! share takes no name from the order, and the agent mounts each by its tag once the overlay
 //! is the root -- in the order given, so a store's lands over the directory the volume's
 //! own share holds for it. A store is served from this process, read-only.
 //!
-//! # The root that is thrown away
+//! # The boot root
 //!
 //! The virtio-fs root is [`FsDevice::new_null`] -- a filesystem with nothing in it but what
-//! the overlay puts there: the init binary, its config, and the empty directories the init
-//! mounts the two disks over. It exists for the moment between the kernel handing over and
-//! the init pivoting onto the overlay.
+//! the overlay puts there: the init binary, its config, the agent, and the empty directories
+//! the agent mounts the two disks over. libkrun's init stays on it as PID 1, which is where it
+//! tells the host how the machine ended; everything else leaves it for the overlay.
 //!
 //! # The agent
 //!
-//! What the init runs is not a command but `virtx-uvm-guest`, the agent, which runs the
-//! commands the host sends. It is built into this binary (see `build.rs`) and shown on a
-//! filesystem of its own -- a [`FsDevice::new_null`] with the agent in its overlay -- since one
-//! on the root above would be left behind by the pivot. The init mounts it at [`AGENT_DIR`]
-//! once the image is the root.
+//! What the init runs is not a command but `virtx-uvm-guest`, the agent, built into this
+//! binary (see `build.rs`). The first thing it reads on its port is a
+//! [`MachineInfo`](wire::MachineInfo), which this process writes there: it builds the root
+//! that names -- the upper disk overlaid on the lower, the shares mounted, the resolver named
+//! -- steps into it, and runs the commands the host sends.
 //!
 //! # `/abin` and `/alib`
 //!
@@ -98,16 +99,13 @@ const UPPER_DEVICE: &str = "/dev/vdb";
 const LOWER_FSTYPE: &str = "erofs";
 const UPPER_FSTYPE: &str = "ext4";
 
-/// The directories the init needs on the root before it can mount anything, since a
-/// filesystem with nothing in it has nowhere to mount over.
+/// The directories the init and the agent need on the boot root before they can mount
+/// anything, since a filesystem with nothing in it has nowhere to mount over.
 const ROOT_DIRS: [&str; 6] = ["dev", "proc", "sys", "newroot", "lower", "upper"];
 
 /// What each share is attached under, with its place in the list after it. A tag is only a
 /// name the two ends agree on, and one nothing else uses is all this needs.
 const MOUNT_TAG: &str = "mnt";
-
-/// What the guest mounts a share as, which is the only thing a virtio-fs share can be.
-const MOUNT_FSTYPE: &str = "virtiofs";
 
 /// `S_IFDIR | 0755`, as [`FsOverlay::add_dir`] wants a mode.
 const DIR_MODE: u32 = 0o040_755;
@@ -118,10 +116,7 @@ const DEFAULT_PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/b
 /// The agent, as `build.rs` built it for the guest.
 const AGENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtx-uvm-guest"));
 
-/// Where the agent's filesystem is mounted in the guest, the tag it is attached under, and the
-/// agent's name in it.
-const AGENT_DIR: &str = "/.virtx";
-const AGENT_TAG: &str = "virtx";
+/// The agent's name on the boot root.
 const AGENT_NAME: &str = "virtx-uvm-guest";
 
 /// Where virtx's own programs are mounted in the guest, and the tag they are attached under.
@@ -164,6 +159,12 @@ fn prefault_memory() -> bool {
 /// How often the agent is [pinged](CtrlReq::Ping) once it is up.
 const PING_EVERY: Duration = Duration::from_secs(5);
 
+/// How long past its second the silence check may wake before this process is taken to have
+/// been paused meanwhile ([`Machine::pause`](super::Machine::pause)) rather than slow. It cannot
+/// tell a pause from a stall of the process as long, as on a host loaded enough to leave it
+/// unscheduled: a stall is forgiven as a pause is, the silence started anew.
+const PAUSED_PAST: Duration = Duration::from_secs(3);
+
 /// How long the agent may say nothing, pings unanswered, before its guest is taken to have
 /// stopped and the machine is ended: `VIRTX_GUEST_SILENCE`, in seconds, `0` for never, or a
 /// minute, and no less than two pings apart. A guest that halts, as `halt -f` does or a
@@ -191,12 +192,6 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
 pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
-    // What PID 1 does once the guest is up: run the agent, mounted with its filesystem below,
-    // and end the machine when it does. The init binary and this config are injected into the
-    // root through the overlay
-    // below, and `apply` is what appends `init=/init.krun` to the kernel cmdline. The two
-    // devices go in as environment because that is how libkrun's init is told where its root
-    // is.
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
@@ -204,26 +199,24 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
     let alib = beside(ALIB_HOST);
     let env = env(&machine.config, abin.is_some());
-    let mut init = krun_init::Config::builder()
-        .args(&[&format!("{AGENT_DIR}/{AGENT_NAME}")])
-        .env(&env.iter().map(String::as_str).collect::<Vec<_>>())
-        .workdir(&workdir(&machine.config))
-        .env_var(&format!("KRUN_BLOCK_LOWER_DEVICE={LOWER_DEVICE}"))
-        .env_var(&format!("KRUN_BLOCK_LOWER_FSTYPE={LOWER_FSTYPE}"))
-        .env_var(&format!("KRUN_BLOCK_UPPER_DEVICE={UPPER_DEVICE}"))
-        .env_var(&format!("KRUN_BLOCK_UPPER_FSTYPE={UPPER_FSTYPE}"));
-    if machine.spec.network != Network::None {
-        init = init.env_var(&format!("{}={}", net::NAMESERVER_ENV, net::NAMESERVER));
-    }
+    let mut info = wire::MachineInfo {
+        lower_device: LOWER_DEVICE.to_owned(),
+        lower_fstype: LOWER_FSTYPE.to_owned(),
+        upper_device: UPPER_DEVICE.to_owned(),
+        upper_fstype: UPPER_FSTYPE.to_owned(),
+        shares: Vec::new(),
+        nameserver: (machine.spec.network != Network::None).then(|| net::NAMESERVER.to_string()),
+        workdir: workdir(&machine.config),
+    };
 
-    // The virtio-fs devices the guest is shown, which the init mounts by their tags in this
+    // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
     // order: each volume's files and the stores under them, with each volume held. Refused
     // where one could not be shown where it was asked.
     let mut shares = Vec::new();
     for (dir, at, tag) in [(&abin, ABIN_DIR, ABIN_TAG), (&alib, ALIB_DIR, ALIB_TAG)] {
         let Some(dir) = dir else { continue };
         let host = utf8(dir, at)?;
-        init = init.mount(at, MOUNT_FSTYPE, tag);
+        info.shares.push((tag.to_owned(), at.to_owned()));
         shares.push(
             FsDevice::new_read_only(tag, host)
                 .map_err(|e| Error::vmm(format!("sharing {at}"), e))?,
@@ -256,7 +249,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         let files = volume.files();
         let shared = format!("volume {} at {at}", volume.name());
         let host = utf8(&files, &shared)?;
-        init = init.mount(&at, MOUNT_FSTYPE, &tag);
+        info.shares.push((tag.clone(), at.clone()));
         // Read-only at the device, which is the whole of what `read_only` promises.
         shares.push(
             match asked.read_only {
@@ -272,7 +265,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                     source: e,
                 })?;
             let tag = format!("{MOUNT_TAG}{}", shares.len());
-            init = init.mount(&format!("{at}/{}", mount.path), MOUNT_FSTYPE, &tag);
+            info.shares
+                .push((tag.clone(), format!("{at}/{}", mount.path)));
             shares.push(
                 FsDevice::new_external(&tag, Arc::new(served))
                     .map_err(|e| Error::vmm(format!("serving {tag}"), e))?,
@@ -280,14 +274,13 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         }
     }
 
-    let mut agent = FsOverlay::new();
-    agent
-        .add_file(AGENT_NAME, AGENT, 0o755, false)
-        .map_err(|e| Error::vmm("putting the agent on its filesystem", e))?;
-    let mut agent_fs = FsDevice::new_null(AGENT_TAG)
-        .map_err(|e| Error::vmm("making the agent's filesystem", e))?;
-    agent_fs.set_overlay(agent);
-    init = init.mount(AGENT_DIR, MOUNT_FSTYPE, AGENT_TAG);
+    // What PID 1 does once the guest is up: run the agent from the boot root, in the image's
+    // environment, and end the machine when it does. The init binary and this config are
+    // injected into the root through the overlay below, and `apply` is what appends
+    // `init=/init.krun` to the kernel cmdline.
+    let init = krun_init::Config::builder()
+        .args(&[&format!("/{AGENT_NAME}")])
+        .env(&env.iter().map(String::as_str).collect::<Vec<_>>());
 
     // Leaked, because the root borrows it for as long as the machine runs, which is the rest
     // of the process.
@@ -311,6 +304,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // on a cloud runner, those 16384 faults were 2.1s of a 6.4s boot.
     #[cfg(windows)]
     payload.append_cmdline("swiotlb=noforce");
+    // The kernel's crypto algorithms are not tested as each registers: on one vCPU those tests
+    // are a third of a boot, run against the init for it.
+    #[cfg(target_arch = "aarch64")]
+    payload.append_cmdline("cryptomgr.notests");
 
     let mut overlay = FsOverlay::new();
     for dir in ROOT_DIRS {
@@ -318,13 +315,17 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             .add_dir(dir, DIR_MODE)
             .map_err(|e| Error::vmm(format!("making /{dir} on the boot root"), e))?;
     }
+    overlay
+        .add_file(AGENT_NAME, AGENT, 0o755, false)
+        .map_err(|e| Error::vmm("putting the agent on the boot root", e))?;
     init.apply(&mut overlay, &mut payload)
         .map_err(Error::Init)?;
     // Under nested virtualization -- a cloud instance -- each check the guest kernel makes of
     // its clock, and each PCI slot it probes, is a trip to the outer hypervisor: some 70 ms of
-    // a boot there. Its TSC is the host's, invariant; and a machine without a GPU has no PCI
-    // device, its devices being virtio-mmio's. x86_64's own: elsewhere the kernel would not
-    // know them, and would pass them to the init as its environment.
+    // a boot there. Its clock is its hypervisor's, which libkrun has it prefer by not saying the
+    // TSC is invariant, so a check of the TSC guards nothing; and a machine without a GPU has
+    // no PCI device, its devices being virtio-mmio's. x86_64's own: elsewhere the kernel would
+    // not know them, and would pass them to the init as its environment.
     #[cfg(target_arch = "x86_64")]
     {
         payload.append_cmdline("tsc=reliable no_timer_check");
@@ -333,9 +334,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         }
     }
 
-    let mut root =
+    let mut boot_root =
         FsDevice::new_null(ROOT_TAG).map_err(|e| Error::vmm("making the boot root", e))?;
-    root.set_overlay(overlay);
+    boot_root.set_overlay(overlay);
 
     // The guest's console goes to libkrun's log, and the agent's port to two pipes: one the
     // host's messages are written into for the agent to read, one it writes into for this
@@ -387,11 +388,27 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     lower.set_read_only(true);
 
     let upper_path = utf8(&machine.upper, "the upper disk")?;
-    let upper_device = BlockDevice::new("vdb", upper_path, DiskFormat::Raw)
-        .map_err(|e| Error::vmm("attaching the upper disk", e))?;
+    // A sandbox's disk as the embedder's disks open it ([`crate::disks`]): read and written
+    // through what they make of it, if anything, rather than as the file is.
+    let opened = match &machine.sandbox_disk {
+        Some(disk) => crate::disks::disks()
+            .open(&machine.upper, disk.source.as_deref())
+            .map_err(|e| Error::io("opening the upper disk", e))?,
+        None => None,
+    };
+    let upper_device = match &opened {
+        Some(disk) => BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, disk.storage()),
+        None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
+    }
+    .map_err(|e| Error::vmm("attaching the upper disk", e))?;
+    // Told its machine has booted, as its agent says it is ready.
+    let booting = opened.clone();
+    if let Some(disk) = opened {
+        std::thread::spawn(move || disk.background());
+    }
 
     let mut devices = MmioDeviceManager::new();
-    devices.add(root);
+    devices.add(boot_root);
     devices.add(
         console
             .build()
@@ -421,7 +438,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     for share in shares {
         devices.add(share);
     }
-    devices.add(agent_fs);
 
     let vmm = VmmBuilder::new()
         .vcpus(machine.spec.vcpus)
@@ -442,7 +458,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
 
-    // The host's messages on to the agent, and the agent's back -- `Ready` with where the ports
+    // The root for the agent to build, then the host's messages on to it, and the agent's back -- `Ready` with where the ports
     // are published, which only this side knows. A host that has closed `ctrlin`, or written
     // something unreadable into it, is gone and will hear nothing more: the guest is shut down
     // as the host would, killed if it has not ended by `STOP_TIMEOUT`. An agent that has
@@ -458,6 +474,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     std::thread::spawn({
         let for_guest = Arc::clone(&for_guest);
         move || {
+            let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
             while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
                 let _ = wire::send(&mut *for_guest.lock().unwrap(), &message);
             }
@@ -472,7 +489,12 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
                 *heard.lock().unwrap() = Some(Instant::now());
                 let _ = match message {
-                    CtrlResp::Ready(_) => send(&CtrlResp::Ready(addresses.clone())),
+                    CtrlResp::Ready(_) => {
+                        if let Some(disk) = &booting {
+                            disk.booted();
+                        }
+                        send(&CtrlResp::Ready(addresses.clone()))
+                    }
                     CtrlResp::Pong => Ok(()),
                     message => send(&message),
                 };
@@ -491,18 +513,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             }
         }
     });
+    // A machine paused whole -- this process stopped, as the host does while it copies its
+    // disk -- is not a silent guest: this thread stopped with it, and wakes well past its second,
+    // which starts the silence anew.
     let silence = guest_silence();
     std::thread::spawn(move || {
+        let mut checked = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(1));
-            if heard
-                .lock()
-                .unwrap()
-                .is_some_and(|heard| heard.elapsed() > silence)
-            {
+            let now = Instant::now();
+            let mut heard = heard.lock().unwrap();
+            if now.duration_since(checked) > PAUSED_PAST {
+                if heard.is_some() {
+                    *heard = Some(now);
+                }
+            } else if heard.is_some_and(|heard| heard.elapsed() > silence) {
                 log::error!("the guest has answered nothing for {silence:?}: it is ended");
                 std::process::exit(1);
             }
+            checked = now;
         }
     });
 

@@ -22,6 +22,19 @@ describe('against virtx-stdio', () => {
   })
   afterEach(() => client.close())
 
+  test('a sandbox is resized and its disk never shrunk', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE, { memoryMib: 512, diskGib: 2 })
+    assert.deepEqual(await sandbox.resize({ vcpus: 2, diskGib: 3 }), {
+      vcpus: 2,
+      memoryMib: 512,
+      diskGib: 3,
+      up: false,
+    })
+    await assert.rejects(sandbox.resize({ diskGib: 1 }), { status: 400 })
+    await sandbox.remove()
+  })
+
   test('a volume is created and got', async () => {
     const name = unique('volume')
     const volume = await client.createVolume(name)

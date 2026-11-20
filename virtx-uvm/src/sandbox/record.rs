@@ -19,7 +19,8 @@ use super::Error;
 /// A sandbox as it is kept on disk.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Record {
-    /// What it was made with, its `image` the digest it booted, which it boots every time.
+    /// What it was made with, its `image` the digest it booted, which it boots every time, and
+    /// its size as it was last [resized](super::Sandbox::resize) to.
     pub(super) args: SandboxCreateArgs,
     /// The port each key opens: what its server reaches a port by, such as a capability in the
     /// port's URL.

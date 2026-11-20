@@ -19,6 +19,9 @@
 //! - [`endpoints::Home::take_in`] and [`let_go`](endpoints::Home::let_go): a sandbox taken into a
 //!   home whose record and disk were put there, and let go of with them left there, for moving a
 //!   sandbox between servers, or backing it up and restoring it.
+//! - [`virtx_uvm::set_admission`]: room for its machines, every project's together. A sandbox
+//!   or a build there is none for is refused `503` `capacity`, nothing of it made. The binary
+//!   sets none, and every machine boots.
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.

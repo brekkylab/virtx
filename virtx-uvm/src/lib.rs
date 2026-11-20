@@ -2,8 +2,10 @@
 //! volumes mounted into them; the sandboxes a server makes of those, and the jobs run in each
 //! -- and the files of a volume or a sandbox, served to a client; and the projects all of it
 //! belongs to; and where a project's data is kept beyond this machine, if anywhere
-//! ([`StorageBackend`]).
+//! ([`StorageBackend`]). How many machines may run at once is the embedder's to say
+//! ([`Admission`]).
 
+mod admission;
 pub mod backend;
 mod files;
 mod fstree;
@@ -13,6 +15,7 @@ mod project;
 mod sandbox;
 mod volume;
 
+pub use admission::{Admission, NoRoom, Room, admit, set_admission};
 pub use backend::StorageBackend;
 pub use files::Files;
 pub use fstree::*;

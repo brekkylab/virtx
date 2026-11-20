@@ -1104,6 +1104,8 @@ impl From<SandboxError> for Refused {
             SandboxError::Backend(e) => internal(e),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
+            // Where whatever embeds this sets an admission: the protocol's refusal.
+            SandboxError::NoRoom(_) => refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e),
             SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
         }
     }

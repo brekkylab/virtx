@@ -21,7 +21,7 @@ use crate::backend::{Backing, Held, Stored, Wanted};
 use crate::machine::wire::CtrlResp;
 use crate::{
     Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
-    Ports, Reference, VolumeHold, VolumeMount, VolumeStore,
+    Ports, Reference, Room, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -130,7 +130,8 @@ type Starting = (Vec<String>, oneshot::Sender<Result<Arc<Job>, String>>);
 
 /// Where a sandbox's machine is.
 enum State {
-    Up(Arc<Machine>),
+    /// Up, with the room it was given ([`Admission`](crate::Admission)), held until it is down.
+    Up(Arc<Machine>, Option<Room>),
     /// Stopped while the sandbox was in use by nothing, and booted again for what next needs
     /// it.
     Parked,
@@ -309,6 +310,8 @@ impl Sandbox {
             }
         }
 
+        // Room for its machine before anything of it is made, held for its first boot.
+        let room = crate::admit(&machine_spec(args))?;
         let backend = backing.get();
         let digest = match &args.image {
             ImageName::Tag { tag } => {
@@ -369,7 +372,7 @@ impl Sandbox {
             }
         }
         let made = async {
-            sandbox.wake().await?;
+            sandbox.wake_in(Some(room)).await?;
             match keys {
                 Some(keys) => sandbox.keep(Record {
                     args,
@@ -431,7 +434,6 @@ impl Sandbox {
             .collect::<Result<_, Error>>()?;
 
         let rootfs = images.insert_rootfs(&layers)?;
-        let gpu = args.gpu.unwrap_or(false);
         let dir = root.join(SANDBOX);
         let upper = match upper {
             Some(upper) => upper,
@@ -457,16 +459,7 @@ impl Sandbox {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
             upper: upper.path.clone(),
-            spec: MachineSpec {
-                vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
-                ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
-                gpu,
-                gpu_memory_mib: args.gpu_memory_mib,
-                network: match args.network {
-                    true => Network::Public,
-                    false => Network::None,
-                },
-            },
+            spec: machine_spec(args),
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.clone(),
@@ -708,7 +701,7 @@ impl Sandbox {
         // Taken first, so that nothing its machine's stopping ends -- its exit, a job killed
         // with it -- is written into it: a job that runs now is kept as one that ran.
         let record = self.record.lock().unwrap().take();
-        if let State::Up(machine) = state {
+        if let State::Up(machine, _room) = state {
             machine.stop();
         }
         // Its machine down, and its disk and volumes still here: the backend's to keep now.
@@ -726,12 +719,23 @@ impl Sandbox {
 
     /// Its machine, booting one if it is parked.
     async fn wake(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
+        self.wake_in(None).await
+    }
+
+    /// Its machine, booting one if it is parked in the room `given`, where it is given --
+    /// asked for as its sandbox is made -- and otherwise in room asked for now.
+    async fn wake_in(self: &Arc<Self>, given: Option<Option<Room>>) -> Result<Arc<Machine>, Error> {
         let _turn = self.turn.lock().await;
         match &*self.state.lock().unwrap() {
-            State::Up(machine) => return Ok(Arc::clone(machine)),
+            State::Up(machine, _) => return Ok(Arc::clone(machine)),
             State::Exited => return Err(Error::Ended),
             State::Parked => {}
         }
+        // Room for it first, so a machine there is none for is never started.
+        let mut room = match given {
+            Some(room) => room,
+            None => crate::admit(&self.config.spec)?,
+        };
         // Its disk and each volume it writes held here, brought up to what is kept, and each
         // volume it only reads brought up, where they are kept beyond this machine: what is
         // held, held until its machine is down.
@@ -754,13 +758,14 @@ impl Sandbox {
             let mut state = self.state.lock().unwrap();
             let closed = matches!(*state, State::Exited);
             if !closed {
-                *state = State::Up(Arc::clone(&machine));
+                *state = State::Up(Arc::clone(&machine), room.take());
             }
             closed
         };
-        // Closed while it booted: what booted goes with it.
+        // Closed while it booted: what booted goes with it, and then its room.
         if closed {
             tokio::task::spawn_blocking(move || machine.stop()).await?;
+            drop(room);
             return Err(Error::Ended);
         }
         let (reading, read) = (Arc::clone(self), Arc::clone(&machine));
@@ -805,13 +810,13 @@ impl Sandbox {
     async fn park_if(&self, unused_for: Option<Duration>) -> Result<(), Error> {
         let _turn = self.turn.lock().await;
         let idle = self.idle();
-        let machine = {
+        let (machine, room) = {
             let mut state = self.state.lock().unwrap();
-            let machine = match &*state {
-                State::Up(machine) => Arc::clone(machine),
+            match &*state {
+                State::Up(..) => {}
                 State::Parked => return Ok(()),
                 State::Exited => return Err(Error::Ended),
-            };
+            }
             if let Some(after) = unused_for {
                 match idle {
                     None => {
@@ -824,25 +829,29 @@ impl Sandbox {
                     Some(_) => {}
                 }
             }
-            *state = State::Parked;
-            machine
+            let State::Up(machine, room) = std::mem::replace(&mut *state, State::Parked) else {
+                unreachable!("up, as matched under the same lock")
+            };
+            (machine, room)
         };
+        // Its room is given back once it is down.
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
         self.holding.lock().unwrap().clear();
+        drop(room);
         Ok(())
     }
 
     /// Its machine while one runs.
     fn up(&self) -> Option<Arc<Machine>> {
         match &*self.state.lock().unwrap() {
-            State::Up(machine) => Some(Arc::clone(machine)),
+            State::Up(machine, _) => Some(Arc::clone(machine)),
             _ => None,
         }
     }
 
     /// Whether `machine` is its machine now.
     fn is(&self, machine: &Arc<Machine>) -> bool {
-        matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, machine))
+        matches!(&*self.state.lock().unwrap(), State::Up(up, _) if Arc::ptr_eq(up, machine))
     }
 
     /// Kill `job` if it runs.
@@ -910,7 +919,8 @@ impl Sandbox {
         let mut starting = self.starting.lock().unwrap();
         let exited = {
             let mut state = self.state.lock().unwrap();
-            let exited = matches!(&*state, State::Up(up) if Arc::ptr_eq(up, machine));
+            // Its room with it, since it is down.
+            let exited = matches!(&*state, State::Up(up, _) if Arc::ptr_eq(up, machine));
             if exited {
                 *state = State::Exited;
             }
@@ -1279,6 +1289,20 @@ impl Unknown {
     /// Delete its disk and record. Blocking work.
     pub fn remove(mut self) {
         self.upper.kept = false;
+    }
+}
+
+/// The machine a sandbox made as `args` asks boots as, each time.
+fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
+    MachineSpec {
+        vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
+        ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
+        gpu: args.gpu.unwrap_or(false),
+        gpu_memory_mib: args.gpu_memory_mib,
+        network: match args.network {
+            true => Network::Public,
+            false => Network::None,
+        },
     }
 }
 

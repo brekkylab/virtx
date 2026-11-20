@@ -23,6 +23,10 @@ pub enum Error {
     /// nothing was booted.
     #[error(transparent)]
     NoRoom(#[from] NoRoom),
+    /// What was asked cannot be done while the sandbox is in use: a job runs in it, or
+    /// something reaches it.
+    #[error("{0}")]
+    InUse(String),
 
     /// The sandbox's machine has exited, and takes nothing more.
     #[error("the sandbox's machine has exited")]
@@ -46,6 +50,10 @@ pub enum Error {
 
     #[error(transparent)]
     Volume(#[from] VolumeError),
+
+    /// What the storage backend refused, or failed with.
+    #[error(transparent)]
+    Backend(#[from] crate::backend::Refusal),
 
     #[error(transparent)]
     Machine(#[from] MachineError),

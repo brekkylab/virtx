@@ -122,7 +122,9 @@ pub trait StorageBackend: Send + Sync {
     }
 
     /// The tags kept and not here yet: what the home's registry lists beside its own, in its
-    /// catalog and its tag lists, each [wanted](Self::want) once a request names it.
+    /// catalog and its tag lists, each [wanted](Self::want) once a request names it. A
+    /// reference with no tag in it is not listed. Where it fails, the listing is refused `500`
+    /// rather than answered with the tags here alone.
     fn tags(&self) -> BoxFuture<'_, anyhow::Result<Vec<Reference>>> {
         Box::pin(async { Ok(Vec::new()) })
     }

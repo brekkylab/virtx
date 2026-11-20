@@ -97,7 +97,8 @@ impl Home {
     /// sandboxes' upper disks under `root`, with each sandbox a server before it kept there
     /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
-    /// is made for says otherwise ([`Access::through`]). Blocking work, as knowing each
+    /// is made for says otherwise ([`Access::through`]). `registry` is this home's alone: it is
+    /// backed as the home is ([`backed_by`](Home::backed_by)). Blocking work, as knowing each
     /// sandbox again is.
     pub fn new(
         images: ImageStore,
@@ -156,8 +157,16 @@ impl Home {
     /// registry lists the tags kept there and brings a manifest it is asked for here. Said
     /// once, as it is made, before any request reaches it. A home given none -- a server on its
     /// own -- keeps nothing beyond its stores. See [`StorageBackend`].
+    ///
+    /// # Panics
+    ///
+    /// Where it has a backend already, given to it or to the registry it was made with: a home
+    /// keeps the one it was given first.
     pub fn backed_by(self, backend: Arc<dyn StorageBackend>) -> Home {
-        self.backing.set(backend);
+        assert!(
+            self.backing.set(backend),
+            "a home is backed once, and this one or its registry has a backend already"
+        );
         self
     }
 

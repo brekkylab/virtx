@@ -447,16 +447,18 @@ export interface SandboxExecOptions {
 }
 
 /**
- * Why a process did not end by itself: the server killed it, as `SIGKILL` does, its code `137`.
- * `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it ran, its sandbox
- * still there; `sandbox_deleted`, its sandbox was removed under it; `vm_exited`, its sandbox's VM
- * exited on its own under it; `restarted`, its server restarted while it ran, keeping its sandbox.
+ * Why a process did not end by itself: the server, or the kernel, killed it, as `SIGKILL` does,
+ * its code `137`. `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it
+ * ran, its sandbox still there; `sandbox_deleted`, its sandbox was removed under it; `vm_exited`,
+ * its sandbox's VM exited on its own under it; `oom`, its memory ran out; `restarted`, its server
+ * restarted while it ran, keeping its sandbox.
  */
 export type SandboxJobEndReason =
   | 'timeout'
   | 'cancelled'
   | 'sandbox_deleted'
   | 'vm_exited'
+  | 'oom'
   | 'restarted'
 
 /** What the server answers about a process started in a sandbox. */

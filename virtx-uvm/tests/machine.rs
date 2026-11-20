@@ -577,6 +577,48 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     close(sandbox).await;
 }
 
+async fn a_fork_bomb_leaves_the_sandbox_answering(home: Home) {
+    // Large enough for more threads than the kernel's pids, as most are.
+    answered_beside_a_bomb(&home, 2048, "f(){ f & f & wait; }; f").await;
+}
+
+async fn a_fork_bomb_out_of_memory_leaves_the_sandbox_answering(home: Home) {
+    // Each of its processes holding 600 KB of its own: the memory runs out long before the
+    // pids do, in a machine of any size.
+    let bomb = r#"s=$(head -c 300000 /dev/zero | tr "\0" x); f(){ y="$s$s"; f & f & wait; }; f"#;
+    answered_beside_a_bomb(&home, 1024, bomb).await;
+}
+
+/// A command run in a sandbox of `memory_mib` answered beside `bomb`, a script forking without
+/// end, as it goes on.
+async fn answered_beside_a_bomb(home: &Home, memory_mib: u32, bomb: &str) {
+    let mut args = small();
+    args.memory_mib = Some(memory_mib);
+    let sandbox = home.sandbox(&args, None).await;
+    let started = format!("sh -c '{bomb}' >/dev/null 2>&1 </dev/null & echo started");
+    let (lines, _) = run(&sandbox, &["sh", "-c", &started], None).await.unwrap();
+    assert_eq!(lines, ["started"]);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Answered while the bomb goes on: how soon is not what is tried, and the timeout only
+    // keeps a sandbox that never answers from holding the suite. The processes are counted by a
+    // pipeline, which forks: the bomb holds all but a share of them, which another command has.
+    // A process gone between the glob and `ls` is no error of the count's.
+    let counted = [
+        "sh",
+        "-c",
+        "echo alive; ls -d /proc/[0-9]* 2>/dev/null | wc -l",
+    ];
+    let answered = tokio::time::timeout(Duration::from_secs(120), run(&sandbox, &counted, None));
+    let (lines, _) = answered
+        .await
+        .expect("a command answered beside the bomb")
+        .unwrap();
+    assert_eq!(lines[0], "alive", "{lines:?}");
+    let processes: u32 = lines[1].trim().parse().unwrap_or(0);
+    assert!(processes > 100, "the bomb went on beside it: {lines:?}");
+    close(sandbox).await;
+}
+
 async fn a_job_ends_with_its_process_not_with_what_it_left_running(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     // A program left running with the job's own output: the job ends with its shell, and the
@@ -903,6 +945,80 @@ async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
     };
     assert_eq!(read.unwrap(), deleted);
     assert_eq!(job.get().reason, Some(SandboxJobEndReason::SandboxDeleted));
+}
+
+async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // How `cmd` ended, read from its log to its end.
+    let ended = async |cmd: &[&str]| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        let job = sandbox.exec(cmd, false, None).await.unwrap();
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => (end, job.get().reason),
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Holding more than one command may, 64 KiB at a time: killed for its memory, by the kernel,
+    // or by the agent where its program's pages are read back again and again instead.
+    let hungry = [
+        "awk",
+        r#"BEGIN { while (1) held[i++] = sprintf("%65536s", "") }"#,
+    ];
+    let Ok((end, reason)) = tokio::time::timeout(HANG, ended(&hungry)).await else {
+        // What its cgroup held, said with the failure.
+        let held = "cd /sys/fs/cgroup/jobs; for c in */; do echo $c; \
+            cat $c/memory.max $c/memory.current $c/memory.events; done; free -m";
+        let held = run(&sandbox, &["sh", "-c", held], None).await;
+        panic!("its memory never ran out: {held:?}");
+    };
+    let oom = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Oom),
+    };
+    assert_eq!((end, reason), (oom, Some(SandboxJobEndReason::Oom)));
+    // `SIGKILL` from itself, within its memory: its own end, as before.
+    let (end, reason) = ended(&["sh", "-c", "kill -9 $$"]).await;
+    assert_eq!((end, reason), (SandboxJobEnd::exited(137), None));
+    // The sandbox answers on.
+    assert_eq!(
+        run(&sandbox, &["echo", "on"], None).await.unwrap().0,
+        ["on"]
+    );
+    close(sandbox).await;
+}
+
+async fn a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // A file half as large again as one command's memory, out of the page cache.
+    let write = "own=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); \
+        mib=$(( $(cat $own/memory.max) * 3 / 2 >> 20 )); \
+        dd if=/dev/zero of=/root/big bs=1M count=$mib 2>/dev/null && \
+        [ $(( $(stat -c %s /root/big) >> 20 )) -eq $mib ] && \
+        sync && echo 3 > /proc/sys/vm/drop_caches";
+    assert_eq!(
+        run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
+        0
+    );
+    // Read whole four times: each pass hits its limit and reads back what the last let go of,
+    // holding next to nothing of its own.
+    let read = [
+        "sh",
+        "-c",
+        "for i in 1 2 3 4; do sha256sum /root/big >/dev/null || exit; done",
+    ];
+    // A guard against a hang: four passes over a GiB and more take a while on a slow disk.
+    let ended = tokio::time::timeout(HANG * 5, run(&sandbox, &read, None));
+    let (lines, code) = ended.await.expect("the reads end").unwrap();
+    assert_eq!((lines, code), (vec![], 0));
+    close(sandbox).await;
 }
 
 /// A machine's process leads a process group of its own, so what is sent its starter's group --
@@ -1984,11 +2100,15 @@ fn main() -> ExitCode {
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         a_job_ends_with_its_process_not_with_what_it_left_running,
+        a_fork_bomb_leaves_the_sandbox_answering,
+        a_fork_bomb_out_of_memory_leaves_the_sandbox_answering,
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,
         writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open,
         a_job_s_end_says_why_the_server_ended_it_and_only_then,
+        a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not,
+        a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
         a_machine_boots_only_with_room_given_back_as_it_goes_down,

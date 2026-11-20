@@ -405,12 +405,14 @@ Lines of one stream are in the order the process wrote them; lines of the two, i
 
 The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, when its sandbox is deleted, with its sandbox's VM, or with its server, which keeps its sandbox.
 In each of the last five, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+It is killed so too, its `code` `137`, when its memory runs out: past what the server lets one command take, or the VM's, or where it thrashes there, reading back what it had to let go of.
 A server MAY say which, in its end and in its job, with `reason`:
 
 - `"timeout"`: its `timeout_ms` ran out.
 - `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed. Its sandbox is still there.
 - `"sandbox_deleted"`: its sandbox was deleted while it ran, by the sandbox's `DELETE` or by the server, which then ends its log with this end before the job goes with the sandbox.
 - `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
+- `"oom"`: its memory ran out: it ended `137`, killed, or a process it started killed, for want of memory. A server that holds a command to a memory limit SHOULD say it, so that one is told apart from a `SIGKILL` sent.
 - `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
 
 A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.

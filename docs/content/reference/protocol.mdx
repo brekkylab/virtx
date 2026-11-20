@@ -247,6 +247,8 @@ Cancelling one stops it:
 - A pull leaves no tag changed. Blobs already fetched MAY be kept for reuse.
 - A push puts no manifest to the other registry. Blobs already pushed there stay.
 
+A cancel that comes once a build or a pull has begun to write its tag waits for that to finish: the job has then ended, as it would have, and the `DELETE` removes it.
+
 The server MAY remove an image job that has ended, once a time it chooses has passed.
 
 `POST /images/prune` deletes each image no reference points at and no sandbox uses, and what only such images held, such as their layers.

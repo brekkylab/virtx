@@ -797,6 +797,21 @@ impl Store {
         Ok(self.remove_tag_file(reference)?.then_some(image))
     }
 
+    /// Put `reference` back as it was before a change being undone: naming `image`, or no image
+    /// where it named none or `image` is no longer here. Unlike [`remove_tag`](Store::remove_tag)
+    /// it takes away the last tag of an image something holds: what it puts back is a state the
+    /// store was in, the hold taken since on an image no tag named.
+    pub fn restore_tag(&self, reference: &Reference, image: Option<&Digest>) -> Result<()> {
+        if let Some(image) = image {
+            match self.insert_tag(reference, image) {
+                Err(Error::Missing(_)) => {}
+                done => return done,
+            }
+        }
+        let _change = self.change()?;
+        self.remove_tag_file(reference).map(drop)
+    }
+
     /// Take `reference`'s file away, by a caller that holds the store's [`Change`]. `false` if
     /// it was not here.
     fn remove_tag_file(&self, reference: &Reference) -> Result<bool> {

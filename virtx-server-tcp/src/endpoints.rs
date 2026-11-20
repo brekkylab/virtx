@@ -89,7 +89,7 @@ pub struct Home {
     unknown: Mutex<HashMap<String, UnknownSandbox>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
-    image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
+    image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, Stop)>>,
     /// Set once its project is to be removed: no sandbox or image job is added after.
     closed: AtomicBool,
     /// Where its project's data is kept beyond this machine, once it is given one
@@ -325,8 +325,8 @@ impl Home {
     /// Cancel every image job here, and close every sandbox, as removing each does, side by
     /// side: blocks until each machine has stopped and synced what it wrote.
     pub fn close_all(&self) {
-        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
-            cancel(&job, &task);
+        for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
+            cancel_now(&job, &stop);
         }
         let closed: Vec<_> = self
             .sandboxes
@@ -404,8 +404,8 @@ impl Home {
     /// side, each kept for the next server over this home ([`Sandbox::leave`]): blocks until
     /// each machine has stopped and synced what it wrote.
     pub fn leave_all(&self) {
-        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
-            cancel(&job, &task);
+        for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
+            cancel_now(&job, &stop);
         }
         let left: Vec<_> = self
             .sandboxes
@@ -841,11 +841,14 @@ async fn image_job_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 }
 
 /// Start a job of `kind` for `reference`: `work`, given what logs a line of it, run until it
-/// ends or is cancelled, and kept [`IMAGE_JOB_KEPT`] after.
+/// ends or is cancelled, the image it makes then tagged `tags` where it names one, and kept
+/// [`IMAGE_JOB_KEPT`] after. Its tag's change and its end run to their end once begun, a cancel
+/// waiting for them ([`cancel`]); a job cancelled first leaves its tag be.
 fn image_job<Fut>(
     home: &Arc<Home>,
     kind: ImageJobKind,
     reference: String,
+    tags: Option<Reference>,
     work: impl FnOnce(Box<dyn FnMut(String) + Send>) -> Fut,
 ) -> Answer
 where
@@ -871,30 +874,55 @@ where
     let logged = Arc::clone(&job);
     let work = work(Box::new(move |line| logged.write(ImageJobEntry::Log(line))));
     let (ended, kept, removed) = (Arc::clone(&job), Arc::clone(home), id.clone());
+    let gate = Arc::new(tokio::sync::Mutex::new(false));
+    let (closed, backing, images) = (Arc::clone(&gate), home.backing.clone(), home.images.clone());
     let task = tokio::spawn(async move {
-        let end = match work.await {
-            Ok(digest) => ImageJobEnd {
-                digest: Some(digest.to_string()),
-                error: None,
-            },
-            Err(e) => ImageJobEnd {
-                digest: None,
-                error: Some(e.to_string()),
-            },
-        };
-        ended.end(
-            |job| {
-                job.running = false;
-                job.digest.clone_from(&end.digest);
-                job.error.clone_from(&end.error);
-            },
-            ImageJobEntry::End(end.clone()),
-        );
-        tokio::time::sleep(IMAGE_JOB_KEPT).await;
-        kept.image_jobs.lock().unwrap().remove(&removed);
-        ended.remove();
+        let worked = work.await;
+        let ending = Arc::clone(&ended);
+        let ending = tokio::spawn(async move {
+            let cancelled = closed.lock().await;
+            if *cancelled {
+                return false;
+            }
+            let done = match (worked, tags) {
+                (Ok(digest), Some(reference)) => {
+                    (tag(&backing, &images, &reference, &digest).await).map(|()| digest)
+                }
+                (worked, _) => worked,
+            };
+            let end = match done {
+                Ok(digest) => ImageJobEnd {
+                    digest: Some(digest.to_string()),
+                    error: None,
+                },
+                Err(e) => ImageJobEnd {
+                    digest: None,
+                    error: Some(e.to_string()),
+                },
+            };
+            ending.end(
+                |job| {
+                    job.running = false;
+                    job.digest.clone_from(&end.digest);
+                    job.error.clone_from(&end.error);
+                },
+                ImageJobEntry::End(end.clone()),
+            );
+            true
+        });
+        let ended_here =
+            (ending.await).unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+        if ended_here {
+            tokio::time::sleep(IMAGE_JOB_KEPT).await;
+            kept.image_jobs.lock().unwrap().remove(&removed);
+            ended.remove();
+        }
     });
-    jobs.insert(id.clone(), (Arc::clone(&job), task.abort_handle()));
+    let stop = Stop {
+        task: task.abort_handle(),
+        gate,
+    };
+    jobs.insert(id.clone(), (Arc::clone(&job), stop));
     Ok(created(
         format!("/images/jobs/{id}"),
         &*job.job.lock().unwrap(),
@@ -906,18 +934,17 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
     let reference = reference(&args.reference)?;
     let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
     let (mirror, public) = (home.mirror.clone(), home.public.clone());
-    let backing = home.backing.clone();
     image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
+        Some(reference.clone()),
         move |report| async move {
             let registry = RegistryClient::new(images.clone(), args.auth)
                 .with_mirror(mirror.as_deref())
                 .with_public(public)
                 .through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
-            tag(&backing, &images, &reference, &image).await?;
             Ok(image)
         },
     )
@@ -931,6 +958,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         &home,
         ImageJobKind::Push,
         args.reference,
+        None,
         move |report| async move {
             let registry = RegistryClient::new(images, args.auth).through(Some(&*registries))?;
             Ok(registry.push(&reference, report).await?)
@@ -955,7 +983,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let (registries, mirror) = (Arc::clone(&home.registries), home.mirror.clone());
-    let (public, backing) = (home.public.clone(), home.backing.clone());
+    let public = home.public.clone();
     let recipe = args.recipe;
     // Room for one machine as the build is asked for, if a step of it boots one -- its steps
     // boot one at a time -- so a build there is none for is refused `503` as a sandbox is,
@@ -970,6 +998,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         &home,
         ImageJobKind::Build,
         args.reference,
+        Some(reference),
         move |mut report| async move {
             // Held until the build ends, or is cancelled: its future dropped.
             let _room = room;
@@ -999,7 +1028,6 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
             let store = images.clone();
             let digest =
                 tokio::task::spawn_blocking(move || store.insert_image(&image, &layers)).await??;
-            tag(&backing, &images, &reference, &digest).await?;
             Ok(digest)
         },
     )
@@ -1078,15 +1106,38 @@ async fn image_job_remove(
     Segments(id): Segments<String>,
 ) -> Answer {
     let removed = home.image_jobs.lock().unwrap().remove(&id);
-    let (job, task) =
+    let (job, stop) =
         removed.ok_or_else(|| not_found(format!("no image job here has the id {id}")))?;
-    cancel(&job, &task);
+    cancel(&job, &stop).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Stop `job`'s `task`, leaving no tag changed, end it as cancelled, and remove its log.
-fn cancel(job: &ImageJobOf, task: &AbortHandle) {
-    task.abort();
+/// What stops an image job: its task, and the gate its tag's change and its end pass, closed
+/// (`true`) once it is cancelled.
+struct Stop {
+    task: AbortHandle,
+    gate: Arc<tokio::sync::Mutex<bool>>,
+}
+
+/// Stop `job`, leaving no tag changed, end it as cancelled, and remove its log. One whose tag's
+/// change is under way is waited for and ends as that does, the cancel coming after it.
+async fn cancel(job: &ImageJobOf, stop: &Stop) {
+    stop.task.abort();
+    *stop.gate.lock().await = true;
+    end_cancelled(job);
+}
+
+/// [`cancel`], as its home closes: a tag's change under way goes on, not waited for.
+fn cancel_now(job: &ImageJobOf, stop: &Stop) {
+    stop.task.abort();
+    if let Ok(mut gate) = stop.gate.try_lock() {
+        *gate = true;
+    }
+    end_cancelled(job);
+}
+
+/// End `job` as cancelled, if it has not ended, and remove its log.
+fn end_cancelled(job: &ImageJobOf) {
     job.end(
         |job| (job.running, job.error) = (false, Some("cancelled".into())),
         ImageJobEntry::End(ImageJobEnd {

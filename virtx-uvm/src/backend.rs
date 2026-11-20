@@ -7,7 +7,8 @@
 //! What the backend answers in place of the stores here is answered as the protocol has it: a
 //! volume it lists is listed as one here is.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_util::future::BoxFuture;
 use virtx_core::VolumeListOutputItem;
@@ -167,9 +168,14 @@ pub trait StorageBackend: Send + Sync {
 }
 
 /// A home's [`StorageBackend`], once it is given one: shared by the home and each of its
-/// sandboxes, which take it as they next need it, and given once.
+/// sandboxes, which take it as they next need it, and given once. It orders the changes to each
+/// tag ([`lock_tags`](Self::lock_tags)), so that a tag here and where it is kept change in the
+/// same order.
 #[derive(Clone, Default)]
-pub struct Backing(Arc<OnceLock<Arc<dyn StorageBackend>>>);
+pub struct Backing {
+    backend: Arc<OnceLock<Arc<dyn StorageBackend>>>,
+    tags: Arc<TagLocks>,
+}
 
 impl std::fmt::Debug for Backing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -181,18 +187,40 @@ impl std::fmt::Debug for Backing {
 impl Backing {
     /// Back it with `backend` from now on: `false`, and nothing changed, where it was already.
     pub fn set(&self, backend: Arc<dyn StorageBackend>) -> bool {
-        self.0.set(backend).is_ok()
+        self.backend.set(backend).is_ok()
     }
 
     /// The backend, if it has one.
     pub fn get(&self) -> Option<&Arc<dyn StorageBackend>> {
-        self.0.get()
+        self.backend.get()
+    }
+
+    /// Each of `tags` to change alone, here and where it is kept, until the answer drops:
+    /// waits while another change holds one. A change to a tag holds it from its write here
+    /// through the backend's call to its put-back, so that two never reach the backend in
+    /// another order than they wrote here.
+    pub async fn lock_tags(&self, tags: impl IntoIterator<Item = Reference>) -> TagsLocked {
+        let mut tags: Vec<_> = tags.into_iter().collect();
+        // One order for every caller, so that two locking several never wait on each other.
+        tags.sort_by_key(|tag| tag.to_string());
+        tags.dedup();
+        let mut held = Vec::with_capacity(tags.len());
+        for tag in tags {
+            let lock = Arc::clone(self.tags.0.lock().unwrap().entry(tag.clone()).or_default());
+            held.push((tag, lock.lock_owned().await));
+        }
+        TagsLocked {
+            locks: Arc::clone(&self.tags),
+            held,
+        }
     }
 
     /// Have `tag` name `image` in `store`, the home's image store, and kept so where there is a
     /// backend ([`StorageBackend::tagged`]): done once both are, and run to its end even if
-    /// what awaits it is dropped. Where the backend fails, `tag` is put back here as it was --
-    /// naming what it named, or none.
+    /// what awaits it is dropped, with no other change to `tag` between
+    /// ([`lock_tags`](Self::lock_tags)). Where the backend fails, `tag` is put back here as it
+    /// was -- naming what it named, or none where that is gone ([`ImageStore::restore_tag`]);
+    /// a put-back that fails too is logged.
     pub async fn tag(
         &self,
         store: &ImageStore,
@@ -202,6 +230,7 @@ impl Backing {
         let (backing, store, tag, image) =
             (self.clone(), store.clone(), tag.clone(), image.clone());
         let tagging = tokio::spawn(async move {
+            let _locked = backing.lock_tags([tag.clone()]).await;
             let written = (store.clone(), tag.clone(), image.clone());
             let before = blocking(move || {
                 let (store, tag, image) = written;
@@ -216,10 +245,7 @@ impl Backing {
             let Err(e) = backend.tagged(&tag, &image).await else {
                 return Ok(());
             };
-            let put_back = blocking(move || match before {
-                Some(before) => store.insert_tag(&tag, &before),
-                None => store.remove_tag(&tag).map(drop),
-            });
+            let put_back = blocking(move || store.restore_tag(&tag, before.as_ref()));
             if let Err(put) = put_back.await {
                 eprintln!("putting a tag back as it was here: {put}");
             }
@@ -228,6 +254,39 @@ impl Backing {
         tagging
             .await
             .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+    }
+}
+
+/// The lock of each tag a change holds, while one does.
+#[derive(Default)]
+struct TagLocks(Mutex<HashMap<Reference, Arc<tokio::sync::Mutex<()>>>>);
+
+/// Tags held to change alone ([`Backing::lock_tags`]), until it drops.
+pub struct TagsLocked {
+    locks: Arc<TagLocks>,
+    held: Vec<(Reference, tokio::sync::OwnedMutexGuard<()>)>,
+}
+
+impl TagsLocked {
+    /// Whether `tag` is one of those held.
+    pub fn holds(&self, tag: &Reference) -> bool {
+        self.held.iter().any(|(held, _)| held == tag)
+    }
+}
+
+impl Drop for TagsLocked {
+    fn drop(&mut self) {
+        for (tag, guard) in self.held.drain(..) {
+            drop(guard);
+            let mut locks = self.locks.0.lock().unwrap();
+            // Only the map holds it: no change waits on it.
+            if locks
+                .get(&tag)
+                .is_some_and(|lock| Arc::strong_count(lock) == 1)
+            {
+                locks.remove(&tag);
+            }
+        }
     }
 }
 

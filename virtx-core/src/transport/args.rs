@@ -271,7 +271,11 @@ mod tests {
             refused::<SandboxCreateArgs>(&format!(
                 r#"{{{image}, "ports": [{{"port": 53, "protocol": "udp"}}]}}"#
             )),
-            r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not an object"#
+            r#"ports[0].protocol: "udp" is not a protocol this server opens"#
+        );
+        assert_eq!(
+            refused::<SandboxCreateArgs>(&format!(r#"{{{image}, "ports": [{{"port": "53"}}]}}"#)),
+            r#"ports[0].port: a whole number from 0 to 65535, not "53""#
         );
         assert_eq!(
             refused::<ProjectMemberSetArgs>(r#"{"role": 1}"#),

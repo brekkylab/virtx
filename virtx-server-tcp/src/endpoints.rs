@@ -208,6 +208,8 @@ impl Home {
 
     /// Its sandboxes, whether each one's machine is up or not: for routes of a server's own
     /// ([`serve::router`](crate::serve::router)'s `own`), which may count them or park them.
+    /// Those a restart could not know again are not among them, though each keeps its disk and
+    /// record under the home's root until it is removed.
     pub fn sandboxes(&self) -> Vec<Arc<Sandbox>> {
         let sandboxes = self.sandboxes.lock().unwrap();
         sandboxes
@@ -217,7 +219,9 @@ impl Home {
     }
 
     /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
-    /// was used, side by side; those in use are left as they are.
+    /// was used, side by side; those in use are left as they are. These are the sandboxes here
+    /// as it is called: one made meanwhile is left up, so a server that drains its host stops
+    /// sending it work first.
     pub async fn park_unused(&self) {
         let parked = self.sandboxes().into_iter().map(|sandbox| async move {
             let _ = sandbox.park().await;
@@ -227,7 +231,7 @@ impl Home {
 
     /// Park every sandbox here, in use or not ([`Sandbox::park_anyway`]), side by side: what
     /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
-    /// used.
+    /// used. As [`park_unused`](Home::park_unused), the sandboxes here as it is called.
     pub async fn park_all(&self) {
         let parked = self.sandboxes().into_iter().map(|sandbox| async move {
             sandbox.park_anyway().await;

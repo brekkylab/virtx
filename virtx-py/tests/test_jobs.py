@@ -35,6 +35,7 @@ from virtx import (
     VirtxError,
     Volume,
 )
+from virtx.image import image_job_entry
 from virtx.sandbox import sandbox_job_entry
 
 
@@ -203,10 +204,15 @@ async def test_a_process_whose_sandbox_is_removed_ends_with_the_reason(client: C
 
 
 def test_a_reason_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:
-    end = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "disk_full"}}).entry
-    assert end == SandboxJobEnd(137, "disk_full")
-    known = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "timeout"}}).entry
-    assert known == SandboxJobEnd(137, SandboxJobEndReason.TIMEOUT)
+    end = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "disk_full"}})
+    assert end is not None and end.entry == SandboxJobEnd(137, "disk_full")
+    known = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "timeout"}})
+    assert known is not None and known.entry == SandboxJobEnd(137, SandboxJobEndReason.TIMEOUT)
+
+
+def test_a_log_entry_of_a_kind_this_version_does_not_know_is_passed_over() -> None:
+    assert sandbox_job_entry({"id": 4, "progress": None}) is None
+    assert image_job_entry({"id": 4, "layer": None}) is None
 
 
 def test_a_port_protocol_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:

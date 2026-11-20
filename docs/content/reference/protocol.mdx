@@ -189,7 +189,7 @@ data: {"end": {"code": 0}}
 ```
 
 - `id` is the entry's number in the log: `1` for the first, and one more for each after it.
-- `data` is the entry, one JSON object with one member, written on one line. What its member is named and holds is the job's kind's.
+- `data` is the entry, one JSON object with one member, written on one line. What its member is named and holds is the job's kind's. A later version of this protocol may add a kind of entry; a client passes over one it does not know, its `id` still counting for `Last-Event-ID`.
 - The server sets no other field, and MAY send comments, lines starting with `:`, to keep the connection open. A client ignores any other field, and any event with no `data`.
 
 Every reader gets the whole log, from its first entry, as the job writes it.

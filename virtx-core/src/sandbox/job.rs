@@ -100,8 +100,12 @@ pub struct SandboxStdinArgs {
 }
 
 /// One entry of a sandbox job's log. As JSON, an object of one member, as `{"stdout": "..."}`.
+///
+/// An entry of a kind a later version of the protocol adds is read as
+/// [`Other`](Self::Other), for a reader to pass over, so a log with one still reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SandboxJobEntry {
     /// A line the process wrote to stdout, without its line ending.
     Stdout(String),
@@ -114,6 +118,10 @@ pub enum SandboxJobEntry {
 
     /// How it ended, last.
     End(SandboxJobEnd),
+
+    /// One of a kind this version does not know.
+    #[serde(untagged)]
+    Other(crate::UnknownEntry),
 }
 
 /// How a process ended.
@@ -336,6 +344,28 @@ mod tests {
             })
         );
         assert_eq!(serde_json::to_value(&entry).unwrap(), value);
+    }
+
+    #[test]
+    fn an_entry_of_a_kind_this_version_does_not_know_is_read_to_be_passed_over() {
+        let other = crate::LogEntry {
+            id: 4,
+            entry: SandboxJobEntry::Other(crate::UnknownEntry {
+                kind: "progress".into(),
+            }),
+        };
+        let read = json!({"id": 4, "progress": {"done": 3}});
+        assert_eq!(
+            serde_json::from_value::<crate::LogEntry<SandboxJobEntry>>(read).unwrap(),
+            other
+        );
+        assert_eq!(
+            serde_json::to_value(&other).unwrap(),
+            json!({"id": 4, "progress": null})
+        );
+        let item: SandboxExecItem =
+            serde_json::from_value(json!({"id": 4, "progress": {"done": 3}})).unwrap();
+        assert_eq!(item, SandboxExecItem::Log(other));
     }
 
     #[test]

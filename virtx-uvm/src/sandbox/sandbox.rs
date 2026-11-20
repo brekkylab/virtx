@@ -151,6 +151,8 @@ enum State {
 pub struct Sandbox {
     /// Its upper disk's name, and so its own.
     id: String,
+    /// The name it was made with, which a server finds it again by.
+    name: Option<String>,
     /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
     root: PathBuf,
     /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
@@ -230,6 +232,12 @@ impl Sandbox {
         backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
+        if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
+            return Err(Error::Invalid(format!(
+                "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
+                 starting with '.' or '-', 128 at most"
+            )));
+        }
         let mut given = HashSet::new();
         if let Some(port) = args
             .ports
@@ -475,6 +483,7 @@ impl Sandbox {
         let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
         Ok(Sandbox {
             id: upper.id.clone(),
+            name: args.name.clone(),
             root: root.to_owned(),
             up_since: Mutex::default(),
             dir,
@@ -513,6 +522,11 @@ impl Sandbox {
         &self.id
     }
 
+    /// The name it was made with, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     /// When its machine came up, while it is up; `None` while it is parked or has exited.
     pub fn up_since(&self) -> Option<SystemTime> {
         self.up_since.lock().unwrap().map(|(at, _)| at)
@@ -522,6 +536,7 @@ impl Sandbox {
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
+            name: self.name.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),
@@ -1221,6 +1236,10 @@ impl Sandbox {
                     ImageName::Digest { digest } => Some(digest.clone()),
                     ImageName::Tag { .. } => None,
                 });
+            let name = read
+                .as_ref()
+                .ok()
+                .and_then(|record| record.args.name.clone());
             let known = read.and_then(|record| {
                 let digest = record.image()?;
                 let (args, kept) = (record.args.clone(), (Some(upper), Some(record)));
@@ -1241,6 +1260,7 @@ impl Sandbox {
                     if let Some(upper) = Upper::kept_one(&dir, &id) {
                         kept.unknown.push(Unknown {
                             id,
+                            name,
                             image,
                             why,
                             upper,
@@ -1326,6 +1346,7 @@ pub struct Kept {
 #[derive(Debug)]
 pub struct Unknown {
     id: String,
+    name: Option<String>,
     image: Option<String>,
     why: String,
     upper: Upper,
@@ -1334,6 +1355,11 @@ pub struct Unknown {
 impl Unknown {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The name it was made with, as its record says, if it reads.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// Why it could not be known again.
@@ -1346,6 +1372,7 @@ impl Unknown {
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
+            name: self.name.clone(),
             image: self.image.clone().unwrap_or_default(),
             running: false,
             ports: Vec::new(),

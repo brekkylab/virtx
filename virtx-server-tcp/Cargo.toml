@@ -16,6 +16,7 @@ gpu = ["virtx-uvm/gpu"]
 anyhow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
+form_urlencoded = "1"
 http = "1"
 http-body-util = "0.1"
 # An OpenID Connect provider's tokens, checked against its keys.

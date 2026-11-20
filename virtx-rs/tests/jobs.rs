@@ -425,6 +425,37 @@ fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
 }
 
 #[test]
+fn a_sandbox_is_found_by_its_name_which_no_other_has_until_it_is_removed() {
+    for client in [common::client(), common::tcp_client()] {
+        common::alpine(&client);
+        let name = common::unique("named");
+        let args = SandboxCreateArgs::new(ALPINE).name(&name);
+        let made = client.create_sandbox(&args).wait().unwrap();
+        assert_eq!(made.name(), Some(name.as_str()));
+        let found = client.find_sandbox(&name).wait().unwrap().unwrap();
+        assert_eq!((found.id(), found.name()), (made.id(), Some(name.as_str())));
+        let nobody = client
+            .find_sandbox(common::unique("nobody"))
+            .wait()
+            .unwrap();
+        assert!(nobody.is_none());
+
+        let taken = client.create_sandbox(&args).wait().unwrap_err();
+        assert_eq!(
+            (taken.source_kind(), taken.status()),
+            (Source::Server, Some(409)),
+            "{taken}"
+        );
+
+        made.remove().wait().unwrap();
+        assert!(client.find_sandbox(&name).wait().unwrap().is_none());
+        let again = client.create_sandbox(&args).wait().unwrap();
+        assert_ne!(again.id(), made.id());
+        again.remove().wait().unwrap();
+    }
+}
+
+#[test]
 fn a_process_is_read_with_its_log_its_job_first() {
     for client in [common::client(), common::tcp_client()] {
         common::alpine(&client);

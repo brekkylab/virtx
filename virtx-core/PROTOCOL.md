@@ -296,12 +296,14 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?, error?}` |
-| `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?, error?}` |
+| `GET /sandboxes/` | | `200`, array of `{id, name?, image, running, abins?, error?}` |
+| `GET /sandboxes/?name={name}` | | `200`, array of the one named so, or of none |
+| `POST /sandboxes/` | `{image, name?, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, name?, image, running, ports?, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, name?, image, running, abins?, error?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
+- `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. It is letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 characters, as a volume's, compared as written, so case counts; any other is refused with `400`, `invalid`. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.

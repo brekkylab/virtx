@@ -36,7 +36,7 @@ use virtx_core::{
     SandboxPort, SandboxSignalArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
     VolumeMountListOutputItem, described_type, from_body,
 };
-use virtx_uvm::backend::{Backing, Refusal, Stored};
+use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
@@ -765,7 +765,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
-    let mirror = home.mirror.clone();
+    let (mirror, backing) = (home.mirror.clone(), home.backing.clone());
     image_job(
         &home,
         ImageJobKind::Pull,
@@ -775,8 +775,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
                 .with_mirror(mirror.as_deref())
                 .through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
-            let (store, tagged) = (images.clone(), image.clone());
-            tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
+            tag(&backing, &images, &reference, &image).await?;
             Ok(image)
         },
     )
@@ -805,7 +804,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let (registries, mirror) = (Arc::clone(&home.registries), home.mirror.clone());
-    let recipe = args.recipe;
+    let (recipe, backing) = (args.recipe, home.backing.clone());
     image_job(
         &home,
         ImageJobKind::Build,
@@ -839,15 +838,31 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                 )
                 .await?;
             }
-            let digest = tokio::task::spawn_blocking(move || {
-                let digest = images.insert_image(&image, &layers)?;
-                images.insert_tag(&reference, &digest)?;
-                Ok::<_, ImageStoreError>(digest)
-            })
-            .await??;
+            let store = images.clone();
+            let digest =
+                tokio::task::spawn_blocking(move || store.insert_image(&image, &layers)).await??;
+            tag(&backing, &images, &reference, &digest).await?;
             Ok(digest)
         },
     )
+}
+
+/// `reference` made to name `image` in `images`, and kept so beyond this machine where the
+/// home is backed ([`Backing::tag`]): an image job's last step.
+async fn tag(
+    backing: &Backing,
+    images: &ImageStore,
+    reference: &Reference,
+    image: &Digest,
+) -> Result<(), Failure> {
+    match backing.tag(images, reference, image).await {
+        Ok(()) => Ok(()),
+        Err(TagError::Store(e)) => Err(e.into()),
+        Err(TagError::Kept(e)) => {
+            eprintln!("keeping {reference} beyond this machine: {e:#}");
+            Err("the tag could not be kept beyond this machine".into())
+        }
+    }
 }
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.

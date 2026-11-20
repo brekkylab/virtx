@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 use futures_util::future::BoxFuture;
 use virtx_core::VolumeListOutputItem;
 
-use crate::{Digest, Reference};
+use crate::{Digest, ImageStore, ImageStoreError, Reference};
 
 /// What a backend keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,6 +67,10 @@ pub enum Refusal {
 ///
 /// A sandbox's disk, once taken, is its machine's alone: how the machine reads it is not the
 /// backend's to say.
+///
+/// A tag the home writes or removes is told to the backend as it is
+/// ([`tagged`](Self::tagged), [`untag`](Self::untag)), and what wrote or removed it is answered
+/// once the backend has it so.
 ///
 /// What is kept is the embedder's to remove where no request here does: a project's, as the
 /// project is removed, and a sandbox's disk let go of here and taken in nowhere else.
@@ -128,9 +132,37 @@ pub trait StorageBackend: Send + Sync {
     /// The tags kept and not here yet: what the home's registry lists beside its own, in its
     /// catalog and its tag lists, each [wanted](Self::want) once a request names it. A
     /// reference with no tag in it is not listed. Where it fails, the listing is refused `500`
-    /// rather than answered with the tags here alone.
+    /// rather than answered with the tags here alone. A tag the registry was pushed or removed
+    /// is kept so before that is answered ([`tagged`](Self::tagged), [`untag`](Self::untag)),
+    /// so a listing after it lists what it left.
     fn tags(&self) -> BoxFuture<'_, anyhow::Result<Vec<Reference>>> {
         Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// Tag `tag` just written in the home's image store to name `image`, whose manifest, config
+    /// and layers are there to be read: kept so from now on, in place of whatever it named.
+    /// Told by a push of a manifest by its tag to the home's registry, and by a pull or a build
+    /// of the home's, each answered once this is. Where it fails, `tag` is put back here as it
+    /// was -- naming what it named, or none -- and the push refused `500`, the pull or build
+    /// failed.
+    fn tagged<'a>(
+        &'a self,
+        tag: &'a Reference,
+        image: &'a Digest,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        let _ = (tag, image);
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Tag `tag` removed from where it is kept: whether it was. Asked by a `DELETE` of the home's
+    /// registry, for its tag and for each tag a digest takes away, once it is removed here -- or
+    /// at once for a tag not here, its image not [wanted](Self::want) for it, so that a tag whose
+    /// image cannot be brought here still goes. The removal is answered once this is: `202`
+    /// where the tag was here or kept, `404` where neither. Where it fails, a tag removed here
+    /// is put back, and the removal is refused `500`.
+    fn untag<'a>(&'a self, tag: &'a Reference) -> BoxFuture<'a, anyhow::Result<bool>> {
+        let _ = tag;
+        Box::pin(async { Ok(false) })
     }
 }
 
@@ -156,4 +188,64 @@ impl Backing {
     pub fn get(&self) -> Option<&Arc<dyn StorageBackend>> {
         self.0.get()
     }
+
+    /// Have `tag` name `image` in `store`, the home's image store, and kept so where there is a
+    /// backend ([`StorageBackend::tagged`]): done once both are, and run to its end even if
+    /// what awaits it is dropped. Where the backend fails, `tag` is put back here as it was --
+    /// naming what it named, or none.
+    pub async fn tag(
+        &self,
+        store: &ImageStore,
+        tag: &Reference,
+        image: &Digest,
+    ) -> Result<(), TagError> {
+        let (backing, store, tag, image) =
+            (self.clone(), store.clone(), tag.clone(), image.clone());
+        let tagging = tokio::spawn(async move {
+            let written = (store.clone(), tag.clone(), image.clone());
+            let before = blocking(move || {
+                let (store, tag, image) = written;
+                let before = store.get_tag(&tag)?;
+                store.insert_tag(&tag, &image)?;
+                Ok::<_, ImageStoreError>(before)
+            })
+            .await?;
+            let Some(backend) = backing.get() else {
+                return Ok(());
+            };
+            let Err(e) = backend.tagged(&tag, &image).await else {
+                return Ok(());
+            };
+            let put_back = blocking(move || match before {
+                Some(before) => store.insert_tag(&tag, &before),
+                None => store.remove_tag(&tag).map(drop),
+            });
+            if let Err(put) = put_back.await {
+                eprintln!("putting a tag back as it was here: {put}");
+            }
+            Err(TagError::Kept(e))
+        });
+        tagging
+            .await
+            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
+    }
+}
+
+/// Why [`Backing::tag`] left a tag as it was.
+#[derive(Debug, thiserror::Error)]
+pub enum TagError {
+    /// The home's image store failed to write it.
+    #[error(transparent)]
+    Store(#[from] ImageStoreError),
+    /// The backend failed to keep it, and it was put back here. Answered with no word of why,
+    /// which can name what the backend runs on; the server logs it.
+    #[error(transparent)]
+    Kept(anyhow::Error),
+}
+
+/// `work`, blocking work, run off the runtime; a panic in it goes on in the caller.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))
 }

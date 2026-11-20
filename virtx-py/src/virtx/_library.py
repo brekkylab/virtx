@@ -67,6 +67,10 @@ class VirtxError(Exception):
     body: str | None
     """The server's response body, where it was not a JSON error."""
 
+    written: int | None
+    """How many bytes of a write to a job's stdin went in before its process closed the stdin
+    under it: that ``409``, ``ended``, alone has it."""
+
     def __init__(
         self,
         message: str,
@@ -74,12 +78,14 @@ class VirtxError(Exception):
         body: str | None = None,
         source: Source = "client",
         code: str | None = None,
+        written: int | None = None,
     ) -> None:
         super().__init__(message)
         self.source = source
         self.status = status
         self.code = code
         self.body = body
+        self.written = written
 
 
 class _Bytes(ctypes.Structure):
@@ -280,6 +286,7 @@ class Library:
                 failure.get("body"),
                 failure["source"],
                 failure.get("code"),
+                failure.get("written"),
             )
         raise VirtxError(f"unknown status {status}")
 

@@ -281,13 +281,28 @@ impl Machine {
 
     /// Start `cmd` in the guest, beside whatever else runs there. Answered by a
     /// [`Started`](CtrlResp::Started) from [`recv`](Machine::recv), each `exec` in turn,
-    /// with its pid there: the id its output and its end come back under.
-    pub fn exec(&self, cmd: Vec<String>) -> Result<()> {
+    /// with its pid there: the id its output and its end come back under. Its stdin a pipe to
+    /// write with [`write_stdin`](Machine::write_stdin) if `stdin`, empty if not.
+    pub fn exec(&self, cmd: Vec<String>, stdin: bool) -> Result<()> {
         if cmd.is_empty() {
             return Err(Error::NoCommand);
         }
-        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Exec { cmd })
-            .map_err(|e| Error::io("sending the command", e))
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Exec { cmd, stdin },
+        )
+        .map_err(|e| Error::io("sending the command", e))
+    }
+
+    /// Write `data` to the stdin of the process `id`, started with one by
+    /// [`exec`](Machine::exec), and close it after if `eof`: answered by a
+    /// [`Written`](CtrlResp::Written) from [`recv`](Machine::recv) that carries `seq`.
+    pub fn write_stdin(&self, id: u32, seq: u64, data: String, eof: bool) -> Result<()> {
+        wire::send(
+            &mut *self.ctrlin.lock().unwrap(),
+            &CtrlReq::Stdin { id, seq, data, eof },
+        )
+        .map_err(|e| Error::io("writing to a process's stdin", e))
     }
 
     /// Send `signal`, as Linux numbers it, to the process `id` and everything it started.

@@ -286,6 +286,7 @@ The job says why it ended where the process did not end by itself: its `reason`,
 | `cancelled` | Its job was removed while it ran. Its sandbox is still there, and the command can be run again. |
 | `sandbox_deleted` | Its sandbox was removed under it, and everything it had with it. |
 | `vm_exited` | Its sandbox's machine exited on its own under it. |
+| `oom` | Its memory ran out: it, or a process it started, was killed past the memory one command may take or the machine's, or for thrashing there. |
 | `restarted` | Its server restarted while it ran, keeping its sandbox. |
 
 ## Signal or cancel a job

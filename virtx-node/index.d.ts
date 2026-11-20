@@ -23,6 +23,11 @@ export class VirtxError extends Error {
   code: string | null
   /** The server's response body, where it was not a JSON error. */
   body: string | null
+  /**
+   * How many bytes of a write to a job's stdin went in before its process closed the stdin under
+   * it: that `409`, `ended`, alone has it.
+   */
+  written: number | null
 }
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
@@ -465,16 +470,18 @@ export interface SandboxExecOptions {
 }
 
 /**
- * Why a process did not end by itself: the server killed it, as `SIGKILL` does, its code `137`.
- * `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it ran, its sandbox
- * still there; `sandbox_deleted`, its sandbox was removed under it; `vm_exited`, its sandbox's VM
- * exited on its own under it; `restarted`, its server restarted while it ran, keeping its sandbox.
+ * Why a process did not end by itself: the server, or the kernel, killed it, as `SIGKILL` does,
+ * its code `137`. `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it
+ * ran, its sandbox still there; `sandbox_deleted`, its sandbox was removed under it; `vm_exited`,
+ * its sandbox's VM exited on its own under it; `oom`, its memory ran out; `restarted`, its server
+ * restarted while it ran, keeping its sandbox.
  */
 export type SandboxJobEndReason =
   | 'timeout'
   | 'cancelled'
   | 'sandbox_deleted'
   | 'vm_exited'
+  | 'oom'
   | 'restarted'
 
 /** What the server answers about a process started in a sandbox. */

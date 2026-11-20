@@ -10,8 +10,8 @@ use crate::{Error, Source};
 /// Why a call failed, as C reads it: `{"message": "...", "source": "server"}`, `source` where
 /// it failed (`server`, `job`, `transport` or `client`), with `"status": 404` beside it when
 /// the server refused the request with that HTTP status, `"code"` the protocol's where it
-/// answered its error as the protocol does (`not_found`, `in_use`), and `"body"` where the
-/// refusal had a body that was not a JSON error.
+/// answered its error as the protocol does (`not_found`, `in_use`), `"written"` where that error
+/// had it, and `"body"` where the refusal had a body that was not a JSON error.
 #[derive(Debug, Serialize)]
 pub(crate) struct Failure {
     message: String,
@@ -20,6 +20,8 @@ pub(crate) struct Failure {
     status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    written: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
 }
@@ -36,6 +38,7 @@ impl From<Error> for Failure {
             source: error.source_kind(),
             status,
             code: error.code().map(str::to_owned),
+            written: error.written(),
             body,
         }
     }
@@ -103,6 +106,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::Members;
 
     fn written(error: Error) -> Value {
         let (status, bytes) = failure(error);
@@ -113,12 +117,27 @@ mod tests {
     #[test]
     fn a_failure_carries_the_status_the_server_refused_with() {
         assert_eq!(
-            written(Error::Status(404, "not_found: no such file".into())),
+            written(Error::Status(
+                404,
+                "not_found: no such file".into(),
+                Members::default()
+            )),
             json!({
                 "message": "the server answered 404 Not Found: not_found: no such file",
                 "source": "server",
                 "status": 404,
                 "code": "not_found",
+            })
+        );
+        let cut = Members { written: Some(5) };
+        assert_eq!(
+            written(Error::Status(409, "ended: cut".into(), cut)),
+            json!({
+                "message": "the server answered 409 Conflict: ended: cut",
+                "source": "server",
+                "status": 409,
+                "code": "ended",
+                "written": 5,
             })
         );
         assert_eq!(

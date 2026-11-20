@@ -150,7 +150,6 @@ fn a_resized_sandbox_boots_so_and_its_disk_only_grows() {
 }
 
 #[test]
-#[ignore = "no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused"]
 fn stdin_written_comes_back_until_it_is_closed() {
     let client = common::client();
     common::alpine(&client);
@@ -174,6 +173,25 @@ fn stdin_written_comes_back_until_it_is_closed() {
             SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
+
+    // Its process closes its stdin under a write: refused, saying how much of it went in.
+    let cut = ["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"];
+    let cut = sandbox
+        .exec(&SandboxExecArgs::new(cut).stdin(true))
+        .wait()
+        .unwrap();
+    let of = 1 << 20;
+    let refused = cut.write_stdin(Some(&"x".repeat(of)), false).wait();
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        (refused.status(), refused.code()),
+        (Some(409), Some("ended"))
+    );
+    let written = refused.written().unwrap();
+    assert!(written > 0 && written < of as u64, "{written} of {of}");
+    // Any other refusal has none.
+    let after = cut.write_stdin(Some("x"), false).wait().unwrap_err();
+    assert_eq!((after.code(), after.written()), (Some("ended"), None));
     sandbox.remove().wait().unwrap();
 }
 

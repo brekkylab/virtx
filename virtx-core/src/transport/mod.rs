@@ -762,9 +762,10 @@ mod tests {
         );
     }
 
-    /// An exec is read with its log in one request from a server that answers it so, the job in
-    /// `virtx-job`; from one that answers the job alone, in two; and where the answer breaks, the
-    /// job's log is read on after the last entry read.
+    /// An exec is read with its log in one request from a server that answers it so, the job its
+    /// first event; from one that answers the job alone, in two; and where the answer breaks, the
+    /// job's log is read on after the last entry read, the job's event counting for none -- and
+    /// the job itself read at its `Location` where the answer breaks before it.
     #[tokio::test]
     async fn an_exec_is_read_with_its_log_in_one_request_or_two() {
         use std::sync::{Arc, Mutex};
@@ -783,70 +784,83 @@ mod tests {
                 })
                 .collect()
         };
+        let job_event = format!("data: {{\"job\":{JOB}}}\n\n");
         // `mode`: `log`, answered with all of it; `job`, with the job alone; `broken`, with the
-        // first entry and then a broken body.
+        // job and the first entry, then a broken body; `jobless`, with a body broken before the
+        // job; `bare`, with the job, then a broken body.
         let asked = Arc::new(Mutex::new(Vec::<String>::new()));
         let router = |mode: &'static str| {
             let asked = asked.clone();
+            let job_event = job_event.clone();
             let exec = {
                 let asked = asked.clone();
                 move |headers: HeaderMap| async move {
                     let accept = headers["accept"].to_str().unwrap().to_owned();
                     asked.lock().unwrap().push(format!("exec {accept}"));
+                    // Broken a while after `sent`, once that has reached the client.
+                    let broken = |sent: String| {
+                        let sent = futures_util::stream::iter([Ok(sent)]);
+                        let gone = futures_util::stream::once(async {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            Err(std::io::Error::other("gone"))
+                        });
+                        Body::from_stream(sent.chain(gone))
+                    };
                     let log = |body: Body| {
                         axum::response::Response::builder()
                             .status(201)
                             .header("content-type", "text/event-stream")
                             .header("location", "/sandboxes/s/jobs/j")
-                            .header("virtx-job", JOB)
                             .body(body)
                             .unwrap()
                     };
                     match mode {
-                        "log" => log(Body::from(entries(1, 3))),
-                        "broken" => {
-                            // Broken a while after the first entry, once that has reached the
-                            // client.
-                            let first = futures_util::stream::iter([Ok(entries(1, 1))]);
-                            let gone = futures_util::stream::once(async {
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                Err(std::io::Error::other("gone"))
-                            });
-                            log(Body::from_stream(first.chain(gone)))
-                        }
+                        "log" => log(Body::from(format!("{job_event}{}", entries(1, 3)))),
+                        "broken" => log(broken(format!("{job_event}{}", entries(1, 1)))),
+                        "jobless" => log(broken(": open\n\n".into())),
+                        "bare" => log(broken(job_event)),
                         _ => axum::response::Response::builder()
                             .status(201)
                             .header("content-type", "application/json")
+                            .header("location", "/sandboxes/s/jobs/j")
                             .body(Body::from(JOB))
                             .unwrap(),
                     }
                 }
             };
+            let got = {
+                let asked = asked.clone();
+                move || async move {
+                    asked.lock().unwrap().push("job".into());
+                    ([("content-type", "application/json")], JOB)
+                }
+            };
             let events = move |headers: HeaderMap| async move {
-                let after: u64 = headers
+                let after = headers
                     .get("last-event-id")
-                    .map_or(0, |after| after.to_str().unwrap().parse().unwrap());
-                asked.lock().unwrap().push(format!("events after {after}"));
+                    .map(|after| after.to_str().unwrap().parse::<u64>().unwrap());
+                asked.lock().unwrap().push(match after {
+                    Some(after) => format!("events after {after}"),
+                    None => "events".into(),
+                });
                 (
                     [("content-type", "text/event-stream")],
-                    entries(after + 1, 3),
+                    entries(after.unwrap_or(0) + 1, 3),
                 )
             };
             Router::new()
                 .route("/sandboxes/s/jobs/exec/", post(exec))
+                .route("/sandboxes/s/jobs/j", get(got))
                 .route("/sandboxes/s/jobs/j/events", get(events))
         };
         let args = SandboxExecArgs::new(["x"]);
+        let exec = "exec text/event-stream, application/json";
         for (mode, requests) in [
-            ("log", vec!["exec text/event-stream, application/json"]),
-            (
-                "job",
-                vec!["exec text/event-stream, application/json", "events after 0"],
-            ),
-            (
-                "broken",
-                vec!["exec text/event-stream, application/json", "events after 1"],
-            ),
+            ("log", vec![exec]),
+            ("job", vec![exec, "events"]),
+            ("broken", vec![exec, "events after 1"]),
+            ("jobless", vec![exec, "job", "events"]),
+            ("bare", vec![exec, "events"]),
         ] {
             asked.lock().unwrap().clear();
             let url = serve(router(mode)).await;

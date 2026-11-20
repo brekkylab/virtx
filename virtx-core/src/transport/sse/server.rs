@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt as _};
 use http::HeaderMap;
 use serde::Serialize;
 use tokio::sync::watch;
@@ -91,7 +91,7 @@ impl<E: Clone + Serialize + Send + Sync + 'static> Log<E> {
     pub fn events(
         self: Arc<Self>,
         headers: &HeaderMap,
-    ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
+    ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static + use<E> {
         let after: usize = headers
             .get("last-event-id")
             .and_then(|value| value.to_str().ok())
@@ -120,6 +120,18 @@ impl<E: Clone + Serialize + Send + Sync + 'static> Log<E> {
                 }
             },
         )
+    }
+
+    /// An event of `first`, with no `id`, then every entry from the log's first as
+    /// [`events`](Log::events) sends them: the entries keep their numbers in the log, so a
+    /// reader cut off reads on from `events` after the last entry it read.
+    pub fn events_led_by(
+        self: Arc<Self>,
+        first: &impl Serialize,
+    ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
+        let first = serde_json::to_string(first).expect("an entry serializes");
+        let first = Bytes::from(format!("data: {first}\n\n"));
+        futures_util::stream::iter([Ok(first)]).chain(self.events(&HeaderMap::new()))
     }
 }
 
@@ -240,6 +252,36 @@ mod tests {
         assert_eq!(
             read(&log, &after("1")).await,
             "id: 2\ndata: {\"end\":{}}\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_log_led_by_an_event_numbers_its_entries_as_the_log_does() {
+        let log = Log::new(10, Line::Truncated {});
+        for line in ["a", "b"] {
+            log.push(Line::Stdout(line.into()));
+        }
+        assert!(log.end(Line::End {}, || {}));
+        let led: Vec<_> = Arc::clone(&log)
+            .events_led_by(&serde_json::json!({"job": {"id": "j"}}))
+            .collect()
+            .await;
+        let led: String = led
+            .into_iter()
+            .map(|event| String::from_utf8(event.unwrap().to_vec()).unwrap())
+            .collect();
+        assert_eq!(
+            led,
+            "data: {\"job\":{\"id\":\"j\"}}\n\n\
+             id: 1\ndata: {\"stdout\":\"a\"}\n\n\
+             id: 2\ndata: {\"stdout\":\"b\"}\n\n\
+             id: 3\ndata: {\"end\":{}}\n\n"
+        );
+        // Cut off after its first entry, it reads on from the log after that entry's id.
+        assert_eq!(
+            read(&log, &after("1")).await,
+            "id: 2\ndata: {\"stdout\":\"b\"}\n\n\
+             id: 3\ndata: {\"end\":{}}\n\n"
         );
     }
 }

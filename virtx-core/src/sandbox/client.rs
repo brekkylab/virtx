@@ -2,10 +2,11 @@
 
 use ::http::header;
 use futures_util::{Stream, StreamExt as _};
+use sse_stream::SseStream;
 
 use super::{
-    SANDBOX_JOB_HEADER, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
-    SandboxJobEntry, SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
+    Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
+    SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
     Error,
@@ -90,8 +91,8 @@ pub(crate) async fn exec(
 
 /// Start a process in the sandbox `id`, as `args` says, and read its log: its job, then each
 /// entry, until its end. Asked of the server in one request where it answers an exec with its
-/// log -- accepting `text/event-stream`, the job in [`JOB_HEADER`] -- and in two, the job and
-/// then its log, where it answers with the job alone.
+/// log -- accepting `text/event-stream`, the job its first event -- and in two, the job and then
+/// its log, where it answers with the job alone.
 pub(crate) fn exec_log<'a>(
     client: &'a TransportClient,
     id: &str,
@@ -125,18 +126,41 @@ pub(crate) fn exec_log<'a>(
             }
             return;
         }
-        let job: SandboxJob = response
+        let location = response
             .headers()
-            .get(SANDBOX_JOB_HEADER)
-            .and_then(|job| job.to_str().ok())
-            .ok_or_else(|| Error::Transport(format!("{path} answered its log without its job")))
-            .and_then(|job| serde_json::from_str(job).map_err(|e| Error::Client(e.to_string())))?;
+            .get(header::LOCATION)
+            .and_then(|at| at.to_str().ok())
+            .map(str::to_owned);
+        let mut events = SseStream::new(response.into_body());
+        // The job, the answer's first event; where the answer breaks or ends before it, the job
+        // at its path in `Location`.
+        let first = loop {
+            match events.next().await {
+                Some(Ok(event)) => match event.data {
+                    Some(data) => break Some(data),
+                    None => continue,
+                },
+                Some(Err(_)) | None => break None,
+            }
+        };
+        let job: SandboxJob = match first {
+            Some(first) => match serde_json::from_str(&first).map_err(|e| Error::Client(e.to_string()))? {
+                SandboxExecItem::Job(job) => job,
+                SandboxExecItem::Log(_) => Err(Error::Client(format!("{path} answered its log without its job first")))?,
+            },
+            None => {
+                let location = location.ok_or_else(|| {
+                    Error::Transport(format!("{path} broke off before its job, and named no `Location`"))
+                })?;
+                http::get(client, &location).await?
+            }
+        };
         let at = format!("{}/events", self::job(&id, &job.id));
         let job_id = job.id.clone();
         yield SandboxExecItem::Job(job);
         // Its log, from this answer, until its `end`, or until the body breaks or ends before it.
         let (mut after, mut ended) = (None, false);
-        let mut entries = std::pin::pin!(sse::client::entries(response, &at));
+        let mut entries = std::pin::pin!(sse::client::entries(events, &at));
         loop {
             match entries.next().await {
                 None if ended => return,
@@ -153,7 +177,7 @@ pub(crate) fn exec_log<'a>(
             }
         }
         // The answer broke, or ended before the job's end: the job's log, after the last entry
-        // read, as a log is read on.
+        // read -- the job's event is none of the log's, and moves no count -- as a log is read on.
         let mut log = std::pin::pin!(job_log(client, &id, &job_id, after));
         while let Some(entry) = log.next().await {
             yield SandboxExecItem::Log(entry?);

@@ -44,6 +44,7 @@ pub(crate) fn log<'a, E: DeserializeOwned + Send + 'a>(
             // Why it is opened again, and whether that is its connection broken.
             let (broke, cut) = match opened {
                 Ok(opened) => {
+                    let opened = SseStream::new(opened.into_body());
                     let mut entries = std::pin::pin!(entries::<E>(opened, &path));
                     let (mut broke, mut read, mut ended) = (None, false, false);
                     while let Some(entry) = entries.next().await {
@@ -109,15 +110,14 @@ async fn running(client: &TransportClient, path: &str) -> Result<bool, Error> {
     Ok(job["running"].as_bool().unwrap_or(false))
 }
 
-/// The entries of `response`, a log answered from `path`, each read as an `E`, and whether it
-/// is the log's `end`, until its body ends. A connection broken on the way is an
+/// The entries of `events`, a log answered from `path`, each read as an `E`, and whether it is
+/// the log's `end`, until its body ends. A connection broken on the way is an
 /// [`Error::Transport`].
 pub(crate) fn entries<'a, E: DeserializeOwned + Send + 'a>(
-    response: http::Response<Body>,
+    mut events: SseStream<Body>,
     path: &'a str,
 ) -> impl Stream<Item = Result<(LogEntry<E>, bool), Error>> + Send + 'a {
     async_stream::try_stream! {
-        let mut events = SseStream::new(response.into_body());
         while let Some(event) = events.next().await {
             let event = event.map_err(|e| Error::Transport(format!("reading the log: {e}")))?;
             let Some(data) = event.data else {

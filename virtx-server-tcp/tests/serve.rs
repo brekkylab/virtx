@@ -1034,17 +1034,23 @@ async fn an_exec_that_accepts_its_log_is_answered_with_it() {
         .await
         .unwrap();
     assert_eq!(answer.status(), StatusCode::CREATED);
-    let job: Value = serde_json::from_str(answer.headers()["virtx-job"].to_str().unwrap()).unwrap();
+    assert!(answer.headers().get("virtx-job").is_none());
+    let location = answer.headers()["location"].to_str().unwrap().to_owned();
+    let log = answer.text().await.unwrap();
+    // The job first, as an event with no id; then its log, numbered as the job's log is.
+    let (first, rest) = log.split_once("\n\n").unwrap();
+    let first: Value = serde_json::from_str(first.strip_prefix("data: ").unwrap()).unwrap();
+    let job = &first["job"];
     assert_eq!(job["cmd"][2], "echo héllo; echo two >&2; exit 3");
     assert_eq!(
-        answer.headers()["location"].to_str().unwrap(),
+        location,
         format!(
             "/sandboxes/{}/jobs/{}",
             created.id,
             job["id"].as_str().unwrap()
         )
     );
-    let log = answer.text().await.unwrap();
+    assert!(rest.starts_with("id: 1\n"), "{log}");
     assert!(log.contains(r#"data: {"stdout":"héllo"}"#), "{log}");
     assert!(log.contains(r#"data: {"stderr":"two"}"#), "{log}");
     assert!(log.ends_with("data: {\"end\":{\"code\":3}}\n\n"), "{log}");

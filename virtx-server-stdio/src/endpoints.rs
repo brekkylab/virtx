@@ -34,7 +34,7 @@ use tokio::task::AbortHandle;
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
-    Role, SANDBOX_JOB_HEADER, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxResizeArgs,
+    Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort, SandboxResizeArgs,
     SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
     VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
     from_body,
@@ -829,8 +829,8 @@ async fn sandbox_job_list(
 }
 
 /// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
-/// `text/event-stream`, `201` with the job's log as the body, the job in
-/// [`SANDBOX_JOB_HEADER`] and its path in `Location`: its output and end with no second request.
+/// `text/event-stream`, `201` with the job as the first event and then its log, and its path in
+/// `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -846,17 +846,19 @@ async fn sandbox_exec(
     let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
     let answered = job.get();
     let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
-    // A job too long for a header is answered alone, and its log read with a request of its own.
-    let said = answered.header_value();
-    let Some(said) = said.filter(|_| accepts_event_stream(&headers)) else {
+    if !accepts_event_stream(&headers) {
         return Ok(created(location, &answered));
-    };
-    let mut log = events(job.log(), &HeaderMap::new());
-    *log.status_mut() = StatusCode::CREATED;
-    let location = header::HeaderValue::from_str(&location).map_err(internal)?;
-    log.headers_mut().insert(header::LOCATION, location);
-    log.headers_mut().insert(SANDBOX_JOB_HEADER, said);
-    Ok(log)
+    }
+    let log = Arc::clone(job.log()).events_led_by(&SandboxExecItem::Job(answered));
+    Ok((
+        StatusCode::CREATED,
+        [
+            (header::LOCATION, location),
+            (header::CONTENT_TYPE, "text/event-stream".to_owned()),
+        ],
+        Body::from_stream(log),
+    )
+        .into_response())
 }
 
 async fn sandbox_job_get(

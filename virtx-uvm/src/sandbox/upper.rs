@@ -187,9 +187,11 @@ fn delete(path: &Path) -> io::Result<()> {
         _ => {}
     }
     // What the embedder keeps beside it goes with it ([`Disks::forget`](crate::disks::Disks)).
-    let forgotten = crate::disks::disks().forget(path);
+    if let Err(e) = crate::disks::disks().forget(path) {
+        eprintln!("forgetting the disk {}: {e}", path.display());
+    }
     let _ = fs::remove_file(lock_path(path));
-    forgotten
+    Ok(())
 }
 
 /// The disk at `from` copied to `to`, replacing what is there: cloned where the filesystem

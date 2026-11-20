@@ -433,7 +433,8 @@ impl Sandbox {
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.clone(),
-            sandbox_disk: Some(SandboxDisk::default()),
+            // Set as each of its machines boots ([`Sandbox::wake`]).
+            sandbox_disk: None,
         };
         let exited = record.as_ref().is_some_and(|record| record.exited);
         let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());

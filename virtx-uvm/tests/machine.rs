@@ -1678,6 +1678,27 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     }
 }
 
+async fn a_guest_s_kernel_boots_seeded_and_tests_none_of_its_crypto(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let (lines, code) = run(&sandbox, &["dmesg"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("self-tests disabled")),
+        "{lines:?}"
+    );
+    // Seeded by the device tree, before the kernel's clock starts.
+    #[cfg(target_arch = "aarch64")]
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("0.000000] random: crng init done")),
+        "{lines:?}"
+    );
+    close(sandbox).await;
+}
+
 async fn a_signal_ends_a_job_with_every_process_it_started(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     // The signal reaches the child it left in the background too, which would run on otherwise.
@@ -2528,6 +2549,7 @@ fn main() -> ExitCode {
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
+        a_guest_s_kernel_boots_seeded_and_tests_none_of_its_crypto,
         a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
         sandboxes_made_at_once_each_run_their_own,

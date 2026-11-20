@@ -331,6 +331,13 @@ On Linux, the guest kernel is copied into the guest's memory whole rather than m
 file page by page. Mapped, a boot waited on page faults the guest took one at a time: a machine
 booted in 490 ms on an EC2 node, and in 161 ms with the kernel copied.
 
+### `rng-seed`: the guest's random pool seeded as it boots
+
+On aarch64, the device tree's `/chosen` carries 64 bytes of the host's entropy as `rng-seed`.
+Without one the guest's random pool starts empty, and each random number the kernel takes early
+in its boot asks whether the CPU has `RNDR` by reading `ID_AA64ISAR0_EL1`, which traps to the
+hypervisor every time: 40 ms of a 120 ms boot on an M3 Pro, before the kernel's clock starts.
+
 ## rutabaga_gfx: `virgl-renderer`
 
 Published rutabaga_gfx (0.1.85) routes macOS to a stub OS backend that panics as

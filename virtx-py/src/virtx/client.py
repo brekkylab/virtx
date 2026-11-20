@@ -451,6 +451,7 @@ class Client:
         self,
         image: str | ImageName,
         *,
+        name: str | None = None,
         network: bool = True,
         ports: Iterable[int] = (),
         vcpus: int | None = None,
@@ -466,7 +467,10 @@ class Client:
         ``/abin/skills/{name}/``. ``ports`` are TCP ports in it to open, reserved as it is made
         and answered here only, each with the ``url`` a ``PortForwarder`` reaches it by. Whatever
         is left out the server picks. ``disk_gib`` is how much it may write over its image, in
-        GiB, at most 1024, which goes with it.
+        GiB, at most 1024, which goes with it. ``name`` finds it again with ``find_sandbox``,
+        rather than keeping its id: letters, digits, ``.``, ``_`` and ``-``, not starting with ``.``
+        or ``-``, at most 128, or it is refused with ``400``; one another sandbox has is refused
+        with ``409``.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
@@ -476,6 +480,7 @@ class Client:
                 "virtx_client_create_sandbox",
                 _args(
                     image=image_name(image).to_dict(),
+                    name=name,
                     network=network,
                     ports=list(ports),
                     vcpus=vcpus,
@@ -494,3 +499,8 @@ class Client:
     async def get_sandbox(self, id: str) -> Sandbox:
         """The sandbox ``id``, without its ports."""
         return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))
+
+    async def find_sandbox(self, name: str) -> Sandbox | None:
+        """The sandbox named ``name``, without its ports, or ``None`` if none is."""
+        found = await self._call("virtx_client_find_sandbox", _args(name=name))
+        return Sandbox.from_dict(self, found) if found is not None else None

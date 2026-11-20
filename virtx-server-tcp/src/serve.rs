@@ -18,7 +18,7 @@ use anyhow::Context as _;
 use axum::Extension;
 use axum::extract::Path;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::any;
@@ -167,14 +167,49 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
     Ok(listener)
 }
 
-/// `router` served on `listener` until this process is interrupted.
+/// `router` served on `listener` until this process is asked to stop.
 pub async fn run(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(interrupted())
         .await?;
     Ok(())
+}
+
+/// Once this process is asked to stop: by ctrl-c; on Unix by `SIGTERM` too, as a service
+/// manager, `docker stop` or a plain `kill` asks; on Windows by ctrl-break, the one console
+/// event a process group of its own can be sent, and by its console's closing, a logoff or a
+/// shutdown, each of which Windows gives a few seconds before it ends the process.
+async fn interrupted() {
+    #[cfg(unix)]
+    if let Ok(mut terminate) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        if let (Ok(mut ctrl_break), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+            windows::ctrl_break(),
+            windows::ctrl_close(),
+            windows::ctrl_logoff(),
+            windows::ctrl_shutdown(),
+        ) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = ctrl_break.recv() => {}
+                _ = close.recv() => {}
+                _ = logoff.recv() => {}
+                _ = shutdown.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// What a browser at one of the config's `origins` may do here: every method the endpoints
@@ -265,37 +300,55 @@ fn port(
 
 /// Carry bytes between `socket` and the port `tunnel` reaches until either ends: what is
 /// read from the port as binary messages, and the binary messages to the port. Closed at once
-/// when no machine runs, as a port nothing listens on is.
+/// when the port is not reached, such as when no machine runs, saying why as the close's reason.
 async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
-    if let Ok(mut reached) = tunnel.connect().await {
-        let (mut from, mut to) = reached.split();
-        let mut buffer = vec![0u8; CHUNK];
-        loop {
-            tokio::select! {
-                read = from.read(&mut buffer) => match read {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let message = Message::Binary(buffer[..n].to_vec().into());
-                        if socket.send(message).await.is_err() {
-                            break;
-                        }
+    let mut reached = match tunnel.connect().await {
+        Ok(reached) => reached,
+        Err(e) => {
+            let frame = CloseFrame {
+                code: close_code::ERROR,
+                reason: close_reason(&e.to_string()).into(),
+            };
+            let _ = socket.send(Message::Close(Some(frame))).await;
+            return;
+        }
+    };
+    let (mut from, mut to) = reached.split();
+    let mut buffer = vec![0u8; CHUNK];
+    loop {
+        tokio::select! {
+            read = from.read(&mut buffer) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let message = Message::Binary(buffer[..n].to_vec().into());
+                    if socket.send(message).await.is_err() {
+                        break;
                     }
-                },
-                received = socket.recv() => match received {
-                    Some(Ok(Message::Binary(bytes))) => {
-                        if to.write_all(&bytes).await.is_err() {
-                            break;
-                        }
+                }
+            },
+            received = socket.recv() => match received {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if to.write_all(&bytes).await.is_err() {
+                        break;
                     }
-                    // Answered by the socket itself.
-                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                    // Text is no TCP's, and anything else is the end.
-                    Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
-                },
-            }
+                }
+                // Answered by the socket itself.
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                // Text is no TCP's, and anything else is the end.
+                Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
+            },
         }
     }
     let _ = socket.send(Message::Close(None)).await;
+}
+
+/// `said` as a close's reason, which a WebSocket holds 123 bytes of: cut at a character's end.
+fn close_reason(said: &str) -> String {
+    let mut end = said.len().min(123);
+    while !said.is_char_boundary(end) {
+        end -= 1;
+    }
+    said[..end].to_owned()
 }
 
 #[cfg(test)]
@@ -324,6 +377,7 @@ mod tests {
 
     use std::sync::Arc;
 
+    use futures_util::StreamExt as _;
     use futures_util::future::BoxFuture;
 
     use virtx_uvm::ProjectStore;
@@ -1473,9 +1527,14 @@ mod tests {
             "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
         );
 
-        // Its port's URL reaches it as it did: parked, nothing listens there.
+        // Its port's URL reaches it as it did: parked, no machine runs to reach the port in,
+        // which the close says.
         let port = served.port_url(&format!("ports/{capability}"));
-        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
+        let mut socket = Served::open(&port, Some("virtx.tcp")).await.unwrap();
+        let Some(Ok(tungstenite::Message::Close(Some(frame)))) = socket.next().await else {
+            panic!("the WebSocket was not closed with a reason");
+        };
+        assert!(frame.reason.contains("no machine runs"), "{}", frame.reason);
 
         let (status, _) = served
             .send("DELETE", "sandboxes/kept", Some("demo"), "")

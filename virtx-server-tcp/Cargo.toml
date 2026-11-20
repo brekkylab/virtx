@@ -16,6 +16,7 @@ gpu = ["virtx-uvm/gpu"]
 anyhow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
+form_urlencoded = "1"
 http = "1"
 http-body-util = "0.1"
 # An OpenID Connect provider's tokens, checked against its keys.
@@ -52,6 +53,10 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 # The wire, spoken by hand, and by virtx-core's client with the project given at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 virtx-core = { workspace = true, features = ["client"] }
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "process"] }
 # A port's WebSocket, as a client would open it.
 tokio-tungstenite = "0.29"
+
+# Ctrl-break sent to a server, as an operator interrupts it on Windows.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_System_Threading"] }

@@ -332,6 +332,8 @@ export class Volume extends Files implements VolumeInfo {
 /** What the server answers about a sandbox. */
 export interface SandboxInfo {
   id: string
+  /** The name it was made with, which `findSandbox` finds it by. */
+  name?: string
   /** The digest of the image it was made from. */
   image: string
   /** Whether it takes processes: `false` once its VM has exited on its own. */
@@ -352,6 +354,7 @@ export interface SandboxInfo {
 export class Sandbox extends Files implements SandboxInfo {
   private constructor()
   id: string
+  name?: string
   image: string
   running: boolean
   ports?: SandboxPort[]
@@ -375,6 +378,8 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
+  /** A name to find it again by, with `findSandbox`, rather than keeping its id: letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128, or it is refused with `400`; one another sandbox has is refused with `409`. */
+  name?: string
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
@@ -399,9 +404,16 @@ export interface SandboxExecOptions {
 
 /**
  * Why a process did not end by itself: the server killed it, as `SIGKILL` does, its code `137`.
- * `restarted`, its server restarted while it ran, keeping its sandbox.
+ * `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it ran, its sandbox
+ * still there; `sandbox_deleted`, its sandbox was removed under it; `vm_exited`, its sandbox's VM
+ * exited on its own under it; `restarted`, its server restarted while it ran, keeping its sandbox.
  */
-export type SandboxJobEndReason = 'restarted'
+export type SandboxJobEndReason =
+  | 'timeout'
+  | 'cancelled'
+  | 'sandbox_deleted'
+  | 'vm_exited'
+  | 'restarted'
 
 /** What the server answers about a process started in a sandbox. */
 export interface SandboxJobInfo {
@@ -476,7 +488,10 @@ export interface CompleteOptions {
  * read until its `end` entry, and `complete`, the job's own once started. The job starts at the
  * call, as a promise's work does, and once however the value is used: awaited, iterated,
  * completed, or each. Each loop reads the log from its start; leaving one leaves the job
- * running, which the job's `remove` cancels.
+ * running, which the job's `remove` cancels. A sandbox's `exec` iterated before the code awaits
+ * anything else -- `for await (const entry of sandbox.exec(cmd))` -- starts the job and reads its
+ * log as one request, where the server answers so; once anything is awaited between the call and
+ * the loop, the job has started on its own and its log is a second request.
  */
 export class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
   /** Start the job and follow it to its end, as its `complete` does. */
@@ -586,17 +601,23 @@ export class Client {
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
   getSandbox(id: string): Promise<Sandbox>
+  /** The sandbox named `name`, without its ports, or `undefined` if none is. */
+  findSandbox(name: string): Promise<Sandbox | undefined>
 }
 
 /**
  * A sandbox's port at an address on this machine's loopback, until it is closed. It runs on its
- * client's session, so the client's last close stops it.
+ * client's session, so the client's last close stops it. A connection whose WebSocket is
+ * refused, or closed before the port sent a byte, is closed, and what was seen is `lastError`,
+ * and emitted as a process warning of the type `VirtxWarning`.
  */
 export class PortForwarder {
-  /** Forward the port a sandbox answered `url` for, as `SandboxPort.url`, over `client`'s session. Blocks until it is open. */
-  static open(client: Client, url: string): PortForwarder
+  /** Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it, over `client`'s session. Given the port, what a connection that fails says names its number. Returns once its local address is open, which takes no request of the server. */
+  static open(client: Client, port: SandboxPort | string): PortForwarder
   /** Where the port is reached, as `host:port`. */
   readonly address: string
+  /** Why the last connection to the forwarder that failed did, its message naming the port, with the server's reason for closing it if it gave one; `null` while none has, and again once a later connection's port sends a byte. It is the last failure, not whether the port is reached now. Its `status` is the server's, where it refused the connection's WebSocket. A server on this machine is reached at its own address, not through the forwarder, so it has none. */
+  readonly lastError: VirtxError | null
   /** The address's host: a loopback IP. */
   readonly host: string
   /** The address's port. */

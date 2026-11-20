@@ -12,7 +12,9 @@ use sha2::{Digest as _, Sha256};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
+use virtx_core::{
+    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+};
 
 use super::record::Record;
 use super::upper::Upper;
@@ -149,6 +151,8 @@ enum State {
 pub struct Sandbox {
     /// Its upper disk's name, and so its own.
     id: String,
+    /// The name it was made with, which a server finds it again by.
+    name: Option<String>,
     /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
     root: PathBuf,
     /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
@@ -181,6 +185,8 @@ pub struct Sandbox {
     config: MachineConfig,
     vm: Vec<OsString>,
     state: Mutex<State>,
+    /// Why a job that runs as it ends is ended, once it is closed or let go of.
+    ended_for: Mutex<Option<SandboxJobEndReason>>,
     /// Held while its machine boots or stops, so one does at a time.
     turn: tokio::sync::Mutex<()>,
     /// Its jobs, by id, until each is removed.
@@ -228,6 +234,12 @@ impl Sandbox {
         backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
+        if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
+            return Err(Error::Invalid(format!(
+                "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
+                 starting with '.' or '-', 128 at most"
+            )));
+        }
         let mut given = HashSet::new();
         if let Some(port) = args
             .ports
@@ -473,6 +485,7 @@ impl Sandbox {
         let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
         Ok(Sandbox {
             id: upper.id.clone(),
+            name: args.name.clone(),
             root: root.to_owned(),
             up_since: Mutex::default(),
             dir,
@@ -494,6 +507,7 @@ impl Sandbox {
                 true => State::Exited,
                 false => State::Parked,
             }),
+            ended_for: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(jobs),
             starting: Mutex::default(),
@@ -511,6 +525,11 @@ impl Sandbox {
         &self.id
     }
 
+    /// The name it was made with, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     /// When its machine came up, while it is up; `None` while it is parked or has exited.
     pub fn up_since(&self) -> Option<SystemTime> {
         self.up_since.lock().unwrap().map(|(at, _)| at)
@@ -520,6 +539,7 @@ impl Sandbox {
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
+            name: self.name.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: Vec::new(),
@@ -594,7 +614,7 @@ impl Sandbox {
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
                 if let Some(sandbox) = sandbox.upgrade() {
-                    let _ = sandbox.kill(&job);
+                    let _ = sandbox.kill(&job, SandboxJobEndReason::Timeout);
                 }
             });
         }
@@ -614,11 +634,13 @@ impl Sandbox {
             .ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))
     }
 
-    /// Kill the job `id` if it runs, and remove it.
+    /// Kill the job `id` if it runs, ending it as cancelled, and remove it: what reads its log
+    /// reads on to that end.
     pub fn remove_job(&self, id: &str) -> Result<(), Error> {
         let removed = self.jobs.lock().unwrap().remove(id);
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
-        self.kill(&job)?;
+        self.kill(&job, SandboxJobEndReason::Cancelled)?;
+        job.cut(SandboxJobEndReason::Cancelled);
         job.remove();
         self.keep_jobs();
         Ok(())
@@ -695,15 +717,22 @@ impl Sandbox {
 
     /// Let go of it as its server ends: its machine stopped as parking stops it, every job in
     /// it ended, and nothing booting it again in this process. One kept past its process is
-    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]); one not
-    /// kept is deleted, as [`close`](Sandbox::close) deletes it. Blocks as `close` does.
+    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]), its jobs
+    /// that ran ended `restarted`; one not kept is deleted, as [`close`](Sandbox::close)
+    /// deletes it. Blocks as `close` does.
     pub fn leave(&self) {
         self.end(true);
     }
 
     /// Stop its machine for good, and end and remove every job in it; its upper disk deleted,
-    /// or left where it is kept and `leaving`.
+    /// or left where it is kept and `leaving`. A job that runs ends as `restarted` where the
+    /// sandbox is kept past its server, and as `sandbox_deleted` where it is deleted.
     fn end(&self, leaving: bool) {
+        let reason = match leaving && self.record.lock().unwrap().is_some() {
+            true => SandboxJobEndReason::Restarted,
+            false => SandboxJobEndReason::SandboxDeleted,
+        };
+        *self.ended_for.lock().unwrap() = Some(reason);
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
         // A park or a boot under way finishes first, so its machine is down by the time this
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
@@ -724,7 +753,7 @@ impl Sandbox {
         }
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
-            job.end(128 + SIGKILL);
+            job.cut(reason);
             job.remove();
         }
     }
@@ -880,10 +909,11 @@ impl Sandbox {
         matches!(&*self.state.lock().unwrap(), State::Up(up, _) if Arc::ptr_eq(up, machine))
     }
 
-    /// Kill `job` if it runs.
-    fn kill(&self, job: &Job) -> Result<(), Error> {
+    /// Kill `job` if it runs, for `reason`.
+    fn kill(&self, job: &Job, reason: SandboxJobEndReason) -> Result<(), Error> {
         let (pid, running) = job.pid();
         if let Some(machine) = self.up().filter(|_| running) {
+            job.killing(reason);
             machine.signal(pid, SIGKILL)?;
         }
         Ok(())
@@ -940,8 +970,9 @@ impl Sandbox {
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
-        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,
-        // nothing ran; otherwise it ended on its own, and nothing boots it again.
+        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Closed or
+        // let go of, it was stopped under them, for the reason `end` gave; otherwise it ended on
+        // its own, and nothing boots it again.
         let mut starting = self.starting.lock().unwrap();
         let exited = {
             let mut state = self.state.lock().unwrap();
@@ -965,8 +996,16 @@ impl Sandbox {
             }
         }
         starting.clear();
+        let reason = match exited {
+            true => SandboxJobEndReason::VmExited,
+            false => self
+                .ended_for
+                .lock()
+                .unwrap()
+                .unwrap_or(SandboxJobEndReason::SandboxDeleted),
+        };
         for job in running.into_values() {
-            job.end(128 + SIGKILL);
+            job.cut(reason);
         }
         drop(starting);
         self.keep_jobs();
@@ -1177,6 +1216,10 @@ impl Sandbox {
                     ImageName::Digest { digest } => Some(digest.clone()),
                     ImageName::Tag { .. } => None,
                 });
+            let name = read
+                .as_ref()
+                .ok()
+                .and_then(|record| record.args.name.clone());
             let known = read.and_then(|record| {
                 let digest = record.image()?;
                 let (args, kept) = (record.args.clone(), (Some(upper), Some(record)));
@@ -1193,6 +1236,7 @@ impl Sandbox {
                     if let Some(upper) = Upper::kept_one(&dir, &id) {
                         kept.unknown.push(Unknown {
                             id,
+                            name,
                             image,
                             why: e.told(),
                             upper,
@@ -1278,6 +1322,7 @@ pub struct Kept {
 #[derive(Debug)]
 pub struct Unknown {
     id: String,
+    name: Option<String>,
     image: Option<String>,
     why: String,
     upper: Upper,
@@ -1286,6 +1331,11 @@ pub struct Unknown {
 impl Unknown {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The name it was made with, as its record says, if it reads.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// Why it could not be known again, without this host's paths: a failure on this host's
@@ -1300,6 +1350,7 @@ impl Unknown {
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
+            name: self.name.clone(),
             image: self.image.clone().unwrap_or_default(),
             running: false,
             ports: Vec::new(),

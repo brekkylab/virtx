@@ -6,7 +6,7 @@
 //! A home keeps its project's data in its own stores, and beyond this machine too where it is
 //! given a [`StorageBackend`] ([`Home::backed_by`]), whose cache its stores are then.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, FromRequest, FromRequestParts, Request};
+use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
@@ -33,8 +33,9 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPort, SandboxSignalArgs, Step, VolumeCreateArgs, VolumeListOutputItem,
-    VolumeMountCreateArgs, VolumeMountListOutputItem, described_type, from_body,
+    SandboxExecItem, SandboxPort, SandboxSignalArgs, Step, VolumeCreateArgs, VolumeListOutputItem,
+    VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
+    from_body,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored};
 use virtx_uvm::{
@@ -81,6 +82,8 @@ pub struct Home {
     vm: Vec<OsString>,
     /// The sandboxes, by id, until each is removed.
     sandboxes: Mutex<HashMap<String, Held>>,
+    /// The names sandboxes being made have taken, each until it is made or is not.
+    naming: Mutex<HashSet<String>>,
     /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
     /// with why, and refused all but its `DELETE`.
     unknown: Mutex<HashMap<String, UnknownSandbox>>,
@@ -145,6 +148,7 @@ impl Home {
             vm,
             sandboxes: Mutex::new(sandboxes),
             unknown: Mutex::new(unknown),
+            naming: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
             backing,
@@ -327,6 +331,28 @@ impl Home {
         });
     }
 
+    /// Take `name` for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here has it, or one being made has taken it.
+    fn naming(&self, name: Option<&str>) -> Result<Naming<'_>, Refused> {
+        let Some(name) = name else {
+            return Ok(Naming(self, None));
+        };
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut naming = self.naming.lock().unwrap();
+        let held = sandboxes
+            .values()
+            .any(|held| held.sandbox.name() == Some(name))
+            || (self.unknown.lock().unwrap().values()).any(|kept| kept.name() == Some(name));
+        if held || !naming.insert(name.to_owned()) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                format!("a sandbox here is named {name} already"),
+            ));
+        }
+        Ok(Naming(self, Some(name.to_owned())))
+    }
+
     /// Its sandboxes, whether each one's machine is up or not: for routes of a server's own
     /// ([`serve::router`](crate::serve::router)'s `own`), which may count them or park them.
     /// Those a restart could not know again are not among them, though each keeps its disk and
@@ -414,6 +440,18 @@ impl Tunnel {
     /// The port, in the sandbox's machine while it runs.
     pub async fn connect(&self) -> io::Result<TcpStream> {
         self.activity.sandbox().connect(self.port).await
+    }
+}
+
+/// A name a sandbox being made has taken, given back as this drops: once the sandbox is among
+/// [`Home`]'s, which holds it from there, or once its making failed.
+struct Naming<'a>(&'a Home, Option<String>);
+
+impl Drop for Naming<'_> {
+    fn drop(&mut self) {
+        if let Some(name) = &self.1 {
+            self.0.naming.lock().unwrap().remove(name);
+        }
     }
 }
 
@@ -1203,19 +1241,32 @@ async fn sandbox_files(
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
-async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+/// Every sandbox; with `?name=`, the one named so, if any.
+async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
+    let name = query.as_deref().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "name")
+            .map(|(_, name)| name.into_owned())
+    });
     let sandboxes = home.sandboxes.lock().unwrap();
     let mut listed: Vec<_> = sandboxes
         .values()
+        .filter(|held| name.is_none() || held.sandbox.name() == name.as_deref())
         .map(|held| held.sandbox.answer())
         .collect();
     let unknown = home.unknown.lock().unwrap();
-    listed.extend(unknown.values().map(UnknownSandbox::answer));
+    listed.extend(
+        unknown
+            .values()
+            .filter(|kept| name.is_none() || kept.name() == name.as_deref())
+            .map(UnknownSandbox::answer),
+    );
     Ok(json(&listed))
 }
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    let _naming = home.naming(args.name.as_deref())?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
@@ -1319,9 +1370,13 @@ async fn sandbox_job_list(
     Ok(json(&home.sandbox(&id)?.jobs()))
 }
 
+/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
+/// `text/event-stream`, `201` with the job as the first event and then its log, and its path in
+/// `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
+    headers: HeaderMap,
     Whole(request): Whole,
 ) -> Answer {
     let args: SandboxExecArgs = body(&request)?;
@@ -1337,8 +1392,22 @@ async fn sandbox_exec(
     }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?.get();
-    Ok(created(format!("/sandboxes/{id}/jobs/{}", job.id), &job))
+    let job = sandbox.exec(args.cmd, timeout).await?;
+    let answered = job.get();
+    let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
+    if !accepts_event_stream(&headers) {
+        return Ok(created(location, &answered));
+    }
+    let log = Arc::clone(job.log()).events_led_by(&SandboxExecItem::Job(answered));
+    Ok((
+        StatusCode::CREATED,
+        [
+            (header::LOCATION, location),
+            (header::CONTENT_TYPE, "text/event-stream".to_owned()),
+        ],
+        Body::from_stream(log),
+    )
+        .into_response())
 }
 
 async fn sandbox_job_get(

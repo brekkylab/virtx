@@ -865,7 +865,10 @@ impl Sandbox {
     }
 
     /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
-    /// answered once it is written, so a job that does not read holds the writer back.
+    /// answered once it is in the process's stdin, which takes a pipe's worth before the process
+    /// reads any, so a job that does not read holds the writer back once that is full. A write
+    /// its process closed its stdin under part-way is [`StdinCut`](Error::StdinCut), saying how
+    /// much went in.
     pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
         let ended = || {
             Error::JobEnded(
@@ -876,10 +879,12 @@ impl Sandbox {
         let (pid, running) = job.pid();
         // A job that runs keeps the machine it runs in up.
         let run = self.run().filter(|_| running).ok_or_else(ended)?;
-        let send = || Ok(run.machine.write_stdin(pid, data, eof)?);
+        let of = data.len() as u64;
+        let send = |seq| Ok(run.machine.write_stdin(pid, seq, data, eof)?);
         match job.write_stdin(eof, send).await? {
-            true => Ok(()),
-            false => Err(ended()),
+            Some(super::job::Written { whole: true, .. }) => Ok(()),
+            Some(super::job::Written { bytes, .. }) if bytes > 0 => Err(Error::StdinCut { bytes, of }),
+            _ => Err(ended()),
         }
     }
 
@@ -1116,9 +1121,14 @@ impl Sandbox {
                         let _ = told.send(());
                     }
                 }
-                CtrlResp::Written { id, written } => {
+                CtrlResp::Written {
+                    id,
+                    seq,
+                    bytes,
+                    whole,
+                } => {
                     if let Some(job) = running.get(&id) {
-                        job.written(written);
+                        job.written(seq, super::job::Written { bytes, whole });
                     }
                 }
                 CtrlResp::Ready(_) | CtrlResp::Pong => {}

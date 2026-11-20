@@ -254,11 +254,11 @@ impl Machine {
 
     /// Write `data` to the stdin of the process `id`, started with one by
     /// [`exec`](Machine::exec), and close it after if `eof`: answered by a
-    /// [`Written`](CtrlResp::Written) from [`recv`](Machine::recv), each in turn.
-    pub fn write_stdin(&self, id: u32, data: String, eof: bool) -> Result<()> {
+    /// [`Written`](CtrlResp::Written) from [`recv`](Machine::recv) that carries `seq`.
+    pub fn write_stdin(&self, id: u32, seq: u64, data: String, eof: bool) -> Result<()> {
         wire::send(
             &mut *self.ctrlin.lock().unwrap(),
-            &CtrlReq::Stdin { id, data, eof },
+            &CtrlReq::Stdin { id, seq, data, eof },
         )
         .map_err(|e| Error::io("writing to a process's stdin", e))
     }

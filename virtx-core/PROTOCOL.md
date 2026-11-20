@@ -443,9 +443,10 @@ With `stdin` `true`, the client writes to it with `POST {job}/stdin`:
 
 - `data` is a string, written to the process's stdin as UTF-8, as it is.
 - `eof` `true` closes the process's stdin, after any `data` in the same request.
-- The server answers once it has written `data`, so a process that does not read holds the answer back.
+- The server answers once `data` is in the process's stdin, which takes a pipe's worth before the process reads any, so a process that does not read holds the answer back once that is full.
 - A client sends a job's next `stdin` only once the one before it is answered, so they are written in the order sent.
-- A job started without `stdin`, one whose stdin is closed, and one that has ended refuse it with `409`, `ended`.
+- A job started without `stdin`, one whose stdin is closed -- by `eof` or by its process -- and one that has ended refuse it with `409`, `ended`. So does a write its process closed its stdin under part-way, its message saying how much of `data` went in.
+- An empty `data` writes nothing, and is answered as any write is: `204` while the process's stdin still has a reader.
 
 ## Images
 

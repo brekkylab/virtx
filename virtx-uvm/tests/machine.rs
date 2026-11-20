@@ -382,16 +382,21 @@ async fn answered_beside_a_bomb(home: &Home, memory_mib: u32, bomb: &str) {
     assert_eq!(lines, ["started"]);
     tokio::time::sleep(Duration::from_secs(5)).await;
     // Answered while the bomb goes on: how soon is not what is tried, and the timeout only
-    // keeps a sandbox that never answers from holding the suite. The processes are counted by
-    // the shell's own glob: no fork, which the bomb may starve.
-    let counted = ["sh", "-c", "echo alive; set -- /proc/[0-9]*; echo $#"];
+    // keeps a sandbox that never answers from holding the suite. The processes are counted by a
+    // pipeline, which forks: the bomb holds all but a share of them, which another command has.
+    // A process gone between the glob and `ls` is no error of the count's.
+    let counted = [
+        "sh",
+        "-c",
+        "echo alive; ls -d /proc/[0-9]* 2>/dev/null | wc -l",
+    ];
     let answered = tokio::time::timeout(Duration::from_secs(120), run(&sandbox, &counted, None));
     let (lines, _) = answered
         .await
         .expect("a command answered beside the bomb")
         .unwrap();
     assert_eq!(lines[0], "alive", "{lines:?}");
-    let processes: u32 = lines[1].parse().unwrap_or(0);
+    let processes: u32 = lines[1].trim().parse().unwrap_or(0);
     assert!(processes > 100, "the bomb went on beside it: {lines:?}");
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
@@ -407,11 +412,8 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running(home: Home) {
         (lines, code),
         (vec!["started".into(), "no newline".into()], 0)
     );
-    let still = [
-        "sh",
-        "-c",
-        "pgrep -f 'sleep 300' >/dev/null && echo running",
-    ];
+    // By the program's name, which the shell asking is not.
+    let still = ["sh", "-c", "pgrep -x sleep >/dev/null && echo running"];
     assert_eq!(run(&sandbox, &still, None).await.unwrap().0, ["running"]);
 
     // One that writes on: what the job wrote is its log, whole, and what is left running is
@@ -514,12 +516,66 @@ async fn stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else(home: 
         !writing.is_finished(),
         "written to a process that does not read"
     );
-    // Once it ends, so does the write, as ended.
+    // Once it ends, so does the write: refused as ended, or as cut with what its pipe took in,
+    // whichever the guest says first.
     sandbox.remove_job(&id).unwrap();
     let written = tokio::time::timeout(HANG, writing)
         .await
-        .expect("the write ends");
-    assert!(matches!(written.unwrap(), Err(SandboxError::JobEnded(_))));
+        .expect("the write ends")
+        .unwrap();
+    assert!(
+        matches!(
+            written,
+            Err(SandboxError::JobEnded(_) | SandboxError::StdinCut { .. })
+        ),
+        "{written:?}"
+    );
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
+async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    let ended = |r: &Result<(), SandboxError>| matches!(r, Err(SandboxError::JobEnded(_)));
+
+    // An empty write asks whether the stdin still has a reader.
+    let cmd = ["sh", "-c", "cat >/dev/null"].map(String::from).to_vec();
+    let reading = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = reading.get().id;
+    sandbox
+        .write_stdin(&id, String::new(), false)
+        .await
+        .unwrap();
+    sandbox.remove_job(&id).unwrap();
+
+    // Closed by its process, which runs on: an empty write and a write both refused.
+    let cmd = ["sh", "-c", "exec 0<&-; sleep 300"]
+        .map(String::from)
+        .to_vec();
+    let closed = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = closed.get().id;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let refused = sandbox.write_stdin(&id, String::new(), false).await;
+    assert!(ended(&refused), "{refused:?}");
+    assert!(closed.get().running);
+    sandbox.remove_job(&id).unwrap();
+
+    // Closed under a write: refused saying how much of it went in, and refused after.
+    let cmd = ["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"]
+        .map(String::from)
+        .to_vec();
+    let cut = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = cut.get().id;
+    let of = 1u64 << 20;
+    let refused = sandbox
+        .write_stdin(&id, "x".repeat(of as usize), false)
+        .await;
+    let Err(SandboxError::StdinCut { bytes, of: asked }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(bytes > 0 && bytes < of && asked == of, "{bytes} of {asked}");
+    let refused = sandbox.write_stdin(&id, "x".into(), false).await;
+    assert!(ended(&refused), "{refused:?}");
+    assert!(cut.get().running);
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
@@ -1565,6 +1621,7 @@ fn main() -> ExitCode {
         a_job_s_end_says_why_the_server_ended_it_and_only_then,
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
+        a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,
         an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote,
         each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
         a_machine_boots_only_with_room_given_back_as_it_goes_down,

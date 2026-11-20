@@ -53,6 +53,10 @@ pub enum Error {
     /// Something on this host that should not have failed.
     #[error("{0}")]
     Failed(String),
+    /// A write to a job's stdin that its process closed the stdin under: `bytes` of its `of`
+    /// went in, and nothing more will.
+    #[error("the job's stdin closed after {bytes} of the {of} bytes written to it")]
+    StdinCut { bytes: u64, of: u64 },
 
     #[error(transparent)]
     Image(#[from] ImageStoreError),

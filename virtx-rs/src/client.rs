@@ -20,7 +20,7 @@ use virtx_core::{
     ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
     ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
     RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, VolumeCreateArgs,
+    SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, VolumeCreateArgs,
     VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
@@ -752,6 +752,14 @@ impl Client {
         call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
+    /// The sandbox named `name`, each port without its `url`, if one is.
+    pub fn find_sandbox(&self, name: impl AsRef<str>) -> Call<Option<Sandbox>> {
+        let args = json!({ "name": name.as_ref() });
+        let client = self.clone();
+        let call: Call<Option<SandboxInfo>> = self.call(self.api.virtx_client_find_sandbox, args);
+        call.map(move |info| info.map(|info| Sandbox::new(client.clone(), info)))
+    }
+
     /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
     /// its volumes.
     pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
@@ -860,6 +868,26 @@ impl Client {
         Events::new(
             self.api,
             self.start(self.api.virtx_client_sandbox_job_log, args),
+        )
+    }
+
+    /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
+    /// first, then each entry until its `end`. One request where the server answers an exec
+    /// with its log, two elsewhere. Dropping it leaves the job running.
+    pub(crate) fn exec_sandbox_with_log(
+        &self,
+        id: impl AsRef<str>,
+        args: &SandboxExecArgs,
+    ) -> Events<SandboxExecItem> {
+        let args = json!({
+            "sandbox": id.as_ref(),
+            "cmd": args.cmd,
+            "stdin": args.stdin,
+            "timeout_ms": args.timeout_ms,
+        });
+        Events::new(
+            self.api,
+            self.start(self.api.virtx_client_exec_sandbox_log, args),
         )
     }
 

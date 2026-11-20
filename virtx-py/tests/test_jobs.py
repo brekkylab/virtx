@@ -1,6 +1,8 @@
 """Images, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
-against the fixture's ``virtx-stdio``."""
+against the fixture's ``virtx-stdio``, and its ``virtx-server-tcp`` where a port is forwarded."""
 
+import asyncio
+import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from virtx import (
     InboundError,
     InboundRule,
     Output,
+    PortForwarder,
     PortProtocol,
     PortSpec,
     Recipe,
@@ -206,8 +209,14 @@ async def test_a_build_completed_prints_its_log_and_answers_its_digest(
 async def test_an_exec_iterated_yields_its_output_and_how_it_ended(client: Client) -> None:
     await alpine(client)
     sandbox = await client.create_sandbox(ALPINE)
-    log = [entry.entry async for entry in sandbox.exec(["echo", "hi"])]
+    started = sandbox.exec(["echo", "hi"])
+    log = [entry.entry async for entry in started]
     assert log == [Stdout("hi"), SandboxJobEnd(0)]
+    # Iterated first, read with its job: the job is the one it started, awaited after.
+    job = await started
+    assert isinstance(job, SandboxJob) and job.cmd == ["echo", "hi"]
+    assert (await sandbox.job(job.id)).code == 0
+    assert [j.id for j in await sandbox.jobs()] == [job.id]
     await sandbox.remove()
 
 
@@ -297,3 +306,59 @@ async def test_a_port_says_what_it_is_for_and_whom_it_lets_in(client: Client) ->
     with pytest.raises(VirtxError) as refused:
         await client.create_sandbox(ALPINE, ports=[ssh])
     assert refused.value.status == 400
+
+
+async def test_a_sandbox_is_found_by_its_name_which_no_other_has(client: Client) -> None:
+    await alpine(client)
+    name = unique("named")
+    made = await client.create_sandbox(ALPINE, name=name)
+    assert made.name == name
+    found = await client.find_sandbox(name)
+    assert found is not None and found.id == made.id and found.name == name
+    assert found.client is client
+    assert await client.find_sandbox(unique("nobody")) is None
+    with pytest.raises(VirtxError) as refused:
+        await client.create_sandbox(ALPINE, name=name)
+    assert (refused.value.source, refused.value.status) == ("server", 409)
+    await made.remove()
+    assert await client.find_sandbox(name) is None
+
+
+async def test_a_forwarded_port_nothing_listens_on_says_so(
+    tcp_client: Client, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="virtx")
+    await alpine(tcp_client)
+    sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
+    # The port asked for again has no ``url`` to forward: the one its making answered has.
+    again = await tcp_client.get_sandbox(sandbox.id)
+    with pytest.raises(VirtxError) as refused:
+        PortForwarder.open(tcp_client, again.ports[0])
+    assert refused.value.source == "client"
+    assert str(refused.value).startswith("port 7000 has no url")
+    url = sandbox.ports[0].url
+    assert url is not None
+    with PortForwarder.open(tcp_client, sandbox.ports[0]) as forwarder:
+        assert forwarder.last_error is None
+        reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
+        assert await reader.read() == b""
+        writer.close()
+
+        # Kept once the connection that failed has closed: looked for a minute.
+        for _ in range(6000):
+            if forwarder.last_error is not None:
+                break
+            await asyncio.sleep(0.01)
+        error = forwarder.last_error
+        assert isinstance(error, VirtxError), "no error was kept"
+        assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
+        assert "before the port sent a byte" in str(error)
+        assert url not in str(error)
+
+        for _ in range(6000):
+            if any(r.name == "virtx" and r.getMessage() == str(error) for r in caplog.records):
+                break
+            await asyncio.sleep(0.01)
+        warned = [r for r in caplog.records if r.name == "virtx"]
+        assert [(r.levelno, r.getMessage()) for r in warned][-1:] == [(logging.WARNING, str(error))]
+    await sandbox.remove()

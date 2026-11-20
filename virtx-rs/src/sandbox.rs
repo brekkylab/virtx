@@ -1,8 +1,8 @@
 //! A sandbox and the jobs in it, each with the client its requests go through.
 
 use virtx_core::{
-    FileRoot, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxJob as SandboxJobInfo,
-    SandboxJobEntry,
+    FileRoot, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxExecItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry,
 };
 
 use crate::{Call, Client, Error, Events, JobEnd, StartedJob, files, job::sealed::Ends};
@@ -33,6 +33,11 @@ impl Sandbox {
         &self.info.id
     }
 
+    /// The name it was made with, which finds it again ([`Client::find_sandbox`]).
+    pub fn name(&self) -> Option<&str> {
+        self.info.name.as_deref()
+    }
+
     /// What the server answered about it: its image, whether it runs, and its ports, each
     /// with the `url` it is reached at only where making it answered.
     pub fn info(&self) -> &SandboxInfo {
@@ -43,6 +48,13 @@ impl Sandbox {
     /// it ended are the job's [`log`](SandboxJob::log), or [`StartedJob::log`].
     pub fn exec(&self, args: &SandboxExecArgs) -> StartedJob<SandboxJob, SandboxJobEntry> {
         self.client.exec_sandbox(&self.info.id, args)
+    }
+
+    /// Start a process in it as `args` says, and read its log: its job, once, first, then each
+    /// entry until its `end`. One request where the server answers an exec with its log, two
+    /// elsewhere; [`exec`](Self::exec)'s log is always two. Dropping it leaves the job running.
+    pub fn exec_with_log(&self, args: &SandboxExecArgs) -> Events<SandboxExecItem> {
+        self.client.exec_sandbox_with_log(&self.info.id, args)
     }
 
     /// Every job in it.

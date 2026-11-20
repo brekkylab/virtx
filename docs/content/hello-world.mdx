@@ -163,7 +163,6 @@ let client = Client::from_env()?;
 </Tabs>
 
 The key is its project's, so the program names no project, and the client reaches the region of virtx cloud nearest the machine it runs on.
-A client can also run as the person `virtx login` signed in, with no key; see the CLI's [sign-in to virtx cloud](/docs/reference/cli/#virtx-cloud).
 
 ### On your machine (stdio)
 
@@ -175,10 +174,14 @@ Your machine must meet the [requirements](https://github.com/brekkylab/virtx#req
 
 Set up `virtx-server-tcp` on a machine of yours, as [Running your own server](/docs/guides/self-hosting/) shows.
 
-Sign in to it once with `virtx`, built from `virtx-cli/`:
+Sign in to it once with the `virtx` command, which `uvx` or `npx` runs without installing; to install it instead, see [Installing](/docs/reference/cli/#installing):
 
 ```sh
-virtx login https://virtx.example
+uvx virtx login https://virtx.example                 # pipx run virtx, without uv
+
+# or
+
+npx -y @brekkylab/virtx login https://virtx.example
 ```
 
 Then, in the program, connect with the token it prints in place of `Client.spawn()`:
@@ -191,7 +194,7 @@ from virtx import CommandAuth
 
 with Client.connect(
     "https://virtx.example",
-    CommandAuth("virtx", ("token", "--json")),
+    CommandAuth("uvx", ("virtx", "token", "--json")),
 ) as client:
 ```
 
@@ -201,7 +204,7 @@ with Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] }
+  { type: 'command', program: 'npx', args: ['-y', '@brekkylab/virtx', 'token', '--json'] }
 )
 ```
 
@@ -213,7 +216,7 @@ use virtx::Auth;
 
 let client = Client::connect(
     "https://virtx.example",
-    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;

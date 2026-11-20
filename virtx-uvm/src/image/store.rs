@@ -127,6 +127,10 @@ enum OriginFile {
         image: Digest,
         manifest: String,
         config: String,
+        /// Whether a pull with no credentials filed it: what alone may be shared
+        /// ([`Store::share_from`]). One filed before this was recorded is not.
+        #[serde(default)]
+        anonymous: bool,
     },
 }
 
@@ -237,7 +241,7 @@ impl Store {
     /// the same filesystem, and a copy where it is not. Linked, one file serves every store
     /// that links it, and a store's removal of the layer removes its own link alone. `from` must
     /// be the EROFS image `layer` names -- one another store filed -- which is not read again
-    /// here.
+    /// here: what that store filed is taken on its word, as a registry's would be.
     ///
     /// A layer already here is renewed; on Unix, one here as a file of its own -- written here
     /// rather than linked -- is replaced by the link, as the same bytes, so one file serves both
@@ -261,8 +265,8 @@ impl Store {
             if here {
                 return Ok(());
             }
-            fs::copy(from, &part)
-                .map_err(|e| Error::io(format!("copying {}", from.display()), e))?;
+            // Named by the layer, not by `from`: the other store's path is not the asker's.
+            fs::copy(from, &part).map_err(|e| Error::io(format!("copying layer {layer}"), e))?;
         }
         fs::rename(&part, &path).map_err(|e| {
             let _ = fs::remove_file(&part);
@@ -272,13 +276,19 @@ impl Store {
 
     /// The image registry manifest `origin` became in `from`, filed here too, with its origin:
     /// its layers [linked](Store::link_layer), and its manifest and config and the registry's as
-    /// `from` keeps them. None where `from` has no image of `origin`. An image `from` removes
-    /// meanwhile fails it, and may leave a layer here for a prune.
+    /// `from` keeps them. None where `from` has no image of `origin` that a pull with no
+    /// credentials filed ([`insert_anonymous_image_origin`](Store::insert_anonymous_image_origin)):
+    /// one pulled with credentials, or pushed, is not shared. An image `from` removes meanwhile
+    /// fails it, and may leave a layer here for a prune.
+    ///
+    /// What `from` filed is taken on its word, its layers linked by the digests it recorded, so
+    /// every store shared from is as trusted as the least trusted of them.
     pub fn share_from(&self, from: &Store, origin: &Digest) -> Result<Option<Digest>> {
         let Some(OriginFile::Image {
             image,
             manifest: served,
             config: served_config,
+            anonymous: true,
         }) = read_filed::<OriginFile>(&from.shelf("origin", origin, "json"))?
         else {
             return Ok(None);
@@ -292,7 +302,8 @@ impl Store {
             self.link_layer(&from.layer_path(layer), layer)?;
         }
         let filed = self.insert_image_manifest(&manifest, &config)?;
-        self.insert_image_origin(origin, served.as_bytes(), served_config.as_bytes(), &filed)?;
+        let (served, served_config) = (served.as_bytes(), served_config.as_bytes());
+        self.insert_anonymous_image_origin(origin, served, served_config, &filed)?;
         Ok(Some(filed))
     }
 
@@ -909,13 +920,36 @@ impl Store {
     /// layers.
     ///
     /// Named by `digest`, which a pull has checked: `manifest`'s own, or that of the index
-    /// it was chosen from.
+    /// it was chosen from. Not to be shared: as a pull with credentials, or a push, files it.
     pub fn insert_image_origin(
         &self,
         digest: &Digest,
         manifest: &[u8],
         config: &[u8],
         image: &Digest,
+    ) -> Result<()> {
+        self.file_image_origin(digest, manifest, config, image, false)
+    }
+
+    /// As [`insert_image_origin`](Store::insert_image_origin), for a pull with no credentials:
+    /// what [`share_from`](Store::share_from) may share.
+    pub fn insert_anonymous_image_origin(
+        &self,
+        digest: &Digest,
+        manifest: &[u8],
+        config: &[u8],
+        image: &Digest,
+    ) -> Result<()> {
+        self.file_image_origin(digest, manifest, config, image, true)
+    }
+
+    fn file_image_origin(
+        &self,
+        digest: &Digest,
+        manifest: &[u8],
+        config: &[u8],
+        image: &Digest,
+        anonymous: bool,
     ) -> Result<()> {
         if !self.shelf("image", image, "json").is_file() {
             return Err(Error::Missing(image.clone()));
@@ -933,6 +967,7 @@ impl Store {
             image: image.clone(),
             manifest: text(manifest)?,
             config: text(config)?,
+            anonymous,
         })
         .map_err(|e| Error::io("serializing an origin", e.into()))?;
         write_atomically(&path, |file| {
@@ -976,6 +1011,7 @@ impl Store {
                 image: of,
                 manifest,
                 config,
+                ..
             } = read
                 && of == *image
             {

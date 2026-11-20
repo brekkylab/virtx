@@ -17,6 +17,7 @@ use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, Sand
 use super::record::Record;
 use super::upper::Upper;
 use super::{Error, Job};
+use crate::backend::{Backing, Held, Stored, Wanted};
 use crate::machine::wire::CtrlResp;
 use crate::{
     Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
@@ -165,6 +166,12 @@ pub struct Sandbox {
     /// Its volumes, held against removal for each of its machines and between them, until it
     /// is closed.
     volume_holds: Mutex<Vec<VolumeHold>>,
+    /// Each volume it mounts, by name, and whether read-only.
+    mounted: Vec<(String, bool)>,
+    /// Where its disk and volumes are kept beyond this machine, if anywhere, and what that holds
+    /// for its machine while it is up.
+    backing: Backing,
+    holding: Mutex<Vec<Held>>,
     /// What each of its machines boots, and the process each runs as.
     config: MachineConfig,
     vm: Vec<OsString>,
@@ -199,6 +206,12 @@ impl Sandbox {
     /// With `keys`, the port each opens, it is kept past this process: its record is written
     /// once it has booted, and a making cut short before then leaves nothing. Without, it goes
     /// with this process.
+    ///
+    /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
+    /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
+    /// [made](crate::StorageBackend::made) there before its machine first boots -- and removed
+    /// from there again where its making fails after.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         images: &ImageStore,
         root: &Path,
@@ -207,6 +220,7 @@ impl Sandbox {
         vm: Vec<OsString>,
         park_after: Option<Duration>,
         keys: Option<HashMap<String, u16>>,
+        backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
         let mut given = HashSet::new();
@@ -295,11 +309,18 @@ impl Sandbox {
             }
         }
 
+        let backend = backing.get();
         let digest = match &args.image {
             ImageName::Tag { tag } => {
                 let reference: Reference = tag
                     .parse()
                     .map_err(|e| Error::Invalid(format!("{tag}: {e}")))?;
+                if let Some(backend) = backend {
+                    backend
+                        .want(Wanted::Tag(&reference))
+                        .await
+                        .map_err(failed)?;
+                }
                 images.get_tag(&reference)?.ok_or_else(|| {
                     Error::NotFound(format!("no image here is tagged {tag}: pull it first"))
                 })?
@@ -308,10 +329,18 @@ impl Sandbox {
                 let digest = digest
                     .parse::<Digest>()
                     .map_err(|e| Error::Invalid(format!("{digest}: {e}")))?;
+                if let Some(backend) = backend {
+                    backend.want(Wanted::Image(&digest)).await.map_err(failed)?;
+                }
                 // A registry's digest names the image pulled or pushed as it.
                 images.get_image_origin(&digest)?.unwrap_or(digest)
             }
         };
+        if let Some(backend) = backend {
+            for asked in &args.volumes {
+                backend.bring_up(Stored::Volume(&asked.volume)).await?;
+            }
+        }
         // What it boots as every time: the image by the digest it boots now.
         let mut args = args.clone();
         args.image = ImageName::Digest {
@@ -323,26 +352,41 @@ impl Sandbox {
             volumes.clone(),
             args.clone(),
         );
+        let backed = backing.clone();
         let built = move || {
             let given = (None, None);
             Sandbox::build(
-                &images, &root, &volumes, &made, digest, vm, park_after, given,
+                &images, &root, &volumes, &made, digest, vm, park_after, given, backed,
             )
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
-        sandbox.wake().await?;
-        if let Some(keys) = keys {
-            let record = Record {
-                args,
-                keys,
-                exited: false,
-                jobs: Vec::new(),
-            };
-            if let Err(e) = sandbox.keep(record) {
+        if let Some(backend) = backend {
+            let size = u64::from(args.disk_gib.unwrap_or(DEFAULT_DISK_GIB)) << 30;
+            if let Err(e) = backend.made(Stored::Disk(&sandbox.id), size).await {
                 let closed = Arc::clone(&sandbox);
                 tokio::task::spawn_blocking(move || closed.close()).await?;
-                return Err(e);
+                return Err(e.into());
             }
+        }
+        let made = async {
+            sandbox.wake().await?;
+            match keys {
+                Some(keys) => sandbox.keep(Record {
+                    args,
+                    keys,
+                    exited: false,
+                    jobs: Vec::new(),
+                }),
+                None => Ok(()),
+            }
+        };
+        if let Err(e) = made.await {
+            let closed = Arc::clone(&sandbox);
+            tokio::task::spawn_blocking(move || closed.close()).await?;
+            if let Some(backend) = backend {
+                let _ = backend.remove(Stored::Disk(&sandbox.id)).await;
+            }
+            return Err(e);
         }
         Ok(sandbox)
     }
@@ -361,6 +405,7 @@ impl Sandbox {
         vm: Vec<OsString>,
         park_after: Option<Duration>,
         kept: (Option<Upper>, Option<Record>),
+        backing: Backing,
     ) -> Result<Sandbox, Error> {
         let (upper, record) = kept;
         let missing = || Error::NotFound(format!("no image here is {digest}"));
@@ -439,6 +484,11 @@ impl Sandbox {
             upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
             volume_holds: Mutex::new(volume_holds),
+            mounted: (args.volumes.iter())
+                .map(|asked| (asked.volume.clone(), asked.readonly))
+                .collect(),
+            backing,
+            holding: Mutex::default(),
             config,
             vm,
             state: Mutex::new(match exited {
@@ -661,6 +711,8 @@ impl Sandbox {
         if let State::Up(machine) = state {
             machine.stop();
         }
+        // Its machine down, and its disk and volumes still here: the backend's to keep now.
+        self.holding.lock().unwrap().clear();
         self.volume_holds.lock().unwrap().clear();
         if let Some(mut upper) = self.upper.lock().unwrap().take() {
             upper.kept = leaving && record.is_some();
@@ -680,10 +732,24 @@ impl Sandbox {
             State::Exited => return Err(Error::Ended),
             State::Parked => {}
         }
+        // Its disk and each volume it writes held here, brought up to what is kept, and each
+        // volume it only reads brought up, where they are kept beyond this machine: what is
+        // held, held until its machine is down.
+        let mut holding = Vec::new();
+        if let Some(backend) = self.backing.get() {
+            holding.push(backend.take(Stored::Disk(&self.id)).await?);
+            for (volume, readonly) in &self.mounted {
+                match readonly {
+                    true => backend.bring_up(Stored::Volume(volume)).await?,
+                    false => holding.push(backend.take(Stored::Volume(volume)).await?),
+                }
+            }
+        }
         // Booting is blocking work, until the guest takes commands.
         let (config, vm) = (self.config.clone(), self.vm.clone());
         let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
         let machine = Arc::new(machine);
+        *self.holding.lock().unwrap() = holding;
         let closed = {
             let mut state = self.state.lock().unwrap();
             let closed = matches!(*state, State::Exited);
@@ -762,6 +828,7 @@ impl Sandbox {
             machine
         };
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
+        self.holding.lock().unwrap().clear();
         Ok(())
     }
 
@@ -849,6 +916,9 @@ impl Sandbox {
             }
             exited
         };
+        if exited {
+            self.holding.lock().unwrap().clear();
+        }
         // Kept so, past its process, before any job is seen to end: a server started again
         // knows it exited.
         if exited && let Some(record) = &mut *self.record.lock().unwrap() {
@@ -1047,13 +1117,15 @@ impl Sandbox {
     /// for the next that needs it. What sandboxes not kept left is deleted first, as
     /// [`sweep`](Sandbox::sweep) deletes it. One that cannot be known again -- its record not
     /// read, or its image, a volume or an abin of it gone -- is [`Unknown`], its disk and
-    /// record held where they are until it is removed. Blocking work, as making one is.
+    /// record held where they are until it is removed. Each takes what `backing` has as it next
+    /// needs it. Blocking work, as making one is.
     pub fn kept(
         images: &ImageStore,
         root: &Path,
         volumes: &VolumeStore,
         vm: Vec<OsString>,
         park_after: Option<Duration>,
+        backing: &Backing,
     ) -> Kept {
         let dir = root.join(SANDBOX);
         Upper::sweep(&dir);
@@ -1069,16 +1141,13 @@ impl Sandbox {
                     ImageName::Tag { .. } => None,
                 });
             let known = read.and_then(|record| {
-                let ImageName::Digest { digest } = &record.args.image else {
-                    return Err("its record names its image by no digest".into());
-                };
-                let digest = digest
-                    .parse::<Digest>()
-                    .map_err(|e| format!("{digest}: {e}"))?;
+                let digest = record.image()?;
                 let (args, kept) = (record.args.clone(), (Some(upper), Some(record)));
-                let vm = vm.clone();
-                Sandbox::build(images, root, volumes, &args, digest, vm, park_after, kept)
-                    .map_err(|e| e.to_string())
+                let (vm, backing) = (vm.clone(), backing.clone());
+                Sandbox::build(
+                    images, root, volumes, &args, digest, vm, park_after, kept, backing,
+                )
+                .map_err(|e| e.to_string())
             });
             match known {
                 Ok(sandbox) => kept.known.push(Arc::new(sandbox)),
@@ -1101,6 +1170,54 @@ impl Sandbox {
         }
         Abin::sweep(&Abin::dir(root));
         kept
+    }
+
+    /// Sandbox `id`, kept under `root` with its record and its disk as a server leaves them --
+    /// one that [let it go](Sandbox::leave), on this machine or another, or a backup's -- known
+    /// here as [`kept`](Sandbox::kept) knows each: parked, or exited where its record says so,
+    /// with its jobs, each that ran then ended `restarted`. Where `backing` has a backend, its
+    /// image is [wanted](crate::StorageBackend::want) and its volumes
+    /// [brought up](crate::StorageBackend::bring_up) first. Refused
+    /// [`NotFound`](Error::NotFound) where no sandbox `id` is kept there or another process has
+    /// it, and as making it is where it cannot be known: its disk and record are left as they
+    /// are then.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn take_in(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        backing: &Backing,
+        id: &str,
+    ) -> Result<Arc<Sandbox>, Error> {
+        if !crate::is_name(id) {
+            return Err(Error::Invalid(format!("{id:?} is not a sandbox's id")));
+        }
+        let dir = root.join(SANDBOX);
+        let upper = Upper::kept_one(&dir, id).ok_or_else(|| {
+            Error::NotFound(format!(
+                "no sandbox {id} is kept here, or another server has it"
+            ))
+        })?;
+        let record = Record::read(&dir, id).map_err(Error::Invalid)?;
+        let digest = record.image().map_err(Error::Invalid)?;
+        if let Some(backend) = backing.get() {
+            backend.want(Wanted::Image(&digest)).await.map_err(failed)?;
+            for asked in &record.args.volumes {
+                backend.bring_up(Stored::Volume(&asked.volume)).await?;
+            }
+        }
+        let (images, root, volumes) = (images.clone(), root.to_owned(), volumes.clone());
+        let backing = backing.clone();
+        let built = move || {
+            let args = record.args.clone();
+            let kept = (Some(upper), Some(record));
+            Sandbox::build(
+                &images, &root, &volumes, &args, digest, vm, park_after, kept, backing,
+            )
+        };
+        Ok(Arc::new(tokio::task::spawn_blocking(built).await??))
     }
 
     /// Whether a sandbox, of this process or another, lives under `root`: one holds an upper
@@ -1163,6 +1280,11 @@ impl Unknown {
     pub fn remove(mut self) {
         self.upper.kept = false;
     }
+}
+
+/// What a storage backend failed with, as making or booting a sandbox fails.
+fn failed(e: anyhow::Error) -> Error {
+    Error::Backend(crate::backend::Refusal::Failed(e))
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.

@@ -730,12 +730,6 @@ fn executable(dir: &Path) {
     }
 }
 
-/// The environment the guest runs in: the image's, with `PATH` and `HOME` added when it
-/// sets neither, with the values docker uses, and [`ABIN_DIR`] in front of `PATH` when `abin`
-/// says the machine has one.
-///
-/// In front rather than behind: `/abin` is what virtx undertakes to provide, and an image's own
-/// `index` should not be what a caller reading `abin/skills/` ends up running.
 /// The directory the image's process starts in -- a machine's, and a build step's: its config's
 /// `WorkingDir`, or the root where the config names none -- unset, or set empty, as images built
 /// by older tools leave it.
@@ -748,6 +742,12 @@ pub(crate) fn workdir(config: &Config) -> String {
         .to_owned()
 }
 
+/// The environment the guest runs in: the image's, with `PATH` and `HOME` added when it
+/// sets neither, with the values docker uses, and [`ABIN_DIR`] in front of `PATH` when `abin`
+/// says the machine has one.
+///
+/// In front rather than behind: `/abin` is what virtx undertakes to provide, and an image's own
+/// `index` should not be what a caller reading `abin/skills/` ends up running.
 fn env(config: &Config, abin: bool) -> Vec<String> {
     let mut env = config.env().clone().unwrap_or_default();
     let set = |env: &[String], name: &str| env.iter().any(|var| var.starts_with(name));

@@ -950,6 +950,14 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             spec.port
         )));
     }
+    // No inbound rules are kept here, so a port given some is refused rather than opened to
+    // whoever they were meant to keep out.
+    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+        return Err(invalid(format!(
+            "ports: {}'s inbound rules are not kept by this server",
+            spec.port
+        )));
+    }
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since

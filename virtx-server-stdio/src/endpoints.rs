@@ -688,6 +688,14 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // No inbound rules are kept here, so a port given some is refused rather than opened to
+    // whoever they were meant to keep out.
+    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+        return Err(invalid(format!(
+            "ports: {}'s inbound rules are not kept by this server",
+            spec.port
+        )));
+    }
 
     // Each port on this host's loopback, which only this machine reaches, taken to the
     // sandbox's machine while it runs: TCP as it is, so an `http` port is HTTP at its URL too.

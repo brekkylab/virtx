@@ -233,14 +233,6 @@ impl Sandbox {
                 spec.port
             )));
         }
-        // No rules are kept here, so a port given some is refused rather than opened to whoever
-        // they were meant to keep out.
-        if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
-            return Err(Error::Invalid(format!(
-                "ports: {}'s inbound rules are not kept by this server",
-                spec.port
-            )));
-        }
         let mut at = HashSet::new();
         for volume in &args.volumes {
             let why = match crate::mount_point(&volume.path) {

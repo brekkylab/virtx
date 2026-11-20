@@ -31,6 +31,7 @@ use tokio_util::io::ReaderStream;
 
 use super::registry_client::Reference;
 use super::store::{self, Store};
+use crate::backend::{Backing, TagError, Wanted};
 use crate::fstree::FsTree;
 
 /// What a response carries.
@@ -55,6 +56,8 @@ pub struct RegistryServer {
     /// Each blob being pushed, until it is whole, and each whole one that is not a layer, until
     /// a manifest names it: in the temp directory, and gone with this.
     uploads: PathBuf,
+    /// Where its images are kept beyond this machine, once its home is given that.
+    backing: Backing,
 }
 
 impl Drop for RegistryServer {
@@ -112,7 +115,56 @@ impl RegistryServer {
             store,
             base: base.into(),
             uploads,
+            backing: Backing::default(),
         })
+    }
+
+    /// Where its images are kept beyond this machine, once there is a backend for them: the
+    /// home over its store shares this, and backs it as it is backed. Its catalog and tag lists
+    /// list the tags kept there too, and a manifest named by its tag or digest is
+    /// [wanted](crate::StorageBackend::want) from there before it is answered. A tag pushed is
+    /// kept there, and one removed is removed there, before either is answered.
+    pub fn backing(&self) -> &Backing {
+        &self.backing
+    }
+
+    /// The tags kept beyond this machine and not here, for a listing beside the store's: those
+    /// with a tag in them. Refused `500` where the backend fails, which is logged, so that no
+    /// listing is answered short.
+    async fn kept_tags(&self) -> Result<Vec<Reference>> {
+        let Some(backend) = self.backing.get() else {
+            return Ok(Vec::new());
+        };
+        match backend.tags().await {
+            Ok(tags) => Ok(tags.into_iter().filter(|tag| tag.tag().is_some()).collect()),
+            Err(e) => {
+                eprintln!("listing the tags kept beyond this machine: {e:#}");
+                Err(refusal(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UNKNOWN",
+                    "the tags kept beyond this machine could not be listed",
+                ))
+            }
+        }
+    }
+
+    /// The image the manifest `reference` of repository `name` names -- a tag, or a digest --
+    /// made ready here from beyond this machine, where it is kept there. Answered from what is
+    /// here whatever comes of it.
+    async fn want(&self, name: &str, reference: &str) {
+        let Some(backend) = self.backing.get() else {
+            return;
+        };
+        let wanted = match reference.parse::<Digest>() {
+            Ok(digest) => backend.want(Wanted::Image(&digest)).await,
+            Err(_) => match tagged(name, reference) {
+                Ok(tag) => backend.want(Wanted::Tag(&tag)).await,
+                Err(_) => return,
+            },
+        };
+        if let Err(e) = wanted {
+            eprintln!("bringing {name}:{reference} here: {e:#}");
+        }
     }
 
     /// Answer one request, whose path is under the base.
@@ -173,7 +225,10 @@ impl RegistryServer {
         let path = path.strip_prefix('/').ok_or_else(unknown)?;
         if path == "_catalog" {
             return match method {
-                Method::GET => self.catalog(asked("n"), asked("last")),
+                Method::GET => {
+                    let also = self.kept_tags().await?;
+                    self.catalog(&also, asked("n"), asked("last"))
+                }
                 _ => Err(refusal(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "UNSUPPORTED",
@@ -185,7 +240,10 @@ impl RegistryServer {
         // The name is everything before the endpoint, slashes and all.
         if let Some(name) = path.strip_suffix("/tags/list") {
             return match method {
-                Method::GET => self.tags(name, asked("n"), asked("last")),
+                Method::GET => {
+                    let also = self.kept_tags().await?;
+                    self.tags(name, &also, asked("n"), asked("last"))
+                }
                 _ => Err(refusal(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "UNSUPPORTED",
@@ -213,14 +271,16 @@ impl RegistryServer {
         let (rest, last) = path.rsplit_once('/').ok_or_else(unknown)?;
         let (name, endpoint) = rest.rsplit_once('/').ok_or_else(unknown)?;
         match (endpoint, method) {
-            ("manifests", Method::GET) => self.get_manifest(name, last, true).await,
-            ("manifests", Method::HEAD) => self.get_manifest(name, last, false).await,
-            ("manifests", Method::PUT) => self.put_manifest(name, last, request.into_body()).await,
-            // A removal waits for the store's change under way: blocking work.
-            ("manifests", Method::DELETE) => {
-                let (server, name, last) = (self.clone(), name.to_owned(), last.to_owned());
-                tokio::task::spawn_blocking(move || server.delete_manifest(&name, &last)).await?
+            ("manifests", Method::GET) => {
+                self.want(name, last).await;
+                self.get_manifest(name, last, true).await
             }
+            ("manifests", Method::HEAD) => {
+                self.want(name, last).await;
+                self.get_manifest(name, last, false).await
+            }
+            ("manifests", Method::PUT) => self.put_manifest(name, last, request.into_body()).await,
+            ("manifests", Method::DELETE) => self.delete_manifest(name, last).await,
             ("blobs", Method::GET) => self.get_blob(last, true).await,
             ("blobs", Method::HEAD) => self.get_blob(last, false).await,
             ("blobs", Method::DELETE) => {
@@ -264,13 +324,17 @@ impl RegistryServer {
         }
     }
 
-    /// Every repository a tag is in, as the spec pages a tag listing.
-    fn catalog(&self, n: Option<&str>, last: Option<&str>) -> Result<Response<Body>> {
-        let mut repositories: Vec<String> = self
-            .store
-            .tags()?
-            .iter()
-            .map(|(reference, _)| repository(reference))
+    /// Every repository a tag is in, here or in `also`, as the spec pages a tag listing.
+    fn catalog(
+        &self,
+        also: &[Reference],
+        n: Option<&str>,
+        last: Option<&str>,
+    ) -> Result<Response<Body>> {
+        let mut repositories: Vec<String> = (self.store.tags()?.iter())
+            .map(|(reference, _)| reference)
+            .chain(also)
+            .map(repository)
             .collect();
         repositories.sort();
         repositories.dedup();
@@ -290,19 +354,26 @@ impl RegistryServer {
         Ok(response)
     }
 
-    fn tags(&self, name: &str, n: Option<&str>, last: Option<&str>) -> Result<Response<Body>> {
+    /// The tags of repository `name`, here or in `also`, as the spec pages them.
+    fn tags(
+        &self,
+        name: &str,
+        also: &[Reference],
+        n: Option<&str>,
+        last: Option<&str>,
+    ) -> Result<Response<Body>> {
         let wanted = repository(&tagged(name, "latest")?);
-        let mut tags: Vec<String> = self
-            .store
-            .tags()?
-            .iter()
-            .filter(|(reference, _)| repository(reference) == wanted)
-            .filter_map(|(reference, _)| reference.tag().map(str::to_owned))
+        let mut tags: Vec<String> = (self.store.tags()?.iter())
+            .map(|(reference, _)| reference)
+            .chain(also)
+            .filter(|reference| repository(reference) == wanted)
+            .filter_map(|reference| reference.tag().map(str::to_owned))
             .collect();
         if tags.is_empty() {
             return Err(refusal(StatusCode::NOT_FOUND, "NAME_UNKNOWN", name));
         }
         tags.sort();
+        tags.dedup();
         let (page, more) = paged(tags, n, last)?;
         let mut response = json_response(StatusCode::OK, &json!({"name": name, "tags": page}));
         if more && let Some(last) = page.last() {
@@ -413,10 +484,9 @@ impl RegistryServer {
                 manifest.config().digest().to_string(),
             )
         })?;
-        // Filing and tagging each wait for the store's change under way: blocking work.
+        // Filing waits for the store's change under way: blocking work.
         let (store, uploads) = (self.store.clone(), self.uploads.clone());
         let config_digest = manifest.config().digest().digest().to_owned();
-        let filed = digest.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             store
                 .insert_image_manifest(&body, &config)
@@ -431,12 +501,23 @@ impl RegistryServer {
                 })?;
             // Kept with the image now.
             let _ = std::fs::remove_file(uploads.join(config_digest));
-            if let Some(tag) = tag {
-                store.insert_tag(&tag, &filed)?;
-            }
             Ok(())
         })
         .await??;
+        if let Some(tag) = tag {
+            match self.backing.tag(&self.store, &tag, &digest).await {
+                Ok(()) => {}
+                Err(TagError::Store(e)) => return Err(e.into()),
+                Err(TagError::Kept(e)) => {
+                    eprintln!("keeping {tag} beyond this machine: {e:#}");
+                    return Err(refusal(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "UNKNOWN",
+                        "the tag could not be kept beyond this machine",
+                    ));
+                }
+            }
+        }
 
         let mut response = empty(StatusCode::CREATED);
         let headers = response.headers_mut();
@@ -460,51 +541,76 @@ impl RegistryServer {
     /// A tag takes only itself away; a digest takes every tag naming its image in this
     /// repository, and the image too once no tag in any other names it. Either is refused
     /// `409 DENIED`, with nothing removed, where it would leave an image a sandbox or a build
-    /// stands on named by no tag.
-    fn delete_manifest(&self, name: &str, reference: &str) -> Result<Response<Body>> {
-        let unknown = || refusal(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", reference);
-        let in_use = |image: &Digest| {
-            refusal(
-                StatusCode::CONFLICT,
-                "DENIED",
-                format!(
-                    "in use: a sandbox or a build stands on {image}, and no other tag names it"
-                ),
-            )
-        };
-        if !reference.contains(':') {
-            return match self.store.remove_tag(&tagged(name, reference)?) {
-                Ok(Some(_)) => Ok(empty(StatusCode::ACCEPTED)),
-                Ok(None) => Err(unknown()),
-                Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
-                Err(e) => Err(e.into()),
+    /// stands on named by no tag. Each tag taken away here is then removed where it is kept
+    /// ([`untag`](crate::StorageBackend::untag)), and a tag not here is removed there alone, its
+    /// image not brought here for it; answered once that is done, and run to its end even if
+    /// the request is dropped. A backend's failure is refused `500`, each tag it has not
+    /// removed put back here. Each tag it takes away is held from its removal here to the
+    /// backend's ([`Backing::lock_tags`]), so that no push of it comes between; one that names
+    /// the digest's image only once that is held is left, as pushed after.
+    async fn delete_manifest(&self, name: &str, reference: &str) -> Result<Response<Body>> {
+        let (store, backing) = (self.store.clone(), self.backing.clone());
+        let (name, reference) = (name.to_owned(), reference.to_owned());
+        tokio::spawn(async move {
+            // A removal waits for the store's change under way: blocking work.
+            let named = {
+                let (store, name, reference) = (store.clone(), name.clone(), reference.clone());
+                tokio::task::spawn_blocking(move || named_by(&store, &name, &reference)).await??
             };
-        }
-        let digest = reference
-            .parse::<Digest>()
-            .map_err(|e| refusal(StatusCode::BAD_REQUEST, "DIGEST_INVALID", e.to_string()))?;
-        if self.store.get_image_manifest(&digest)?.is_none() {
-            return Err(unknown());
-        }
-        let here = repository(&tagged(name, "latest")?);
-        let (tags_here, tags_elsewhere): (Vec<_>, Vec<_>) = self
-            .store
-            .tags()?
-            .into_iter()
-            .filter(|(_, named)| *named == digest)
-            .partition(|(tag, _)| repository(tag) == here);
-        // An image tagged only in other repositories is not this one's.
-        if tags_here.is_empty() && !tags_elsewhere.is_empty() {
-            return Err(unknown());
-        }
-        match self
-            .store
-            .remove_image_tagged(&digest, |tag| repository(tag) == here)
-        {
-            Ok(_) => Ok(empty(StatusCode::ACCEPTED)),
-            Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
-            Err(e) => Err(e.into()),
-        }
+            let locked = backing.lock_tags(named).await;
+            let taken = {
+                let (store, name, reference) = (store.clone(), name.clone(), reference.clone());
+                tokio::task::spawn_blocking(move || {
+                    delete_here(&store, &name, &reference, |tag| locked.holds(tag))
+                        .map(|taken| (taken, locked))
+                })
+                .await??
+            };
+            let (taken, _locked) = taken;
+            let mut kept = false;
+            if let Some(backend) = backing.get() {
+                for (at, (tag, _)) in taken.tags.iter().enumerate() {
+                    match backend.untag(tag).await {
+                        Ok(was) => kept |= was,
+                        Err(e) => {
+                            eprintln!("removing {tag} where it is kept: {e:#}");
+                            let back = taken.tags[at..].to_vec();
+                            tokio::task::spawn_blocking(move || {
+                                for (tag, image) in back {
+                                    if image.is_some()
+                                        && let Err(e) = store.restore_tag(&tag, image.as_ref())
+                                    {
+                                        eprintln!("putting {tag} back here: {e}");
+                                    }
+                                }
+                            })
+                            .await?;
+                            return Err(refusal(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "UNKNOWN",
+                                "the tag could not be removed where it is kept",
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(image) = taken.image {
+                tokio::task::spawn_blocking(move || match store.remove_image(&image) {
+                    Ok(_) | Err(store::Error::InUse(..)) => Ok(()),
+                    Err(e) => Err(e),
+                })
+                .await??;
+            }
+            match taken.here || kept {
+                true => Ok(empty(StatusCode::ACCEPTED)),
+                false => Err(refusal(
+                    StatusCode::NOT_FOUND,
+                    "MANIFEST_UNKNOWN",
+                    reference,
+                )),
+            }
+        })
+        .await?
     }
 
     /// A layer, streamed from its file, or a config.
@@ -898,6 +1004,104 @@ fn tagged(name: &str, tag: &str) -> Result<Reference> {
         .map_err(|e| refusal(StatusCode::BAD_REQUEST, "NAME_INVALID", e.to_string()))
 }
 
+/// What a manifest's `DELETE` took away here.
+struct Taken {
+    /// Whether it named something here.
+    here: bool,
+    /// Each tag taken away, with the image it named here: none for a tag not here.
+    tags: Vec<(Reference, Option<Digest>)>,
+    /// The image a digest named, to be removed once its tags are removed where they are kept,
+    /// unless a tag names it still or something holds it by then.
+    image: Option<Digest>,
+}
+
+/// The tags a manifest's `DELETE` of `reference` in repository `name` would take away in
+/// `store` now: the tag it names, or each tag in `name` naming the digest's image. Unchecked:
+/// [`delete_here`] answers for what is wrong with it.
+fn named_by(store: &Store, name: &str, reference: &str) -> Result<Vec<Reference>> {
+    if !reference.contains(':') {
+        return Ok(tagged(name, reference).into_iter().collect());
+    }
+    let (Ok(digest), Ok(here)) = (reference.parse::<Digest>(), tagged(name, "latest")) else {
+        return Ok(Vec::new());
+    };
+    let here = repository(&here);
+    Ok((store.tags()?.into_iter())
+        .filter(|(tag, named)| *named == digest && repository(tag) == here)
+        .map(|(tag, _)| tag)
+        .collect())
+}
+
+/// What a manifest's `DELETE` of `reference` in repository `name` takes away in `store`, as
+/// [`RegistryServer::delete_manifest`] says: of a digest's tags, only those `held` picks.
+fn delete_here(
+    store: &Store,
+    name: &str,
+    reference: &str,
+    held: impl Fn(&Reference) -> bool,
+) -> Result<Taken> {
+    let unknown = || refusal(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", reference);
+    let in_use = |image: &Digest| {
+        refusal(
+            StatusCode::CONFLICT,
+            "DENIED",
+            format!("in use: a sandbox or a build stands on {image}, and no other tag names it"),
+        )
+    };
+    if !reference.contains(':') {
+        let tag = tagged(name, reference)?;
+        return match store.remove_tag(&tag) {
+            Ok(image) => Ok(Taken {
+                here: image.is_some(),
+                tags: vec![(tag, image)],
+                image: None,
+            }),
+            Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
+            Err(e) => Err(e.into()),
+        };
+    }
+    let digest = reference
+        .parse::<Digest>()
+        .map_err(|e| refusal(StatusCode::BAD_REQUEST, "DIGEST_INVALID", e.to_string()))?;
+    if store.get_image_manifest(&digest)?.is_none() {
+        return Err(unknown());
+    }
+    let here = repository(&tagged(name, "latest")?);
+    let (tags_here, tags_elsewhere): (Vec<_>, Vec<_>) = store
+        .tags()?
+        .into_iter()
+        .filter(|(_, named)| *named == digest)
+        .partition(|(tag, _)| repository(tag) == here);
+    // An image tagged only in other repositories is not this one's.
+    if tags_here.is_empty() && !tags_elsewhere.is_empty() {
+        return Err(unknown());
+    }
+    // A tag pushed since the tags to take away were held is left, as pushed after.
+    if !tags_here.is_empty() && !tags_here.iter().any(|(tag, _)| held(tag)) {
+        return Ok(Taken {
+            here: true,
+            tags: Vec::new(),
+            image: None,
+        });
+    }
+    let taken = match tags_here.is_empty() {
+        // Named by no tag: removed now, as there is none to remove anywhere else first.
+        true => store.remove_image(&digest).map(|_| Vec::new()),
+        false => store.remove_tags_of(&digest, |tag| repository(tag) == here && held(tag)),
+    };
+    match taken {
+        Ok(tags) => Ok(Taken {
+            here: true,
+            image: (!tags.is_empty()).then(|| digest.clone()),
+            tags: (tags.into_iter())
+                .map(|tag| (tag, Some(digest.clone())))
+                .collect(),
+        }),
+        Err(store::Error::InUse(image, _)) => Err(in_use(&image)),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// The repository a reference is in, as `_catalog` lists it and a path names it back.
 fn repository(reference: &Reference) -> String {
     format!("{}/{}", reference.registry(), reference.repository())
@@ -996,6 +1200,8 @@ fn json_response(status: StatusCode, body: &serde_json::Value) -> Response<Body>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use http::HeaderMap;
     use oci_spec::image::{ImageConfiguration, ImageManifestBuilder};
 
@@ -1372,5 +1578,430 @@ mod tests {
         let (status, _, body) = send(server, Method::POST, &wrong, &tar).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(String::from_utf8_lossy(&body).contains("DIGEST_INVALID"));
+    }
+
+    /// An image kept beyond this machine, tagged `kept:v1`, brought here as a backend would
+    /// bring it: by its tag or its digest. It lists a reference by digest alone too. A tag
+    /// told to it is said in `tagged`, with its image, and kept from then on; one removed, in
+    /// `untagged`. It fails each of those while `failing`, taking the image of a tag it fails
+    /// to keep where `taking`, as a sandbox made of it meanwhile would. Where `paused`, a
+    /// removal waits for a permit of it, `untagging` set as it does. What it keeps is `kept`.
+    #[derive(Default)]
+    struct Elsewhere {
+        here: Option<Store>,
+        wanted: std::sync::Mutex<Vec<String>>,
+        tagged: std::sync::Mutex<Vec<(String, Digest)>>,
+        untagged: std::sync::Mutex<Vec<String>>,
+        kept: std::sync::Mutex<HashMap<String, Digest>>,
+        failing: bool,
+        taking: bool,
+        taken: std::sync::Mutex<Vec<store::ImageHold>>,
+        paused: Option<tokio::sync::Semaphore>,
+        untagging: std::sync::atomic::AtomicBool,
+    }
+
+    impl Elsewhere {
+        fn over(here: &Store) -> Elsewhere {
+            Elsewhere {
+                here: Some(here.clone()),
+                ..Elsewhere::default()
+            }
+        }
+
+        fn failing(here: &Store) -> Elsewhere {
+            Elsewhere {
+                failing: true,
+                ..Elsewhere::over(here)
+            }
+        }
+    }
+
+    /// File the image [`Elsewhere`] keeps in `store`: the same digest in every store.
+    fn kept_image(store: &Store) -> Digest {
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = ImageConfiguration::default();
+        store.insert_image(&config, &[layer]).unwrap()
+    }
+
+    impl crate::StorageBackend for Elsewhere {
+        fn want<'a>(
+            &'a self,
+            wanted: Wanted<'a>,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                let elsewhere = Scratch::new("elsewhere");
+                let kept = kept_image(&elsewhere.0);
+                let here = self.here.as_ref().unwrap();
+                let said = match wanted {
+                    Wanted::Tag(tag) => {
+                        if *tag == "kept:v1".parse::<Reference>().unwrap() {
+                            here.insert_tag(tag, &kept_image(here))?;
+                        }
+                        tag.to_string()
+                    }
+                    Wanted::Image(digest) => {
+                        if *digest == kept {
+                            kept_image(here);
+                        }
+                        digest.to_string()
+                    }
+                };
+                self.wanted.lock().unwrap().push(said);
+                Ok(())
+            })
+        }
+
+        fn tags(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<Vec<Reference>>> {
+            Box::pin(async {
+                anyhow::ensure!(!self.failing, "the backend is down");
+                let untagged = format!("untagged@sha256:{}", "0".repeat(64));
+                Ok(vec!["kept:v1".parse().unwrap(), untagged.parse().unwrap()])
+            })
+        }
+
+        fn tagged<'a>(
+            &'a self,
+            tag: &'a Reference,
+            image: &'a Digest,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                if self.failing && self.taking {
+                    let held = self.here.as_ref().unwrap().hold_image(image)?;
+                    self.taken.lock().unwrap().push(held);
+                }
+                anyhow::ensure!(!self.failing, "the backend is down");
+                let told = (tag.to_string(), image.clone());
+                self.tagged.lock().unwrap().push(told.clone());
+                self.kept.lock().unwrap().insert(told.0, told.1);
+                Ok(())
+            })
+        }
+
+        fn untag<'a>(
+            &'a self,
+            tag: &'a Reference,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<bool>> {
+            Box::pin(async move {
+                if let Some(paused) = &self.paused {
+                    (self.untagging).store(true, std::sync::atomic::Ordering::SeqCst);
+                    paused.acquire().await?.forget();
+                }
+                anyhow::ensure!(!self.failing, "the backend is down");
+                let tag = tag.to_string();
+                let kept = tag == "docker.io/library/kept:v1"
+                    || (self.tagged.lock().unwrap().iter()).any(|(told, _)| *told == tag);
+                self.kept.lock().unwrap().remove(&tag);
+                self.untagged.lock().unwrap().push(tag);
+                Ok(kept)
+            })
+        }
+    }
+
+    /// A registry whose images are kept beyond this machine lists the tags kept there beside its
+    /// own, and brings a manifest named by its tag or its digest here before it answers it.
+    #[tokio::test]
+    async fn a_backed_registry_lists_what_is_kept_and_brings_what_is_asked_here() {
+        for by_digest in [false, true] {
+            let scratch = Scratch::new(&format!("backed-{by_digest}"));
+            let (store, server) = (&scratch.0, &scratch.1);
+            let elsewhere = std::sync::Arc::new(Elsewhere::over(store));
+            assert!(server.backing().set(elsewhere.clone()));
+            let digest = kept_image(&Scratch::new("kept-digest").0).to_string();
+
+            let (_, _, body) = send(server, Method::GET, "/images/v2/_catalog", b"").await;
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["repositories"],
+                json!(["docker.io/library/kept"])
+            );
+            let (status, _, body) =
+                send(server, Method::GET, "/images/v2/kept/tags/list", b"").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["tags"],
+                json!(["v1"])
+            );
+            assert!(store.images().unwrap().is_empty(), "listed, not brought");
+
+            let named = match by_digest {
+                true => digest.clone(),
+                false => "v1".to_owned(),
+            };
+            let manifest = format!("/images/v2/kept/manifests/{named}");
+            let (status, headers, _) = send(server, Method::HEAD, &manifest, b"").await;
+            assert_eq!(status, StatusCode::OK, "{named}");
+            assert_eq!(header(&headers, "docker-content-digest"), digest);
+            let wanted = match by_digest {
+                true => digest.clone(),
+                false => "docker.io/library/kept:v1".to_owned(),
+            };
+            assert_eq!(*elsewhere.wanted.lock().unwrap(), [wanted]);
+        }
+        let scratch = Scratch::new("backed-none");
+        assert!((scratch.1.backing()).set(std::sync::Arc::new(Elsewhere::over(&scratch.0))));
+        let none = "/images/v2/none/manifests/v1";
+        let (status, _, _) = send(&scratch.1, Method::GET, none, b"").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "kept nowhere");
+        let untagged = "/images/v2/untagged/tags/list";
+        let (status, _, _) = send(&scratch.1, Method::GET, untagged, b"").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "no tag of it is kept");
+    }
+
+    /// A registry whose backend cannot list what it keeps refuses its listings `500`, rather
+    /// than answering them with the tags here alone.
+    #[tokio::test]
+    async fn a_backed_registry_refuses_a_listing_its_backend_cannot_give() {
+        let scratch = Scratch::new("backed-down");
+        let (store, server) = (&scratch.0, &scratch.1);
+        store
+            .insert_tag(&"here:v1".parse().unwrap(), &kept_image(store))
+            .unwrap();
+        assert!((server.backing()).set(std::sync::Arc::new(Elsewhere::failing(store))));
+        for listing in ["/images/v2/_catalog", "/images/v2/here/tags/list"] {
+            let (status, _, _) = send(server, Method::GET, listing, b"").await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{listing}");
+        }
+    }
+
+    /// Push `layer` as image `tag` of repository `name`, by its tag or, with `None`, its
+    /// digest: what the push answers, and the image's digest.
+    async fn push(
+        server: &RegistryServer,
+        name: &str,
+        tag: Option<&str>,
+        layer: &[u8],
+    ) -> (StatusCode, Digest) {
+        let config = config(&[layer]);
+        for blob in [layer, &config] {
+            let post = format!("/images/v2/{name}/blobs/uploads/?digest={}", sha256(blob));
+            send(server, Method::POST, &post, blob).await;
+        }
+        let manifest = manifest(&config, &[(EROFS_LAYER, layer)]);
+        let digest = sha256(&manifest);
+        let named = tag.map_or(digest.to_string(), str::to_owned);
+        let put = format!("/images/v2/{name}/manifests/{named}");
+        let (status, _, _) = send(server, Method::PUT, &put, &manifest).await;
+        (status, digest)
+    }
+
+    /// A tag pushed to a registry whose images are kept beyond this machine is told to be kept
+    /// there, as naming the image pushed, before the push is answered; a manifest pushed by its
+    /// digest alone tells it nothing.
+    #[tokio::test]
+    async fn a_tag_pushed_to_a_backed_registry_is_kept_where_its_images_are() {
+        let scratch = Scratch::new("backed-push");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let elsewhere = std::sync::Arc::new(Elsewhere::over(store));
+        assert!(server.backing().set(elsewhere.clone()));
+
+        let (status, image) = push(server, "app", Some("v1"), &erofs(b"one")).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            *elsewhere.tagged.lock().unwrap(),
+            [("docker.io/library/app:v1".to_owned(), image.clone())]
+        );
+        assert_eq!(
+            store.get_tag(&"app:v1".parse().unwrap()).unwrap(),
+            Some(image)
+        );
+
+        let (status, _) = push(server, "app", None, &erofs(b"two")).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(elsewhere.tagged.lock().unwrap().len(), 1, "no tag to keep");
+    }
+
+    /// A push whose tag its backend cannot keep is refused `500`, and leaves the tag here as it
+    /// was: naming the image it named, or none.
+    #[tokio::test]
+    async fn a_tag_its_backend_cannot_keep_is_left_as_it_was() {
+        let scratch = Scratch::new("backed-push-down");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let before = kept_image(store);
+        let v1: Reference = "app:v1".parse().unwrap();
+        store.insert_tag(&v1, &before).unwrap();
+        assert!(
+            server
+                .backing()
+                .set(std::sync::Arc::new(Elsewhere::failing(store)))
+        );
+
+        let (status, _) = push(server, "app", Some("v1"), &erofs(b"one")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(store.get_tag(&v1).unwrap(), Some(before), "named as before");
+
+        let (status, _) = push(server, "app", Some("v2"), &erofs(b"two")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(store.get_tag(&"app:v2".parse().unwrap()).unwrap(), None);
+
+        // A new tag whose image a sandbox took meanwhile goes too, though it was the image's last.
+        let scratch = Scratch::new("backed-push-down-taken");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let elsewhere = std::sync::Arc::new(Elsewhere {
+            taking: true,
+            ..Elsewhere::failing(store)
+        });
+        assert!(server.backing().set(elsewhere.clone()));
+        let (status, image) = push(server, "app", Some("v3"), &erofs(b"three")).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(elsewhere.taken.lock().unwrap().len(), 1, "taken");
+        assert_eq!(store.get_tag(&"app:v3".parse().unwrap()).unwrap(), None);
+        assert!(
+            store.get_image(&image).unwrap().is_some(),
+            "the image stays"
+        );
+    }
+
+    /// A push of a tag whose `DELETE` is under way where the tag is kept waits for it, so that
+    /// the tag ends here and there naming what was pushed: the push comes after the removal in
+    /// both.
+    #[tokio::test]
+    async fn a_push_of_a_tag_being_removed_comes_after_its_removal() {
+        let scratch = Scratch::new("backed-push-untag");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let elsewhere = std::sync::Arc::new(Elsewhere {
+            paused: Some(tokio::sync::Semaphore::new(0)),
+            ..Elsewhere::over(store)
+        });
+        assert!(server.backing().set(elsewhere.clone()));
+        let (status, _) = push(server, "app", Some("v1"), &erofs(b"one")).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let untagging = async || {
+            while !(elsewhere.untagging).load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let delete = send(server, Method::DELETE, "/images/v2/app/manifests/v1", b"");
+        let pushed = async {
+            untagging().await;
+            push(server, "app", Some("v1"), &erofs(b"two")).await
+        };
+        let released = async {
+            untagging().await;
+            // Time for a push not ordered after the removal to land first.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            elsewhere.paused.as_ref().unwrap().add_permits(1);
+        };
+        let ((deleted, _, _), (pushed, image), ()) = tokio::join!(delete, pushed, released);
+        assert_eq!(
+            (deleted, pushed),
+            (StatusCode::ACCEPTED, StatusCode::CREATED)
+        );
+        let v1: Reference = "app:v1".parse().unwrap();
+        assert_eq!(store.get_tag(&v1).unwrap().as_ref(), Some(&image), "here");
+        assert_eq!(
+            elsewhere
+                .kept
+                .lock()
+                .unwrap()
+                .get("docker.io/library/app:v1"),
+            Some(&image),
+            "where it is kept"
+        );
+    }
+
+    /// A tag's `DELETE` removes it here and where it is kept, answered once both are; one kept
+    /// and not here is removed there alone, its image not brought here first, so that one
+    /// whose image cannot be still goes; one kept nowhere is unknown. A tag here that the store
+    /// refuses to take away is left where it is kept too.
+    #[tokio::test]
+    async fn a_backed_registry_removes_a_kept_tag_without_bringing_its_image_here() {
+        let scratch = Scratch::new("backed-untag");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let elsewhere = std::sync::Arc::new(Elsewhere::over(store));
+        assert!(server.backing().set(elsewhere.clone()));
+
+        let here: Reference = "here:v1".parse().unwrap();
+        store.insert_tag(&here, &kept_image(store)).unwrap();
+        let (status, _, _) =
+            send(server, Method::DELETE, "/images/v2/here/manifests/v1", b"").await;
+        assert_eq!(status, StatusCode::ACCEPTED, "here, if not kept");
+        assert!(store.get_tag(&here).unwrap().is_none());
+        assert_eq!(
+            *elsewhere.untagged.lock().unwrap(),
+            ["docker.io/library/here:v1"]
+        );
+        let image = kept_image(store);
+        store.remove_image(&image).unwrap();
+
+        let kept = "/images/v2/kept/manifests/v1";
+        let (status, _, _) = send(server, Method::DELETE, kept, b"").await;
+        assert_eq!(status, StatusCode::ACCEPTED, "kept, if not here");
+        assert_eq!(
+            elsewhere.untagged.lock().unwrap()[1],
+            "docker.io/library/kept:v1"
+        );
+        assert!(
+            elsewhere.wanted.lock().unwrap().is_empty(),
+            "not brought here"
+        );
+        assert!(store.images().unwrap().is_empty());
+
+        let none = "/images/v2/none/manifests/v1";
+        let (status, _, _) = send(server, Method::DELETE, none, b"").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "kept nowhere");
+
+        let held: Reference = "held:v1".parse().unwrap();
+        let image = kept_image(store);
+        store.insert_tag(&held, &image).unwrap();
+        let _hold = store.hold_image(&image).unwrap();
+        let (status, _, _) =
+            send(server, Method::DELETE, "/images/v2/held/manifests/v1", b"").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(store.get_tag(&held).unwrap(), Some(image));
+        assert_eq!(
+            elsewhere.untagged.lock().unwrap().len(),
+            3,
+            "not removed there"
+        );
+    }
+
+    /// A digest's `DELETE` removes each tag it takes away here from where it is kept too, and
+    /// no tag of another repository.
+    #[tokio::test]
+    async fn a_digest_deleted_from_a_backed_registry_removes_its_tags_where_they_are_kept() {
+        let scratch = Scratch::new("backed-untag-digest");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let elsewhere = std::sync::Arc::new(Elsewhere::over(store));
+        assert!(server.backing().set(elsewhere.clone()));
+        let image = kept_image(store);
+        for tag in ["app:v1", "app:v2", "other:v1"] {
+            store.insert_tag(&tag.parse().unwrap(), &image).unwrap();
+        }
+
+        let digest = format!("/images/v2/app/manifests/{image}");
+        let (status, _, _) = send(server, Method::DELETE, &digest, b"").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            *elsewhere.untagged.lock().unwrap(),
+            ["docker.io/library/app:v1", "docker.io/library/app:v2"]
+        );
+        assert_eq!(store.tags().unwrap().len(), 1, "other's kept");
+    }
+
+    /// A `DELETE` its backend cannot carry out where the tag is kept is refused `500`, and
+    /// leaves the tag here.
+    #[tokio::test]
+    async fn a_tag_its_backend_cannot_remove_is_left_here() {
+        let scratch = Scratch::new("backed-untag-down");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let image = kept_image(store);
+        let here: Reference = "here:v1".parse().unwrap();
+        store.insert_tag(&here, &image).unwrap();
+        assert!(
+            server
+                .backing()
+                .set(std::sync::Arc::new(Elsewhere::failing(store)))
+        );
+
+        for removed in ["v1".to_owned(), image.to_string()] {
+            let delete = format!("/images/v2/here/manifests/{removed}");
+            let (status, _, _) = send(server, Method::DELETE, &delete, b"").await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{removed}");
+            assert_eq!(
+                store.get_tag(&here).unwrap(),
+                Some(image.clone()),
+                "{removed}"
+            );
+        }
     }
 }

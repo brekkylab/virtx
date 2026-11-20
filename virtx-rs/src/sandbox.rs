@@ -2,7 +2,7 @@
 
 use virtx_core::{
     FileRoot, LogEntry, Sandbox as SandboxInfo, SandboxExecArgs, SandboxExecItem,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs, SandboxResources,
 };
 
 use crate::{Call, Client, Error, Events, JobEnd, StartedJob, files, job::sealed::Ends};
@@ -70,6 +70,15 @@ impl Sandbox {
     /// The job `info` describes in it, reached through its client, without asking the server.
     pub fn job_from(&self, info: SandboxJobInfo) -> SandboxJob {
         SandboxJob::new(self.client.clone(), self.info.id.clone(), info)
+    }
+
+    /// Resize it as `args` says: its vCPUs and memory from its VM's next boot on, and its disk
+    /// grown, never shrunk, to as large as its VM next boots with. A VM up and unused is
+    /// stopped for its vCPUs or memory to change, and one in use is refused `409`; its disk alone
+    /// stops nothing. Answers its size as it is to be, and whether its VM is up now, the size it
+    /// booted with until then.
+    pub fn resize(&self, args: &SandboxResizeArgs) -> Call<SandboxResources> {
+        self.client.resize_sandbox(&self.info.id, args)
     }
 
     /// Stop it, end its jobs, and forget it, with everything it wrote outside its volumes.

@@ -680,6 +680,17 @@ struct VirtxFuture *virtx_client_find_sandbox(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
+// Resizes the sandbox `id`, given `{"id": "...", "vcpus": n, "memory_mib": n,
+// "disk_gib": n}`, all but `id` optional. Answers with its size as it is to be, as
+// `{"vcpus": n, "memory_mib": n, "disk_gib": n, "up": bool}`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_resize_sandbox(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
 // Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
 // with `null`.
 //

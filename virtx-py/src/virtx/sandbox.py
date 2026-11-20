@@ -154,6 +154,21 @@ class SandboxVolume:
 
 
 @dataclass(frozen=True)
+class SandboxResources:
+    """A sandbox's size as ``Sandbox.resize`` answers it: what its VM boots with from its next
+    boot on, and whether its VM is ``up`` now, the size it booted with until it boots again."""
+
+    vcpus: int
+    memory_mib: int
+    disk_gib: int
+    up: bool
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> SandboxResources:
+        return cls(value["vcpus"], value["memory_mib"], value["disk_gib"], value["up"])
+
+
+@dataclass(frozen=True)
 class Sandbox(Files):
     """One sandbox the server holds, and the client that reaches it: what runs processes in it
     and reads and writes its files. Dropping it leaves the sandbox; ``remove`` removes it."""
@@ -233,6 +248,21 @@ class Sandbox(Files):
             "virtx_client_get_sandbox_job", args(sandbox=self.id, job=id)
         )
         return SandboxJob.from_dict(self.client, self.id, output)
+
+    async def resize(
+        self,
+        *,
+        vcpus: int | None = None,
+        memory_mib: int | None = None,
+        disk_gib: int | None = None,
+    ) -> SandboxResources:
+        """Resize it: its ``vcpus`` and ``memory_mib`` from its VM's next boot on, and its disk
+        grown, never shrunk, to ``disk_gib`` as its VM next boots. A VM up and unused is stopped
+        for its vCPUs or memory to change, and one in use is refused ``409``; its disk alone
+        stops nothing. What is left out stays as it is."""
+        request = args(id=self.id, vcpus=vcpus, memory_mib=memory_mib, disk_gib=disk_gib)
+        output = await self.client._call("virtx_client_resize_sandbox", request)
+        return SandboxResources.from_dict(output)
 
     async def remove(self) -> None:
         """Stop it, end its jobs, and forget it, with everything it wrote outside its volumes."""

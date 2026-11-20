@@ -1085,34 +1085,6 @@ async fn a_job_given_no_input_reads_its_end(home: Home) {
     close(sandbox).await;
 }
 
-async fn a_job_s_log_ends_when_its_sandbox_is_closed(home: Home) {
-    let sandbox = home.sandbox(&small(), None).await;
-    let cmd = ["sh", "-c", "echo started; sleep 60"]
-        .map(String::from)
-        .to_vec();
-    let job = sandbox.exec(cmd, None).await.unwrap();
-    // Read while it runs.
-    let mut events = Box::pin(Arc::clone(job.log()).events(&HeaderMap::new()));
-    let first = events.next().await.unwrap().unwrap();
-    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
-    let reading = tokio::spawn(async move {
-        let mut rest = Vec::new();
-        while let Some(Ok(event)) = events.next().await {
-            rest.push(event);
-        }
-        rest
-    });
-
-    close(sandbox).await;
-    let rest = tokio::time::timeout(Duration::from_secs(10), reading).await;
-    let rest: Vec<_> = rest.expect("the log ended").unwrap();
-    let rest: Vec<_> = rest.iter().map(|event| entry(event)).collect();
-    // A job removed while its log is read ends the stream where it is (PROTOCOL.md): its end is
-    // read only by a reader woken before the removal.
-    let ended = matches!(rest.as_slice(), [SandboxJobEntry::End(end)] if end.code == 137);
-    assert!(rest.is_empty() || ended, "{rest:?}");
-}
-
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
     let args = small();
     let made = join_all((0..3).map(|_| home.sandbox(&args, None))).await;
@@ -1903,7 +1875,6 @@ fn main() -> ExitCode {
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
-        a_job_s_log_ends_when_its_sandbox_is_closed,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,

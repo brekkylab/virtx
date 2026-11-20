@@ -648,12 +648,18 @@ fn client_library() -> String {
     )
 }
 
-/// The library alone, with the features its default is: no kernel and nothing to sign.
+/// The library alone, with the features its default is: no kernel and nothing to sign. Its
+/// crate builds an rlib alone, so the library for C is asked for here.
 fn build_client(options: &Options) -> anyhow::Result<()> {
     let mut cargo = cargo();
-    cargo
-        .current_dir(root_path())
-        .args(["build", "-p", CLIENT_PACKAGE, "--lib"]);
+    cargo.current_dir(root_path()).args([
+        "rustc",
+        "-p",
+        CLIENT_PACKAGE,
+        "--lib",
+        "--crate-type",
+        "cdylib,staticlib",
+    ]);
     if let Some(target) = &options.target {
         cargo.args(["--target", target]);
     }

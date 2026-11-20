@@ -70,10 +70,10 @@ imago = { version = "0.2.6", default-features = false, features = ["sync"] }
 #     libkrun = { path = "../libkrun/src/libkrun" }
 #     krun-init-blob = { path = "../libkrun/init/init-blob" }
 #     krun-display = { path = "../libkrun/src/display" }
-krun = { git = "https://github.com/brekkylab/libkrun", rev = "f4b0faee", package = "libkrun", features = ["blk"] }
-krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "f4b0faee", package = "krun-init-blob", features = ["krun"] }
+krun = { git = "https://github.com/brekkylab/libkrun", rev = "cc7d8205", package = "libkrun", features = ["blk"] }
+krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "cc7d8205", package = "krun-init-blob", features = ["krun"] }
 # A display backend, which libkrun's virtio-gpu device has to be handed.
-krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "f4b0faee", package = "krun-display", optional = true }
+krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "cc7d8205", package = "krun-display", optional = true }
 
 # The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
 # downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic

@@ -303,6 +303,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // on a cloud runner, those 16384 faults were 2.1s of a 6.4s boot.
     #[cfg(windows)]
     payload.append_cmdline("swiotlb=noforce");
+    // The kernel's crypto algorithms are not tested as each registers: on one vCPU those tests
+    // are a third of a boot, run against the init for it.
+    #[cfg(target_arch = "aarch64")]
+    payload.append_cmdline("cryptomgr.notests");
 
     let mut overlay = FsOverlay::new();
     for dir in ROOT_DIRS {

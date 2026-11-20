@@ -577,6 +577,51 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     close(sandbox).await;
 }
 
+async fn a_job_ends_with_its_process_not_with_what_it_left_running(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // A program left running with the job's own output: the job ends with its shell, and the
+    // program runs on.
+    let left = ["sh", "-c", "sleep 300 & echo started; printf 'no newline'"];
+    let ended = tokio::time::timeout(HANG, run(&sandbox, &left, None));
+    let (lines, code) = ended.await.expect("the job ends with its shell").unwrap();
+    assert_eq!(
+        (lines, code),
+        (vec!["started".into(), "no newline".into()], 0)
+    );
+    // By the program's name, which the shell asking is not.
+    let still = ["sh", "-c", "pgrep -x sleep >/dev/null && echo running"];
+    assert_eq!(run(&sandbox, &still, None).await.unwrap().0, ["running"]);
+
+    // One that writes on: what the job wrote is its log, whole, and what is left running is
+    // never held up by a pipe nothing reads any more. It writes to stderr in lines of x.
+    let writer = "(while true; do head -c 8000 /dev/zero | tr '\\0' x; echo; date >> /tmp/w; \
+                  sleep 0.01; done) >&2 & seq 1 20000; echo done";
+    let writes = ["sh", "-c", writer];
+    let ended = tokio::time::timeout(HANG, run(&sandbox, &writes, None));
+    let (lines, code) = ended.await.expect("the job ends with its shell").unwrap();
+    // Its own lines are seq's and `done`; the rest are the writer's, of x alone.
+    let own: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.is_empty() || line.bytes().any(|b| b != b'x'))
+        .collect();
+    let seq: Vec<String> = (1..=20_000).map(|n| n.to_string()).collect();
+    assert!(
+        own.len() == 20_001 && own[..20_000] == seq && own[20_000] == "done",
+        "{} lines, not seq's: {:?}",
+        own.len(),
+        own.iter()
+            .filter(|l| l.parse::<u32>().is_err())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(code, 0);
+    let moving = "sleep 1; a=$(wc -l < /tmp/w); sleep 2; b=$(wc -l < /tmp/w); \
+                  [ $b -gt $((a + 20)) ] && echo moving";
+    let (lines, _) = run(&sandbox, &["sh", "-c", moving], None).await.unwrap();
+    assert_eq!(lines, ["moving"], "what the job left running was held up");
+    close(sandbox).await;
+}
+
 async fn a_job_s_stdin_is_written_until_it_is_closed(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let cmd = ["sh", "-c", "tr a-z A-Z; echo done"]
@@ -1938,6 +1983,7 @@ fn main() -> ExitCode {
     let mut tests = Vec::from(tests![
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
+        a_job_ends_with_its_process_not_with_what_it_left_running,
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,

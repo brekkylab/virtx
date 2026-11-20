@@ -190,10 +190,20 @@ pub enum IoFailure {
 
 /// Write `message` as one frame.
 pub fn send(out: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
-    let message = serde_json::to_vec(message).map_err(io::Error::other)?;
-    let length = u32::try_from(message.len()).map_err(io::Error::other)?;
-    out.write_all(&length.to_be_bytes())?;
-    out.write_all(&message)?;
+    send_all(out, std::slice::from_ref(message))
+}
+
+/// `messages`, a frame each, handed to `out` as one buffer: fewer writes than a frame each,
+/// where a write is a machine's exit to its host.
+pub fn send_all<M: Serialize>(out: &mut impl Write, messages: &[M]) -> io::Result<()> {
+    let mut frames = Vec::new();
+    for message in messages {
+        let message = serde_json::to_vec(message).map_err(io::Error::other)?;
+        let length = u32::try_from(message.len()).map_err(io::Error::other)?;
+        frames.extend_from_slice(&length.to_be_bytes());
+        frames.extend_from_slice(&message);
+    }
+    out.write_all(&frames)?;
     out.flush()
 }
 

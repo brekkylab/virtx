@@ -50,6 +50,8 @@ const SKILL: &str = "SKILL.md";
 
 /// The most characters a port's label has.
 const LABEL_MOST: usize = 128;
+/// How long a guest has to say it has synced ([`Sandbox::sync`]).
+const SYNC_WAIT: Duration = Duration::from_secs(5);
 
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
@@ -206,6 +208,11 @@ pub struct Sandbox {
     /// Each command sent to the machine and not yet answered, in the order sent, and who waits
     /// for its job.
     starting: Mutex<VecDeque<Starting>>,
+    /// Who waits for its guest to say it has synced.
+    synced: Mutex<Option<oneshot::Sender<()>>>,
+    /// Whether the embedder's disks served its disk to its last machine: `None` until one has
+    /// booted in this process.
+    served: Mutex<Option<bool>>,
     /// Where its machine's ports are reached.
     ports: Ports,
     /// How long it is in use by nothing before its machine is parked, `None` for never, and
@@ -528,6 +535,8 @@ impl Sandbox {
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(jobs),
             starting: Mutex::default(),
+            synced: Mutex::default(),
+            served: Mutex::default(),
             ports: Ports::default(),
             park_after,
             watching: AtomicBool::new(false),
@@ -819,6 +828,72 @@ impl Sandbox {
         })
     }
 
+    /// Have its guest put what it has written on its disk, so that the disk's file holds it:
+    /// `true` once the guest says it has, `false` if it has not within 5 s. A parked machine's
+    /// disk holds what it wrote already. Refused once its machine has exited or it is closed.
+    pub async fn sync(&self) -> Result<bool, Error> {
+        // Its machine neither boots nor stops meanwhile.
+        let _turn = self.turn.lock().await;
+        let machine = match &*self.state.lock().unwrap() {
+            State::Up(machine, _) => Arc::clone(machine),
+            State::Parked => return Ok(true),
+            State::Exited => return Err(Error::Ended),
+        };
+        self.synced_by(&machine).await
+    }
+
+    /// `machine`, its own, synced as [`sync`](Self::sync) says, its turn held.
+    async fn synced_by(&self, machine: &Machine) -> Result<bool, Error> {
+        let (told, synced) = oneshot::channel();
+        *self.synced.lock().unwrap() = Some(told);
+        machine.sync()?;
+        let synced = tokio::time::timeout(SYNC_WAIT, synced).await;
+        Ok(matches!(synced, Ok(Ok(()))))
+    }
+
+    /// A copy of its disk at `to`, whole, replacing what is there: [synced](Self::sync) first
+    /// if its machine runs, and the machine paused while the disk is copied -- at once where the
+    /// host's filesystem clones files (APFS, Btrfs, XFS made with reflink), else for as long as
+    /// reading and writing it takes. A guest that has not synced within 5 s is copied as it is,
+    /// which its journal makes whole. A parked machine's disk is copied as it was left.
+    ///
+    /// For a disk that is its file alone: one the embedder's disks serve its machine
+    /// ([`Disks::serve`](crate::disks::Disks::serve)) is theirs to copy, and refused here, as is
+    /// one of an embedder's not yet booted in this process. Refused once its machine has exited
+    /// or it is closed.
+    pub async fn copy_disk(&self, to: &Path) -> Result<(), Error> {
+        // Its machine neither boots nor stops meanwhile, nor its disk goes.
+        let _turn = self.turn.lock().await;
+        let machine = match &*self.state.lock().unwrap() {
+            State::Up(machine, _) => Some(Arc::clone(machine)),
+            State::Parked => None,
+            State::Exited => return Err(Error::Ended),
+        };
+        let from = match &*self.upper.lock().unwrap() {
+            Some(upper) => upper.path.clone(),
+            None => return Err(Error::Ended),
+        };
+        let served = *self.served.lock().unwrap();
+        if served.unwrap_or_else(crate::disks::embedded) {
+            return Err(Error::Unsupported(format!(
+                "sandbox {}'s disk is the embedder's to copy, not a file alone",
+                self.id
+            )));
+        }
+        if let Some(machine) = &machine {
+            self.synced_by(machine).await?;
+        }
+        let to = to.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _paused = machine.as_deref().map(Machine::pause).transpose()?;
+            super::upper::copy(&from, &to).map_err(|source| Error::Io {
+                context: format!("copying {} to {}", from.display(), to.display()),
+                source,
+            })
+        })
+        .await?
+    }
+
     /// Stop its machine for good, end and remove every job in it, as cancelling each does, and
     /// delete its upper disk, with its record if it is kept. Blocks while the guest shuts down,
     /// and so must not be called on an async runtime's thread.
@@ -912,6 +987,7 @@ impl Sandbox {
                 source: e,
             })?;
         let (source, held) = served.unzip();
+        *self.served.lock().unwrap() = Some(source.is_some());
         config.sandbox_disk = Some(SandboxDisk { source });
         // Booting is blocking work, until the guest takes commands: its disk grown first to as
         // large as it was last resized to. A grow that fails leaves the disk as it was, which it
@@ -1120,9 +1196,16 @@ impl Sandbox {
                         job.written(seq, Written { bytes, taken });
                     }
                 }
+                CtrlResp::Synced => {
+                    if let Some(told) = self.synced.lock().unwrap().take() {
+                        let _ = told.send(());
+                    }
+                }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
+        // Nothing waits for a sync it will not say.
+        self.synced.lock().unwrap().take();
         // Gone, and what ran in it with it: killed, as far as anything in it can tell. Closed or
         // let go of, it was stopped under them, for the reason `end` gave; otherwise it ended on
         // its own, and nothing boots it again.

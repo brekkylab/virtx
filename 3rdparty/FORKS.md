@@ -318,7 +318,9 @@ process and in each machine's, which is the same binary). Before a sandbox's mac
 server's process is asked what the machine fetches the disk's data from while it runs, such as a
 socket that answers for data kept elsewhere, and holds what serves it until the machine is down.
 The machine's process opens the disk through a storage of the embedder's, given that source, and
-tells it when the guest is up. Each removed disk is reported to the embedder too. A build's disk,
+tells it when the guest is up. Each removed disk is reported to the embedder too. A disk the
+embedder serves is its to copy: `Sandbox::copy_disk` refuses it, and `Sandbox::sync` has the guest
+put what it wrote on the disk first. A build's disk,
 made and thrown away within its step, is always a file.
 
 **The patch** is `BlockDevice::with_storage`: a block device that reads and writes its image
@@ -621,13 +623,21 @@ it boots as, and the next server over the same root knows it again, parked
 kept as `Unknown` until it is removed; `virtx-stdio`'s go with it. The devices a machine has, and why each, are in
 [`machine/boot.rs`](../virtx-uvm/src/machine/boot.rs).
 
+A sandbox's disk can be copied whole while its machine runs (`Sandbox::copy_disk`), for a backup
+or to keep it elsewhere: the guest puts what it has written on the disk (`Sandbox::sync`, which
+can be asked alone), the machine's process is paused -- `SIGSTOP`, `NtSuspendProcess` on
+Windows -- and the disk copied, cloned at once where the host's filesystem clones files (APFS,
+Btrfs, XFS made with reflink), and the machine resumed.
+
 A machine ends when its guest does: a reboot, a power-off -- through ACPI's sleep register on
 an x86_64 Linux host, PSCI on aarch64 -- or silence. Once the guest is up, the machine's process
 pings its agent every five seconds, and a guest that has answered nothing for
 `VIRTX_GUEST_SILENCE` seconds, a minute unless it says otherwise (`0` for never, and never
 less than ten), is ended: one halted, as `halt -f` leaves it or a Windows host's guest that
 powers off, whose idle vCPUs no host sees, and one too stuck to answer. Its jobs end as killed, as on a power-off. A busy guest answers
-within moments; a minute is as long as the host waits on a guest's files.
+within moments; a minute is as long as the host waits on a guest's files. A machine paused is not
+a silent guest: its process wakes past the silence check's second, which starts the silence
+anew.
 
 **The stacking happens in the guest**, because overlayfs is a kernel filesystem and the host has no way to mount one — let alone an EROFS a macOS kernel cannot read at all.
 libkrun's init knows how to mount one block device as the root, not two, so it is not asked to: it runs the agent on the boot root, and the agent mounts both disks, overlays them, and steps into the overlay before it takes a command ([`virtx-uvm-guest`](../virtx-uvm-guest/src/main.rs)).

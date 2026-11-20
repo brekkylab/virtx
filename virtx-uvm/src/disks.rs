@@ -8,6 +8,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The crate [`DynStorage`] is of, at the version libkrun links: what an embedder writes a
@@ -67,12 +68,23 @@ struct Files;
 impl Disks for Files {}
 
 static DISKS: OnceLock<Arc<dyn Disks>> = OnceLock::new();
+/// Whether they are an embedder's, [set](set_disks) before anything here asked what they are.
+static EMBEDDED: AtomicBool = AtomicBool::new(false);
 
 /// Sandboxes' upper disks are `disks` in this process, from now on: said once, before any is
 /// made or opened. `false`, and nothing changed, where it was said already or comes too late:
 /// a disk was made or opened as a file first.
 pub fn set_disks(disks: Arc<dyn Disks>) -> bool {
-    DISKS.set(disks).is_ok()
+    let set = DISKS.set(disks).is_ok();
+    if set {
+        EMBEDDED.store(true, Ordering::Relaxed);
+    }
+    set
+}
+
+/// Whether sandboxes' upper disks in this process are an embedder's rather than files alone.
+pub(crate) fn embedded() -> bool {
+    EMBEDDED.load(Ordering::Relaxed)
 }
 
 /// What sandboxes' upper disks are in this process.

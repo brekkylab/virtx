@@ -159,6 +159,12 @@ fn prefault_memory() -> bool {
 /// How often the agent is [pinged](CtrlReq::Ping) once it is up.
 const PING_EVERY: Duration = Duration::from_secs(5);
 
+/// How long past its second the silence check may wake before this process is taken to have
+/// been paused meanwhile ([`Machine::pause`](super::Machine::pause)) rather than slow. It cannot
+/// tell a pause from a stall of the process as long, as on a host loaded enough to leave it
+/// unscheduled: a stall is forgiven as a pause is, the silence started anew.
+const PAUSED_PAST: Duration = Duration::from_secs(3);
+
 /// How long the agent may say nothing, pings unanswered, before its guest is taken to have
 /// stopped and the machine is ended: `VIRTX_GUEST_SILENCE`, in seconds, `0` for never, or a
 /// minute, and no less than two pings apart. A guest that halts, as `halt -f` does or a
@@ -502,18 +508,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             }
         }
     });
+    // A machine paused whole -- this process stopped, as the host does while it copies its
+    // disk -- is not a silent guest: this thread stopped with it, and wakes well past its second,
+    // which starts the silence anew.
     let silence = guest_silence();
     std::thread::spawn(move || {
+        let mut checked = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(1));
-            if heard
-                .lock()
-                .unwrap()
-                .is_some_and(|heard| heard.elapsed() > silence)
-            {
+            let now = Instant::now();
+            let mut heard = heard.lock().unwrap();
+            if now.duration_since(checked) > PAUSED_PAST {
+                if heard.is_some() {
+                    *heard = Some(now);
+                }
+            } else if heard.is_some_and(|heard| heard.elapsed() > silence) {
                 log::error!("the guest has answered nothing for {silence:?}: it is ended");
                 std::process::exit(1);
             }
+            checked = now;
         }
     });
 

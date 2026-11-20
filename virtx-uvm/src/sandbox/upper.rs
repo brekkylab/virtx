@@ -214,6 +214,126 @@ fn delete(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The disk at `from` copied to `to`, replacing what is there: cloned where the filesystem
+/// shares extents between files -- APFS, Btrfs, XFS made with reflink -- at once however much it
+/// holds, and elsewhere read and written, its holes left holes where the host finds them. Made
+/// beside `to` and moved over it once whole, so a copy that fails leaves what was there.
+pub(super) fn copy(from: &Path, to: &Path) -> io::Result<()> {
+    let mut part = to.as_os_str().to_owned();
+    part.push(".copying");
+    let part = PathBuf::from(part);
+    let copied = match cloned(from, &part) {
+        Ok(true) => Ok(()),
+        Ok(false) => copy_sparse(from, &part),
+        Err(e) => Err(e),
+    };
+    let moved = copied.and_then(|()| fs::rename(&part, to));
+    if moved.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    moved
+}
+
+/// `from` read and written to `to`: on Unix only the extents with data, as `lseek` finds them,
+/// and the whole of it on a filesystem that finds none.
+#[cfg(unix)]
+fn copy_sparse(from: &Path, to: &Path) -> io::Result<()> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::os::fd::AsRawFd as _;
+
+    let mut from = File::open(from)?;
+    let mut to = File::create(to)?;
+    let length = from.metadata()?.len();
+    to.set_len(length)?;
+    let mut at = 0;
+    while at < length {
+        // SAFETY: a descriptor of ours, and a plain offset.
+        let data = unsafe { libc::lseek(from.as_raw_fd(), at as libc::off_t, libc::SEEK_DATA) };
+        if data == -1 {
+            let e = io::Error::last_os_error();
+            // What a filesystem that finds no holes answers, as HFS+ does.
+            let unfound = [libc::ENOTTY, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EINVAL];
+            match e.raw_os_error() {
+                // No data past `at`: the rest is a hole.
+                Some(libc::ENXIO) => break,
+                // The whole of it, read and written.
+                Some(code) if at == 0 && unfound.contains(&code) => {
+                    io::copy(&mut from, &mut to)?;
+                    break;
+                }
+                _ => return Err(e),
+            }
+        }
+        // SAFETY: as above.
+        let hole = unsafe { libc::lseek(from.as_raw_fd(), data, libc::SEEK_HOLE) };
+        if hole == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let (data, hole) = (data as u64, hole as u64);
+        from.seek(SeekFrom::Start(data))?;
+        to.seek(SeekFrom::Start(data))?;
+        io::copy(&mut (&mut from).take(hole - data), &mut to)?;
+        at = hole;
+    }
+    to.sync_all()
+}
+
+#[cfg(not(unix))]
+fn copy_sparse(from: &Path, to: &Path) -> io::Result<()> {
+    fs::copy(from, to).map(|_| ())
+}
+
+/// `from` cloned to `to`, sharing its extents until either is written: false where the
+/// filesystem cannot, with nothing copied.
+#[cfg(target_os = "linux")]
+fn cloned(from: &Path, to: &Path) -> io::Result<bool> {
+    use std::os::fd::AsRawFd as _;
+
+    let source = File::open(from)?;
+    let target = File::create(to)?;
+    // SAFETY: two descriptors of ours, open for as long as the call.
+    if unsafe { libc::ioctl(target.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+        target.sync_all()?;
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        // Not a filesystem that clones, or not between these two.
+        Some(libc::EOPNOTSUPP | libc::EXDEV | libc::EINVAL | libc::ENOTTY) => Ok(false),
+        _ => Err(e),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cloned(from: &Path, to: &Path) -> io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+    };
+    let (source, target) = (path(from)?, path(to)?);
+    // `clonefile` makes `to`, and will not over one there.
+    match fs::remove_file(to) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    // SAFETY: two NUL-terminated paths of ours.
+    if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) } == 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::ENOTSUP | libc::EXDEV) => Ok(false),
+        _ => Err(e),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn cloned(_from: &Path, _to: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
 fn lock_path(path: &Path) -> PathBuf {
     let mut lock = path.as_os_str().to_owned();
     lock.push(".lock");
@@ -255,6 +375,46 @@ mod tests {
         assert!(!Upper::lives(dir.path()));
         assert!(!Upper::lives(&dir.path().join("none")));
         assert!(Upper::create(dir.path(), "work", 2).unwrap().is_some());
+    }
+
+    /// A disk copied over one there is the same, cloned or read and written; read and written,
+    /// its holes stay holes.
+    #[test]
+    fn a_disk_copied_keeps_its_data_and_its_holes() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("from.ext4"), dir.path().join("to.ext4"));
+        let mut disk = File::create(&from).unwrap();
+        disk.set_len(64 << 20).unwrap();
+        for (at, what) in [(0, b"first"), (40 << 20, b"later")] {
+            disk.seek(SeekFrom::Start(at)).unwrap();
+            disk.write_all(what).unwrap();
+        }
+        disk.sync_all().unwrap();
+        fs::write(&to, "what was there").unwrap();
+
+        copy(&from, &to).unwrap();
+        assert_eq!(fs::read(&from).unwrap(), fs::read(&to).unwrap());
+        // One that fails leaves what was there.
+        let none = dir.path().join("none.ext4");
+        let kept = dir.path().join("kept.ext4");
+        fs::write(&kept, "what was there").unwrap();
+        assert!(copy(&none, &kept).is_err());
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "what was there");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 3, "nothing left beside them: {names:?}");
+        copy_sparse(&from, &to).unwrap();
+        assert_eq!(fs::read(&from).unwrap(), fs::read(&to).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let stored = fs::metadata(&to).unwrap().blocks() * 512;
+            assert!(stored < 4 << 20, "{stored} bytes stored for 10 of data");
+        }
     }
 
     #[test]

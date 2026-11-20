@@ -85,6 +85,9 @@ pub enum CtrlReq {
         #[serde(default)]
         eof: bool,
     },
+    /// Put what the guest has written on its disks, as they are about to be copied, and say so
+    /// with [`Synced`](CtrlResp::Synced).
+    Sync,
     /// Answered with [`Pong`](CtrlResp::Pong), from the machine's process to the agent: how it
     /// hears a guest that is up. The host never sends it.
     Ping,
@@ -113,6 +116,8 @@ pub enum CtrlResp {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         oom: bool,
     },
+    /// What the guest had written is on its disks, as the last [`Sync`](CtrlReq::Sync) asked.
+    Synced,
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
     /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
     /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine

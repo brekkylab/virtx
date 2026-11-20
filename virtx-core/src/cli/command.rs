@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use crate::Client;
 use crate::cli::{
     build::{self, BuildArgs},
-    cloud::{self, CloudArgs, CloudCommand},
+    cloud::CloudArgs,
     inspect::{self, InspectArgs},
     job::Interrupted,
     load::{self, LoadArgs},
@@ -16,6 +16,7 @@ use crate::cli::{
     rm::{self, RmArgs},
     save::{self, SaveArgs},
     server::{self, ServerArgs},
+    sign_in::{ProviderArgs, SignInCommand},
     tag::{self, TagArgs},
 };
 
@@ -23,11 +24,14 @@ use crate::cli::{
 #[command(
     name = "virtx",
     version,
-    about = "Build and manage a virtx server's images, and sign in to virtx cloud"
+    about = "Build and manage a virtx server's images, and sign in to its provider or virtx cloud"
 )]
 pub(crate) struct Cli {
     #[command(flatten)]
     server: ServerArgs,
+
+    #[command(flatten)]
+    provider: ProviderArgs,
 
     #[command(flatten)]
     cloud: CloudArgs,
@@ -83,16 +87,14 @@ enum Command {
     #[command(about = LOAD)]
     Load(LoadArgs),
 
-    /// virtx cloud's: `login`, `token`, `whoami` and `logout`.
     #[command(flatten)]
-    Cloud(CloudCommand),
+    SignIn(SignInCommand),
 }
 
 impl Command {
-    /// The image command it is; `Err` with virtx cloud's, which reaches no server.
-    fn into_image(self) -> Result<ImageCommand, CloudCommand> {
+    /// The image command this is, or the command of signing in.
+    fn into_image(self) -> Result<ImageCommand, SignInCommand> {
         Ok(match self {
-            Command::Cloud(command) => return Err(command),
             Command::Image { command } => command,
             Command::Build(args) => ImageCommand::Build(args),
             Command::Images(args) => ImageCommand::Ls(args),
@@ -103,12 +105,35 @@ impl Command {
             Command::Tag(args) => ImageCommand::Tag(args),
             Command::Save(args) => ImageCommand::Save(args),
             Command::Load(args) => ImageCommand::Load(args),
+            Command::SignIn(command) => return Err(command),
         })
     }
 }
 
+/// What `virtx` is asked to do: an image command on the server `ServerArgs` reaches, or a
+/// command of signing in, of the provider `ProviderArgs` names.
+pub(crate) enum Asked {
+    Images(ServerArgs, ImageCommand),
+    SignIn(ProviderArgs, CloudArgs, SignInCommand),
+}
+
+/// Read the command line `argv` spells, the program name first; or, printing why, answer clap's
+/// exit code: for an argument it could not read, or a `--help`.
+pub(crate) fn parse(
+    argv: impl IntoIterator<Item = impl Into<OsString> + Clone>,
+) -> Result<Asked, u8> {
+    let cli = Cli::try_parse_from(argv).map_err(|error| {
+        let _ = error.print();
+        u8::try_from(error.exit_code()).unwrap_or(2)
+    })?;
+    Ok(match cli.command.into_image() {
+        Ok(command) => Asked::Images(cli.server, command),
+        Err(command) => Asked::SignIn(cli.provider, cli.cloud, command),
+    })
+}
+
 #[derive(Debug, PartialEq, Subcommand)]
-enum ImageCommand {
+pub(crate) enum ImageCommand {
     #[command(about = BUILD)]
     Build(BuildArgs),
 
@@ -140,10 +165,9 @@ enum ImageCommand {
     Prune(PruneArgs),
 }
 
-/// Run the command line `argv` spells, the program name first, and answer the exit code: 0 when
-/// done, 1 when a command failed, 130 when Ctrl-C cancelled it, and clap's own for an argument it
-/// could not read or a `--help`.
-pub(crate) async fn run(argv: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> u8 {
+/// Run `command` on the server `server` reaches, and answer the exit code: 0 when done, 1 when it
+/// failed, 130 when Ctrl-C cancelled it.
+pub(crate) async fn run(server: ServerArgs, command: ImageCommand) -> u8 {
     // Rust starts with SIGPIPE ignored, so `virtx images | head` would fail on the write after
     // `head` exits, where a shell tool ends quietly.
     #[cfg(unix)]
@@ -151,14 +175,7 @@ pub(crate) async fn run(argv: impl IntoIterator<Item = impl Into<OsString> + Clo
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let cli = match Cli::try_parse_from(argv) {
-        Ok(cli) => cli,
-        Err(error) => {
-            let _ = error.print();
-            return u8::try_from(error.exit_code()).unwrap_or(2);
-        }
-    };
-    match execute(cli).await {
+    match execute(&server, command).await {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("virtx: {}", report(&error));
@@ -167,13 +184,8 @@ pub(crate) async fn run(argv: impl IntoIterator<Item = impl Into<OsString> + Clo
     }
 }
 
-async fn execute(cli: Cli) -> anyhow::Result<()> {
-    let command = match cli.command.into_image() {
-        Ok(command) => command,
-        // virtx cloud's commands start no server and reach none.
-        Err(command) => return cloud::run(&cli.cloud.domain, command).await,
-    };
-    let client = server::connect(&cli.server).await?;
+async fn execute(server: &ServerArgs, command: ImageCommand) -> anyhow::Result<()> {
+    let client = server::connect(server).await?;
     let done = dispatch(&client, command).await;
     client.close().await;
     done
@@ -213,8 +225,6 @@ pub(crate) fn report(error: &anyhow::Error) -> String {
 mod tests {
     use std::path::Path;
 
-    use clap::CommandFactory as _;
-
     use super::*;
 
     fn parse(args: &[&str]) -> ImageCommand {
@@ -225,6 +235,59 @@ mod tests {
             .command
             .into_image()
             .unwrap()
+    }
+
+    #[test]
+    fn the_commands_of_signing_in_are_the_parser_s_and_listed() {
+        let help = Cli::try_parse_from(["virtx", "help", "login"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(
+            help.to_string()
+                .contains("Sign in, approving the code shown")
+        );
+        let listed = Cli::try_parse_from(["virtx", "--help"])
+            .unwrap_err()
+            .to_string();
+        for command in ["login", "token", "whoami", "logout"] {
+            assert!(listed.contains(command), "{command} in --help");
+        }
+    }
+
+    #[test]
+    fn a_provider_is_named_before_or_after_the_command_of_signing_in() {
+        for argv in [
+            &[
+                "virtx",
+                "--issuer",
+                "https://idp.example",
+                "--client-id",
+                "virtx",
+                "token",
+                "--json",
+            ][..],
+            &[
+                "virtx",
+                "token",
+                "--json",
+                "--issuer",
+                "https://idp.example",
+                "--client-id",
+                "virtx",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert_eq!(cli.provider.issuer.as_deref(), Some("https://idp.example"));
+            assert_eq!(cli.provider.client_id.as_deref(), Some("virtx"));
+            assert_eq!(
+                cli.command.into_image().unwrap_err(),
+                SignInCommand::Token { json: true }
+            );
+        }
+        let login = Cli::try_parse_from(["virtx", "login", "https://virtx.example"]).unwrap();
+        assert!(matches!(
+            login.command.into_image(),
+            Err(SignInCommand::Login { url: Some(url), .. }) if url == "https://virtx.example"
+        ));
     }
 
     #[test]
@@ -369,35 +432,6 @@ mod tests {
         let after = Cli::try_parse_from(["virtx", "images", "--server", "./s"]).unwrap();
         assert_eq!(before.server, after.server);
         assert_eq!(before.server.server.as_deref(), Some(Path::new("./s")));
-    }
-
-    /// virtx cloud's commands are commands of the one parser (issues #158, #178): `--domain`
-    /// before the command as after it, and `--help` lists them.
-    #[test]
-    fn virtx_cloud_s_commands_take_their_domain_anywhere_and_are_listed() {
-        for argv in [
-            &["virtx", "--domain", "example.invalid", "whoami"][..],
-            &["virtx", "whoami", "--domain", "example.invalid"],
-            &["virtx", "--domain=example.invalid", "whoami"],
-        ] {
-            let cli = Cli::try_parse_from(argv).unwrap();
-            assert_eq!(cli.cloud.domain, "example.invalid", "{argv:?}");
-            assert_eq!(
-                cli.command.into_image().err(),
-                Some(CloudCommand::Whoami),
-                "{argv:?}"
-            );
-        }
-        let cli = Cli::try_parse_from(["virtx", "token", "--json"]).unwrap();
-        assert_eq!(cli.cloud.domain, cloud::DOMAIN);
-        assert_eq!(
-            cli.command.into_image().err(),
-            Some(CloudCommand::Token { json: true })
-        );
-        let help = Cli::command().render_help().to_string();
-        for command in ["login", "token", "whoami", "logout", "build", "images"] {
-            assert!(help.contains(command), "{command} in:\n{help}");
-        }
     }
 
     #[test]

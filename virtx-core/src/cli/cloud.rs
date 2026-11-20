@@ -53,8 +53,8 @@ const FRESH_FOR: Duration = Duration::from_secs(120);
 pub(crate) struct CloudArgs {
     /// Where virtx cloud is: its control plane is api.<domain>. For `login`, `token`,
     /// `whoami` and `logout`.
-    #[arg(long, global = true, env = "VIRTX_DOMAIN", default_value = DOMAIN)]
-    pub(crate) domain: String,
+    #[arg(long, global = true, env = "VIRTX_DOMAIN")]
+    pub(crate) domain: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Subcommand)]

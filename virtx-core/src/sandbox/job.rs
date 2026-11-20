@@ -120,8 +120,15 @@ pub enum SandboxJobEntry {
     End(SandboxJobEnd),
 
     /// One of a kind this version does not know.
-    #[serde(untagged)]
+    #[serde(untagged, deserialize_with = "unknown_entry")]
     Other(crate::UnknownEntry),
+}
+
+/// [`SandboxJobEntry::Other`]: one named by none of the kinds above.
+fn unknown_entry<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::UnknownEntry, D::Error> {
+    crate::UnknownEntry::not_of(deserializer, &["stdout", "stderr", "truncated", "end"])
 }
 
 /// How a process ended.
@@ -365,6 +372,21 @@ mod tests {
         let item: SandboxExecItem =
             serde_json::from_value(json!({"id": 4, "progress": {"done": 3}})).unwrap();
         assert_eq!(item, SandboxExecItem::Log(other));
+    }
+
+    #[test]
+    fn an_entry_of_a_kind_this_version_knows_that_does_not_read_is_refused() {
+        for malformed in [
+            json!({"id": 9, "stdout": 5}),
+            json!({"id": 9, "stderr": null}),
+            json!({"id": 9, "truncated": 1}),
+            json!({"id": 9, "end": {}}),
+            json!({"id": 9, "end": {"code": "x"}}),
+        ] {
+            let read =
+                serde_json::from_value::<crate::LogEntry<SandboxJobEntry>>(malformed.clone());
+            assert!(read.is_err(), "{malformed} read as {read:?}");
+        }
     }
 
     #[test]

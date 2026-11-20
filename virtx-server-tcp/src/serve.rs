@@ -2108,6 +2108,95 @@ mod tests {
         assert_eq!(tagged.map(|image| image.to_string()), Some(digest));
     }
 
+    /// A sandbox made under an id and keys given it is refused, before its machine boots, an id
+    /// a sandbox here has, a key one opens a port by, an id that cannot be one and keys that are
+    /// not one for each port; a port over HTTP and with inbound rules is not refused for it.
+    /// Nothing of it is made.
+    #[tokio::test]
+    async fn a_sandbox_made_under_an_id_and_keys_given_it_is_refused_only_what_it_cannot_be() {
+        use crate::endpoints::Given;
+
+        let access = Arc::new(OnceLock::new());
+        let kept = Arc::clone(&access);
+        let served = Served::spawn_over("given", async move |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            let made = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            let made = Arc::new(made);
+            let _ = kept.set(Arc::clone(&made));
+            super::router(made, axum::Router::new())
+        })
+        .await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let image = json!({ "type": "digest", "digest": digest.unwrap().to_string() });
+        let args = json!({ "image": image, "ports": [8080] });
+        let record = json!({ "args": args, "keys": { capability.clone(): 8080 } });
+        std::fs::write(dir.join("kept.ext4"), b"").unwrap();
+        std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
+        let (status, _) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let home = access.get().unwrap().homes().pop().unwrap();
+        assert!(home.sandboxes().get("kept").is_some());
+
+        let web = PortSpec::new(8080)
+            .protocol(PortProtocol::Http)
+            .inbound([InboundRule::new("10.0.0.0/8")]);
+        let made = async |image: &str, id: &str, keys: &[(&str, u16)]| {
+            let args = SandboxCreateArgs::new(image).port(web.clone());
+            let keys = keys.iter().map(|(key, port)| (key.to_string(), *port));
+            let given = Given {
+                id: id.to_owned(),
+                keys: keys.collect(),
+            };
+            refused_with(home.make(args, given).await.err().unwrap()).await
+        };
+        let exists = (StatusCode::CONFLICT, "exists".to_owned());
+        assert_eq!(made("kept:1", "kept", &[("k", 8080)]).await, exists);
+        assert_eq!(made("kept:1", "new", &[(&capability, 8080)]).await, exists);
+        let invalid = (StatusCode::BAD_REQUEST, "invalid".to_owned());
+        for id in ["", "../x", "a.b", &"a".repeat(65)] {
+            assert_eq!(made("kept:1", id, &[("k", 8080)]).await, invalid, "{id:?}");
+        }
+        let unkeyed: [&[(&str, u16)]; 5] = [
+            &[],
+            &[("k", 8080), ("j", 8080)],
+            &[("k", 8080), ("j", 9090)],
+            &[("k-1", 8080)],
+            &[(&"k".repeat(129), 8080)],
+        ];
+        for keys in unkeyed {
+            assert_eq!(made("kept:1", "new", keys).await, invalid, "{keys:?}");
+        }
+        // Past each check of its own, refused for what is not here alone.
+        let missing = made("none:1", "new", &[("k", 8080)]).await;
+        assert_eq!(missing, (StatusCode::NOT_FOUND, "not_found".to_owned()));
+
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with("kept."))
+            .collect();
+        left.sort();
+        assert_eq!(left, Vec::<String>::new());
+        assert_eq!(home.sandboxes().list().len(), 1);
+    }
+
     /// A sandbox whose record and disk are put in a home is taken in, its image wanted from the
     /// home's backend: parked, behind its port URLs, and taken in once. Let go of, no request
     /// reaches it, and its record and disk stay for it to be taken in again; in use, it is not

@@ -11,6 +11,10 @@ pub enum Error {
     #[error("{0}")]
     NotFound(String),
 
+    /// A sandbox asked for under an id that one here has, has made or keeps.
+    #[error("{0}")]
+    Exists(String),
+
     /// What this host cannot give, such as a GPU it was built without.
     #[error("{0}")]
     Unsupported(String),

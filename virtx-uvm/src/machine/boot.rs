@@ -207,7 +207,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut init = krun_init::Config::builder()
         .args(&[&format!("{AGENT_DIR}/{AGENT_NAME}")])
         .env(&env.iter().map(String::as_str).collect::<Vec<_>>())
-        .workdir(machine.config.working_dir().as_deref().unwrap_or("/"))
+        .workdir(&workdir(&machine.config))
         .env_var(&format!("KRUN_BLOCK_LOWER_DEVICE={LOWER_DEVICE}"))
         .env_var(&format!("KRUN_BLOCK_LOWER_FSTYPE={LOWER_FSTYPE}"))
         .env_var(&format!("KRUN_BLOCK_UPPER_DEVICE={UPPER_DEVICE}"))
@@ -661,6 +661,18 @@ fn executable(dir: &Path) {
     }
 }
 
+/// The directory the image's process starts in -- a machine's, and a build step's: its config's
+/// `WorkingDir`, or the root where the config names none -- unset, or set empty, as images built
+/// by older tools leave it.
+pub(crate) fn workdir(config: &Config) -> String {
+    config
+        .working_dir()
+        .as_deref()
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or("/")
+        .to_owned()
+}
+
 /// The environment the guest runs in: the image's, with `PATH` and `HOME` added when it
 /// sets neither, with the values docker uses, and [`ABIN_DIR`] in front of `PATH` when `abin`
 /// says the machine has one.
@@ -688,6 +700,17 @@ fn env(config: &Config, abin: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_working_dir_the_image_left_empty_or_unset_is_the_root() {
+        let mut set = Config::default();
+        set.set_working_dir(Some("/app".to_string()));
+        assert_eq!(workdir(&set), "/app");
+        let mut empty = Config::default();
+        empty.set_working_dir(Some(String::new()));
+        assert_eq!(workdir(&empty), "/");
+        assert_eq!(workdir(&Config::default()), "/");
+    }
 
     #[test]
     fn a_path_the_image_did_not_set_is_added_and_one_it_did_is_left_alone() {

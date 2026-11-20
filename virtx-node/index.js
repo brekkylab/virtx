@@ -774,7 +774,8 @@ class PortForwarder {
 
   // Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it,
   // over `client`'s session. Given the port, what a connection that fails says names its number.
-  // Returns once its local address is open, which takes no request of the server.
+  // Returns once its local address is open, which takes no request of the server. A port without
+  // its `url`, as `getSandbox` answers one, is refused, naming it.
   static open(client, port) {
     const lib = client._lib
     const bytes = encode(

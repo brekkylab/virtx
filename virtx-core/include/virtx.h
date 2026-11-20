@@ -633,7 +633,8 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            size_t args_len);
 
 // Answers with the sandboxes, as
-// `[{"id": "...", "image": "algorithm:hex", "running": bool}, ...]`.
+// `[{"id": "...", "image": "algorithm:hex", "running": bool,
+// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`.
 //
 // # Safety
 //
@@ -641,13 +642,15 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
-// `{"image": {...}, "name": "...", "network": bool, "ports": [n],
+// `{"image": {...}, "name": "...", "network": bool,
+// "ports": [n | {"port": n, "label": "...", "protocol": "tcp" | "http", "inbound": [...]}],
 // "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
-// sandbox as `virtx_client_list_sandbox` answers each, and
-// `"ports": [{"port": n, "url": "..."}]` if it was given some: here only.
+// sandbox as `virtx_client_list_sandbox` answers each, its
+// `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
+// with their `url`s here only.
 //
 // # Safety
 //
@@ -841,7 +844,8 @@ void virtx_stream_free(struct VirtxStream *stream);
 // `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
 // forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
 // the error's message. Returns once its local address is open, which takes no request of
-// the server.
+// the server. A port without its `url`, as asking for a sandbox again answers one, is
+// refused.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with
 // `virtx_port_forwarder_free`.

@@ -369,7 +369,10 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::VolumeListOutputItem;
-    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
+    use virtx_core::{
+        Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
+        SandboxCreateArgs,
+    };
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
         FsTree, ImageStore, ProjectId, PublicRegistries, RegistryProxy, StorageBackend, VolumeStore,
@@ -1253,7 +1256,7 @@ mod tests {
                 "POST",
                 "sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
             ),
             (
                 "GET",
@@ -1442,8 +1445,17 @@ mod tests {
 
         // A port that is none, and a sandbox of an image nobody filed, are refused before it
         // boots.
-        let mut args = SandboxCreateArgs::new("a:b");
-        args.ports = vec![0];
+        let args = SandboxCreateArgs::new("a:b").port(0);
+        assert_eq!(status(client.create_sandbox(&args).await), 400);
+        // So are a port asked for over HTTP, which a port's tunnel here does not serve, and one
+        // with inbound rules, which this server keeps none of.
+        let web = PortSpec::new(5173).protocol(PortProtocol::Http);
+        let args = SandboxCreateArgs::new("a:b").port(web);
+        let refused = client.create_sandbox(&args).await.unwrap_err();
+        assert_eq!(refused.status(), Some(400), "{refused}");
+        assert!(refused.to_string().contains("HTTP"), "{refused}");
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        let args = SandboxCreateArgs::new("a:b").port(ssh);
         assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);
@@ -1451,8 +1463,8 @@ mod tests {
 
     /// What a server before this one kept of a project's sandboxes is known again as the project
     /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
-    /// was made with, with its jobs, one that ran then ended `restarted`; what no sandbox keeps
-    /// is deleted. No machine boots for it.
+    /// was made with and answering its ports without them, with its jobs, one that ran then
+    /// ended `restarted`; what no sandbox keeps is deleted. No machine boots for it.
     #[tokio::test]
     async fn a_project_s_sandboxes_are_kept_across_a_restart() {
         let served = Served::spawn("kept").await;
@@ -1468,14 +1480,21 @@ mod tests {
             { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
             { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
         ]);
+        let web = json!({ "port": 8080, "label": "web" });
         let kept = [
-            ("kept", json!({ capability.clone(): 8080 }), false, jobs),
-            ("ended", json!({}), true, json!([])),
+            (
+                "kept",
+                json!({ capability.clone(): 8080 }),
+                false,
+                jobs,
+                web.clone(),
+            ),
+            ("ended", json!({}), true, json!([]), json!(8080)),
         ];
-        for (id, keys, exited, jobs) in kept {
+        for (id, keys, exited, jobs, port) in kept {
             std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
             let image = json!({ "type": "digest", "digest": digest });
-            let args = json!({ "image": image, "ports": [8080] });
+            let args = json!({ "image": image, "ports": [port] });
             let record = json!({ "args": args, "keys": keys, "exited": exited, "jobs": jobs });
             std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
         }
@@ -1490,10 +1509,14 @@ mod tests {
         assert_eq!(
             listed,
             [
-                json!({ "id": "ended", "image": digest, "running": false }),
-                json!({ "id": "kept", "image": digest, "running": true }),
+                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080 }] }),
+                json!({ "id": "kept", "image": digest, "running": true, "ports": [web] }),
             ]
         );
+        let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let got: Value = serde_json::from_str(&got).unwrap();
+        assert_eq!(got, listed[1]);
         let mut left: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -2056,5 +2079,68 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert_eq!(*beyond.removed.lock().unwrap(), ["moved"]);
         assert!(!dir.join("moved.ext4").exists() && !dir.join("moved.json").exists());
+    }
+
+    /// A home's sandboxes, as a server built on this one reads them for routes of its own: each
+    /// found by its id, and counted with how many have their machine up, none while each is
+    /// parked; one not known again is none of them, and counted apart.
+    #[tokio::test]
+    async fn a_home_s_sandboxes_are_found_and_counted() {
+        let access = Arc::new(OnceLock::new());
+        let kept = Arc::clone(&access);
+        let served = Served::spawn_over("counted", async move |home| {
+            let projects = TcpMembership::new(home);
+            let tester = Principal::new("tester");
+            projects.create(&tester, "demo").await.unwrap();
+            let store = ProjectStore::new(home);
+            let made = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            let made = Arc::new(made);
+            let _ = kept.set(Arc::clone(&made));
+            super::router(made, axum::Router::new())
+        })
+        .await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = format!("sha256:{}", "0".repeat(64));
+        for (id, image) in [("a", &digest), ("b", &digest), ("lost", &gone)] {
+            let image = json!({ "type": "digest", "digest": image });
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let record = json!({ "args": { "image": image } });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        let (status, _) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let home = access.get().unwrap().homes().pop().unwrap();
+
+        let sandboxes = home.sandboxes();
+        let counts = |known, up, unknown| crate::endpoints::Counts { known, up, unknown };
+        assert_eq!(sandboxes.counts(), counts(2, 0, 1));
+        let mut listed: Vec<_> = sandboxes
+            .list()
+            .iter()
+            .map(|sandbox| sandbox.id().to_owned())
+            .collect();
+        listed.sort();
+        assert_eq!(listed, ["a", "b"]);
+        assert_eq!(sandboxes.get("a").unwrap().id(), "a");
+        assert!(sandboxes.get("lost").is_none(), "not known again");
+        assert!(sandboxes.get("none").is_none());
+        assert!(sandboxes.running_on("a").is_none(), "parked");
+
+        let (status, _) = served.send("DELETE", "sandboxes/b", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(home.sandboxes().counts(), counts(1, 0, 1));
+        assert!(home.sandboxes().get("b").is_none());
     }
 }

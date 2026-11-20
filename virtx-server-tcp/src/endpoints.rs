@@ -353,16 +353,11 @@ impl Home {
         Ok(Naming(self, Some(name.to_owned())))
     }
 
-    /// Its sandboxes, whether each one's machine is up or not: for routes of a server's own
-    /// ([`serve::router`](crate::serve::router)'s `own`), which may count them or park them.
-    /// Those a restart could not know again are not among them, though each keeps its disk and
-    /// record under the home's root until it is removed.
-    pub fn sandboxes(&self) -> Vec<Arc<Sandbox>> {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .values()
-            .map(|held| Arc::clone(&held.sandbox))
-            .collect()
+    /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
+    /// ([`serve::router`](crate::serve::router)'s `own`) and its work between requests, which
+    /// may find, count or park them.
+    pub fn sandboxes(&self) -> Sandboxes<'_> {
+        Sandboxes(self)
     }
 
     /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
@@ -370,9 +365,13 @@ impl Home {
     /// as it is called: one made meanwhile is left up, so a server that drains its host stops
     /// sending it work first.
     pub async fn park_unused(&self) {
-        let parked = self.sandboxes().into_iter().map(|sandbox| async move {
-            let _ = sandbox.park().await;
-        });
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                let _ = sandbox.park().await;
+            });
         futures_util::future::join_all(parked).await;
     }
 
@@ -380,9 +379,13 @@ impl Home {
     /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
     /// used. As [`park_unused`](Home::park_unused), the sandboxes here as it is called.
     pub async fn park_all(&self) {
-        let parked = self.sandboxes().into_iter().map(|sandbox| async move {
-            sandbox.park_anyway().await;
-        });
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                sandbox.park_anyway().await;
+            });
         futures_util::future::join_all(parked).await;
     }
 
@@ -426,6 +429,59 @@ impl Home {
             ));
         }
         Err(not_found(format!("no sandbox here has the id {id}")))
+    }
+}
+
+/// A home's sandboxes, as each is when it is asked: those the home knows, each whether its
+/// machine is up or not ([`Home::sandboxes`]). One kept in the home and not known again, which
+/// takes only its `DELETE`, is none of them, and is [counted](Sandboxes::counts) apart.
+pub struct Sandboxes<'a>(&'a Home);
+
+/// How many sandboxes a home holds, as [`Sandboxes::counts`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// Those it knows.
+    pub known: usize,
+    /// Of those, the ones whose machine is up.
+    pub up: usize,
+    /// Those kept in it and not known again, each holding its disk and record under the home's
+    /// root until it is removed.
+    pub unknown: usize,
+}
+
+impl Sandboxes<'_> {
+    /// Each of them, in no set order.
+    pub fn list(&self) -> Vec<Arc<Sandbox>> {
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes
+            .values()
+            .map(|held| Arc::clone(&held.sandbox))
+            .collect()
+    }
+
+    /// The sandbox `id`, if it is one of them.
+    pub fn get(&self, id: &str) -> Option<Arc<Sandbox>> {
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes.get(id).map(|held| Arc::clone(&held.sandbox))
+    }
+
+    /// How many there are, how many of those have their machine up now, and how many more the
+    /// home holds and does not know.
+    pub fn counts(&self) -> Counts {
+        let (known, up) = {
+            let sandboxes = self.0.sandboxes.lock().unwrap();
+            let up = sandboxes.values().filter(|held| held.sandbox.is_up());
+            (sandboxes.len(), up.count())
+        };
+        let unknown = self.0.unknown.lock().unwrap().len();
+        Counts { known, up, unknown }
+    }
+
+    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk
+    /// at the moment it is asked. Nothing holds it up after, and a park or a boot may change
+    /// the answer as soon as it is given.
+    pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
+        self.get(id).filter(|sandbox| sandbox.is_up())
     }
 }
 
@@ -1229,6 +1285,21 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // A port's URL here is a tunnel for TCP, which a browser does not open.
+    if let Some(spec) = args.ports.iter().find(|spec| !spec.protocol.is_tcp()) {
+        return Err(invalid(format!(
+            "ports: {} is asked for over HTTP, which this server does not serve a port over",
+            spec.port
+        )));
+    }
+    // No inbound rules are kept here, so a port given some is refused rather than opened to
+    // whoever they were meant to keep out.
+    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+        return Err(invalid(format!(
+            "ports: {}'s inbound rules are not kept by this server",
+            spec.port
+        )));
+    }
     let _naming = home.naming(args.name.as_deref())?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
@@ -1237,17 +1308,21 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     // sandbox, so that its URLs reach it across this server's restart.
     let mut opened = Vec::new();
     let mut capabilities = HashMap::new();
-    for &port in &args.ports {
+    for spec in &args.ports {
         let capability = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
         opened.push(SandboxPort {
-            port,
-            url: format!("ports/{capability}"),
+            port: spec.port,
+            url: Some(format!("ports/{capability}")),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
+            address: None,
+            inbound_error: None,
         });
-        capabilities.insert(capability, port);
+        capabilities.insert(capability, spec.port);
     }
     let sandbox = Sandbox::create(
         &home.images,

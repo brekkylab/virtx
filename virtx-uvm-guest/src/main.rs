@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
-use std::os::fd::{AsRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
@@ -343,13 +343,17 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
     });
 }
 
-/// One of a process's pipes, read on a thread of its own: each line sent up to what it held as
-/// its process ended, and what comes after -- a background program's -- read and dropped, so
-/// that a program writing to it is never held up by a full pipe.
+/// One of a process's pipes, read on a thread of its own: each line sent up to what was in it
+/// when its process ended, and what comes after -- a background program's -- read and dropped,
+/// so that a program writing to it is never held up by a full pipe.
 struct Piped {
-    fd: Option<i32>,
-    /// What has been read, and once its process has ended, what it had written by then:
-    /// read under the lock, so the two are counted alike.
+    /// The pipe, held here too so that [`exited`](Piped::exited) asks about it and no
+    /// descriptor that took its number after its thread let go.
+    pipe: Option<Arc<File>>,
+    /// Written a byte by [`exited`](Piped::exited), to wake its thread from waiting on the pipe.
+    wake: Option<File>,
+    /// What has been read, and once its process has ended, what was in the pipe by then: read
+    /// under the lock, so the two are counted alike.
     count: Arc<Mutex<Count>>,
 }
 
@@ -369,14 +373,18 @@ impl Piped {
         let count = Arc::new(Mutex::new(Count::default()));
         let Some(pipe) = pipe else {
             let _ = read.send(());
-            return Self { fd: None, count };
+            return Self {
+                pipe: None,
+                wake: None,
+                count,
+            };
         };
-        let fd = pipe.as_raw_fd();
-        let (out, counted) = (Arc::clone(out), Arc::clone(&count));
+        let (woken, wake) = wake_pipe().map_or((None, None), |(r, w)| (Some(r), Some(w)));
+        let pipe = Arc::new(File::from(pipe));
+        let (out, counted, reading) = (Arc::clone(out), Arc::clone(&count), Arc::clone(&pipe));
         thread::spawn(move || {
-            let pipe = File::from(pipe);
-            // Each read's lines said at once, one write for them all: each write costs the
-            // machine an exit to its host, dear under nested virtualization.
+            // Each read's lines said together, in as few writes as the device takes: each write
+            // costs the machine an exit to its host, dear under nested virtualization.
             let say = |lines: &mut Vec<Vec<u8>>| {
                 if lines.is_empty() {
                     return;
@@ -404,14 +412,15 @@ impl Piped {
                     say(&mut said);
                     let _ = told.send(());
                 }
-                // A while at most, so that its process ending is seen while nothing comes.
-                if !readable(fd, 100) {
+                // Until its process has ended, the pipe or the wake, whichever comes first; after,
+                // the pipe alone, read only to be dropped.
+                if told.is_some() && !readable(reading.as_raw_fd(), woken.as_ref()) {
                     continue;
                 }
-                // How much was read, and how much of it its process wrote before it ended.
+                // How much was read, and how much of it was in the pipe when its process ended.
                 let (n, own) = {
                     let mut count = counted.lock().unwrap();
-                    match (&pipe).read(&mut chunk) {
+                    match (&*reading).read(&mut chunk) {
                         Ok(0) | Err(_) => (0, 0),
                         Ok(n) => {
                             let before = count.read;
@@ -452,37 +461,65 @@ impl Piped {
             }
         });
         Self {
-            fd: Some(fd),
+            pipe: Some(pipe),
+            wake,
             count,
         }
     }
 
-    /// Its process has ended: what is in the pipe now is the last of what it wrote.
+    /// Its process has ended: what is in the pipe now is the last of what it wrote, as far as
+    /// the agent can tell -- a program it left running may have written there since it ended.
     fn exited(&self) {
         let mut count = self.count.lock().unwrap();
-        let waiting = self.fd.map_or(0, |fd| {
+        let waiting = self.pipe.as_ref().map_or(0, |pipe| {
             let mut n: libc::c_int = 0;
-            // SAFETY: a descriptor its thread holds open until the pipe ends, and an int.
-            match unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) } {
+            // SAFETY: a descriptor `pipe` holds open, and an int.
+            match unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &mut n) } {
                 0 => n.max(0) as u64,
                 _ => 0,
             }
         });
         count.until = Some(count.read + waiting);
+        if let Some(mut wake) = self.wake.as_ref() {
+            let _ = wake.write_all(&[0]);
+        }
     }
 }
 
-/// Whether `fd` has something to read, or has ended, within `ms` milliseconds.
-fn readable(fd: i32, ms: i32) -> bool {
-    let mut polled = libc::pollfd {
+/// A pipe to wake a [`Piped`]'s thread with: its reading end, then its writing end, neither
+/// inherited by a command.
+fn wake_pipe() -> io::Result<(File, File)> {
+    let mut fds = [0; 2];
+    // SAFETY: two ints for `pipe2` to fill.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: two descriptors just made, owned by nothing else.
+    Ok(unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) })
+}
+
+/// Waits for `fd` to have something to read, or to have ended, or for `woken` to be: whether
+/// `fd` is ready. What woke `woken` is taken from it. Without one -- the guest out of
+/// descriptors -- a tenth of a second at most, so that its process ending is still seen.
+fn readable(fd: i32, woken: Option<&File>) -> bool {
+    let pollfd = |fd| libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
-    // SAFETY: one `pollfd` of ours.
-    unsafe { libc::poll(&mut polled, 1, ms) > 0 }
+    let mut polled = [pollfd(fd), pollfd(woken.map_or(-1, |w| w.as_raw_fd()))];
+    let bound = if woken.is_some() { -1 } else { 100 };
+    // SAFETY: two `pollfd`s of descriptors held open, or of -1, which `poll` passes over.
+    if unsafe { libc::poll(polled.as_mut_ptr(), 2, bound) } <= 0 {
+        return false;
+    }
+    if polled[1].revents != 0
+        && let Some(mut woken) = woken
+    {
+        let _ = woken.read(&mut [0; 8]);
+    }
+    polled[0].revents != 0
 }
-
 
 /// How `child` ended: its exit code, `128 + signal` for one a signal ended.
 fn code(child: &mut Child) -> i32 {

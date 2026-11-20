@@ -179,8 +179,8 @@ pub fn send(out: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
     send_all(out, std::slice::from_ref(message))
 }
 
-/// `messages`, a frame each, written at once: one write for them all, where a write is a
-/// machine's exit to its host.
+/// `messages`, a frame each, handed to `out` as one buffer: fewer writes than a frame each,
+/// where a write is a machine's exit to its host.
 pub fn send_all<M: Serialize>(out: &mut impl Write, messages: &[M]) -> io::Result<()> {
     let mut frames = Vec::new();
     for message in messages {

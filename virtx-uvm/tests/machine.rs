@@ -320,11 +320,8 @@ async fn a_job_ends_with_its_process_not_with_what_it_left_running(home: Home) {
         (lines, code),
         (vec!["started".into(), "no newline".into()], 0)
     );
-    let still = [
-        "sh",
-        "-c",
-        "pgrep -f 'sleep 300' >/dev/null && echo running",
-    ];
+    // By the program's name, which the shell asking is not.
+    let still = ["sh", "-c", "pgrep -x sleep >/dev/null && echo running"];
     assert_eq!(run(&sandbox, &still, None).await.unwrap().0, ["running"]);
 
     // One that writes on: what the job wrote is its log, whole, and what is left running is

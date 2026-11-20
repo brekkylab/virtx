@@ -20,8 +20,9 @@ use virtx_core::{
     ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
     ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
     RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, Source, VolumeCreateArgs,
-    VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
+    SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs,
+    SandboxResources, Source, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
+    VolumeMountListOutputItem,
 };
 
 use crate::{
@@ -811,6 +812,17 @@ impl Client {
         let client = self.clone();
         let call: Call<Option<SandboxInfo>> = self.call(self.api.virtx_client_find_sandbox, args);
         call.map(move |info| info.map(|info| Sandbox::new(client.clone(), info)))
+    }
+
+    /// Resize the sandbox `id` as `args` says.
+    pub(crate) fn resize_sandbox(
+        &self,
+        id: impl AsRef<str>,
+        args: &SandboxResizeArgs,
+    ) -> Call<SandboxResources> {
+        let mut args = serde_json::to_value(args).expect("a resize serializes");
+        args["id"] = json!(id.as_ref());
+        self.call(self.api.virtx_client_resize_sandbox, args)
     }
 
     /// Delete the sandbox `id`: its VM stopped if it is up, and its disk removed. Its volumes

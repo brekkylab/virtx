@@ -207,6 +207,7 @@ api! {
     virtx_client_create_sandbox: WithArgs,
     virtx_client_get_sandbox: WithArgs,
     virtx_client_find_sandbox: WithArgs,
+    virtx_client_resize_sandbox: WithArgs,
     virtx_client_remove_sandbox: WithArgs,
     virtx_client_list_sandbox_job: WithArgs,
     virtx_client_exec_sandbox: WithArgs,

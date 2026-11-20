@@ -44,7 +44,7 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortProtocol, PortSpec, ProjectCreateArgs,
     ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
-    SandboxCreateArgs, SandboxExecArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
     VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
     described_type, from_body,
 };
@@ -743,7 +743,12 @@ pub fn router() -> Router {
         .route("/volumes/{name}/files/", any(volume_files))
         .route("/volumes/{name}/files/{*path}", any(volume_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
-        .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
+        .route(
+            "/sandboxes/{id}",
+            get(sandbox_get)
+                .patch(sandbox_resize)
+                .delete(sandbox_remove),
+        )
         .route("/sandboxes/{id}/disk", put(sandbox_disk))
         .route("/sandboxes/{id}/resources", put(sandbox_resources))
         .route("/sandboxes/{id}/files", any(sandbox_files))
@@ -1442,7 +1447,7 @@ async fn sandbox_resources(
     let args: ResourcesArgs = body(&request)?;
     let sandbox = home.sandbox(&id)?;
     let resized = sandbox
-        .resize(args.vcpus, args.memory_mib, args.disk_gib)
+        .resize_resources(args.vcpus, args.memory_mib, args.disk_gib)
         .await?;
     Ok(json(&resized))
 }
@@ -1497,6 +1502,18 @@ async fn sandbox_get(
     Segments(id): Segments<String>,
 ) -> Answer {
     Ok(json(&home.sandboxes.answer(&id)?))
+}
+
+/// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
+/// if it is up and nothing uses it, and refused `409`, `in_use`, if something does; its disk
+/// grown, never shrunk, as its VM next boots.
+async fn sandbox_resize(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(id): Segments<String>,
+    Whole(request): Whole,
+) -> Answer {
+    let args: SandboxResizeArgs = body(&request)?;
+    Ok(json(&home.sandbox(&id)?.resize(&args).await?))
 }
 
 /// Remove it, and its disk kept beyond this machine first: refused, and nothing removed, where

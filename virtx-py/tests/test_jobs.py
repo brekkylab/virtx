@@ -29,6 +29,7 @@ from virtx import (
     SandboxJobEndReason,
     SandboxJobKind,
     SandboxPort,
+    SandboxResources,
     SandboxVolume,
     StartedJob,
     Stderr,
@@ -247,6 +248,17 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
         await client.get_sandbox(sandbox.id)
     assert refused.value.status == 404
     await volume.remove()
+
+
+async def test_a_sandbox_is_resized_and_its_disk_never_shrunk(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE, memory_mib=512, disk_gib=1)
+    resized = await sandbox.resize(vcpus=2, disk_gib=2)
+    assert resized == SandboxResources(vcpus=2, memory_mib=512, disk_gib=2, up=False)
+    with pytest.raises(VirtxError) as refused:
+        await sandbox.resize(disk_gib=1)
+    assert refused.value.status == 400
+    await sandbox.remove()
 
 
 async def test_a_log_is_read_again_after_an_entry(client: Client) -> None:

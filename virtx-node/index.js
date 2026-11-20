@@ -143,6 +143,7 @@ const SIGNATURES = {
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
   virtx_client_find_sandbox: WITH_ARGS,
+  virtx_client_resize_sandbox: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -1092,6 +1093,13 @@ class Sandbox extends Files {
       job: id,
     })
     return new SandboxJob(this.client, this.id, info)
+  }
+
+  // Resizes it: its `vcpus` and `memoryMib` from its VM's next boot on, and its disk grown, never
+  // shrunk, to `diskGib` as its VM next boots. Answers its size as it is to be, and whether its
+  // VM is `up` now.
+  async resize(options = {}) {
+    return this.client._call('virtx_client_resize_sandbox', { ...options, id: this.id })
   }
 
   // Deletes it: its VM stopped if it is up, and its disk removed. Its volumes stay.

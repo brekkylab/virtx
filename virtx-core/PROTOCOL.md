@@ -299,6 +299,7 @@ Its disk lasts until the sandbox is deleted: the server MAY [park](#parking) its
 | `GET /sandboxes/?name={name}` | | `200`, array of the one named so, or of none |
 | `POST /sandboxes/` | `{image, name?, disk_gib?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, the sandbox, with `ports` |
 | `GET /sandboxes/{id}` | | `200`, the sandbox |
+| `PATCH /sandboxes/{id}` | `{vcpus?, memory_mib?, disk_gib?}` | `200`, `{vcpus, memory_mib, disk_gib, up}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 A sandbox is `{id, name?, image, running, abins?, error?}`, and in the answer to its `POST`, `ports` too:
@@ -315,6 +316,15 @@ Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
 A sandbox stands on the image it booted, by digest, for as long as it exists: booted again, it boots that image, whatever its tag points at by then.
 So the server keeps that image while the sandbox exists, as [Images](#images) says.
+
+#### Resizing
+
+A server MAY resize a sandbox with its `PATCH`, and one that does not answers it `405`, `method_not_allowed`.
+Each member is held to what `POST` holds it to, and one left out stays as it is.
+
+- `vcpus` and `memory_mib` are what its VM boots with from its next boot on. A VM is the size it booted with: the server stops one that is up and in which nothing runs, as below, to boot it again so for what next needs it, and refuses one in use with `409`, `in_use`, changing nothing.
+- `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there; a VM that is up is stopped for it, or the change refused, as for `vcpus` and `memory_mib`. One smaller than it is now is refused with `400`, `invalid`: a disk is grown, never shrunk.
+- The answer is its size as it is to be, each member as the server gives it, and `up`, whether its VM is up now: one that is, the size it booted with until it boots again.
 
 #### Use
 

@@ -203,6 +203,65 @@ impl SandboxCreateArgs {
     }
 }
 
+/// What resizing a sandbox takes: `PATCH /sandboxes/{id}`'s body, each member optional and left
+/// as it is without one. Its vCPUs and memory are those its VM boots with from its next boot on;
+/// its disk only grows, to as large as its VM next boots with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxResizeArgs {
+    /// How many vCPUs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u8>,
+
+    /// Memory, in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u32>,
+
+    /// How much it may write over its image, in GiB, at most 1024: grown, never shrunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u32>,
+}
+
+impl SandboxResizeArgs {
+    /// Each method sets one field, so they chain from [`default`](Self::default).
+    ///
+    /// ```
+    /// # use virtx_core::SandboxResizeArgs;
+    /// let args = SandboxResizeArgs::default().vcpus(2).disk_gib(8);
+    ///
+    /// assert_eq!((args.vcpus, args.memory_mib, args.disk_gib), (Some(2), None, Some(8)));
+    /// ```
+    pub fn vcpus(mut self, vcpus: u8) -> Self {
+        self.vcpus = Some(vcpus);
+        self
+    }
+
+    pub fn memory_mib(mut self, mib: u32) -> Self {
+        self.memory_mib = Some(mib);
+        self
+    }
+
+    pub fn disk_gib(mut self, gib: u32) -> Self {
+        self.disk_gib = Some(gib);
+        self
+    }
+}
+
+/// A sandbox's size, as resizing it answers: what its VM boots with from its next boot on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxResources {
+    pub vcpus: u8,
+
+    /// Memory, in MiB.
+    pub memory_mib: u32,
+
+    /// How much it may write over its image, in GiB.
+    pub disk_gib: u32,
+
+    /// Whether its VM is up now, the size it booted with until it boots again.
+    pub up: bool,
+}
+
 fn on() -> bool {
     true
 }
@@ -487,6 +546,19 @@ mod tests {
         let decoded: SandboxCreateArgs = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, args);
         assert!(decoded.network);
+    }
+
+    #[test]
+    fn a_resize_says_only_what_it_asked_for_and_takes_no_other_member() {
+        let args = SandboxResizeArgs::default().memory_mib(512);
+        let value = serde_json::to_value(&args).unwrap();
+        assert_eq!(value, json!({ "memory_mib": 512 }));
+        assert_eq!(
+            serde_json::from_value::<SandboxResizeArgs>(value).unwrap(),
+            args
+        );
+        let other = json!({ "cpus": 2 });
+        assert!(serde_json::from_value::<SandboxResizeArgs>(other).is_err());
     }
 
     #[test]

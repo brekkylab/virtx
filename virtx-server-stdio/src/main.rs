@@ -291,7 +291,7 @@ mod tests {
 
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
-        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
+        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -595,6 +595,12 @@ mod tests {
             (Some(404), Some("not_found"))
         );
         assert_eq!(status(exec(&[]).await), 400);
+        let resize = SandboxResizeArgs {
+            vcpus: Some(2),
+            ..SandboxResizeArgs::default()
+        };
+        let resized = server.client.resize_sandbox("nobody", &resize).await;
+        assert_eq!(status(resized), 404);
         assert_eq!(status(server.client.remove_sandbox("nobody").await), 404);
     }
 
@@ -1463,6 +1469,12 @@ mod tests {
                 "signl: not a member; the members are `signal`",
             ),
             (
+                "PATCH",
+                "/sandboxes/nobody",
+                r#"{"cpus": 2}"#,
+                "cpus: not a member; the members are `vcpus`, `memory_mib`, `disk_gib`",
+            ),
+            (
                 "POST",
                 "/images/jobs/pull/",
                 "x",
@@ -1538,6 +1550,7 @@ mod tests {
             ("POST", "/sandboxes/"),
             ("POST", "/sandboxes/nobody/jobs/exec/"),
             ("POST", "/sandboxes/nobody/jobs/j/signal"),
+            ("PATCH", "/sandboxes/nobody"),
         ] {
             let over = Body::from(vec![b' '; limit + 1]);
             let (status, kind, code) = answer(method, path, over).await;

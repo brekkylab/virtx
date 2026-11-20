@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{
     SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+    SandboxResizeArgs, SandboxResources,
 };
 
 use super::hooks::{Held, Hooks, Written};
@@ -947,16 +948,46 @@ impl Sandbox {
         self.record.disk_size().max(length)
     }
 
-    /// Its machine resized, and its disk grown, as it next boots; its disk never shrunk.
-    /// A machine is the size it booted as: one up whose vCPUs or memory change is parked now
-    /// if nothing uses it, and refused [`InUse`](Error::InUse) if something does. Answered as
-    /// it is to be.
-    pub async fn resize(
+    /// Resize it as `args` says, answered as it is to be: its vCPUs and memory those its
+    /// machine boots with from its next boot on, and its disk grown, never shrunk, as its
+    /// machine next boots. A machine is the size it booted with: one up whose size changes, its
+    /// disk's included, is parked now if nothing uses it, and refused [`InUse`](Error::InUse) if
+    /// something does.
+    pub async fn resize(self: &Arc<Self>, args: &SandboxResizeArgs) -> Result<SandboxResources, Error> {
+        let resized = self
+            .resized(args.vcpus, args.memory_mib, args.disk_gib, true)
+            .await?;
+        Ok(SandboxResources {
+            vcpus: resized.vcpus,
+            memory_mib: resized.memory_mib,
+            disk_gib: resized.disk_gib,
+            up: resized.up,
+        })
+    }
+
+    /// Cloud only: resized as [`resize`](Sandbox::resize) is, but for its disk, which grows as
+    /// its machine next boots without parking one that is up -- what the cloud's
+    /// `PUT /sandboxes/{id}/resources` and `/disk` answer.
+    pub async fn resize_resources(
         self: &Arc<Self>,
         vcpus: Option<u8>,
         memory_mib: Option<u32>,
         disk_gib: Option<u32>,
     ) -> Result<Resources, Error> {
+        self.resized(vcpus, memory_mib, disk_gib, false).await
+    }
+
+    /// Its machine resized, and its disk grown, as it next boots; its disk never shrunk. One
+    /// up whose vCPUs or memory change, or its disk where `disk_parks`, is parked now if nothing
+    /// uses it, and refused [`InUse`](Error::InUse) if something does.
+    async fn resized(
+        self: &Arc<Self>,
+        vcpus: Option<u8>,
+        memory_mib: Option<u32>,
+        disk_gib: Option<u32>,
+        disk_parks: bool,
+    ) -> Result<Resources, Error> {
+        check_size(vcpus, memory_mib, disk_gib)?;
         // Not booted meanwhile, nor parked.
         let _turn = self.turn.lock().await;
         if self.is_deleted() {
@@ -983,10 +1014,12 @@ impl Sandbox {
                 self.disk_now().div_ceil(1 << 30)
             )));
         }
-        if machine_changes && self.is_up() {
+        let disk_changes = disk_parks
+            && disk_gib.is_some_and(|gib| (u64::from(gib) << 30) > self.disk_now());
+        if (machine_changes || disk_changes) && self.is_up() {
             if self.busy() {
                 return Err(Error::InUse(format!(
-                    "sandbox {} is in use: its vCPUs and memory change once nothing uses it",
+                    "sandbox {} is in use: its size changes once nothing uses it",
                     self.record.id
                 )));
             }
@@ -1241,6 +1274,39 @@ impl Drop for Activity {
         }
         self.sandbox.active.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// Refuse a size no machine is given: `0` of anything, memory under what a machine boots in,
+/// and a disk over what a sandbox may have.
+fn check_size(
+    vcpus: Option<u8>,
+    memory_mib: Option<u32>,
+    disk_gib: Option<u32>,
+) -> Result<(), Error> {
+    match disk_gib {
+        Some(0) => {
+            return Err(Error::Invalid(
+                "disk_gib: 0 is a disk nothing fits on".into(),
+            ));
+        }
+        Some(gib) if gib > MAX_DISK_GIB => {
+            return Err(Error::Invalid(format!(
+                "disk_gib: {gib} is over the {MAX_DISK_GIB} a sandbox may have"
+            )));
+        }
+        _ => {}
+    }
+    if vcpus == Some(0) {
+        return Err(Error::Invalid(
+            "vcpus: 0 is a machine nothing runs on".into(),
+        ));
+    }
+    if let Some(mib) = memory_mib.filter(|mib| *mib < MIN_MEMORY_MIB) {
+        return Err(Error::Invalid(format!(
+            "memory_mib: {mib} is under the {MIN_MEMORY_MIB} a machine boots in"
+        )));
+    }
+    Ok(())
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.

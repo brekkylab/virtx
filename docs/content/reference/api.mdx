@@ -82,11 +82,12 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. Iterated before it is awaited, the job is started and its log read as one request where the server answers so. In Rust, `exec_with_log(args)` yields the job, then its log. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
+| `resize(vcpus, memory_mib, disk_gib)` | `SandboxResources` | Its vCPUs, memory and disk from its VM's next boot on, its VM stopped now if nothing uses it and refused `409` if something does; its disk grown, never shrunk. Answers `vcpus`, `memory_mib`, `disk_gib` and `up`, whether its VM is up now. See [Resize a sandbox](/docs/guides/setting-sandboxes/#resize-a-sandbox). |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.
 
-In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image`, `running` and `ports`.
+In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image`, `running` and `ports`, and `resize` takes a `SandboxResizeArgs`, chained from `SandboxResizeArgs::default()`.
 
 A port in `create_sandbox`'s `ports` is a number, for TCP, or a `PortSpec(port, label, protocol, inbound)`; in Node.js, `{ port, label?, protocol?, inbound? }`.
 Each comes back as a `SandboxPort`: its `port` and `url`, its `label` and `protocol` as given, an `address` where the server gives a TCP port one, and an `inbound_error` where it opened one whose rules it could not set.

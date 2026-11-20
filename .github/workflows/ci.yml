@@ -4,7 +4,7 @@
 # by hand is in full too. The docs are `docs`'s.
 name: ci
 
-# Markdown is left out, but for the READMEs the packages ship.
+# Markdown and `docs/` are left out.
 on:
   push:
     branches: [main]
@@ -12,8 +12,6 @@ on:
       - "**"
       - "!**/*.md"
       - "!docs/**"
-      - virtx-py/README.md
-      - virtx-node/README.md
   pull_request:
     paths: *paths
   workflow_dispatch:

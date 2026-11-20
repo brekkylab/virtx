@@ -13,8 +13,8 @@
 //!   elsewhere merges none of those.
 //! - [`endpoints::Home::sandboxes`], [`park_unused`](endpoints::Home::park_unused) and
 //!   [`park_all`](endpoints::Home::park_all), and [`access::Access::homes`]: a home's sandboxes,
-//!   for routes of its own to count, or to park -- each one's machine stopped, the sandbox
-//!   kept -- as it needs the host back.
+//!   for routes of its own to find, count -- all, and those whose machine is up -- or park --
+//!   each one's machine stopped, the sandbox kept -- as it needs the host back.
 //! - [`endpoints::Home::backed_by`]: where a project's data is kept beyond this machine, a
 //!   [`virtx_uvm::StorageBackend`] given to each home its [`access::Homes`] makes, the home's own
 //!   stores its cache. The binary's homes have none, and keep nothing beyond their stores.

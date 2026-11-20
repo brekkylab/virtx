@@ -1,7 +1,7 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
-//! ([`router`]), answered from the [`Home`] of the project a request names, and those of the
-//! projects themselves ([`projects`]), answered from the [`Host`]. One client is on the other end
-//! of stdio, so all of it is its.
+//! The endpoints the protocol names, but the images' registry: those in a project ([`router`]),
+//! answered from the [`Home`] of the project a request names, and those of the projects themselves
+//! ([`projects`]), answered from the [`Host`]. One client is on the other end of stdio, so all of
+//! it is its.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -732,13 +732,22 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // No inbound rules are kept here, so a port given some is refused rather than opened to
+    // whoever they were meant to keep out.
+    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+        return Err(invalid(format!(
+            "ports: {}'s inbound rules are not kept by this server",
+            spec.port
+        )));
+    }
     let _naming = home.naming(args.name.as_deref())?;
 
     // Each port on this host's loopback, which only this machine reaches, taken to the
-    // sandbox's machine while it runs.
+    // sandbox's machine while it runs: TCP as it is, so an `http` port is HTTP at its URL too.
     let mut opened = Vec::new();
     let mut listeners = Vec::new();
-    for &port in &args.ports {
+    for spec in &args.ports {
+        let port = spec.port;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
@@ -747,7 +756,11 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
         opened.push(SandboxPort {
             port,
-            url: format!("http://{at}"),
+            url: Some(format!("http://{at}")),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
+            address: None,
+            inbound_error: None,
         });
         listeners.push((port, listener));
     }
@@ -937,8 +950,8 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
 /// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
 const BODY_LIMIT: usize = 2 << 20;
 
-/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
-/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid` if
+/// it broke off, as any refusal here is, in the protocol's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused, as `virtx-server-tcp` reads one: there a connection closed
@@ -983,8 +996,8 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
     }
 }
 
-/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope and the server's words.
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when they
+/// do not read as one, in the protocol's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>

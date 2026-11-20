@@ -1,6 +1,6 @@
 ---
 name: display
-description: Run GUI programs on a screen in memory, watched and driven over VNC
+description: "Run GUI programs on a screen in memory, watched and driven over VNC"
 ---
 
 Run GUI programs on a screen in memory, watched and driven over VNC

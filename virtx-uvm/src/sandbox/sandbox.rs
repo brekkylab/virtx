@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{
     ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+    SandboxPort,
 };
 
 use super::job::Written;
@@ -46,6 +47,9 @@ const SANDBOX: &str = "sandbox";
 const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
+
+/// The most characters a port's label has.
+const LABEL_MOST: usize = 128;
 
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
@@ -170,6 +174,9 @@ pub struct Sandbox {
     _held: ImageHold,
     /// The upper disk it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
+    /// The ports it was made with, as asked for again: what each is for and how it is reached,
+    /// with no `url`, which is its server's.
+    ports_opened: Vec<SandboxPort>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
     abins: Vec<String>,
@@ -243,13 +250,24 @@ impl Sandbox {
             )));
         }
         let mut given = HashSet::new();
-        if let Some(port) = args
+        if let Some(spec) = args
             .ports
             .iter()
-            .find(|port| **port == 0 || !given.insert(**port))
+            .find(|spec| spec.port == 0 || !given.insert(spec.port))
         {
             return Err(Error::Invalid(format!(
-                "ports: {port} is not a port, or is given twice"
+                "ports: {} is not a port, or is given twice",
+                spec.port
+            )));
+        }
+        if let Some(spec) = args.ports.iter().find(|spec| {
+            spec.label
+                .as_ref()
+                .is_some_and(|label| label.chars().count() > LABEL_MOST)
+        }) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s label is past {LABEL_MOST} characters",
+                spec.port
             )));
         }
         let mut at = HashSet::new();
@@ -480,7 +498,7 @@ impl Sandbox {
             spec: machine_spec(args),
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
-            ports: args.ports.clone(),
+            ports: args.ports.iter().map(|spec| spec.port).collect(),
         };
         let exited = record.as_ref().is_some_and(|record| record.exited);
         let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());
@@ -494,6 +512,18 @@ impl Sandbox {
             record: Mutex::new(record),
             image: digest,
             _held: held_image,
+            ports_opened: args
+                .ports
+                .iter()
+                .map(|spec| SandboxPort {
+                    port: spec.port,
+                    url: None,
+                    label: spec.label.clone(),
+                    protocol: spec.protocol,
+                    address: None,
+                    inbound_error: None,
+                })
+                .collect(),
             abins: args.abins.clone(),
             upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
@@ -537,14 +567,15 @@ impl Sandbox {
         self.up_since.lock().unwrap().map(|(at, _)| at)
     }
 
-    /// The sandbox as the server answers it, with no ports: only its making answers those.
+    /// The sandbox as the server answers it, each port with what it is for and how it is
+    /// reached but no `url`: only its making answers those, which its server forms.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
             name: self.name.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
-            ports: Vec::new(),
+            ports: self.ports_opened.clone(),
             abins: self.abins.clone(),
             error: None,
         }
@@ -1392,7 +1423,7 @@ impl Unknown {
     }
 
     /// It as a sandbox is answered: its image as its record names it, empty where that is not
-    /// read, not `running`, and why in `error`.
+    /// read, not `running`, with no ports, since none is open, and why in `error`.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),

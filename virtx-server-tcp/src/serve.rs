@@ -1964,6 +1964,18 @@ mod tests {
         );
         let none = home.take_in("none").await.err().unwrap();
         assert_eq!(refused_with(none).await.0, StatusCode::NOT_FOUND);
+        // One whose record does not read is refused as making it is, by the failure's kind.
+        let (disk, unread) = (dir.join("unread.ext4"), dir.join("unread.json"));
+        std::fs::write(&disk, b"").unwrap();
+        std::fs::write(&unread, b"not a record").unwrap();
+        let refused = home.take_in("unread").await.err().unwrap();
+        let refused = axum::response::IntoResponse::into_response(refused);
+        assert_eq!(refused.status().as_u16(), 500);
+        let body = axum::body::to_bytes(refused.into_body(), usize::MAX).await;
+        let body: Value = serde_json::from_slice(&body.unwrap()).unwrap();
+        assert_eq!(body["error"]["message"], "the server's files: invalid data");
+        std::fs::remove_file(disk).unwrap();
+        std::fs::remove_file(unread).unwrap();
 
         // In use, it stays; let go of, it is reached no more, and its record and disk stay.
         let tunnel = home.tunnel(&capability).unwrap();

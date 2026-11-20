@@ -167,11 +167,12 @@ struct Starting {
 pub(super) struct Run {
     pub(super) machine: Arc<Machine>,
     /// Its sandbox's id, the root it was made under -- which tells apart two sandboxes of one
-    /// id under different roots -- and when its machine came up: what [`runs`](super::runs) is
-    /// told as it comes up and as it goes down.
+    /// id under different roots -- and when its machine came up, by the wall clock and by one no
+    /// one sets: what [`runs`](super::runs) is told as it comes up and as it goes down.
     sandbox: String,
     root: PathBuf,
     started: SystemTime,
+    since: Instant,
     /// Its disk's lock, and what the hooks hold for it, until it has stopped.
     held: Mutex<Option<(SnapshotLock, Vec<Held>)>>,
     /// What it may write: its disk, and the volumes it mounts to write.
@@ -189,7 +190,7 @@ impl Run {
     fn release(&self) {
         if let Some(held) = self.held.lock().unwrap().take() {
             drop(held);
-            super::runs::down(&self.sandbox, &self.root, self.started);
+            super::runs::down(&self.sandbox, &self.root, self.started, self.since);
         }
     }
 }
@@ -538,6 +539,7 @@ impl Sandbox {
             sandbox: id.to_string(),
             root: shared.kept.parent().unwrap_or(&shared.kept).to_owned(),
             started: SystemTime::now(),
+            since: Instant::now(),
             held: Mutex::new(Some((lock, held))),
             writes,
             up: AtomicBool::new(true),

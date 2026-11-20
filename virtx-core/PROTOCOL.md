@@ -420,8 +420,8 @@ Its log's entries are each an object with one member:
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
-The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, or with its sandbox's VM.
-In each of the last three, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, with its sandbox's VM, or with its server, which keeps its sandbox.
+In each of the last four, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
 A server MAY say which, in its end and in its job, with `reason`:
 
 - `"timeout"`: its `timeout_ms` ran out.

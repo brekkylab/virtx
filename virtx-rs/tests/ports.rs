@@ -83,8 +83,8 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let sandbox = serving(&client, port);
     let opened = &sandbox.info().ports[0];
     assert_eq!(
-        (opened.label.as_deref(), opened.protocol, &opened.address),
-        (Some("greeting"), PortProtocol::Http, &None)
+        (opened.label.as_deref(), &opened.protocol, &opened.address),
+        (Some("greeting"), &PortProtocol::Http, &None)
     );
     let url = opened.url.as_deref().unwrap();
     let at = url.strip_prefix("http://").unwrap_or(url).to_owned();

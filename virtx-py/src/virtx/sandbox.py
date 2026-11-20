@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ._library import VirtxError, args
 from .files import Files
@@ -20,8 +20,12 @@ if TYPE_CHECKING:
     from .client import Client
 
 
+E = TypeVar("E", bound=Enum)
+
+
 class PortProtocol(str, Enum):
-    """How a sandbox's port is reached from outside it."""
+    """How a sandbox's port is reached from outside it. A protocol this version does not know is
+    read as the server's string itself."""
 
     TCP = "tcp"
     """TCP: at a loopback address, or through a ``PortForwarder`` opened with its ``url``."""
@@ -63,7 +67,8 @@ class SandboxPort:
     label: str | None = None
     """What it is for, as it was opened with."""
 
-    protocol: PortProtocol = PortProtocol.TCP
+    protocol: PortProtocol | str = PortProtocol.TCP
+    """A ``str`` for a protocol this version does not know."""
 
     address: str | None = None
     """A ``host:port`` any TCP client reaches a TCP port at directly, from a server that gives it
@@ -80,7 +85,7 @@ class SandboxPort:
             value["port"],
             value.get("url"),
             value.get("label"),
-            PortProtocol(value.get("protocol", "tcp")),
+            _known(PortProtocol, value.get("protocol", "tcp")),
             value.get("address"),
             InboundError.from_dict(why) if why is not None else None,
         )
@@ -391,16 +396,19 @@ class SandboxJobEnd:
     """Why, if it did not end by itself: a ``str`` for a reason this version does not know."""
 
 
-def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | str | None:
-    """A job's, or its end's, ``reason``, if it has one: as the server said it where this version
-    does not know it."""
-    reason = value.get("reason")
-    if reason is None:
-        return None
+def _known(kind: type[E], value: str) -> E | str:
+    """``value`` as a member of ``kind``, or as the server said it where this version does not
+    know it."""
     try:
-        return SandboxJobEndReason(reason)
+        return kind(value)
     except ValueError:
-        return str(reason)
+        return value
+
+
+def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | str | None:
+    """A job's, or its end's, ``reason``, if it has one."""
+    reason = value.get("reason")
+    return None if reason is None else _known(SandboxJobEndReason, reason)
 
 
 SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd

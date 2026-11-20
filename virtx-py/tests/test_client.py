@@ -1,9 +1,20 @@
+import asyncio
 import json
+import socket
+import time
 
 import pytest
 import virtx
-from conftest import fixture, unique
-from virtx import BearerAuth, Client, Project, ProjectMemberListOutputItem, Role, VirtxError
+from conftest import ALPINE, alpine, fixture, unique
+from virtx import (
+    BearerAuth,
+    Client,
+    PortForwarder,
+    Project,
+    ProjectMemberListOutputItem,
+    Role,
+    VirtxError,
+)
 
 
 def test_a_second_library_is_refused() -> None:
@@ -48,6 +59,35 @@ async def test_a_client_over_http_sends_its_token_and_project(tcp_client: Client
         with pytest.raises(VirtxError) as refused:
             await anonymous.list_volume()
         assert refused.value.status == 401
+
+
+async def test_a_port_forwarder_listens_on_the_loopback_until_closed(tcp_client: Client) -> None:
+    await alpine(tcp_client)
+    sandbox = await tcp_client.create_sandbox(ALPINE, ports=[8000])
+    try:
+        forwarder = PortForwarder.open(tcp_client, sandbox.ports[0].url)
+        assert isinstance(forwarder.port, int)
+        assert forwarder.address == f"{forwarder.host}:{forwarder.port}"
+        assert forwarder.host == "127.0.0.1"
+        # A connection is taken, whatever the sandbox does with it.
+        socket.create_connection((forwarder.host, forwarder.port), timeout=5).close()
+
+        forwarder.close()
+        forwarder.close()
+        # Its listener goes a moment after: a connection made as it goes is reset.
+        refused = False
+        until = time.monotonic() + 5
+        while not refused and time.monotonic() < until:
+            try:
+                socket.create_connection((forwarder.host, forwarder.port), timeout=5).close()
+            except ConnectionRefusedError:
+                refused = True
+            except ConnectionResetError:
+                pass
+            await asyncio.sleep(0.05)
+        assert refused
+    finally:
+        await sandbox.remove()
 
 
 async def test_a_project_is_made_its_members_set_and_removed() -> None:

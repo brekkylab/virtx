@@ -5,8 +5,8 @@ use std::{env, future, pin::Pin};
 use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
-    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry, Source,
-    Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, Source, Step,
 };
 
 mod common;
@@ -76,12 +76,38 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     assert_eq!(ended, SandboxJobEntry::End(SandboxJobEnd::exited(128 + 15)));
     let again = sandbox.job(sleep.id()).wait().unwrap();
     assert!(!again.info().running, "{again:?}");
+    assert_eq!(again.info().reason, None);
     again.remove().wait().unwrap();
     let gone = sleep.get().wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
     assert_eq!(gone.source_kind(), Source::Server);
 
+    // Past its `timeout_ms`, the server kills it, and its end and its job say so.
+    let timed = SandboxExecArgs::new(["sleep", "60"]).timeout_ms(200);
+    let timed = sandbox.exec(&timed).wait().unwrap();
+    assert_eq!(timed.complete(false).wait().unwrap(), 137);
+    let ended = common::entries(timed.log(None)).pop().unwrap().entry;
+    let killed = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(ended, SandboxJobEntry::End(killed));
+    let timed = timed.get().wait().unwrap();
+    assert_eq!(timed.info().reason, Some(SandboxJobEndReason::Timeout));
+
+    // Its sandbox removed under it: a log being read ends with an end that says so.
+    let up = SandboxExecArgs::new(["sh", "-c", "echo up; sleep 60"]);
+    let up = sandbox.exec(&up).wait().unwrap();
+    let mut log = up.log(None);
+    let first = log.wait_next().unwrap().unwrap().entry;
+    assert_eq!(first, SandboxJobEntry::Stdout("up".into()));
     sandbox.remove().wait().unwrap();
+    let ended = common::entries(log).pop().unwrap().entry;
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(ended, SandboxJobEntry::End(deleted));
     let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }

@@ -990,8 +990,7 @@ mod tests {
     async fn a_volume_that_does_not_open_is_refused_by_the_kind_of_its_failure() {
         let scratch = tempfile::tempdir().unwrap();
         let volumes = VolumeStore::new(scratch.path()).unwrap();
-        volumes.create("v").unwrap();
-        let table = scratch.path().join("volume/v/mounts.json");
+        let table = volumes.create("v").unwrap().path().join("mounts.json");
         std::fs::write(&table, "not a table").unwrap();
         let account = format!("reading {}", table.display());
         for (host_paths, named) in [(HostPaths::Hidden, false), (HostPaths::Named, true)] {

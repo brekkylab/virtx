@@ -170,8 +170,7 @@ pub enum SandboxJobEndReason {
     /// each that ran then is ended so.
     Restarted,
 
-    /// One this version does not know, as the server said it. A server never sends it for one
-    /// above.
+    /// One this version does not know, as the server said it.
     #[serde(untagged)]
     Other(String),
 }

@@ -277,9 +277,11 @@ async fn a_kept_sandbox_whose_making_is_cut_short_leaves_nothing(home: Home) {
 }
 
 /// A storage backend that keeps nothing and says what it is asked, a line each, as what it is
-/// asked to let be written is let go too; and refuses a disk while `refusing`.
+/// asked to let be written is let go too, a disk with no file under `root` let go of "over
+/// nothing"; and refuses a disk while `refusing`.
 #[derive(Default)]
 struct Told {
+    root: PathBuf,
     said: Arc<Mutex<Vec<String>>>,
     refusing: AtomicBool,
 }
@@ -295,12 +297,16 @@ impl Told {
     }
 }
 
-/// Says it is let go of as it drops.
-struct LetGo(Arc<Mutex<Vec<String>>>, String);
+/// Says it is let go of as it drops, and whether over nothing where it holds a file.
+struct LetGo(Arc<Mutex<Vec<String>>>, String, Option<PathBuf>);
 
 impl Drop for LetGo {
     fn drop(&mut self) {
-        self.0.lock().unwrap().push(std::mem::take(&mut self.1));
+        let mut said = std::mem::take(&mut self.1);
+        if self.2.as_ref().is_some_and(|file| !file.exists()) {
+            said.push_str(" over nothing");
+        }
+        self.0.lock().unwrap().push(said);
     }
 }
 
@@ -317,7 +323,11 @@ impl StorageBackend for Told {
             }
             self.say(format!("take {what:?}"));
             let said = Arc::clone(&self.said);
-            Ok(Box::new(LetGo(said, format!("let go {what:?}"))) as Held)
+            let file = match what {
+                Stored::Disk(id) => Some(self.root.join("sandbox").join(format!("{id}.ext4"))),
+                Stored::Volume(_) => None,
+            };
+            Ok(Box::new(LetGo(said, format!("let go {what:?}"), file)) as Held)
         })
     }
 
@@ -343,7 +353,10 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
     for name in ["rw", "ro"] {
         home.volumes.create(name).unwrap();
     }
-    let told = Arc::new(Told::default());
+    let told = Arc::new(Told {
+        root: home.root.clone(),
+        ..Told::default()
+    });
     let backing = Backing::default();
     assert!(backing.set(Arc::clone(&told) as Arc<dyn StorageBackend>));
     let mut args = small();
@@ -444,13 +457,16 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
     let read = ["cat", "/root/kept", "/rw/kept"];
     let (lines, _) = run(&again, &read, None).await.unwrap();
     assert_eq!(lines, ["kept", "kept"]);
+    assert_eq!(told.read().len(), 3, "taken again as it boots");
     let refused = take_in().await;
     assert!(
         matches!(refused, Err(SandboxError::NotFound(_))),
         "one this process knows is taken in once: {:?}",
         refused.err()
     );
+    // Closed, what it took is let go of while its disk is still here.
     close(again).await;
+    assert_eq!(told.read(), let_go);
     assert_eq!(home.left(), Vec::<String>::new());
 }
 

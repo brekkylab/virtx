@@ -711,12 +711,12 @@ impl Sandbox {
         if let State::Up(machine) = state {
             machine.stop();
         }
+        // Its machine down, and its disk and volumes still here: the backend's to keep now.
+        self.holding.lock().unwrap().clear();
         self.volume_holds.lock().unwrap().clear();
         if let Some(mut upper) = self.upper.lock().unwrap().take() {
             upper.kept = leaving && record.is_some();
         }
-        // Its disk deleted or left as it is, and its machine down: the backend's to keep now.
-        self.holding.lock().unwrap().clear();
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.end(128 + SIGKILL);

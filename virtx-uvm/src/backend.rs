@@ -67,6 +67,9 @@ pub enum Refusal {
 ///
 /// A sandbox's disk, once taken, is its machine's alone: how the machine reads it is not the
 /// backend's to say.
+///
+/// What is kept is the embedder's to remove where no request here does: a project's, as the
+/// project is removed, and a sandbox's disk let go of here and taken in nowhere else.
 pub trait StorageBackend: Send + Sync {
     /// `what` was just made here, `size` bytes -- the most a disk may grow to; `0` for a volume,
     /// which grows with its files -- before anything is written to it: kept from now on.
@@ -80,7 +83,8 @@ pub trait StorageBackend: Send + Sync {
     /// `what` held here to be written, brought up to what is kept first: a sandbox's disk and
     /// each volume it mounts writable as its machine boots, until the machine is down, and a
     /// volume as a request writes it, until it is answered. Written until the [`Held`] drops,
-    /// and to be kept again from then on. Refused [`InUse`](Refusal::InUse) while it is held
+    /// and to be kept again from then on: it drops while what it held is still here, before a
+    /// closed sandbox's disk is deleted. Refused [`InUse`](Refusal::InUse) while it is held
     /// beyond this machine, and nothing is written then.
     fn take<'a>(&'a self, what: Stored<'a>) -> BoxFuture<'a, Result<Held, Refusal>> {
         let _ = what;
@@ -98,8 +102,8 @@ pub trait StorageBackend: Send + Sync {
     /// deleted, or a volume. Refused [`InUse`](Refusal::InUse) while it is held beyond this
     /// machine, and nothing is removed then, here or there; [`Unknown`](Refusal::Unknown) where
     /// nothing of it is kept, which the server answers as it answers for what it has here. A
-    /// sandbox's disk is removed there before its machine is stopped: what was taken of it is
-    /// let go of after, its disk gone here too.
+    /// sandbox's disk is removed there before its machine is stopped, so what was taken of it is
+    /// let go of after: of something this backend removed, which it keeps nothing of again.
     fn remove<'a>(&'a self, what: Stored<'a>) -> BoxFuture<'a, Result<(), Refusal>> {
         let _ = what;
         Box::pin(async { Ok(()) })

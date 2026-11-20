@@ -9,25 +9,25 @@ A server offers several endpoints, and each speaks its own protocol:
 
 | Endpoint | Protocol | For |
 | --- | --- | --- |
-| `/images/oci/v2/` | [OCI Distribution](#images) | Images: manifests, blobs and tags |
-| `/images/jobs/` | [HTTP](#image-jobs) | Image jobs: read, cancel |
-| `/images/jobs/pull/` | [HTTP](#image-jobs) | Starting an image pull from another registry |
-| `/images/jobs/push/` | [HTTP](#image-jobs) | Starting an image push to another registry |
-| `/images/jobs/build/` | [HTTP](#image-jobs) | Starting an image build |
-| `/images/jobs/{id}/events` | [Event stream](#events) | An image job's log and end |
-| `/images/prune` | [HTTP](#image-jobs) | Deleting the images nothing uses |
-| `/projects/` | [HTTP](#projects) | Project CRUD |
-| `/projects/{name}/members/` | [HTTP](#projects) | Project member CRUD |
-| `/volumes/` | [HTTP](#volumes) | Volume CRUD |
-| `/volumes/{name}/mounts/` | [HTTP](#mounts) | Volume mount CRUD |
-| `/volumes/{name}/files/` | [WebDAV](#files) | The files in a volume |
-| `/sandboxes/` | [HTTP](#sandboxes) | Sandbox CRUD |
-| `/sandboxes/{id}/files/` | [WebDAV](#files) | The files in a sandbox, as its processes see them |
-| `/sandboxes/{id}/jobs/` | [HTTP](#sandbox-jobs) | Sandbox jobs: read, signal, cancel |
-| `/sandboxes/{id}/jobs/exec/` | [HTTP](#sandbox-jobs) | Starting a process in a sandbox |
-| `/sandboxes/{id}/jobs/{job}/stdin` | [HTTP](#sandbox-jobs) | Writing to a process's stdin |
-| `/sandboxes/{id}/jobs/{job}/signal` | [HTTP](#sandbox-jobs) | Sending a signal to a process |
-| `/sandboxes/{id}/jobs/{job}/events` | [Event stream](#events) | A process's output and end |
+| [`/images/oci/v2/`](#images) | OCI Distribution | Images: manifests, blobs and tags |
+| [`/images/jobs/`](#image-jobs) | HTTP | Image jobs: read, cancel |
+| [`/images/jobs/pull/`](#image-jobs) | HTTP | Starting an image pull from another registry |
+| [`/images/jobs/push/`](#image-jobs) | HTTP | Starting an image push to another registry |
+| [`/images/jobs/build/`](#image-jobs) | HTTP | Starting an image build |
+| [`/images/jobs/{id}/events`](#events) | Event stream | An image job's log and end |
+| [`/images/prune`](#image-jobs) | HTTP | Deleting the images nothing uses |
+| [`/projects/`](#projects) | HTTP | Project CRUD |
+| [`/projects/{name}/members/`](#projects) | HTTP | Project member CRUD |
+| [`/volumes/`](#volumes) | HTTP | Volume CRUD |
+| [`/volumes/{name}/mounts/`](#mounts) | HTTP | Volume mount CRUD |
+| [`/volumes/{name}/files/`](#files) | WebDAV | The files in a volume |
+| [`/sandboxes/`](#sandboxes) | HTTP | Sandbox CRUD |
+| [`/sandboxes/{id}/files/`](#files) | WebDAV | The files in a sandbox, as its processes see them |
+| [`/sandboxes/{id}/jobs/`](#sandbox-jobs) | HTTP | Sandbox jobs: read, signal, cancel |
+| [`/sandboxes/{id}/jobs/exec/`](#sandbox-jobs) | HTTP | Starting a process in a sandbox |
+| [`/sandboxes/{id}/jobs/{job}/stdin`](#sandbox-jobs) | HTTP | Writing to a process's stdin |
+| [`/sandboxes/{id}/jobs/{job}/signal`](#sandbox-jobs) | HTTP | Sending a signal to a process |
+| [`/sandboxes/{id}/jobs/{job}/events`](#events) | Event stream | A process's output and end |
 
 Everything is made, read and removed with plain HTTP, each request standing alone.
 What runs for a while, such as a build or a process, is a [job](#jobs): started with a `POST`, read with a `GET`, cancelled with a `DELETE`, and its log read as an event stream by any client allowed to, from where it left off.
@@ -193,7 +193,7 @@ data: {"end": {"code": 0}}
 - The server sets no other field, and MAY send comments, lines starting with `:`, to keep the connection open. A client ignores any other field, and any event with no `data`.
 
 Every reader gets the whole log, from its first entry, as the job writes it.
-A client that sends `Last-Event-ID: n` gets the entries after the `n`th only, so a client whose stream dropped picks up where it left off.
+A client that sends `Last-Event-ID: n` gets the entries after entry `n` only, so a client whose stream dropped picks up where it left off.
 virtx's client does so by itself over TCP: a stream that breaks, or a `502` to `504` asking for it again, has it asked for after the last entry read, up to five times in a row. A stream that ends before its `end` entry, over either transport, is asked for again at once after the last entry read, where it sent any: a stream cut on the way reads on, and one whose job was removed is answered `404`. One that ends with no entry past where it was asked is asked for again only while the job is `running`, as a broken one is: a job removed is answered `404`, and a log of an ended job asked for after its last entry has nothing more, and ends there.
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.

@@ -1,8 +1,9 @@
 // Images, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
-// against the fixture's `virtx-stdio`.
+// against the fixture's `virtx-stdio`, and its `virtx-server-tcp` where a port is forwarded.
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'node:test'
@@ -11,7 +12,7 @@ import virtx from '../index.js'
 
 import { ALPINE, alpine, fixture, tags, unique } from './fixture.mjs'
 
-const { Client } = virtx
+const { Client, PortForwarder, VirtxError } = virtx
 
 // Each test here has a client of a `virtx-stdio` of its own, closed after it.
 describe('against virtx-stdio', () => {
@@ -67,6 +68,24 @@ describe('against virtx-stdio', () => {
     await assert.rejects(got.job(job.id), { status: 404 })
     await sandbox.remove()
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
+  })
+
+  test('a sandbox is found by its name, which no other has', async () => {
+    await alpine(client)
+    const name = unique('named')
+    const made = await client.createSandbox(ALPINE, { name })
+    assert.equal(made.name, name)
+    const found = await client.findSandbox(name)
+    assert.ok(found instanceof virtx.Sandbox)
+    assert.equal(found.id, made.id)
+    assert.equal(found.name, name)
+    assert.equal(await client.findSandbox(unique('nobody')), undefined)
+    await assert.rejects(client.createSandbox(ALPINE, { name }), {
+      source: 'server',
+      status: 409,
+    })
+    await made.remove()
+    assert.equal(await client.findSandbox(name), undefined)
   })
 
   test('a job reads its stdin until it is closed', async () => {
@@ -210,10 +229,20 @@ describe('against virtx-stdio', () => {
   test('a started command is iterated to its end', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)
-    const log = await Array.fromAsync(sandbox.exec(['echo', 'hi']))
+    const started = sandbox.exec(['echo', 'hi'])
+    const log = await Array.fromAsync(started)
     assert.deepEqual(
       log.map(({ id, ...entry }) => entry),
       [{ stdout: 'hi' }, { end: { code: 0 } }],
+    )
+    // Iterated at once, read with its job: the job is the one it started, awaited after.
+    const job = await started
+    assert.ok(job instanceof virtx.SandboxJob)
+    assert.deepEqual(job.cmd, ['echo', 'hi'])
+    assert.equal((await sandbox.job(job.id)).code, 0)
+    assert.deepEqual(
+      (await sandbox.jobs()).map((j) => j.id),
+      [job.id],
     )
     await sandbox.remove()
   })
@@ -285,4 +314,52 @@ describe('against virtx-stdio', () => {
     await assert.rejects(push.complete(), { name: 'VirtxError', message: failed.message })
     await client.removeImage(reference)
   })
+})
+
+test('a forwarded port nothing listens on says so', async () => {
+  const { url, token, project } = fixture()
+  const client = Client.connect(url, { type: 'bearer', token }, project)
+  const warned = []
+  const warning = (w) => w.name === 'VirtxWarning' && warned.push(w.message)
+  process.on('warning', warning)
+  try {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE, { ports: [7000] })
+    const forwarder = PortForwarder.open(client, sandbox.ports[0])
+    try {
+      assert.equal(forwarder.lastError, null)
+      const read = await new Promise((resolve, reject) => {
+        const socket = net.connect(forwarder.port, forwarder.host)
+        const chunks = []
+        socket.on('data', (chunk) => chunks.push(chunk))
+        socket.on('end', () => resolve(Buffer.concat(chunks)))
+        socket.on('error', reject)
+      })
+      assert.equal(read.length, 0)
+
+      // Kept once the connection that failed has closed, and warned of: looked for a minute.
+      const deadline = Date.now() + 60_000
+      while (forwarder.lastError === null && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      const error = forwarder.lastError
+      assert.ok(error instanceof VirtxError, 'no error was kept')
+      assert.ok(
+        error.message.startsWith(`port 7000, forwarded at ${forwarder.address}: `),
+        error.message,
+      )
+      assert.match(error.message, /before the port sent a byte/)
+      assert.ok(!error.message.includes(sandbox.ports[0].url))
+      while (!warned.includes(error.message) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      assert.ok(warned.includes(error.message), `not warned of: ${warned}`)
+    } finally {
+      forwarder.close()
+      await sandbox.remove()
+    }
+  } finally {
+    process.off('warning', warning)
+    await client.close()
+  }
 })

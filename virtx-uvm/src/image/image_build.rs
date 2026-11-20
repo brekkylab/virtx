@@ -107,7 +107,7 @@ pub async fn build_step(
     // From the root, as the guest's init would fail to go somewhere not there yet. Synced
     // before it is done, since the machine is killed after and what the guest had not put on
     // the upper disk would be lost.
-    let workdir = config.working_dir().clone().unwrap_or_else(|| "/".into());
+    let workdir = machine::workdir(&config);
     config.set_working_dir(None);
     let cmd = [
         "/bin/sh",

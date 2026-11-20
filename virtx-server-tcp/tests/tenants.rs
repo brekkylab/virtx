@@ -147,10 +147,13 @@ async fn a_server_of_its_own_identity_projects_and_routes_is_built_from_the_libr
     );
     let access = Arc::new(access);
     let counting = Arc::clone(&access);
-    let own = axum::Router::new().route(
-        "/node/homes",
-        axum::routing::get(move || async move { counting.homes().len().to_string() }),
-    );
+    // Its projects answered from its membership, merged beside its own route.
+    let own = axum::Router::new()
+        .route(
+            "/node/homes",
+            axum::routing::get(move || async move { counting.homes().len().to_string() }),
+        )
+        .merge(serve::projects(&access));
     let router = serve::router(Arc::clone(&access), own);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());

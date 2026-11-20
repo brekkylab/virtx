@@ -182,6 +182,11 @@ exited 0
 
 A line longer than 64 KiB arrives as several entries, and leaving the loop leaves the command running.
 
+Iterated before it is awaited, `exec` starts the command and reads its output as one request where the server answers so, and as two, the job and then its log, where it does not; awaited after, it is the same job.
+In Python nothing is sent until the value is first awaited or iterated, so whichever of the two comes first decides, whatever else the code awaits in between.
+In Node.js the command is started as the call returns, as a promise's work is: it is one request only when the loop begins before the code awaits anything else, as `for await (const entry of sandbox.exec(cmd))` does, and two once anything is awaited between the call and the loop.
+In Rust, `sandbox.exec_with_log(&args)` does the same, yielding the job first and then each entry.
+
 ## Run several commands at once
 
 Awaiting `exec` starts a job and returns without waiting for it to end, so a command can run in the background while others run beside it.

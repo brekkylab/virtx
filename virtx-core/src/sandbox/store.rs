@@ -10,6 +10,11 @@ pub struct Sandbox {
     /// The sandbox's id, which every request about it names it by.
     pub id: String,
 
+    /// The name it was made with, which finds it again
+    /// ([`Client::find_sandbox`](crate::Client::find_sandbox)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
     /// The digest of the image it booted, as `algorithm:hex`.
     pub image: String,
 
@@ -43,6 +48,11 @@ pub struct Sandbox {
 pub struct SandboxCreateArgs {
     /// The image its root filesystem is built on.
     pub image: ImageName,
+
+    /// A name to find it again by, rather than keeping its id: unique among the sandboxes a
+    /// listing answers, so one another sandbox has is refused, until that one is removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 
     /// Whether its processes reach a network at all: the way out, which `ports` do not need.
     #[serde(default = "on", skip_serializing_if = "is_on")]
@@ -93,16 +103,19 @@ impl SandboxCreateArgs {
     /// ```
     /// # use virtx_core::SandboxCreateArgs;
     /// let args = SandboxCreateArgs::new("jq:latest")
+    ///     .name("dev")
     ///     .port(8000)
     ///     .readonly_volume("data", "/data")
     ///     .abin("index");
     ///
+    /// assert_eq!(args.name.as_deref(), Some("dev"));
     /// assert!(args.volumes[0].readonly);
     /// assert_eq!(args.abins, ["index"]);
     /// ```
     pub fn new(image: impl Into<ImageName>) -> Self {
         Self {
             image: image.into(),
+            name: None,
             network: true,
             ports: Vec::new(),
             vcpus: None,
@@ -113,6 +126,13 @@ impl SandboxCreateArgs {
             volumes: Vec::new(),
             abins: Vec::new(),
         }
+    }
+
+    /// Named `name`, which finds it again: letters, digits, `.`, `_` and `-`, not starting with
+    /// `.` or `-`, at most 128, or it is refused `400`.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Whether its processes reach a network at all.
@@ -229,6 +249,7 @@ mod tests {
             "cell": "c1",
         });
         let sandbox: Sandbox = serde_json::from_value(value).unwrap();
+        assert_eq!(sandbox.name, None);
         assert_eq!(
             sandbox.ports,
             [SandboxPort {
@@ -265,6 +286,7 @@ mod tests {
     #[test]
     fn each_method_sets_its_field() {
         let args = SandboxCreateArgs::new("img:latest")
+            .name("work")
             .network(false)
             .port(80)
             .port(443)
@@ -276,6 +298,7 @@ mod tests {
             .volume("a", "/a")
             .readonly_volume("b", "/a/b");
         let mut expected = SandboxCreateArgs::new("img:latest");
+        expected.name = Some("work".into());
         expected.network = false;
         expected.ports = vec![80, 443];
         expected.vcpus = Some(2);
@@ -296,5 +319,22 @@ mod tests {
             },
         ];
         assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn a_sandbox_named_says_its_name_and_one_unnamed_says_none() {
+        let named: Sandbox = serde_json::from_value(
+            json!({"id": "s", "name": "work", "image": "sha256:00", "running": true}),
+        )
+        .unwrap();
+        assert_eq!(named.name.as_deref(), Some("work"));
+        let value = serde_json::to_value(&named).unwrap();
+        assert_eq!(value["name"], "work");
+        let unnamed = Sandbox {
+            name: None,
+            ..named
+        };
+        let value = serde_json::to_value(&unnamed).unwrap();
+        assert!(value.get("name").is_none(), "{value}");
     }
 }

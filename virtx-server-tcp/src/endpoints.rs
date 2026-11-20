@@ -817,9 +817,7 @@ fn failed(e: Failure) -> String {
     };
     let e = match e.downcast::<RegistryError>() {
         Ok(e) => {
-            if let RegistryError::Io { source, .. }
-            | RegistryError::Fstree(FstreeError::Io { source, .. }) = &*e
-            {
+            if let RegistryError::Fstree(FstreeError::Io { source, .. }) = &*e {
                 return io_failure(source, &e);
             }
             return match *e {
@@ -1853,6 +1851,19 @@ mod tests {
         ];
         for e in on_files {
             assert_eq!(failed(e), "the server's files: permission denied");
+        }
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        cancelled.abort();
+        let elsewhere: [Failure; 2] = [
+            Box::new(BuildError::Join(cancelled.await.unwrap_err())),
+            Box::new(RegistryError::Io {
+                context: "making a registry client".into(),
+                source: io::Error::other("no proxy"),
+            }),
+        ];
+        for e in elsewhere {
+            let said = e.to_string();
+            assert_eq!(failed(e), said);
         }
         let why = "the machine's process ended with exit status: 1 before it was up";
         let machine = BuildError::Machine(MachineError::DidNotStart {

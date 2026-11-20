@@ -959,7 +959,10 @@ mod tests {
             url: None,
             ..made.ports[0].clone()
         };
-        assert_eq!(next.answer(&made.id).unwrap().ports, [asked.clone()]);
+        assert_eq!(
+            next.answer(&made.id).unwrap().ports,
+            std::slice::from_ref(&asked)
+        );
         assert_eq!(listed[0].ports, [asked]);
 
         next.delete(&made.id).await.unwrap();

@@ -352,7 +352,7 @@ async fn a_port_s_websocket_reaches_what_listens_on_it_until_the_sandbox_goes() 
     };
     assert_eq!(
         client.list_sandbox().await.unwrap()[0].ports,
-        [asked.clone()]
+        std::slice::from_ref(&asked)
     );
     assert_eq!(
         client.get_sandbox(&created.id).await.unwrap().ports,

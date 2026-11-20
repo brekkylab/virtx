@@ -83,9 +83,16 @@ pub enum CtrlResp {
     Stdout { id: u32, line: String },
     /// A line the process `id` wrote to its stderr, without its newline.
     Stderr { id: u32, line: String },
-    /// The process `id` ended with `code`; `128 + signal` for one a signal ended. The last
-    /// thing said of it.
-    Exited { id: u32, code: i32 },
+    /// The process `id` ended with `code`; `128 + signal` for one a signal ended. `oom` where
+    /// it ended `137` and its memory ran out: the kernel's OOM killer killed a process of its
+    /// command's cgroup, or the agent killed the cgroup, out of memory and thrashing at its
+    /// limit. The last thing said of it.
+    Exited {
+        id: u32,
+        code: i32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        oom: bool,
+    },
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
     /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
     /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine
@@ -190,10 +197,20 @@ pub enum IoFailure {
 
 /// Write `message` as one frame.
 pub fn send(out: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
-    let message = serde_json::to_vec(message).map_err(io::Error::other)?;
-    let length = u32::try_from(message.len()).map_err(io::Error::other)?;
-    out.write_all(&length.to_be_bytes())?;
-    out.write_all(&message)?;
+    send_all(out, std::slice::from_ref(message))
+}
+
+/// `messages`, a frame each, handed to `out` as one buffer: fewer writes than a frame each,
+/// where a write is a machine's exit to its host.
+pub fn send_all<M: Serialize>(out: &mut impl Write, messages: &[M]) -> io::Result<()> {
+    let mut frames = Vec::new();
+    for message in messages {
+        let message = serde_json::to_vec(message).map_err(io::Error::other)?;
+        let length = u32::try_from(message.len()).map_err(io::Error::other)?;
+        frames.extend_from_slice(&length.to_be_bytes());
+        frames.extend_from_slice(&message);
+    }
+    out.write_all(&frames)?;
     out.flush()
 }
 

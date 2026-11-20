@@ -101,10 +101,11 @@ impl Job {
     }
 
     /// End it with `code`, as its process ended, if it runs still: killed, for why the server
-    /// killed it, if it did.
-    pub(super) fn end(&self, code: i32) {
+    /// killed it, if it did, or for its memory running out where the guest says `oom`.
+    pub(super) fn end(&self, code: i32, oom: bool) {
         let killed = code == 128 + SIGKILL;
         let reason = killed.then(|| *self.killing.lock().unwrap()).flatten();
+        let reason = reason.or((killed && oom).then_some(SandboxJobEndReason::Oom));
         self.end_as(SandboxJobEnd { code, reason });
     }
 
@@ -118,7 +119,8 @@ impl Job {
         });
     }
 
-    /// What its stdin was sent and has not taken never will be: whoever waits on it is told so.
+    /// End it as `end` says, if it runs still. What its stdin was sent and has not taken never
+    /// will be: whoever waits on it is told so.
     fn end_as(&self, end: SandboxJobEnd) {
         *self.stdin.lock().unwrap() = Stdin::default();
         let (code, reason) = (end.code, end.reason);

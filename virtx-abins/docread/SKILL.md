@@ -1,6 +1,6 @@
 ---
 name: docread
-description: Read a document file (text, Word, PDF) by numbered lines, a window at a time
+description: "Read a document file (text, Word, PDF) by numbered lines, a window at a time"
 ---
 
 Read a document file (text, Word, PDF) by numbered lines, a window at a time

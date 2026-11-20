@@ -257,15 +257,15 @@ mod tests {
         let image = r#""image": {"type": "tag", "tag": "alpine"}"#;
         assert_eq!(
             refused::<SandboxCreateArgs>(&format!(r#"{{{image}, "ports": ["5900"]}}"#)),
-            r#"ports[0]: a whole number from 0 to 65535, not "5900""#
+            r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#
         );
         assert_eq!(
             refused::<SandboxCreateArgs>(&format!(r#"{{{image}, "ports": [70000]}}"#)),
-            "ports[0]: a whole number from 0 to 65535, not 70000"
+            r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not 70000"#
         );
         assert_eq!(
             refused::<SandboxCreateArgs>(&format!(r#"{{{image}, "ports": [-1]}}"#)),
-            "ports[0]: a whole number from 0 to 65535, not -1"
+            r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not -1"#
         );
         assert_eq!(
             refused::<ProjectMemberSetArgs>(r#"{"role": 1}"#),

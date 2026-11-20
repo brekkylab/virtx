@@ -1,5 +1,5 @@
-//! How a client reaches a server's endpoints, as `PROTOCOL.md`'s Transport says: HTTP over TCP,
-//! or one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
+//! How a client reaches a server's endpoints, as the protocol's Transport says: HTTP over TCP, or
+//! one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
 //! shares on it: a JSON request and its refusal ([`http`]), a job's log as an event stream
 //! ([`sse`], whose server end keeps the log too), and the files of a volume or a sandbox over
 //! WebDAV ([`webdav`]); and, on the server's end, a request's body read as its args ([`args`]).
@@ -23,14 +23,14 @@ pub use args::{described_type, from_body};
 #[cfg(feature = "client")]
 pub(crate) use client::{Body, full};
 #[cfg(feature = "client")]
-pub use client::{PortForwarder, TransportClient};
+pub use client::{ForwardError, PortForwarder, TransportClient};
 #[cfg(feature = "client")]
 pub(crate) use http::{resolved, segment, segments};
 #[cfg(feature = "server")]
 pub use server::serve_stdio;
 pub use sse::LogEntry;
 #[cfg(feature = "server")]
-pub use sse::server::Log;
+pub use sse::server::{Log, accepts_event_stream};
 pub use webdav::{
     DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot, FileWriteArgs,
     Metadata,
@@ -129,10 +129,10 @@ mod tests {
         // The old one is gone with the new, not kept under it.
         client.set_auth(Auth::None).unwrap();
         let error = http::get::<String>(&client, "/user").await.unwrap_err();
-        assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(401, _, _)), "{error:?}");
         client.set_auth(bearer("carol")).unwrap();
         let error = http::get::<String>(&client, "/user").await.unwrap_err();
-        assert!(matches!(error, Error::Status(403, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(403, _, _)), "{error:?}");
     }
 
     #[tokio::test]
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(http::get::<String>(&client, "/user").await.unwrap(), "bob");
         client.set_headers(HeaderMap::new());
         let error = http::get::<String>(&client, "/user").await.unwrap_err();
-        assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(401, _, _)), "{error:?}");
     }
 
     #[tokio::test]
@@ -242,7 +242,7 @@ mod tests {
             let error = http::get::<String>(&client, "/volumes/nothing")
                 .await
                 .unwrap_err();
-            let Error::Status(404, message) = &error else {
+            let Error::Status(404, message, _) = &error else {
                 panic!("not a 404: {error:?}");
             };
             assert_eq!(message, "not_found: none");
@@ -383,6 +383,175 @@ mod tests {
         }
     }
 
+    /// A sandbox is found by its name in `?name=`, encoded; of what a server answers, only one
+    /// named so is taken, and two named so are refused.
+    #[tokio::test]
+    async fn a_sandbox_is_found_by_its_name_encoded() {
+        use axum::extract::RawQuery;
+        use serde_json::json;
+
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let list = {
+            let asked = asked.clone();
+            move |RawQuery(query): RawQuery| async move {
+                asked.lock().unwrap().push(query);
+                // Every sandbox, as a server that reads no `name` answers.
+                Json(json!([
+                    {"id": "s1", "image": "sha256:00", "running": true},
+                    {"id": "s2", "name": "a b&c", "image": "sha256:00", "running": true},
+                    {"id": "s3", "name": "twice", "image": "sha256:00", "running": true},
+                    {"id": "s4", "name": "twice", "image": "sha256:00", "running": true},
+                ]))
+            }
+        };
+        let url = serve(Router::new().route("/sandboxes/", get(list))).await;
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+
+        let found = crate::sandbox::client::find(&client, "a b&c")
+            .await
+            .unwrap();
+        assert_eq!(found.map(|s| s.id).as_deref(), Some("s2"));
+        let found = crate::sandbox::client::find(&client, "s1").await.unwrap();
+        assert_eq!(found, None);
+        let twice = crate::sandbox::client::find(&client, "twice").await;
+        assert!(matches!(twice, Err(crate::Error::Client(_))), "{twice:?}");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [
+                Some("name=a%20b%26c".to_owned()),
+                Some("name=s1".to_owned()),
+                Some("name=twice".to_owned())
+            ]
+        );
+    }
+
+    /// An exec is read with its log in one request from a server that answers it so, the job its
+    /// first event; from one that answers the job alone, in two; and where the answer breaks, the
+    /// job's log is read on after the last entry read, the job's event counting for none -- and
+    /// the job itself read at its `Location` where the answer breaks before it.
+    #[tokio::test]
+    async fn an_exec_is_read_with_its_log_in_one_request_or_two() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{body::Body, routing::post};
+        use futures_util::{StreamExt as _, TryStreamExt as _};
+
+        use crate::{SandboxExecArgs, SandboxExecItem, SandboxJobEntry};
+
+        const JOB: &str = r#"{"id":"j","kind":"exec","pid":1,"cmd":["x"],"running":true}"#;
+        let entries = |from: u64, to: u64| -> String {
+            (from..=to)
+                .map(|id| match id {
+                    3 => format!("id: {id}\ndata: {{\"end\":{{\"code\":0}}}}\n\n"),
+                    _ => format!("id: {id}\ndata: {{\"stdout\":\"{id}\"}}\n\n"),
+                })
+                .collect()
+        };
+        let job_event = format!("data: {{\"job\":{JOB}}}\n\n");
+        // `mode`: `log`, answered with all of it; `job`, with the job alone; `broken`, with the
+        // job and the first entry, then a broken body; `jobless`, with a body broken before the
+        // job; `bare`, with the job, then a broken body.
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let router = |mode: &'static str| {
+            let asked = asked.clone();
+            let job_event = job_event.clone();
+            let exec = {
+                let asked = asked.clone();
+                move |headers: HeaderMap| async move {
+                    let accept = headers["accept"].to_str().unwrap().to_owned();
+                    asked.lock().unwrap().push(format!("exec {accept}"));
+                    // Broken a while after `sent`, once that has reached the client.
+                    let broken = |sent: String| {
+                        let sent = futures_util::stream::iter([Ok(sent)]);
+                        let gone = futures_util::stream::once(async {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            Err(std::io::Error::other("gone"))
+                        });
+                        Body::from_stream(sent.chain(gone))
+                    };
+                    let log = |body: Body| {
+                        axum::response::Response::builder()
+                            .status(201)
+                            .header("content-type", "text/event-stream")
+                            .header("location", "/sandboxes/s/jobs/j")
+                            .body(body)
+                            .unwrap()
+                    };
+                    match mode {
+                        "log" => log(Body::from(format!("{job_event}{}", entries(1, 3)))),
+                        "broken" => log(broken(format!("{job_event}{}", entries(1, 1)))),
+                        "jobless" => log(broken(": open\n\n".into())),
+                        "bare" => log(broken(job_event)),
+                        _ => axum::response::Response::builder()
+                            .status(201)
+                            .header("content-type", "application/json")
+                            .header("location", "/sandboxes/s/jobs/j")
+                            .body(Body::from(JOB))
+                            .unwrap(),
+                    }
+                }
+            };
+            let got = {
+                let asked = asked.clone();
+                move || async move {
+                    asked.lock().unwrap().push("job".into());
+                    ([("content-type", "application/json")], JOB)
+                }
+            };
+            let events = move |headers: HeaderMap| async move {
+                let after = headers
+                    .get("last-event-id")
+                    .map(|after| after.to_str().unwrap().parse::<u64>().unwrap());
+                asked.lock().unwrap().push(match after {
+                    Some(after) => format!("events after {after}"),
+                    None => "events".into(),
+                });
+                (
+                    [("content-type", "text/event-stream")],
+                    entries(after.unwrap_or(0) + 1, 3),
+                )
+            };
+            Router::new()
+                .route("/sandboxes/s/jobs/exec/", post(exec))
+                .route("/sandboxes/s/jobs/j", get(got))
+                .route("/sandboxes/s/jobs/j/events", get(events))
+        };
+        let args = SandboxExecArgs::new(["x"]);
+        let exec = "exec text/event-stream, application/json";
+        for (mode, requests) in [
+            ("log", vec![exec]),
+            ("job", vec![exec, "events"]),
+            ("broken", vec![exec, "events after 1"]),
+            ("jobless", vec![exec, "job", "events"]),
+            ("bare", vec![exec, "events"]),
+        ] {
+            asked.lock().unwrap().clear();
+            let url = serve(router(mode)).await;
+            let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+            let read: Vec<_> = crate::sandbox::client::exec_log(&client, "s", &args)
+                .try_collect()
+                .await
+                .unwrap();
+            assert!(
+                matches!(&read[0], SandboxExecItem::Job(job) if job.id == "j"),
+                "{mode}: {read:?}"
+            );
+            let ids: Vec<_> = read[1..]
+                .iter()
+                .map(|item| match item {
+                    SandboxExecItem::Log(entry) => entry.id,
+                    SandboxExecItem::Job(_) => panic!("{mode}: a job after the first"),
+                })
+                .collect();
+            assert_eq!(ids, [1, 2, 3], "{mode}");
+            assert!(matches!(
+                read.last(),
+                Some(SandboxExecItem::Log(entry)) if matches!(entry.entry, SandboxJobEntry::End(_))
+            ));
+            assert_eq!(*asked.lock().unwrap(), requests, "{mode}");
+        }
+    }
+
     /// Counts each request to a route, and answers the `n`th (from `0`) with `answer(n)`.
     fn counted(
         asked: &std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -482,7 +651,7 @@ mod tests {
         );
         let client = piped(router);
         let error = http::get::<String>(&client, "/quota").await.unwrap_err();
-        assert!(matches!(error, Error::Status(429, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(429, _, _)), "{error:?}");
         assert_eq!(error.code(), Some("quota"));
         assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
@@ -522,7 +691,7 @@ mod tests {
         let error = http::post::<String>(&client, "/made", &body)
             .await
             .unwrap_err();
-        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(503, _, _)), "{error:?}");
         assert_eq!(made.load(Ordering::SeqCst), 1, "made once at most");
         assert_eq!(
             http::post::<String>(&client, "/room", &body).await.unwrap(),
@@ -627,7 +796,7 @@ mod tests {
         );
         let client = piped(router);
         let error = http::get::<String>(&client, "/slow").await.unwrap_err();
-        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(503, _, _)), "{error:?}");
         assert_eq!(asked.load(Ordering::SeqCst), 3);
     }
 
@@ -787,7 +956,7 @@ mod tests {
         assert!(matches!(cut[..], [Ok(1), Ok(2), Ok(3)]), "{cut:?}");
         let removed = read("removed", None).await;
         assert!(
-            matches!(removed[..], [Ok(1), Err(Error::Status(404, _))]),
+            matches!(removed[..], [Ok(1), Err(Error::Status(404, _, _))]),
             "{removed:?}"
         );
         let waiting = read("waiting", None).await;

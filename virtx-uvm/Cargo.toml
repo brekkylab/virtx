@@ -61,7 +61,7 @@ libc = { workspace = true }
 log = "0.4"
 # The machine: libkrun linked in, its block devices on, and the init it lays over the
 # guest's root. Our fork, at a commit on its `virtx` branch; what each commit there is for is
-# in README.md. To work on libkrun from a local clone, override the source outside the
+# in 3rdparty/FORKS.md. To work on libkrun from a local clone, override the source outside the
 # repository, in `~/.cargo/config.toml`:
 #     [patch."https://github.com/brekkylab/libkrun"]
 #     libkrun = { path = "../libkrun/src/libkrun" }
@@ -97,6 +97,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Ioctl",
     # A volume's root opened sharing deletion.
     "Win32_Storage_FileSystem",
+    # A machine's process started in a process group of its own.
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

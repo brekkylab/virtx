@@ -14,7 +14,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
-pub use self::portforward::PortForwarder;
+pub use self::portforward::{ForwardError, PortForwarder};
 use self::{stdio::Stdio, tcp::Tcp};
 use super::http::refused;
 use crate::{Auth, Error, PROJECT_HEADER};
@@ -46,8 +46,8 @@ fn retry_after(response: &http::Response<Body>) -> Option<Duration> {
     ))
 }
 
-/// What a `429` or a `503` says of the request it answers, as `PROTOCOL.md`'s Refused for now
-/// has it.
+/// What a `429` or a `503` says of the request it answers, as the protocol's Refused for now has
+/// it.
 struct ForNow {
     /// Whether to send the request again after a wait: a `429` unless it is a `quota` whose
     /// `reason` is other than `requests`, which frees up only as the caller closes or deletes

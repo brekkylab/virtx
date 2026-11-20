@@ -60,7 +60,12 @@ pub enum CtrlReq {
     /// Run `cmd` in the guest, beside whatever else runs there. Answered with
     /// [`Started`](CtrlResp::Started) before the next `Exec` is, so the host that waits for
     /// it before sending another knows which it answers.
-    Exec { cmd: Vec<String> },
+    Exec {
+        cmd: Vec<String>,
+        /// Its stdin a pipe, written with [`Stdin`](CtrlReq::Stdin): empty if not.
+        #[serde(default)]
+        stdin: bool,
+    },
     /// Send `signal` to the process `id` and everything it started. Numbered as the guest's
     /// Linux numbers it, which is not every host's: `SIGUSR1` is 10 there and 30 on macOS. Not
     /// answered: what the process does with it, its [`Exited`](CtrlResp::Exited) says.
@@ -68,6 +73,18 @@ pub enum CtrlReq {
     /// Put what the guest has written on its disks, and end the machine. Not answered: its
     /// process ends.
     Shutdown,
+    /// Write `data` to the stdin of the process `id`, one [`Exec`](CtrlReq::Exec) started with
+    /// it, closed after if `eof`. Answered with a [`Written`](CtrlResp::Written) carrying `seq`
+    /// once it is in the process's stdin -- which takes a pipe's worth before the process reads
+    /// any -- or never will be: a process that does not read it holds up none but whoever writes
+    /// to it.
+    Stdin {
+        id: u32,
+        seq: u64,
+        data: String,
+        #[serde(default)]
+        eof: bool,
+    },
     /// Answered with [`Pong`](CtrlResp::Pong), from the machine's process to the agent: how it
     /// hears a guest that is up. The host never sends it.
     Ping,
@@ -86,17 +103,47 @@ pub enum CtrlResp {
     Stdout { id: u32, line: String },
     /// A line the process `id` wrote to its stderr, without its newline.
     Stderr { id: u32, line: String },
-    /// The process `id` ended with `code`; `128 + signal` for one a signal ended. The last
-    /// thing said of it.
-    Exited { id: u32, code: i32 },
+    /// The process `id` ended with `code`; `128 + signal` for one a signal ended. `oom` where
+    /// it ended `137` and its memory ran out: the kernel's OOM killer killed a process of its
+    /// command's cgroup, or the agent killed the cgroup, out of memory and thrashing at its
+    /// limit. The last thing said of it.
+    Exited {
+        id: u32,
+        code: i32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        oom: bool,
+    },
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
     /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
     /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine
     /// could not be built or broke, logged as an error as the process's last word -- so a
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
+    /// The answer to the [`Stdin`](CtrlReq::Stdin) `seq` to the process `id`: how many `bytes`
+    /// of its `data` went in, and what became of it.
+    Written {
+        id: u32,
+        seq: u64,
+        bytes: u64,
+        taken: Taken,
+    },
     /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
     Pong,
+}
+
+/// What became of a [`Stdin`](CtrlReq::Stdin) write, in its [`Written`](CtrlResp::Written).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Taken {
+    /// All of its `data` is in the process's stdin. An empty `data` is, while the stdin still
+    /// has a reader.
+    Whole,
+    /// The stdin is gone -- its reader closed it, or the process ended -- with `bytes` of it in:
+    /// nothing more will be.
+    Closed,
+    /// None of it taken: the agent already holds as many writes to that stdin as it holds. The
+    /// stdin is as it was, `eof` and all, and takes it once its process reads.
+    Full,
 }
 
 /// What the host asks of the guest's files on the I/O channel, each answered with a
@@ -170,10 +217,20 @@ pub enum IoFailure {
 
 /// Write `message` as one frame.
 pub fn send(out: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
-    let message = serde_json::to_vec(message).map_err(io::Error::other)?;
-    let length = u32::try_from(message.len()).map_err(io::Error::other)?;
-    out.write_all(&length.to_be_bytes())?;
-    out.write_all(&message)?;
+    send_all(out, std::slice::from_ref(message))
+}
+
+/// `messages`, a frame each, handed to `out` as one buffer: fewer writes than a frame each,
+/// where a write is a machine's exit to its host.
+pub fn send_all<M: Serialize>(out: &mut impl Write, messages: &[M]) -> io::Result<()> {
+    let mut frames = Vec::new();
+    for message in messages {
+        let message = serde_json::to_vec(message).map_err(io::Error::other)?;
+        let length = u32::try_from(message.len()).map_err(io::Error::other)?;
+        frames.extend_from_slice(&length.to_be_bytes());
+        frames.extend_from_slice(&message);
+    }
+    out.write_all(&frames)?;
     out.flush()
 }
 

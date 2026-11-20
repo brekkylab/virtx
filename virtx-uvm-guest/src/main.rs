@@ -19,27 +19,360 @@
 //! every command inherits, what `/alib` holds for this image ([`alib_env`]): only from in here
 //! is the image's root seen.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufRead as _, BufReader, Read, Seek as _, SeekFrom, Write as _};
-use std::os::fd::AsRawFd as _;
+use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[path = "../../virtx-uvm/src/machine/wire.rs"]
 mod wire;
 
 use wire::{
-    CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME,
+    CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME, Taken,
 };
 
 /// The port's writing half, shared by everything that says something on it, so two messages
 /// never interleave.
 type Out = Arc<Mutex<File>>;
+
+/// The cgroup every command run here goes under -- each in one of its own within it -- its
+/// processes held to [`AGENT_PIDS`] fewer than the kernel's threads or pids, its memory to all
+/// but [`AGENT_MEMORY`], and its CPU weighed under one of this agent's threads: so that a
+/// command forking without end -- a fork bomb -- leaves this agent the processes, the memory and
+/// the CPU it needs to answer the host and to stop, and a command run beside it the CPU of one
+/// command, not one of the bomb's thousands of processes. None where the kernel has no cgroup2
+/// or no `pids` controller.
+static JOBS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+/// What of the kernel's threads the commands may not take: this agent's.
+const AGENT_PIDS: u64 = 256;
+/// What of the machine's memory the commands may not take, for this agent and the kernel: an
+/// eighth of it, up to this.
+const AGENT_MEMORY: u64 = 128 << 20;
+/// What of the commands' memory one command may not take, for another to start beside it: a
+/// sixteenth of the machine's, up to this. Without it, one that takes all there is leaves every
+/// other reclaiming beside it to start.
+const JOB_ROOM: u64 = 64 << 20;
+/// The most memory one command may take, where the kernel has the `memory` controller.
+static JOB_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// What of the commands' processes one command may not take, for another to start beside it: an
+/// eighth of them, up to this. Without it, one forking without end leaves every other command
+/// unable to fork.
+const JOB_PIDS_ROOM: u64 = 256;
+/// The most processes one command may have.
+static JOB_PIDS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// The next command's cgroup.
+static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Each running command's cgroup, where commands are held by their memory, and how its memory
+/// stood at [`watch_thrashing`]'s last look.
+static WATCHED: Mutex<std::collections::BTreeMap<PathBuf, Thrash>> =
+    Mutex::new(std::collections::BTreeMap::new());
+/// How often [`watch_thrashing`] looks, and how many looks in a row a command may thrash at its
+/// memory limit before it is killed.
+const THRASH_LOOK: Duration = Duration::from_secs(1);
+const THRASH_LOOKS: u32 = 3;
+/// What of its memory limit a command out of memory has left for pages reclaim can take, at
+/// most: a thirty-second of it. One whose own memory fills its limit has its program's pages
+/// alone, a few MiB.
+const THRASH_ROOM: u64 = 32;
+
+/// A command's memory as [`watch_thrashing`] last saw it: how often it had hit its limit, how
+/// many pages it had read back after letting them go, how many looks in a row it thrashed, and
+/// whether it was killed for it.
+#[derive(Default)]
+struct Thrash {
+    max: u64,
+    refaults: u64,
+    strikes: u32,
+    killed: bool,
+}
+
+/// Kill each command whose memory has run out, as the kernel's OOM killer kills one whose
+/// memory it cannot take back. The kernel kills only where reclaiming gets nowhere, and a
+/// command whose own anonymous memory fills its limit still has its program's pages to let go
+/// of and read back, again and again, for minutes, without end. One that, between two looks,
+/// hit its limit, read back more than a sixteenth of it in pages, and holds all but a
+/// [`THRASH_ROOM`]th of it in memory that cannot be reclaimed is out of memory; for
+/// [`THRASH_LOOKS`] looks in a row, its cgroup is killed. A command that only reads more files
+/// than its limit holds hits it and reads back as much, but holds what it read as file pages,
+/// which are reclaimed: it is never killed.
+fn watch_thrashing() {
+    let Some(&most) = JOB_MEMORY.get() else {
+        return;
+    };
+    // SAFETY: `sysconf` has no preconditions.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    let enough = most / page / 16;
+    let counted = |read: &str, name: &str| -> u64 {
+        read.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+            .unwrap_or(0)
+    };
+    let read = |own: &Path, file: &str| fs::read_to_string(own.join(file)).unwrap_or_default();
+    loop {
+        thread::sleep(THRASH_LOOK);
+        for (own, thrash) in WATCHED.lock().unwrap().iter_mut() {
+            if thrash.killed {
+                continue;
+            }
+            let max = counted(&read(own, "memory.events"), "max");
+            let stat = read(own, "memory.stat");
+            let refaults = counted(&stat, "workingset_refault_file");
+            // What it holds less what reclaim can take: the file pages on their lists, and the
+            // kernel's reclaimable caches. Anonymous memory, with no swap, and tmpfs stay.
+            let reclaimable = ["active_file", "inactive_file", "slab_reclaimable"]
+                .map(|name| counted(&stat, name))
+                .iter()
+                .sum::<u64>();
+            let current = read(own, "memory.current").trim().parse().unwrap_or(0u64);
+            let held = current.saturating_sub(reclaimable);
+            let thrashing = max > thrash.max
+                && refaults.saturating_sub(thrash.refaults) > enough
+                && held >= most - most / THRASH_ROOM;
+            thrash.strikes = if thrashing { thrash.strikes + 1 } else { 0 };
+            (thrash.max, thrash.refaults) = (max, refaults);
+            if thrash.strikes >= THRASH_LOOKS {
+                thrash.killed = fs::write(own.join("cgroup.kill"), "1").is_ok();
+            }
+        }
+    }
+}
+
+/// The cgroup for commands, made: its `pids.max` the kernel's threads or pids, the fewer, less
+/// [`AGENT_PIDS`], and each command's that less [`JOB_PIDS_ROOM`]; its `memory.max` the
+/// machine's less [`AGENT_MEMORY`], and each command's that less [`JOB_ROOM`]. What it could not
+/// hold them by is said on the console.
+fn jobs_cgroup() -> Option<PathBuf> {
+    let jobs = held_cgroup();
+    let held = |what| jobs.is_some() && held_by(what);
+    let missing: Vec<&str> = ["pids", "cpu", "memory"]
+        .into_iter()
+        .filter(|what| !held(what))
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "{}: commands not held by the cgroup controllers {}",
+            env!("CARGO_BIN_NAME"),
+            missing.join(", ")
+        );
+    }
+    jobs
+}
+
+/// Whether the commands' cgroup holds them by the controller `what`.
+fn held_by(what: &str) -> bool {
+    std::fs::read_to_string("/sys/fs/cgroup/jobs/cgroup.subtree_control")
+        .is_ok_and(|held| held.split_whitespace().any(|c| c == what))
+}
+
+/// [`jobs_cgroup`]'s making.
+fn held_cgroup() -> Option<PathBuf> {
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    std::fs::write(root.join("cgroup.subtree_control"), "+pids").ok()?;
+    // And the CPU: every command together weighs a tenth of one of this agent's threads, which
+    // so answers the host while they take the rest -- all of it, when this agent waits, as it
+    // mostly does. Without the controller, the pids alone.
+    let weighed = std::fs::write(root.join("cgroup.subtree_control"), "+cpu").is_ok();
+    let memory = std::fs::write(root.join("cgroup.subtree_control"), "+memory").is_ok();
+    let jobs = root.join("jobs");
+    std::fs::create_dir_all(&jobs).ok()?;
+    // The kernel's own default for its pids, where it was built with fewer: a machine's
+    // processes held by its memory (`threads-max`), not by 4096 whatever its size.
+    let _ = std::fs::write("/proc/sys/kernel/pid_max", "32768");
+    let read =
+        |path: &str| -> Option<u64> { std::fs::read_to_string(path).ok()?.trim().parse().ok() };
+    // Whichever runs out first: threads, or pids.
+    let threads = read("/proc/sys/kernel/threads-max")?.min(read("/proc/sys/kernel/pid_max")?);
+    let most = threads.saturating_sub(AGENT_PIDS).max(64);
+    std::fs::write(jobs.join("pids.max"), most.to_string()).ok()?;
+    let _ = JOB_PIDS.set(most - (most / 8).min(JOB_PIDS_ROOM));
+    if weighed {
+        let _ = std::fs::write(jobs.join("cpu.weight"), "10");
+        let _ = std::fs::write(jobs.join("cgroup.subtree_control"), "+cpu");
+    }
+    let _ = std::fs::write(jobs.join("cgroup.subtree_control"), "+pids");
+    if memory && let Some(total) = memory_total() {
+        let together = total - (total / 8).min(AGENT_MEMORY);
+        let limited = std::fs::write(jobs.join("memory.max"), together.to_string()).is_ok();
+        if limited && std::fs::write(jobs.join("cgroup.subtree_control"), "+memory").is_ok() {
+            let _ = JOB_MEMORY.set(together - (total / 16).min(JOB_ROOM));
+        }
+    }
+    Some(jobs)
+}
+
+/// Whether the kernel's OOM killer has killed a process in the cgroup `own`: its
+/// `memory.events`' `oom_kill`, which is none where the kernel has no `memory` controller.
+fn oom_killed(own: &Path) -> bool {
+    let events = std::fs::read_to_string(own.join("memory.events")).unwrap_or_default();
+    events.lines().any(|line| {
+        line.strip_prefix("oom_kill ")
+            .and_then(|n| n.trim().parse::<u64>().ok())
+            .is_some_and(|n| n > 0)
+    })
+}
+
+/// The machine's memory, in bytes: `MemTotal` in `/proc/meminfo`.
+fn memory_total() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib << 10)
+}
+
+/// `command`'s process put in a cgroup of its own under [`JOBS`] before it starts, if there is
+/// one: what is answered is that cgroup's `cgroup.procs`, to be held open until the process has
+/// started, and the cgroup, to remove once it ends. Those of commands ended that something they
+/// left running held then, with nothing left in them now, are removed first.
+fn in_jobs(command: &mut Command) -> Option<(File, PathBuf)> {
+    let jobs = JOBS.get()?.as_ref()?;
+    if let Ok(entries) = std::fs::read_dir(jobs) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                // Refused for one with a process in it still.
+                let _ = std::fs::remove_dir(entry.path());
+            }
+        }
+    }
+    let n = NEXT_JOB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let own = jobs.join(n.to_string());
+    std::fs::create_dir(&own).ok()?;
+    if let Some(most) = JOB_MEMORY.get() {
+        let _ = std::fs::write(own.join("memory.max"), most.to_string());
+    }
+    if let Some(most) = JOB_PIDS.get() {
+        let _ = std::fs::write(own.join("pids.max"), most.to_string());
+    }
+    let procs = File::options()
+        .write(true)
+        .open(own.join("cgroup.procs"))
+        .ok()?;
+    let fd = procs.as_raw_fd();
+    // SAFETY: `write` is async-signal-safe; `fd` is open until the process has started. One
+    // that fails leaves the process where it is.
+    unsafe {
+        command.pre_exec(move || {
+            libc::write(fd, b"0".as_ptr().cast(), 1);
+            Ok(())
+        });
+    }
+    Some((procs, own))
+}
+
+/// The stdin of each process started with one, by pid.
+type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
+
+/// How many writes to one process's stdin are queued at most. The host sends the next only once
+/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, as when writes
+/// were given up on while the process did not read, one is answered [`Full`](Taken::Full) and
+/// not taken, rather than the loop waiting.
+const INPUT_QUEUED: usize = 4;
+
+/// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`. `seq` is
+/// the host's number for it, which its [`Written`](CtrlResp::Written) carries back.
+struct Queued {
+    seq: u64,
+    data: String,
+    eof: bool,
+}
+
+/// A process's stdin, written on a thread of its own, each write answered
+/// [`Written`](CtrlResp::Written) once it is, or once it never will be: the loop that takes the
+/// host's requests never waits on a process's reading, and what a process has not read is never
+/// more than [`INPUT_QUEUED`] writes. Dropped, what is queued is still written, and then its
+/// stdin closed.
+struct Input(std::sync::mpsc::SyncSender<Queued>);
+
+impl Input {
+    /// The stdin of process `id`, written to `to`.
+    fn start(out: &Out, id: u32, to: ChildStdin) -> Input {
+        let (queued, taken) = std::sync::mpsc::sync_channel::<Queued>(INPUT_QUEUED);
+        let out = Arc::clone(out);
+        thread::spawn(move || {
+            let mut to = Some(to);
+            while let Ok(Queued { seq, data, eof }) = taken.recv() {
+                let (bytes, whole) = match &mut to {
+                    Some(pipe) => write_counted(pipe, data.as_bytes()),
+                    None => (0, false),
+                };
+                // Its reader gone, or its stdin closed: nothing more is written.
+                if !whole || eof {
+                    to = None;
+                }
+                let taken = if whole { Taken::Whole } else { Taken::Closed };
+                send(
+                    &out,
+                    &CtrlResp::Written {
+                        id,
+                        seq,
+                        bytes,
+                        taken,
+                    },
+                );
+            }
+        });
+        Input(queued)
+    }
+
+    /// `queued` queued, for process `id`, and whether it was: where the queue is full it is
+    /// answered [`Full`](Taken::Full), and the stdin left as it was.
+    fn put(&self, out: &Out, id: u32, queued: Queued) -> bool {
+        let seq = queued.seq;
+        match self.0.try_send(queued) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                send(out, &not_written(id, seq, Taken::Full));
+                false
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                send(out, &not_written(id, seq, Taken::Closed));
+                false
+            }
+        }
+    }
+}
+
+/// Write `data` to `pipe`: how many bytes of it went in, and whether all did. An empty `data`
+/// writes nothing and asks whether the pipe still has a reader, which is what any write would
+/// find out.
+fn write_counted(pipe: &mut ChildStdin, data: &[u8]) -> (u64, bool) {
+    if data.is_empty() {
+        let mut poll = libc::pollfd {
+            fd: pipe.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd` of a descriptor `pipe` holds open, not waited on.
+        let polled = unsafe { libc::poll(&mut poll, 1, 0) };
+        return (0, polled >= 0 && poll.revents & libc::POLLERR == 0);
+    }
+    let mut bytes = 0;
+    while bytes < data.len() {
+        match pipe.write(&data[bytes..]) {
+            Ok(0) => break,
+            Ok(n) => bytes += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    (bytes as u64, bytes == data.len())
+}
+
+/// The answer to write `seq` to process `id` that wrote none of it, `taken` saying why.
+fn not_written(id: u32, seq: u64, taken: Taken) -> CtrlResp {
+    CtrlResp::Written {
+        id,
+        seq,
+        bytes: 0,
+        taken,
+    }
+}
 
 /// The most of a line one message carries: escaped as JSON, a byte is at most six, well within
 /// a frame.
@@ -236,10 +569,29 @@ fn serve() -> io::Result<()> {
         }
     });
 
+    JOBS.get_or_init(jobs_cgroup);
+    thread::spawn(watch_thrashing);
     send(&out, &CtrlResp::Ready(Vec::new()));
+    let stdins = Stdins::default();
     while let Some(message) = wire::recv(&mut input)? {
         match message {
-            CtrlReq::Exec { cmd } => exec(&out, cmd),
+            CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
+            // Handed to its writer, never written here: a process not reading holds up no other.
+            // Answered `Closed` at once for a process with no stdin here. An `eof` not queued
+            // leaves the stdin open.
+            CtrlReq::Stdin { id, seq, data, eof } => {
+                let mut stdins = stdins.lock().unwrap();
+                let queued = match stdins.get(&id) {
+                    Some(input) => input.put(&out, id, Queued { seq, data, eof }),
+                    None => {
+                        send(&out, &not_written(id, seq, Taken::Closed));
+                        false
+                    }
+                };
+                if eof && queued {
+                    stdins.remove(&id);
+                }
+            }
             // SAFETY: `kill` takes plain values; a group that is gone is an error it returns.
             CtrlReq::Signal { id, signal } => unsafe {
                 libc::kill(-(id as libc::pid_t), signal);
@@ -274,72 +626,267 @@ fn find(name: &str) -> io::Result<PathBuf> {
     ))
 }
 
-/// Start `cmd` in a process group of its own, answer the host with its pid -- before anything
-/// it writes, which goes after -- and send how it ended once it has.
-fn exec(out: &Out, cmd: Vec<String>) {
-    let started = Command::new(&cmd[0])
+/// Start `cmd` in a process group of its own, its stdin a pipe if `stdin`, answer the host with
+/// its pid -- before anything it writes, which goes after -- and send how it ended once it has.
+fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
+    let mut command = Command::new(&cmd[0]);
+    command
         .args(&cmd[1..])
-        .stdin(Stdio::null())
+        .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn();
+        .process_group(0);
+    let cgroup = in_jobs(&mut command);
+    let started = command.spawn();
+    // Its process is in it, or never will be: the descriptor that put it there is done.
+    let cgroup = cgroup.map(|(_, own)| own);
     let mut child = match started {
         Ok(child) => child,
         Err(e) => {
+            if let Some(own) = &cgroup {
+                let _ = fs::remove_dir(own);
+            }
             send(out, &CtrlResp::Started(Err(format!("{}: {e}", cmd[0]))));
             return;
         }
     };
     let id = child.id();
+    if let Some(own) = cgroup.as_ref().filter(|_| JOB_MEMORY.get().is_some()) {
+        WATCHED
+            .lock()
+            .unwrap()
+            .insert(own.clone(), Thrash::default());
+    }
+    // Its stdin taken before its start is said, so that a write the host sends at once finds it.
+    if let Some(pipe) = child.stdin.take() {
+        stdins
+            .lock()
+            .unwrap()
+            .insert(id, Input::start(out, id, pipe));
+    }
     send(out, &CtrlResp::Started(Ok(id)));
 
-    let stdout = lines(out, child.stdout.take(), move |line| CtrlResp::Stdout {
-        id,
-        line,
-    });
-    let stderr = lines(out, child.stderr.take(), move |line| CtrlResp::Stderr {
-        id,
-        line,
-    });
-    let out = Arc::clone(out);
+    let (read, all_read) = std::sync::mpsc::channel();
+    let stdout = Piped::start(
+        out,
+        child.stdout.take().map(OwnedFd::from),
+        read.clone(),
+        move |line| CtrlResp::Stdout { id, line },
+    );
+    let stderr = Piped::start(
+        out,
+        child.stderr.take().map(OwnedFd::from),
+        read,
+        move |line| CtrlResp::Stderr { id, line },
+    );
+    let (out, stdins) = (Arc::clone(out), Arc::clone(stdins));
     thread::spawn(move || {
-        // Everything it wrote first, so its end is the last thing said of it.
-        let _ = (stdout.join(), stderr.join());
-        send(
-            &out,
-            &CtrlResp::Exited {
-                id,
-                code: code(&mut child),
-            },
-        );
+        // It ends when its process does -- not when its output does, which a program it left
+        // running in the background (`server &`) holds open for as long as that runs. What it
+        // wrote before it ended is said first, so its end is the last thing said of it: each
+        // pipe read up to what was in it as the process ended, or to its end if sooner.
+        let code = code(&mut child);
+        // Killed, and the kernel's OOM killer killed in its cgroup, or it was killed for
+        // thrashing at its limit: its memory ran out. Read before the cgroup goes.
+        let starved = cgroup.as_ref().and_then(|own| WATCHED.lock().unwrap().remove(own));
+        let starved = starved.is_some_and(|thrash| thrash.killed);
+        let oom = code == 128 + libc::SIGKILL
+            && (starved || cgroup.as_deref().is_some_and(oom_killed));
+        // Its cgroup gone with it, unless a program it left running is in it still.
+        if let Some(own) = &cgroup {
+            let _ = fs::remove_dir(own);
+        }
+        // Its stdin, if still open, closed once what is queued is: no process reads it.
+        drop(stdins.lock().unwrap().remove(&id));
+        stdout.exited();
+        stderr.exited();
+        for _ in 0..2 {
+            if all_read.recv().is_err() {
+                break;
+            }
+        }
+        send(&out, &CtrlResp::Exited { id, code, oom });
     });
 }
 
-/// Each line `read` gives, as `wrapped` makes it a message, until it ends. One longer than
-/// [`LINE_LIMIT`] goes as several, so no frame is past what the host reads.
-fn lines(
-    out: &Out,
-    read: Option<impl Read + Send + 'static>,
-    wrapped: impl Fn(String) -> CtrlResp + Send + 'static,
-) -> thread::JoinHandle<()> {
-    let out = Arc::clone(out);
-    thread::spawn(move || {
-        let Some(read) = read else { return };
-        let mut read = BufReader::new(read);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match (&mut read).take(LINE_LIMIT).read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {}
+/// One of a process's pipes, read on a thread of its own: each line sent up to what was in it
+/// when its process ended, and what comes after -- a background program's -- read and dropped,
+/// so that a program writing to it is never held up by a full pipe.
+struct Piped {
+    /// The pipe, held here too so that [`exited`](Piped::exited) asks about it and no
+    /// descriptor that took its number after its thread let go.
+    pipe: Option<Arc<File>>,
+    /// Written a byte by [`exited`](Piped::exited), to wake its thread from waiting on the pipe.
+    wake: Option<File>,
+    /// What has been read, and once its process has ended, what was in the pipe by then: read
+    /// under the lock, so the two are counted alike.
+    count: Arc<Mutex<Count>>,
+}
+
+#[derive(Default)]
+struct Count {
+    read: u64,
+    until: Option<u64>,
+}
+
+impl Piped {
+    fn start(
+        out: &Out,
+        pipe: Option<OwnedFd>,
+        read: std::sync::mpsc::Sender<()>,
+        wrapped: impl Fn(String) -> CtrlResp + Send + 'static,
+    ) -> Self {
+        let count = Arc::new(Mutex::new(Count::default()));
+        let Some(pipe) = pipe else {
+            let _ = read.send(());
+            return Self {
+                pipe: None,
+                wake: None,
+                count,
+            };
+        };
+        let (mut woken, wake) = wake_pipe().map_or((None, None), |(r, w)| (Some(r), Some(w)));
+        let pipe = Arc::new(File::from(pipe));
+        let (out, counted, reading) = (Arc::clone(out), Arc::clone(&count), Arc::clone(&pipe));
+        thread::spawn(move || {
+            // Each read's lines said together, in as few writes as the device takes: each write
+            // costs the machine an exit to its host, dear under nested virtualization.
+            let say = |lines: &mut Vec<Vec<u8>>| {
+                if lines.is_empty() {
+                    return;
+                }
+                let messages: Vec<CtrlResp> = lines
+                    .iter()
+                    .map(|line| wrapped(String::from_utf8_lossy(line).into_owned()))
+                    .collect();
+                let _ = wire::send_all(&mut *out.lock().unwrap(), &messages);
+                lines.clear();
+            };
+            let mut said: Vec<Vec<u8>> = Vec::new();
+            let mut line = Vec::new();
+            let mut chunk = vec![0u8; 64 << 10];
+            let mut told = Some(read);
+            loop {
+                let caught_up = {
+                    let count = counted.lock().unwrap();
+                    count.until.is_some_and(|until| count.read >= until)
+                };
+                if caught_up && let Some(told) = told.take() {
+                    if !line.is_empty() {
+                        said.push(std::mem::take(&mut line));
+                    }
+                    say(&mut said);
+                    let _ = told.send(());
+                    // Nothing waits on the wake past this: its descriptor given back.
+                    woken = None;
+                }
+                // Until its process has ended, the pipe or the wake, whichever comes first; after,
+                // the pipe alone, read only to be dropped.
+                if told.is_some() && !readable(reading.as_raw_fd(), woken.as_ref()) {
+                    continue;
+                }
+                // How much was read, and how much of it was in the pipe when its process ended.
+                let (n, own) = {
+                    let mut count = counted.lock().unwrap();
+                    match (&*reading).read(&mut chunk) {
+                        Ok(0) | Err(_) => (0, 0),
+                        Ok(n) => {
+                            let before = count.read;
+                            count.read += n as u64;
+                            let own = count.until.map_or(n as u64, |until| {
+                                until.saturating_sub(before).min(n as u64)
+                            });
+                            (n, own as usize)
+                        }
+                    }
+                };
+                if n == 0 {
+                    if let Some(told) = told {
+                        if !line.is_empty() {
+                            said.push(std::mem::take(&mut line));
+                        }
+                        say(&mut said);
+                        let _ = told.send(());
+                    }
+                    return;
+                }
+                // Past its process's end, it is a background program's: dropped.
+                if told.is_none() {
+                    continue;
+                }
+                let mut rest = &chunk[..own];
+                while let Some(at) = rest.iter().position(|b| *b == b'\n') {
+                    line.extend_from_slice(&rest[..at]);
+                    said.push(std::mem::take(&mut line));
+                    rest = &rest[at + 1..];
+                }
+                line.extend_from_slice(rest);
+                // One longer than [`LINE_LIMIT`] goes as several.
+                while line.len() as u64 >= LINE_LIMIT {
+                    said.push(line.drain(..LINE_LIMIT as usize).collect());
+                }
+                say(&mut said);
             }
-            if line.last() == Some(&b'\n') {
-                line.pop();
-            }
-            send(&out, &wrapped(String::from_utf8_lossy(&line).into_owned()));
+        });
+        Self {
+            pipe: Some(pipe),
+            wake,
+            count,
         }
-    })
+    }
+
+    /// Its process has ended: what is in the pipe now is the last of what it wrote, as far as
+    /// the agent can tell -- a program it left running may have written there since it ended.
+    fn exited(&self) {
+        let mut count = self.count.lock().unwrap();
+        let waiting = self.pipe.as_ref().map_or(0, |pipe| {
+            let mut n: libc::c_int = 0;
+            // SAFETY: a descriptor `pipe` holds open, and an int.
+            match unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &mut n) } {
+                0 => n.max(0) as u64,
+                _ => 0,
+            }
+        });
+        count.until = Some(count.read + waiting);
+        if let Some(mut wake) = self.wake.as_ref() {
+            let _ = wake.write_all(&[0]);
+        }
+    }
+}
+
+/// A pipe to wake a [`Piped`]'s thread with: its reading end, then its writing end, neither
+/// inherited by a command.
+fn wake_pipe() -> io::Result<(File, File)> {
+    let mut fds = [0; 2];
+    // SAFETY: two ints for `pipe2` to fill.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: two descriptors just made, owned by nothing else.
+    Ok(unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) })
+}
+
+/// Waits for `fd` to have something to read, or to have ended, or for `woken` to be: whether
+/// `fd` is ready. What woke `woken` is taken from it. Without one -- the guest out of
+/// descriptors -- a tenth of a second at most, so that its process ending is still seen.
+fn readable(fd: i32, woken: Option<&File>) -> bool {
+    let pollfd = |fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut polled = [pollfd(fd), pollfd(woken.map_or(-1, |w| w.as_raw_fd()))];
+    let bound = if woken.is_some() { -1 } else { 100 };
+    // SAFETY: two `pollfd`s of descriptors held open, or of -1, which `poll` passes over.
+    if unsafe { libc::poll(polled.as_mut_ptr(), 2, bound) } <= 0 {
+        return false;
+    }
+    if polled[1].revents != 0
+        && let Some(mut woken) = woken
+    {
+        let _ = woken.read(&mut [0; 8]);
+    }
+    polled[0].revents != 0
 }
 
 /// How `child` ended: its exit code, `128 + signal` for one a signal ended.

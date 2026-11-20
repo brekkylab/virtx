@@ -12,13 +12,17 @@ use sha2::{Digest as _, Sha256};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
+use virtx_core::{
+    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+    SandboxPort,
+};
 
+use super::job::Written;
 use super::record::Record;
 use super::upper::Upper;
 use super::{Error, Job};
 use crate::backend::{Backing, Held, Stored, Wanted};
-use crate::machine::wire::CtrlResp;
+use crate::machine::wire::{CtrlResp, Taken};
 use crate::{
     Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
     Ports, Reference, Room, VolumeHold, VolumeMount, VolumeStore,
@@ -43,6 +47,9 @@ const SANDBOX: &str = "sandbox";
 const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
+
+/// The most characters a port's label has.
+const LABEL_MOST: usize = 128;
 
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
@@ -125,8 +132,9 @@ pub fn signal_number(name: &str) -> Option<i32> {
     Some(index as i32 + 1)
 }
 
-/// A command sent to the machine and not yet answered, and who waits for its job.
-type Starting = (Vec<String>, oneshot::Sender<Result<Arc<Job>, String>>);
+/// A command sent to the machine and not yet answered, whether it was started with a stdin,
+/// and who waits for its job.
+type Starting = (Vec<String>, bool, oneshot::Sender<Result<Arc<Job>, String>>);
 
 /// Where a sandbox's machine is.
 enum State {
@@ -149,6 +157,12 @@ enum State {
 pub struct Sandbox {
     /// Its upper disk's name, and so its own.
     id: String,
+    /// The name it was made with, which a server finds it again by.
+    name: Option<String>,
+    /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
+    root: PathBuf,
+    /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
+    up_since: Mutex<Option<(SystemTime, Instant)>>,
     /// Where its upper disk and its record are.
     dir: PathBuf,
     /// What is kept of it past its process, for one made so: `None` for one that goes with its
@@ -160,6 +174,9 @@ pub struct Sandbox {
     _held: ImageHold,
     /// The upper disk it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
+    /// The ports it was made with, as asked for again: what each is for and how it is reached,
+    /// with no `url`, which is its server's.
+    ports_opened: Vec<SandboxPort>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
     abins: Vec<String>,
@@ -177,6 +194,8 @@ pub struct Sandbox {
     config: MachineConfig,
     vm: Vec<OsString>,
     state: Mutex<State>,
+    /// Why a job that runs as it ends is ended, once it is closed or let go of.
+    ended_for: Mutex<Option<SandboxJobEndReason>>,
     /// Held while its machine boots or stops, so one does at a time.
     turn: tokio::sync::Mutex<()>,
     /// Its jobs, by id, until each is removed.
@@ -224,14 +243,31 @@ impl Sandbox {
         backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
+        if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
+            return Err(Error::Invalid(format!(
+                "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
+                 starting with '.' or '-', 128 at most"
+            )));
+        }
         let mut given = HashSet::new();
-        if let Some(port) = args
+        if let Some(spec) = args
             .ports
             .iter()
-            .find(|port| **port == 0 || !given.insert(**port))
+            .find(|spec| spec.port == 0 || !given.insert(spec.port))
         {
             return Err(Error::Invalid(format!(
-                "ports: {port} is not a port, or is given twice"
+                "ports: {} is not a port, or is given twice",
+                spec.port
+            )));
+        }
+        if let Some(spec) = args.ports.iter().find(|spec| {
+            spec.label
+                .as_ref()
+                .is_some_and(|label| label.chars().count() > LABEL_MOST)
+        }) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s label is past {LABEL_MOST} characters",
+                spec.port
             )));
         }
         let mut at = HashSet::new();
@@ -462,17 +498,32 @@ impl Sandbox {
             spec: machine_spec(args),
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
-            ports: args.ports.clone(),
+            ports: args.ports.iter().map(|spec| spec.port).collect(),
         };
         let exited = record.as_ref().is_some_and(|record| record.exited);
         let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());
         let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
         Ok(Sandbox {
             id: upper.id.clone(),
+            name: args.name.clone(),
+            root: root.to_owned(),
+            up_since: Mutex::default(),
             dir,
             record: Mutex::new(record),
             image: digest,
             _held: held_image,
+            ports_opened: args
+                .ports
+                .iter()
+                .map(|spec| SandboxPort {
+                    port: spec.port,
+                    url: None,
+                    label: spec.label.clone(),
+                    protocol: spec.protocol,
+                    address: None,
+                    inbound_error: None,
+                })
+                .collect(),
             abins: args.abins.clone(),
             upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
@@ -488,6 +539,7 @@ impl Sandbox {
                 true => State::Exited,
                 false => State::Parked,
             }),
+            ended_for: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(jobs),
             starting: Mutex::default(),
@@ -505,13 +557,25 @@ impl Sandbox {
         &self.id
     }
 
-    /// The sandbox as the server answers it, with no ports: only its making answers those.
+    /// The name it was made with, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// When its machine came up, while it is up; `None` while it is parked or has exited.
+    pub fn up_since(&self) -> Option<SystemTime> {
+        self.up_since.lock().unwrap().map(|(at, _)| at)
+    }
+
+    /// The sandbox as the server answers it, each port with what it is for and how it is
+    /// reached but no `url`: only its making answers those, which its server forms.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
+            name: self.name.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
-            ports: Vec::new(),
+            ports: self.ports_opened.clone(),
             abins: self.abins.clone(),
             error: None,
         }
@@ -556,10 +620,12 @@ impl Sandbox {
         }
     }
 
-    /// Start `cmd` in it, beside whatever else runs there, and kill it after `timeout`.
+    /// Start `cmd` in it, beside whatever else runs there, with a stdin to
+    /// [write](Sandbox::write_stdin) if `stdin`, and kill it after `timeout`.
     pub async fn exec(
         self: &Arc<Self>,
         cmd: Vec<String>,
+        stdin: bool,
         timeout: Option<Duration>,
     ) -> Result<Arc<Job>, Error> {
         // In use until the job runs, which keeps it in use from there.
@@ -571,8 +637,8 @@ impl Sandbox {
             if !self.is(&machine) {
                 return Err(Error::Ended);
             }
-            machine.exec(cmd.clone())?;
-            starting.push_back((cmd, waiter));
+            machine.exec(cmd.clone(), stdin)?;
+            starting.push_back((cmd, stdin, waiter));
         }
         let job = started
             .await
@@ -583,7 +649,7 @@ impl Sandbox {
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
                 if let Some(sandbox) = sandbox.upgrade() {
-                    let _ = sandbox.kill(&job);
+                    let _ = sandbox.kill(&job, SandboxJobEndReason::Timeout);
                 }
             });
         }
@@ -603,11 +669,13 @@ impl Sandbox {
             .ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))
     }
 
-    /// Kill the job `id` if it runs, and remove it.
+    /// Kill the job `id` if it runs, ending it as cancelled, and remove it: what reads its log
+    /// reads on to that end.
     pub fn remove_job(&self, id: &str) -> Result<(), Error> {
         let removed = self.jobs.lock().unwrap().remove(id);
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
-        self.kill(&job)?;
+        self.kill(&job, SandboxJobEndReason::Cancelled)?;
+        job.cut(SandboxJobEndReason::Cancelled);
         job.remove();
         self.keep_jobs();
         Ok(())
@@ -623,10 +691,36 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Refused for every job: none is started with a stdin to write to.
-    pub fn stdin(&self, id: &str) -> Result<(), Error> {
-        self.job(id)?;
-        Err(Error::JobEnded("the job was started without stdin"))
+    /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
+    /// answered once it is in the process's stdin, which takes a pipe's worth before the process
+    /// reads any, so a job that does not read holds the writer back once that is full. A write
+    /// its process closed its stdin under part-way is [`StdinCut`](Error::StdinCut), saying how
+    /// much went in. One the guest holds no room for, as when writes given up on while the
+    /// process did not read are still waiting, is [`StdinFull`](Error::StdinFull): not taken,
+    /// `eof` and all, and taken when sent again once the process reads.
+    pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
+        let ended = || {
+            Error::JobEnded(
+                "the job has ended, or its stdin is closed, or it was started without one",
+            )
+        };
+        let job = self.job(id)?;
+        let (pid, running) = job.pid();
+        // A job that runs keeps the machine it runs in up.
+        let machine = self.up().filter(|_| running).ok_or_else(ended)?;
+        let of = data.len() as u64;
+        let send = |seq| Ok(machine.write_stdin(pid, seq, data, eof)?);
+        match job.write_stdin(eof, send).await? {
+            Some(Written {
+                taken: Taken::Whole,
+                ..
+            }) => Ok(()),
+            Some(Written {
+                taken: Taken::Full, ..
+            }) => Err(Error::StdinFull),
+            Some(Written { bytes, .. }) if bytes > 0 => Err(Error::StdinCut { bytes, of }),
+            _ => Err(ended()),
+        }
     }
 
     /// Its machine, booted again if it was parked, to ask of its files. The caller holds an
@@ -684,15 +778,22 @@ impl Sandbox {
 
     /// Let go of it as its server ends: its machine stopped as parking stops it, every job in
     /// it ended, and nothing booting it again in this process. One kept past its process is
-    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]); one not
-    /// kept is deleted, as [`close`](Sandbox::close) deletes it. Blocks as `close` does.
+    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]), its jobs
+    /// that ran ended `restarted`; one not kept is deleted, as [`close`](Sandbox::close)
+    /// deletes it. Blocks as `close` does.
     pub fn leave(&self) {
         self.end(true);
     }
 
     /// Stop its machine for good, and end and remove every job in it; its upper disk deleted,
-    /// or left where it is kept and `leaving`.
+    /// or left where it is kept and `leaving`. A job that runs ends as `restarted` where the
+    /// sandbox is kept past its server, and as `sandbox_deleted` where it is deleted.
     fn end(&self, leaving: bool) {
+        let reason = match leaving && self.record.lock().unwrap().is_some() {
+            true => SandboxJobEndReason::Restarted,
+            false => SandboxJobEndReason::SandboxDeleted,
+        };
+        *self.ended_for.lock().unwrap() = Some(reason);
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
         // A park or a boot under way finishes first, so its machine is down by the time this
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
@@ -703,6 +804,7 @@ impl Sandbox {
         let record = self.record.lock().unwrap().take();
         if let State::Up(machine, _room) = state {
             machine.stop();
+            self.went_down();
         }
         // Its machine down, and its disk and volumes still here: the backend's to keep now.
         self.holding.lock().unwrap().clear();
@@ -712,7 +814,7 @@ impl Sandbox {
         }
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
-            job.end(128 + SIGKILL);
+            job.cut(reason);
             job.remove();
         }
     }
@@ -759,6 +861,10 @@ impl Sandbox {
             let closed = matches!(*state, State::Exited);
             if !closed {
                 *state = State::Up(Arc::clone(&machine), room.take());
+                // Told while the state is held, so its going down, however soon, is told after.
+                let at = SystemTime::now();
+                *self.up_since.lock().unwrap() = Some((at, Instant::now()));
+                super::runs::up(&self.id, &self.root, at);
             }
             closed
         };
@@ -838,7 +944,17 @@ impl Sandbox {
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
         self.holding.lock().unwrap().clear();
         drop(room);
+        self.went_down();
         Ok(())
+    }
+
+    /// Its machine told down, once it is, if it was told up: called by whatever took it out of
+    /// [`State::Up`], once, and before another can boot -- a park and a close hold the turn
+    /// while they do -- so that each machine's going down is told once and in its order.
+    fn went_down(&self) {
+        if let Some((started, since)) = self.up_since.lock().unwrap().take() {
+            super::runs::down(&self.id, &self.root, started, since);
+        }
     }
 
     /// Its machine while one runs.
@@ -854,10 +970,11 @@ impl Sandbox {
         matches!(&*self.state.lock().unwrap(), State::Up(up, _) if Arc::ptr_eq(up, machine))
     }
 
-    /// Kill `job` if it runs.
-    fn kill(&self, job: &Job) -> Result<(), Error> {
+    /// Kill `job` if it runs, for `reason`.
+    fn kill(&self, job: &Job, reason: SandboxJobEndReason) -> Result<(), Error> {
         let (pid, running) = job.pid();
         if let Some(machine) = self.up().filter(|_| running) {
+            job.killing(reason);
             machine.signal(pid, SIGKILL)?;
         }
         Ok(())
@@ -871,22 +988,26 @@ impl Sandbox {
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some((cmd, waiter)) = self.starting.lock().unwrap().pop_front() else {
+                    let Some((cmd, stdin, waiter)) = self.starting.lock().unwrap().pop_front()
+                    else {
                         continue;
                     };
                     let started = started.map(|pid| {
                         let mut jobs = self.jobs.lock().unwrap();
                         keep_ended(&mut jobs, KEEP_ENDED);
                         let id = pick(|id| jobs.contains_key(id));
-                        let job = Job::new(SandboxJob {
-                            id: id.clone(),
-                            kind: SandboxJobKind::Exec,
-                            pid,
-                            cmd,
-                            running: true,
-                            code: None,
-                            reason: None,
-                        });
+                        let job = Job::new(
+                            SandboxJob {
+                                id: id.clone(),
+                                kind: SandboxJobKind::Exec,
+                                pid,
+                                cmd,
+                                running: true,
+                                code: None,
+                                reason: None,
+                            },
+                            stdin,
+                        );
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
                         job
@@ -904,18 +1025,29 @@ impl Sandbox {
                         job.write(SandboxJobEntry::Stderr(line));
                     }
                 }
-                CtrlResp::Exited { id, code } => {
+                CtrlResp::Exited { id, code, oom } => {
                     if let Some(job) = running.remove(&id) {
-                        job.end(code);
+                        job.end(code, oom);
                         *self.used.lock().unwrap() = Instant::now();
                         self.keep_jobs();
+                    }
+                }
+                CtrlResp::Written {
+                    id,
+                    seq,
+                    bytes,
+                    taken,
+                } => {
+                    if let Some(job) = running.get(&id) {
+                        job.written(seq, Written { bytes, taken });
                     }
                 }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
-        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,
-        // nothing ran; otherwise it ended on its own, and nothing boots it again.
+        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Closed or
+        // let go of, it was stopped under them, for the reason `end` gave; otherwise it ended on
+        // its own, and nothing boots it again.
         let mut starting = self.starting.lock().unwrap();
         let exited = {
             let mut state = self.state.lock().unwrap();
@@ -923,6 +1055,7 @@ impl Sandbox {
             let exited = matches!(&*state, State::Up(up, _) if Arc::ptr_eq(up, machine));
             if exited {
                 *state = State::Exited;
+                self.went_down();
             }
             exited
         };
@@ -938,8 +1071,16 @@ impl Sandbox {
             }
         }
         starting.clear();
+        let reason = match exited {
+            true => SandboxJobEndReason::VmExited,
+            false => self
+                .ended_for
+                .lock()
+                .unwrap()
+                .unwrap_or(SandboxJobEndReason::SandboxDeleted),
+        };
         for job in running.into_values() {
-            job.end(128 + SIGKILL);
+            job.cut(reason);
         }
         drop(starting);
         self.keep_jobs();
@@ -1150,6 +1291,10 @@ impl Sandbox {
                     ImageName::Digest { digest } => Some(digest.clone()),
                     ImageName::Tag { .. } => None,
                 });
+            let name = read
+                .as_ref()
+                .ok()
+                .and_then(|record| record.args.name.clone());
             let known = read.and_then(|record| {
                 let digest = record.image()?;
                 let (args, kept) = (record.args.clone(), (Some(upper), Some(record)));
@@ -1170,6 +1315,7 @@ impl Sandbox {
                     if let Some(upper) = Upper::kept_one(&dir, &id) {
                         kept.unknown.push(Unknown {
                             id,
+                            name,
                             image,
                             why,
                             upper,
@@ -1255,6 +1401,7 @@ pub struct Kept {
 #[derive(Debug)]
 pub struct Unknown {
     id: String,
+    name: Option<String>,
     image: Option<String>,
     why: String,
     upper: Upper,
@@ -1265,16 +1412,22 @@ impl Unknown {
         &self.id
     }
 
+    /// The name it was made with, as its record says, if it reads.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     /// Why it could not be known again.
     pub fn why(&self) -> &str {
         &self.why
     }
 
     /// It as a sandbox is answered: its image as its record names it, empty where that is not
-    /// read, not `running`, and why in `error`.
+    /// read, not `running`, with no ports, since none is open, and why in `error`.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
+            name: self.name.clone(),
             image: self.image.clone().unwrap_or_default(),
             running: false,
             ports: Vec::new(),
@@ -1328,17 +1481,20 @@ mod tests {
     #[test]
     fn the_ended_jobs_past_the_limit_go_the_first_ended_first_and_none_that_runs() {
         let job = |id: &str, ended: bool| {
-            let job = Job::new(SandboxJob {
-                id: id.into(),
-                kind: SandboxJobKind::Exec,
-                pid: 1,
-                cmd: vec!["true".into()],
-                running: true,
-                code: None,
-                reason: None,
-            });
+            let job = Job::new(
+                SandboxJob {
+                    id: id.into(),
+                    kind: SandboxJobKind::Exec,
+                    pid: 1,
+                    cmd: vec!["true".into()],
+                    running: true,
+                    code: None,
+                    reason: None,
+                },
+                false,
+            );
             if ended {
-                job.end(0);
+                job.end(0, false);
             }
             (id.to_owned(), job)
         };

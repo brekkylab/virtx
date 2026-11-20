@@ -59,7 +59,7 @@ impl Sandbox {
         let to = to.to_owned();
         tokio::task::spawn_blocking(move || {
             let _paused = run.as_ref().map(|run| run.machine.pause()).transpose()?;
-            copy_sparse(&path, &to)
+            copy_whole(&path, &to)
                 .map_err(|e| Error::Failed(format!("copying {}: {e}", path.display())))
         })
         .await?
@@ -75,10 +75,25 @@ async fn synced_by(run: &Arc<Run>) -> Result<bool, Error> {
     Ok(matches!(synced, Ok(Ok(()))))
 }
 
+/// `from` copied to `to` as [`copy_sparse`] copies it, made beside `to` and moved over it once
+/// whole, so a copy that fails leaves what was there.
+fn copy_whole(from: &Path, to: &Path) -> io::Result<()> {
+    let mut part = to.as_os_str().to_owned();
+    part.push(".copying");
+    let part = std::path::PathBuf::from(part);
+    // One a copy before left, which a clone would not replace.
+    let _ = std::fs::remove_file(&part);
+    let moved = copy_sparse(from, &part).and_then(|()| std::fs::rename(&part, to));
+    if moved.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    moved
+}
+
 /// `from`, a disk, copied to `to`: cloned where the filesystem shares extents between files
 /// ([`cloned`]) -- at once, however much it holds, which is what a sandbox paused for its copy
 /// waits on -- and elsewhere with its holes left holes: only the extents with data in them read
-/// and written, as `lseek` finds them.
+/// and written, as `lseek` finds them, and the whole of it on a filesystem that finds none.
 #[cfg(unix)]
 pub fn copy_sparse(from: &Path, to: &Path) -> io::Result<()> {
     use std::io::{Read as _, Seek as _, SeekFrom};
@@ -97,11 +112,18 @@ pub fn copy_sparse(from: &Path, to: &Path) -> io::Result<()> {
         let data = unsafe { libc::lseek(from.as_raw_fd(), at as libc::off_t, libc::SEEK_DATA) };
         if data == -1 {
             let e = io::Error::last_os_error();
-            // No data past `at`: the rest is a hole.
-            if e.raw_os_error() == Some(libc::ENXIO) {
-                break;
+            // What a filesystem that finds no holes answers, as HFS+ does.
+            let unfound = [libc::ENOTTY, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EINVAL];
+            match e.raw_os_error() {
+                // No data past `at`: the rest is a hole.
+                Some(libc::ENXIO) => break,
+                // The whole of it, read and written.
+                Some(code) if at == 0 && unfound.contains(&code) => {
+                    io::copy(&mut from, &mut to)?;
+                    break;
+                }
+                _ => return Err(e),
             }
-            return Err(e);
         }
         // SAFETY: as above.
         let hole = unsafe { libc::lseek(from.as_raw_fd(), data, libc::SEEK_HOLE) };
@@ -202,6 +224,14 @@ mod tests {
         assert_eq!(std::fs::read(&from).unwrap(), std::fs::read(&to).unwrap());
         let blocks = std::fs::metadata(&to).unwrap().blocks() * 512;
         assert!(blocks < 4 << 20, "{blocks} bytes on disk for 10 of data");
+        copy_whole(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&from).unwrap(), std::fs::read(&to).unwrap());
+        // One that fails leaves what was there, and nothing beside it.
+        let kept = dir.join("kept.img");
+        std::fs::write(&kept, "what was there").unwrap();
+        assert!(copy_whole(&dir.join("none.img"), &kept).is_err());
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "what was there");
+        assert!(!dir.join("kept.img.copying").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

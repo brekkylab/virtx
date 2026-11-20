@@ -59,6 +59,9 @@ anyhow = { workspace = true }
 libc = { workspace = true }
 # libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
 log = "0.4"
+# The storage an embedder's disk is read and written through ([`disks::imago`]): the version
+# libkrun links, re-exported so that an embedder names it from here.
+imago = { version = "0.2.4", default-features = false, features = ["sync"] }
 # The machine: libkrun linked in, its block devices on, and the init it lays over the
 # guest's root. Our fork, at a commit on its `cloud` branch -- its `virtx` branch, and what
 # virtx cloud needs beside: a block device reading through the embedder's storage
@@ -109,9 +112,6 @@ windows-sys = { version = "0.61.2", features = [
 # for the mock servers they answer from.
 tempfile = "3"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
-# A disk the machine tests open as an embedder's, through a storage of their own: imago's, the
-# one libkrun links.
-imago = { version = "0.2.4", default-features = false, features = ["sync"] }
 
 # The tests that boot machines: its own `main`, which becomes the machine when spawned to be one.
 [[test]]

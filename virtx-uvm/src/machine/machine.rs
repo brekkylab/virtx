@@ -282,13 +282,22 @@ impl Machine {
     /// Pause the machine -- its vCPUs and its devices, its whole process -- until what this
     /// answers drops: its disks are left as they are meanwhile, to be copied whole. Its process
     /// is neither stopped nor killed meanwhile: [`stop`](Machine::stop) and
-    /// [`kill`](Machine::kill) wait.
+    /// [`kill`](Machine::kill) wait. Refused once its process has ended.
     pub fn pause(&self) -> Result<Paused<'_>> {
-        let process = self.process.lock().unwrap();
+        let mut process = self.process.lock().unwrap();
+        // Waited for already, or ended: its pid may be another process's by now.
+        match process.try_wait() {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                let ended = io::Error::other("its process has ended");
+                return Err(Error::io("pausing the machine", ended));
+            }
+            Err(e) => return Err(Error::io("pausing the machine", e)),
+        }
         #[cfg(unix)]
         {
-            // SAFETY: a signal to this machine's own process, which is not reaped while its
-            // lock is held.
+            // SAFETY: a signal to this machine's own process, not waited for above, and not
+            // reaped while its lock is held.
             if unsafe { libc::kill(process.id() as libc::pid_t, libc::SIGSTOP) } == -1 {
                 return Err(Error::io("pausing the machine", io::Error::last_os_error()));
             }

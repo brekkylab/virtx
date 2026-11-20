@@ -33,9 +33,9 @@ pub use auth::Auth;
 pub use client::Client;
 #[cfg(feature = "client")]
 pub use ensure::{cache_root, ensure_virtx};
-#[cfg(feature = "client")]
-pub use error::Error;
 pub use error::Source;
+#[cfg(feature = "client")]
+pub use error::{Error, Members};
 pub use image::*;
 pub use project::*;
 pub use sandbox::*;

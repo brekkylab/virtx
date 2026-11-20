@@ -137,6 +137,7 @@ A request that fails is answered with an HTTP error status and a body:
 
 - `code` is a string, from the table below, or another the server gives for its own failures.
 - `message` is a string, for a person to read. A client SHOULD NOT tell errors apart by it.
+- An error MAY have other members beside them, as RFC 9457's extension members are, each said where the refusal that has it is: `reason` of a [`quota`](#refused-for-now), `written` of a write to a job's [stdin](#sandbox-jobs) cut part-way. A client ignores a member it does not know, and reads one it does from that refusal alone.
 
 | Status | `code` | When |
 | --- | --- | --- |
@@ -384,7 +385,7 @@ With `stdin` `true`, the client writes to it with `POST {job}/stdin`:
 - `eof` `true` closes the process's stdin, after any `data` in the same request.
 - The server answers once `data` is in the process's stdin, which takes a pipe's worth before the process reads any, so a process that does not read holds the answer back once that is full.
 - A client sends a job's next `stdin` only once the one before it is answered, so they are written in the order sent.
-- A job started without `stdin`, one whose stdin is closed -- by `eof` or by its process -- and one that has ended refuse it with `409`, `ended`. So does a write its process closed its stdin under part-way, its message saying how much of `data` went in.
+- A job started without `stdin`, one whose stdin is closed -- by `eof` or by its process -- and one that has ended refuse it with `409`, `ended`. So does a write its process closed its stdin under part-way, with `written` beside `code` and `message`: how many bytes of `data`, as UTF-8, went in before it closed, so `{"error": {"code": "ended", "message": "...", "written": 65536}}`. No other refusal of a write has `written`.
 - An empty `data` writes nothing, and is answered as any write is: `204` while the process's stdin still has a reader.
 
 ## Images

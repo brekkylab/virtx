@@ -9,11 +9,14 @@ pub enum Error {
     Library(String),
     /// The server refused the request with this HTTP status, as `PROTOCOL.md` lists them: `404`
     /// for what does not exist, `409` for what is in use or has ended, and the like; with the
-    /// protocol's code where the server answered one (`not_found`, `in_use`), and the message.
+    /// protocol's code where the server answered one (`not_found`, `in_use`), and the message;
+    /// and `written`, how many bytes of a write to a job's stdin went in, where its process
+    /// closed the stdin under it part-way.
     Status {
         status: u16,
         code: Option<String>,
         message: String,
+        written: Option<u64>,
     },
     /// The library answered with an error that is not the server refusing the request: where
     /// it failed, and why.
@@ -48,6 +51,15 @@ impl Error {
     pub fn code(&self) -> Option<&str> {
         match self {
             Error::Status { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// How many bytes of a write to a job's stdin went in before its process closed the stdin
+    /// under it: that `409`, `ended`, alone has it.
+    pub fn written(&self) -> Option<u64> {
+        match self {
+            Error::Status { written, .. } => *written,
             _ => None,
         }
     }

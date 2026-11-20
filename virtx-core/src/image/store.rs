@@ -104,8 +104,15 @@ pub enum ImageJobEntry {
     End(ImageJobEnd),
 
     /// One of a kind this version does not know.
-    #[serde(untagged)]
+    #[serde(untagged, deserialize_with = "unknown_entry")]
     Other(crate::UnknownEntry),
+}
+
+/// [`ImageJobEntry::Other`]: one named by none of the kinds above.
+fn unknown_entry<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::UnknownEntry, D::Error> {
+    crate::UnknownEntry::not_of(deserializer, &["log", "truncated", "end"])
 }
 
 /// How an image job ended: with a digest if it succeeded, an error if not.
@@ -169,6 +176,14 @@ mod tests {
             })
         );
         assert_eq!(read.id, 2);
+        for malformed in [
+            json!({"id": 2, "log": 5}),
+            json!({"id": 2, "truncated": 1}),
+            json!({"id": 2, "end": 1}),
+        ] {
+            let read = serde_json::from_value::<crate::LogEntry<ImageJobEntry>>(malformed.clone());
+            assert!(read.is_err(), "{malformed} read as {read:?}");
+        }
     }
 
     #[test]

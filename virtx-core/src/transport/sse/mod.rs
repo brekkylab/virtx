@@ -33,6 +33,24 @@ pub struct UnknownEntry {
     pub kind: String,
 }
 
+impl UnknownEntry {
+    /// One of an entry enum whose own kinds are `known`: an entry of one of those that did not
+    /// read as it is refused, as malformed, rather than passed over as unknown.
+    pub(crate) fn not_of<'de, D: Deserializer<'de>>(
+        deserializer: D,
+        known: &[&str],
+    ) -> Result<UnknownEntry, D::Error> {
+        let entry = UnknownEntry::deserialize(deserializer)?;
+        match known.contains(&entry.kind.as_str()) {
+            true => Err(de::Error::custom(format!(
+                "a `{}` entry that does not read as one",
+                entry.kind
+            ))),
+            false => Ok(entry),
+        }
+    }
+}
+
 impl Serialize for UnknownEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(1))?;

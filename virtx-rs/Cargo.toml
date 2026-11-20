@@ -5,6 +5,11 @@ edition = "2024"
 description = "A virtx client for Rust, over libvirtx_core's C ABI."
 license = "Apache-2.0"
 repository = "https://github.com/brekkylab/virtx"
+readme = "../README.md"
+homepage = "https://virtx.sh"
+documentation = "https://docs.rs/virtx"
+keywords = ["vm", "microvm", "sandbox", "agent", "virtualization"]
+categories = ["virtualization", "api-bindings", "asynchronous"]
 
 [features]
 # The client linked into this crate, so that `cargo add virtx` is all a Rust program needs. Off,

@@ -787,11 +787,13 @@ mod ffi {
     };
 
     /// What `virtx_port_forwarder_open` takes: a port's `url`, as the server answered it, and
-    /// its number in the sandbox, which names it in what a connection that fails says.
+    /// its number in the sandbox, which names it in what a connection that fails says. A port
+    /// asked for again has no `url`, and is refused, naming it.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct PortForwarderArgs {
-        url: String,
+        #[serde(default)]
+        url: Option<String>,
         #[serde(default)]
         port: Option<u16>,
     }
@@ -809,7 +811,8 @@ mod ffi {
     /// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
     /// forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
     /// the error's message. Returns once its local address is open, which takes no request of
-    /// the server.
+    /// the server. A port without its `url`, as asking for a sandbox again answers one, is
+    /// refused.
     ///
     /// It runs on `client`'s runtime, so the client's last release stops it, and is freed with
     /// `virtx_port_forwarder_free`.
@@ -829,7 +832,10 @@ mod ffi {
         let args = unsafe { json::<PortForwarderArgs>(args, args_len) };
         let opened = unsafe { &(*client).0 }.inside(|client| {
             let args = args?;
-            PortForwarder::open(&client.inner, &args.url, args.port)
+            let Some(url) = args.url else {
+                return Err(unreached(args.port));
+            };
+            PortForwarder::open(&client.inner, &url, args.port)
         });
         let output = opened.map(|opened| {
             let address = opened.address().to_string();
@@ -865,6 +871,15 @@ mod ffi {
         };
         unsafe { write(out, bytes) };
         status
+    }
+
+    /// Why a port without its `url` is not forwarded: only making its sandbox answers one.
+    fn unreached(port: Option<u16>) -> crate::Error {
+        let port = port.map_or_else(|| "a port".to_owned(), |port| format!("port {port}"));
+        crate::Error::Client(format!(
+            "{port} has no url to forward: only the port create_sandbox answered carries one, \
+             not one a sandbox asked for again answers"
+        ))
     }
 
     /// Stop `forwarder` and free it. Null does nothing.
@@ -990,6 +1005,49 @@ mod ffi {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
+        }
+
+        #[test]
+        fn a_port_without_its_url_is_refused_naming_it() {
+            let mut client = ptr::null_mut();
+            let mut out = VirtxBytes {
+                data: ptr::null_mut(),
+                len: 0,
+            };
+            let url = c"http://127.0.0.1:9/";
+            let status = unsafe {
+                virtx_client_connect(
+                    url.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    &mut client,
+                    &mut out,
+                )
+            };
+            assert_eq!(status, crate::ffi::VIRTX_OK);
+
+            let args = br#"{"port": 5173}"#;
+            let mut forwarder = ptr::null_mut();
+            let status = unsafe {
+                virtx_port_forwarder_open(
+                    client,
+                    args.as_ptr(),
+                    args.len(),
+                    &mut forwarder,
+                    &mut out,
+                )
+            };
+            assert_eq!(status, VIRTX_ERROR);
+            assert!(forwarder.is_null());
+            let written = unsafe { std::slice::from_raw_parts(out.data, out.len) };
+            let refused: serde_json::Value = serde_json::from_slice(written).unwrap();
+            unsafe { virtx_bytes_free(out) };
+            let message = refused["message"].as_str().unwrap();
+            assert!(message.starts_with("port 5173 has no url"), "{message}");
+            assert_eq!(refused.get("status"), None);
+            unsafe { virtx_client_release(client) };
         }
     }
 }

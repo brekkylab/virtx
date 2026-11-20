@@ -174,11 +174,19 @@ pub enum SandboxJobEndReason {
     /// Its `timeout_ms` ran out.
     Timeout,
 
-    /// Its job was cancelled: removed while it ran, or its sandbox parked or deleted under it.
+    /// Its job was cancelled: removed while it ran, by its own `DELETE`, or its sandbox parked
+    /// under it.
     Cancelled,
+
+    /// Its sandbox was deleted under it, and everything it had with it.
+    SandboxDeleted,
 
     /// Its sandbox's VM exited on its own under it.
     VmExited,
+
+    /// Its memory ran out: it, or a process it started, was killed for want of memory,
+    /// at the most its command may take or the machine's.
+    Oom,
 
     /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
     /// each that ran then is ended so.
@@ -257,9 +265,23 @@ mod tests {
             (
                 SandboxJobEntry::End(SandboxJobEnd {
                     code: 137,
+                    reason: Some(SandboxJobEndReason::SandboxDeleted),
+                }),
+                json!({"end": {"code": 137, "reason": "sandbox_deleted"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
                     reason: Some(SandboxJobEndReason::VmExited),
                 }),
                 json!({"end": {"code": 137, "reason": "vm_exited"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Oom),
+                }),
+                json!({"end": {"code": 137, "reason": "oom"}}),
             ),
             (
                 SandboxJobEntry::End(SandboxJobEnd {

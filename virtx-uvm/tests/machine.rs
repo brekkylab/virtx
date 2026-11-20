@@ -670,6 +670,73 @@ async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
     assert_eq!(ended, exited);
     assert!(!sandbox.answer(false).running);
     home.sandboxes.delete(sandbox.id()).await.unwrap();
+    // Its sandbox deleted under it: its log, read from before, reads on to its end, which says
+    // so, apart from its own removal.
+    let deleting = home.sandbox(&small()).await;
+    let cmd = ["sleep", "300"].map(String::from).to_vec();
+    let job = deleting.exec(cmd, false, None).await.unwrap();
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    home.sandboxes.delete(deleting.id()).await.unwrap();
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(read.unwrap(), deleted);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::SandboxDeleted));
+}
+
+async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    // How `cmd` ended, read from its log to its end.
+    let ended = async |cmd: &[&str]| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        let job = sandbox.exec(cmd, false, None).await.unwrap();
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => (end, job.get().reason),
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Holding more than one command may, 64 KiB at a time: killed for its memory, by the kernel,
+    // or by the agent where its program's pages are read back again and again instead.
+    let hungry = [
+        "awk",
+        r#"BEGIN { while (1) held[i++] = sprintf("%65536s", "") }"#,
+    ];
+    let Ok((end, reason)) = tokio::time::timeout(HANG, ended(&hungry)).await else {
+        // What its cgroup held, said with the failure.
+        let held = "cd /sys/fs/cgroup/jobs; for c in */; do echo $c; \
+            cat $c/memory.max $c/memory.current $c/memory.events; done; free -m";
+        let held = run(&sandbox, &["sh", "-c", held], None).await;
+        panic!("its memory never ran out: {held:?}");
+    };
+    let oom = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Oom),
+    };
+    assert_eq!((end, reason), (oom, Some(SandboxJobEndReason::Oom)));
+    // `SIGKILL` from itself, within its memory: its own end, as before.
+    let (end, reason) = ended(&["sh", "-c", "kill -9 $$"]).await;
+    assert_eq!((end, reason), (SandboxJobEnd::exited(137), None));
+    // The sandbox answers on.
+    assert_eq!(
+        run(&sandbox, &["echo", "on"], None).await.unwrap().0,
+        ["on"]
+    );
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
 async fn an_unused_sandbox_is_parked_and_booted_again_with_what_it_wrote(home: Home) {
@@ -1657,6 +1724,7 @@ fn main() -> ExitCode {
         a_sandbox_s_jobs_are_kept_past_its_server_each_that_ran_ended_restarted,
         a_running_sandbox_s_disk_is_held_against_another_server,
         a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
+        a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_machine_paused_past_its_guest_s_silence_goes_on,
         a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs,

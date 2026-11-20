@@ -311,7 +311,7 @@ impl Drop for Served {
 /// The HTTP status a request was refused with.
 fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
     match answered {
-        Err(virtx_core::Error::Status(status, _) | virtx_core::Error::Refusal { status, .. }) => {
+        Err(virtx_core::Error::Status(status, ..) | virtx_core::Error::Refusal { status, .. }) => {
             status
         }
         other => panic!("expected a status, got {other:?}"),

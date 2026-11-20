@@ -584,7 +584,7 @@ mod tests {
             .create_sandbox(&here().abin("index").abin("index"))
             .await
         {
-            Err(Error::Status(400, body)) => assert!(body.contains("given twice"), "{body}"),
+            Err(Error::Status(400, body, _)) => assert!(body.contains("given twice"), "{body}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
 

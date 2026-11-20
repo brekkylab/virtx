@@ -138,6 +138,7 @@ A request that fails is answered with an HTTP error status and a body:
 
 - `code` is a string, from the table below, or another the server gives for its own failures.
 - `message` is a string, for a person to read. A client SHOULD NOT tell errors apart by it.
+- An error MAY have other members beside them, as RFC 9457's extension members are, each said where the refusal that has it is: `reason` of a [`quota`](#refused-for-now), `written` of a write to a job's [stdin](#sandbox-jobs) cut part-way. A client ignores a member it does not know, and reads one it does from that refusal alone.
 
 | Status | `code` | When |
 | --- | --- | --- |
@@ -350,7 +351,7 @@ A `GET`, a listing, and a connection to one of its ports do not boot it: a conne
 #### Deleting
 
 A sandbox is deleted by its `DELETE`, or by the server, which MAY reclaim one unused for a while of its choosing.
-Either stops its VM if it is up, ends every job in it as a cancellation does, and closes its ports; its disk goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
+Either stops its VM if it is up, kills every job in it that runs, as its [reason](#sandbox-jobs) `sandbox_deleted` says, and closes its ports; its disk goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
 
 A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
@@ -421,13 +422,16 @@ Its log's entries are each an object with one member:
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
-The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, with its sandbox's VM, or with its server, which keeps its sandbox.
-In each of the last four, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, when its sandbox is deleted, with its sandbox's VM, or with its server, which keeps its sandbox.
+In each of the last five, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+It is killed so too, its `code` `137`, when its memory runs out: past what the server lets one command take, or the VM's, or where it thrashes there, reading back what it had to let go of.
 A server MAY say which, in its end and in its job, with `reason`:
 
 - `"timeout"`: its `timeout_ms` ran out.
-- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed, or by its sandbox [parked](#parking) or [deleted](#deleting) under it.
+- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed, or by its sandbox [parked](#parking) under it. Its sandbox is still there.
+- `"sandbox_deleted"`: its sandbox was [deleted](#deleting) while it ran, by the sandbox's `DELETE` or by the server, which then ends its log with this end before the job goes with the sandbox.
 - `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
+- `"oom"`: its memory ran out: it ended `137`, killed, or a process it started killed, for want of memory. A server that holds a command to a memory limit SHOULD say it, so that one is told apart from a `SIGKILL` sent.
 - `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
 
 A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
@@ -446,7 +450,7 @@ With `stdin` `true`, the client writes to it with `POST {job}/stdin`:
 - `eof` `true` closes the process's stdin, after any `data` in the same request.
 - The server answers once `data` is in the process's stdin, which takes a pipe's worth before the process reads any, so a process that does not read holds the answer back once that is full.
 - A client sends a job's next `stdin` only once the one before it is answered, so they are written in the order sent.
-- A job started without `stdin`, one whose stdin is closed -- by `eof` or by its process -- and one that has ended refuse it with `409`, `ended`. So does a write its process closed its stdin under part-way, its message saying how much of `data` went in.
+- A job started without `stdin`, one whose stdin is closed -- by `eof` or by its process -- and one that has ended refuse it with `409`, `ended`. So does a write its process closed its stdin under part-way, with `written` beside `code` and `message`: how many bytes of `data`, as UTF-8, went in before it closed, so `{"error": {"code": "ended", "message": "...", "written": 65536}}`. No other refusal of a write has `written`.
 - An empty `data` writes nothing, and is answered as any write is: `204` while the process's stdin still has a reader.
 
 ## Images

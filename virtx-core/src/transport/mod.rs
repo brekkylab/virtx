@@ -129,10 +129,10 @@ mod tests {
         // The old one is gone with the new, not kept under it.
         client.set_auth(Auth::None).unwrap();
         let error = http::get::<String>(&client, "/user").await.unwrap_err();
-        assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(401, _, _)), "{error:?}");
         client.set_auth(bearer("carol")).unwrap();
         let error = http::get::<String>(&client, "/user").await.unwrap_err();
-        assert!(matches!(error, Error::Status(403, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(403, _, _)), "{error:?}");
     }
 
     #[tokio::test]
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(http::get::<String>(&client, "/user").await.unwrap(), "bob");
         client.set_headers(HeaderMap::new());
         let error = http::get::<String>(&client, "/user").await.unwrap_err();
-        assert!(matches!(error, Error::Status(401, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(401, _, _)), "{error:?}");
     }
 
     #[tokio::test]
@@ -242,7 +242,7 @@ mod tests {
             let error = http::get::<String>(&client, "/volumes/nothing")
                 .await
                 .unwrap_err();
-            let Error::Status(404, message) = &error else {
+            let Error::Status(404, message, _) = &error else {
                 panic!("not a 404: {error:?}");
             };
             assert_eq!(message, "not_found: none");
@@ -482,7 +482,7 @@ mod tests {
         );
         let client = piped(router);
         let error = http::get::<String>(&client, "/quota").await.unwrap_err();
-        assert!(matches!(error, Error::Status(429, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(429, _, _)), "{error:?}");
         assert_eq!(error.code(), Some("quota"));
         assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
@@ -522,7 +522,7 @@ mod tests {
         let error = http::post::<String>(&client, "/made", &body)
             .await
             .unwrap_err();
-        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(503, _, _)), "{error:?}");
         assert_eq!(made.load(Ordering::SeqCst), 1, "made once at most");
         assert_eq!(
             http::post::<String>(&client, "/room", &body).await.unwrap(),
@@ -627,7 +627,7 @@ mod tests {
         );
         let client = piped(router);
         let error = http::get::<String>(&client, "/slow").await.unwrap_err();
-        assert!(matches!(error, Error::Status(503, _)), "{error:?}");
+        assert!(matches!(error, Error::Status(503, _, _)), "{error:?}");
         assert_eq!(asked.load(Ordering::SeqCst), 3);
     }
 
@@ -942,7 +942,7 @@ mod tests {
         assert!(matches!(cut[..], [Ok(1), Ok(2), Ok(3)]), "{cut:?}");
         let removed = read("removed", None).await;
         assert!(
-            matches!(removed[..], [Ok(1), Err(Error::Status(404, _))]),
+            matches!(removed[..], [Ok(1), Err(Error::Status(404, _, _))]),
             "{removed:?}"
         );
         let waiting = read("waiting", None).await;

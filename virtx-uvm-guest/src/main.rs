@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[path = "../../virtx-uvm/src/machine/wire.rs"]
 mod wire;
@@ -67,6 +67,62 @@ const JOB_PIDS_ROOM: u64 = 256;
 static JOB_PIDS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 /// The next command's cgroup.
 static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Each running command's cgroup, where commands are held by their memory, and how its memory
+/// stood at [`watch_thrashing`]'s last look.
+static WATCHED: Mutex<std::collections::BTreeMap<PathBuf, Thrash>> =
+    Mutex::new(std::collections::BTreeMap::new());
+/// How often [`watch_thrashing`] looks, and how many looks in a row a command may thrash at its
+/// memory limit before it is killed.
+const THRASH_LOOK: Duration = Duration::from_secs(1);
+const THRASH_LOOKS: u32 = 3;
+
+/// A command's memory as [`watch_thrashing`] last saw it: how often it had hit its limit, how
+/// many pages it had read back after letting them go, how many looks in a row it thrashed, and
+/// whether it was killed for it.
+#[derive(Default)]
+struct Thrash {
+    max: u64,
+    refaults: u64,
+    strikes: u32,
+    killed: bool,
+}
+
+/// Kill each command that thrashes at its memory limit, as the kernel's OOM killer kills one
+/// whose memory it cannot take back. The kernel kills only where reclaiming gets nowhere, and a
+/// command whose own anonymous memory fills its limit still has its program's pages to let go
+/// of and read back, again and again, for minutes, without end. One that, between two looks,
+/// hit its limit and read back more than a sixteenth of it in pages is thrashing; for
+/// [`THRASH_LOOKS`] looks in a row, its cgroup is killed.
+fn watch_thrashing() {
+    let Some(&most) = JOB_MEMORY.get() else {
+        return;
+    };
+    // SAFETY: `sysconf` has no preconditions.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    let enough = most / page / 16;
+    let counted = |file: PathBuf, name: &str| -> u64 {
+        let read = fs::read_to_string(file).unwrap_or_default();
+        read.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+            .unwrap_or(0)
+    };
+    loop {
+        thread::sleep(THRASH_LOOK);
+        for (own, thrash) in WATCHED.lock().unwrap().iter_mut() {
+            if thrash.killed {
+                continue;
+            }
+            let max = counted(own.join("memory.events"), "max");
+            let refaults = counted(own.join("memory.stat"), "workingset_refault_file");
+            let thrashing = max > thrash.max && refaults.saturating_sub(thrash.refaults) > enough;
+            thrash.strikes = if thrashing { thrash.strikes + 1 } else { 0 };
+            (thrash.max, thrash.refaults) = (max, refaults);
+            if thrash.strikes >= THRASH_LOOKS {
+                thrash.killed = fs::write(own.join("cgroup.kill"), "1").is_ok();
+            }
+        }
+    }
+}
 
 /// The cgroup for commands, made: its `pids.max` the kernel's threads or pids, the fewer, less
 /// [`AGENT_PIDS`], and each command's that less [`JOB_PIDS_ROOM`]; its `memory.max` the
@@ -129,6 +185,17 @@ fn held_cgroup() -> Option<PathBuf> {
         }
     }
     Some(jobs)
+}
+
+/// Whether the kernel's OOM killer has killed a process in the cgroup `own`: its
+/// `memory.events`' `oom_kill`, which is none where the kernel has no `memory` controller.
+fn oom_killed(own: &Path) -> bool {
+    let events = std::fs::read_to_string(own.join("memory.events")).unwrap_or_default();
+    events.lines().any(|line| {
+        line.strip_prefix("oom_kill ")
+            .and_then(|n| n.trim().parse::<u64>().ok())
+            .is_some_and(|n| n > 0)
+    })
 }
 
 /// The machine's memory, in bytes: `MemTotal` in `/proc/meminfo`.
@@ -371,6 +438,7 @@ fn serve() -> io::Result<()> {
     });
 
     JOBS.get_or_init(jobs_cgroup);
+    thread::spawn(watch_thrashing);
     send(&out, &CtrlResp::Ready(Vec::new()));
     let stdins = Stdins::default();
     while let Some(message) = wire::recv(&mut input)? {
@@ -458,6 +526,12 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         }
     };
     let id = child.id();
+    if let Some(own) = cgroup.as_ref().filter(|_| JOB_MEMORY.get().is_some()) {
+        WATCHED
+            .lock()
+            .unwrap()
+            .insert(own.clone(), Thrash::default());
+    }
     // Its stdin taken before its start is said, so that a write the host sends at once finds it.
     if let Some(pipe) = child.stdin.take() {
         stdins
@@ -487,6 +561,12 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         // wrote before it ended is said first, so its end is the last thing said of it: each
         // pipe read up to what was in it as the process ended, or to its end if sooner.
         let code = code(&mut child);
+        // Killed, and the kernel's OOM killer killed in its cgroup, or it was killed for
+        // thrashing at its limit: its memory ran out. Read before the cgroup goes.
+        let starved = cgroup.as_ref().and_then(|own| WATCHED.lock().unwrap().remove(own));
+        let starved = starved.is_some_and(|thrash| thrash.killed);
+        let oom = code == 128 + libc::SIGKILL
+            && (starved || cgroup.as_deref().is_some_and(oom_killed));
         // Its cgroup gone with it, unless a program it left running is in it still.
         if let Some(own) = &cgroup {
             let _ = fs::remove_dir(own);
@@ -500,7 +580,7 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
                 break;
             }
         }
-        send(&out, &CtrlResp::Exited { id, code });
+        send(&out, &CtrlResp::Exited { id, code, oom });
     });
 }
 

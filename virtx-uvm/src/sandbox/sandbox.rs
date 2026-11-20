@@ -607,7 +607,7 @@ impl Sandbox {
                 self.record.id
             )));
         }
-        self.halt_turned().await
+        self.halt_turned(SandboxJobEndReason::Cancelled).await
     }
 
     /// Its machine parked now, whatever uses it: its jobs ended, as cancelling each does -- what an
@@ -615,7 +615,7 @@ impl Sandbox {
     /// machine is not up, or that is deleted.
     pub async fn park_anyway(self: &Arc<Self>) {
         let _turn = self.turn.lock().await;
-        if let Err(e) = self.halt_turned().await {
+        if let Err(e) = self.halt_turned(SandboxJobEndReason::Cancelled).await {
             eprintln!("sandbox {} not parked: {e}", self.record.id);
         }
     }
@@ -626,19 +626,19 @@ impl Sandbox {
         if !self.is(run) || self.idle().is_none_or(|idle| idle < after) {
             return;
         }
-        if let Err(e) = self.halt_turned().await {
+        if let Err(e) = self.halt_turned(SandboxJobEndReason::Cancelled).await {
             eprintln!("sandbox {}, unused, not parked: {e}", self.record.id);
         }
     }
 
-    /// Its machine stopped if it is up, under its turn: its jobs ended, what the guest wrote
-    /// put on its disk, and its disk kept.
-    async fn halt_turned(self: &Arc<Self>) -> Result<(), Error> {
+    /// Its machine stopped if it is up, under its turn: each job that runs ended for `reason`,
+    /// what the guest wrote put on its disk, and its disk kept.
+    async fn halt_turned(self: &Arc<Self>, reason: SandboxJobEndReason) -> Result<(), Error> {
         let Some(run) = self.take_run()? else {
             return Ok(());
         };
         let stopping = Arc::clone(self);
-        tokio::task::spawn_blocking(move || stopping.halt(&run)).await?;
+        tokio::task::spawn_blocking(move || stopping.halt_for(&run, reason)).await?;
         self.keep();
         Ok(())
     }
@@ -714,11 +714,13 @@ impl Sandbox {
         self.forgotten();
     }
 
-    /// Deleted: its machine stopped first if it is up, its disk removed -- from wherever else
-    /// it is kept first -- and its jobs and its record with it. Its volumes stay.
+    /// Deleted: its machine stopped first if it is up, each job that runs ended
+    /// `sandbox_deleted`, its disk removed -- from wherever else it is kept first -- and its jobs
+    /// and its record with it. Its volumes stay.
     pub(super) async fn delete(self: &Arc<Self>) -> Result<(), Error> {
         let _turn = self.turn.lock().await;
-        self.halt_turned().await?;
+        self.halt_turned(SandboxJobEndReason::SandboxDeleted)
+            .await?;
         let id = &self.record.id;
         self.shared.hooks.deleting(id).await?;
         match self.shared.snapshots.remove(id) {
@@ -783,7 +785,7 @@ impl Sandbox {
         if self.busy() {
             return Err(in_use());
         }
-        self.halt_turned().await?;
+        self.halt_turned(SandboxJobEndReason::Cancelled).await?;
         self.keep();
         self.left();
         Ok(())
@@ -1044,7 +1046,7 @@ impl Sandbox {
                     self.record.id
                 )));
             }
-            self.halt_turned().await?;
+            self.halt_turned(SandboxJobEndReason::Cancelled).await?;
         }
         if let Some(gib) = disk_gib {
             *self.record.disk_gib.lock().unwrap() = Some(gib);
@@ -1112,10 +1114,10 @@ impl Sandbox {
                         job.write(SandboxJobEntry::Stderr(line));
                     }
                 }
-                CtrlResp::Exited { id, code } => {
+                CtrlResp::Exited { id, code, oom } => {
                     if let Some(job) = running.remove(&id) {
                         self.used();
-                        job.end(code);
+                        job.end(code, oom);
                         self.keep();
                     }
                 }
@@ -1363,7 +1365,7 @@ mod keeping_ended {
             false,
         );
         if ended {
-            job.end(0);
+            job.end(0, false);
         }
         (id.into(), job)
     }

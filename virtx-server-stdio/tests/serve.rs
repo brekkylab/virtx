@@ -186,7 +186,7 @@ impl Drop for Server {
 
 fn status<T: std::fmt::Debug>(answered: Result<T, Error>) -> u16 {
     match answered {
-        Err(Error::Status(status, _) | Error::Refusal { status, .. }) => status,
+        Err(Error::Status(status, ..) | Error::Refusal { status, .. }) => status,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }

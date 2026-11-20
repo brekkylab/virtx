@@ -6,7 +6,7 @@ use super::{
     manifest::{Child, Manifest},
     reference::{Reference, Target},
 };
-use crate::{Error, image::ImageListOutputItem, transport::TransportClient};
+use crate::{Error, Members, image::ImageListOutputItem, transport::TransportClient};
 
 /// Every tag in every repository, with the digest it points at, sorted by reference.
 pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutputItem>, Error> {
@@ -112,6 +112,7 @@ fn held<T>(reference: &str, result: Result<T, Error>) -> Result<T, Error> {
         Some(404) => Error::Status(
             404,
             format!("not_found: {reference} is not an image the server holds"),
+            Members::default(),
         ),
         _ => e,
     })

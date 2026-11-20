@@ -212,7 +212,7 @@ pub async fn build_step(
                 {
                     let _ = lines.send(line);
                 }
-                Some(CtrlResp::Exited { id: of, code }) if of == id => return Ok(code),
+                Some(CtrlResp::Exited { id: of, code, .. }) if of == id => return Ok(code),
                 Some(_) => {}
                 None => {
                     return Err(machine::Error::Died(

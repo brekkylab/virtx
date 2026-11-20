@@ -95,7 +95,19 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     let timed = timed.get().wait().unwrap();
     assert_eq!(timed.info().reason, Some(SandboxJobEndReason::Timeout));
 
+    // Its sandbox removed under it: a log being read ends with an end that says so.
+    let up = SandboxExecArgs::new(["sh", "-c", "echo up; sleep 60"]);
+    let up = sandbox.exec(&up).wait().unwrap();
+    let mut log = up.log(None);
+    let first = log.wait_next().unwrap().unwrap().entry;
+    assert_eq!(first, SandboxJobEntry::Stdout("up".into()));
     sandbox.remove().wait().unwrap();
+    let ended = common::entries(log).pop().unwrap().entry;
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(ended, SandboxJobEntry::End(deleted));
     let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
@@ -161,6 +173,25 @@ fn stdin_written_comes_back_until_it_is_closed() {
             SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
+
+    // Its process closes its stdin under a write: refused, saying how much of it went in.
+    let cut = ["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"];
+    let cut = sandbox
+        .exec(&SandboxExecArgs::new(cut).stdin(true))
+        .wait()
+        .unwrap();
+    let of = 1 << 20;
+    let refused = cut.write_stdin(Some(&"x".repeat(of)), false).wait();
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        (refused.status(), refused.code()),
+        (Some(409), Some("ended"))
+    );
+    let written = refused.written().unwrap();
+    assert!(written > 0 && written < of as u64, "{written} of {of}");
+    // Any other refusal has none.
+    let after = cut.write_stdin(Some("x"), false).wait().unwrap_err();
+    assert_eq!((after.code(), after.written()), (Some("ended"), None));
     sandbox.remove().wait().unwrap();
 }
 

@@ -191,6 +191,20 @@ describe('against virtx-stdio', () => {
         log.filter((entry) => 'stdout' in entry).map((entry) => entry.stdout),
         ['one', 'two'],
       )
+
+      // Its process closes its stdin under a write: refused, saying how much of it went in.
+      const cut = await sandbox.exec(['sh', '-c', 'head -c 1 >/dev/null; exec 0<&-; sleep 300'], {
+        stdin: true,
+      })
+      const of = 1 << 20
+      const refused = await cut.writeStdin('x'.repeat(of)).then(
+        () => assert.fail('a write its stdin closed under is refused'),
+        (error) => error,
+      )
+      assert.ok(refused instanceof virtx.VirtxError)
+      assert.deepEqual([refused.status, refused.code], [409, 'ended'])
+      assert.ok(refused.written > 0 && refused.written < of, `${refused.written} of ${of}`)
+      await assert.rejects(cut.writeStdin('x'), { code: 'ended', written: null })
     } finally {
       await sandbox.remove()
     }
@@ -241,6 +255,18 @@ describe('against virtx-stdio', () => {
     const ended = await sleep.get()
     assert.deepEqual([ended.code, ended.reason], [137, 'timeout'])
     await sandbox.remove()
+  })
+
+  test('a process whose sandbox is removed ends with the reason', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const up = await sandbox.exec(['sh', '-c', 'echo up; sleep 60'])
+    const log = up.log()[Symbol.asyncIterator]()
+    assert.equal((await log.next()).value.stdout, 'up')
+    await sandbox.remove()
+    const rest = []
+    for (let next = await log.next(); !next.done; next = await log.next()) rest.push(next.value)
+    assert.deepEqual(rest.at(-1).end, { code: 137, reason: 'sandbox_deleted' })
   })
 
   test('an image build is a job whose log ends with its digest', async () => {

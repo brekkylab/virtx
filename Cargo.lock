@@ -163,7 +163,6 @@ dependencies = [
  "axum-core",
  "base64 0.22.1",
  "bytes",
- "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -179,7 +178,6 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
- "serde_urlencoded",
  "sha1",
  "sync_wrapper",
  "tokio",
@@ -230,6 +228,16 @@ name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
+name = "bincode"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+dependencies = [
+ "serde",
+ "unty",
+]
 
 [[package]]
 name = "bindgen"
@@ -977,18 +985,27 @@ dependencies = [
 
 [[package]]
 name = "ffier"
-version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+version = "0.3.0"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
 dependencies = [
+ "ffier-bridge",
  "ffier-builtins",
  "ffier-impl",
  "ffier-rt",
 ]
 
 [[package]]
+name = "ffier-bridge"
+version = "0.3.0"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
+dependencies = [
+ "ffier-rt",
+]
+
+[[package]]
 name = "ffier-builtins"
-version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+version = "0.3.0"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
 dependencies = [
  "ffier-impl",
  "ffier-rt",
@@ -996,8 +1013,8 @@ dependencies = [
 
 [[package]]
 name = "ffier-impl"
-version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+version = "0.3.0"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
 dependencies = [
  "ffier-schema",
  "proc-macro2",
@@ -1008,13 +1025,13 @@ dependencies = [
 
 [[package]]
 name = "ffier-rt"
-version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+version = "0.3.0"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
 
 [[package]]
 name = "ffier-schema"
-version = "0.2.0"
-source = "git+https://github.com/mtjhrc/ffier.git?tag=0.2.0rc1#9616083b528a045fbc6a275e77da0ec03bd28bea"
+version = "0.3.0"
+source = "git+https://github.com/mtjhrc/ffier.git?tag=v0.3.0#51fc8b1abb282e06a81ac9658aff6ca23507004a"
 dependencies = [
  "serde",
  "serde_json",
@@ -1828,7 +1845,7 @@ checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 [[package]]
 name = "krun-arch"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "acpi_tables",
  "krun-arch-gen",
@@ -1839,6 +1856,7 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "linux-loader",
+ "log",
  "vm-memory",
  "vmm-sys-util",
  "windows-sys 0.61.2",
@@ -1848,12 +1866,12 @@ dependencies = [
 [[package]]
 name = "krun-arch-gen"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 
 [[package]]
 name = "krun-cpuid"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
@@ -1863,7 +1881,7 @@ dependencies = [
 [[package]]
 name = "krun-devices"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "bitflags 1.3.2",
  "caps",
@@ -1896,7 +1914,7 @@ dependencies = [
 [[package]]
 name = "krun-display"
 version = "0.1.0"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "bindgen",
  "bitflags 2.13.1",
@@ -1908,7 +1926,7 @@ dependencies = [
 [[package]]
 name = "krun-hvf"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "crossbeam-channel",
  "krun-arch",
@@ -1919,9 +1937,10 @@ dependencies = [
 [[package]]
 name = "krun-init-blob"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "ffier",
+ "krun-init-common",
  "libkrun",
  "serde",
  "serde_json",
@@ -1929,9 +1948,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "krun-init-common"
+version = "0.1.0-2.0.0-dev"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
+dependencies = [
+ "bincode",
+ "libc",
+ "serde",
+]
+
+[[package]]
 name = "krun-kernel"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "krun-utils",
  "vm-memory",
@@ -1940,7 +1969,7 @@ dependencies = [
 [[package]]
 name = "krun-polly"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "krun-utils",
  "libc",
@@ -1949,7 +1978,7 @@ dependencies = [
 [[package]]
 name = "krun-smbios"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "vm-memory",
 ]
@@ -1957,7 +1986,7 @@ dependencies = [
 [[package]]
 name = "krun-utils"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "bitflags 1.3.2",
  "crossbeam-channel",
@@ -1972,7 +2001,7 @@ dependencies = [
 [[package]]
 name = "krun-whp"
 version = "0.1.0-2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "log",
  "windows-sys 0.61.2",
@@ -2017,7 +2046,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libkrun"
 version = "2.0.0-dev"
-source = "git+https://github.com/brekkylab/libkrun?rev=bebba160#bebba1604863e29d35231ee5c9c72ae263d79431"
+source = "git+https://github.com/brekkylab/libkrun?rev=cc7d8205#cc7d8205397c63d5d4c96b8bb2e6a595a5e82b7b"
 dependencies = [
  "bitflags 2.13.1",
  "bzip2",
@@ -3823,6 +3852,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "unty"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3938,6 +3973,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body-util",
@@ -3956,16 +3992,15 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body-util",
  "jsonwebtoken",
- "libc",
  "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
@@ -4558,27 +4593,27 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.4"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdb02c3132d251ab1606e9fc913a7da6c6ed08cc263df15edf082e1dc497d157"
+checksum = "ad5020ab8f27bfc0024ad0a07aed6bf022a16208f479686fbed4fdd0c85eb0b3"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.4.0"
+version = "8.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
+checksum = "5a9ea9cc2576c2fcc104e9cec04f46e3ede564f4fbc206831e4ef7e859a4140d"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.2+zstd.1.5.7"
+version = "2.1.3+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+checksum = "f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d"
 dependencies = [
  "cc",
  "pkg-config",

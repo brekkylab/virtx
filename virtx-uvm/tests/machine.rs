@@ -1416,6 +1416,27 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+async fn a_guest_s_kernel_boots_seeded_and_tests_none_of_its_crypto(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    let (lines, code) = run(&sandbox, &["dmesg"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("self-tests disabled")),
+        "{lines:?}"
+    );
+    // Seeded by the device tree, before the kernel's clock starts.
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("0.000000] random: crng init done")),
+        "{lines:?}"
+    );
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
 async fn a_signal_ends_a_job_with_every_process_it_started(home: Home) {
     let sandbox = home.sandbox(&small()).await;
     // The signal reaches the child it left in the background too, which would run on otherwise.
@@ -1573,8 +1594,8 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
 }
 
 /// A machine with more virtio-mmio devices than the 16 legacy interrupt lines hold boots, and
-/// each answers: five volumes over the eight devices this sandbox has without them, the last
-/// volume and the guest agent's filesystem on lines past 15.
+/// each answers: five volumes over the seven devices this sandbox has without them, the last
+/// two of the twelve on lines past 15.
 async fn a_sandbox_mounting_many_volumes_reaches_each(home: Home) {
     let names = ["v1", "v2", "v3", "v4", "v5"];
     for name in names {
@@ -1606,6 +1627,24 @@ async fn a_sandbox_mounting_many_volumes_reaches_each(home: Home) {
             format!("{name}\n")
         );
     }
+}
+
+async fn a_volume_mounted_over_etc_is_left_without_a_resolver_file(home: Home) {
+    home.volumes.create("etc").unwrap();
+    let mounting = SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "etc".into(),
+            path: "/etc".into(),
+            readonly: false,
+        }],
+        ..small()
+    };
+    let sandbox = home.sandbox(&mounting).await;
+    let listed = run(&sandbox, &["ls", "-A", "/etc"], None).await.unwrap();
+    assert_eq!(listed, (vec![], 0));
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+    let files = home.volumes.open("etc").unwrap().files();
+    assert_eq!(std::fs::read_dir(files).unwrap().count(), 0);
 }
 
 /// What a guest installs to reach venus and ask it what it finds: venus's guest driver, the
@@ -1987,6 +2026,7 @@ fn main() -> ExitCode {
         a_sandbox_deleted_twice_at_once_ends_once,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,
+        a_volume_mounted_over_etc_is_left_without_a_resolver_file,
         a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
@@ -1997,6 +2037,11 @@ fn main() -> ExitCode {
     ]);
     #[cfg(unix)]
     tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
+    // The x86_64 kernels are built without those tests, and seeded by their CPU.
+    #[cfg(target_arch = "aarch64")]
+    tests.extend(tests![
+        a_guest_s_kernel_boots_seeded_and_tests_none_of_its_crypto
+    ]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {

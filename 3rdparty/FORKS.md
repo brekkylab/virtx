@@ -10,140 +10,9 @@ virtx's server runs on forks of the projects below, each under brekkylab and pin
 | [MoltenVK](https://github.com/brekkylab/MoltenVK) and [SPIRV-Cross](https://github.com/brekkylab/SPIRV-Cross) | the submodules `3rdparty/MoltenVK` and `3rdparty/SPIRV-Cross` | `xtask/scripts/build-deps.sh` (macOS only) |
 | [libepoxy](https://github.com/brekkylab/libepoxy) | the submodule `3rdparty/libepoxy`, at 1.5.10 and unchanged | `xtask/scripts/build-deps.ps1` (Windows only) |
 
-libkrun is pinned at a commit on its `cloud` branch rather than `virtx`: the `virtx` branch, and the commits virtx cloud needs beside, `with-storage` and `kernel-pages`, and a listen fix in `tsi`. It is [libkrun](https://github.com/libkrun/libkrun) 2.0, linked as an rlib: `virtx-uvm` depends on the `libkrun` crate directly, so there is no `libkrun.so` or `.dylib` to ship and no C ABI in the middle. Its API is not stable yet, which is why it is pinned to a commit: bump it deliberately, not automatically.
+libkrun is [libkrun](https://github.com/libkrun/libkrun) 2.0, linked as an rlib: `virtx-uvm` depends on the `libkrun` crate directly, so there is no `libkrun.so` or `.dylib` to ship and no C ABI in the middle. Its API is not stable yet, which is why it is pinned to a commit: bump it deliberately, not automatically.
 
 ## libkrun
-
-### `overlay-root`: machines
-
-[`fstree::erofs`](../virtx-uvm/src/fstree/erofs/) makes an image's layers into a disk: one
-read-only EROFS filesystem -- the layers merged into a metadata image that points into
-them, rather than a copy of them -- shared by every machine ever booted on those layers.
-An upper disk is what makes one of those machines writable: an ext4 of its own, made by
-[`create_upper`](../virtx-uvm/src/machine/machine.rs) and stacked over it by [`machine`](../virtx-uvm/src/machine/):
-
-```
-/dev/vdb  ext4,  writable    the upper disk                ─┐
-                                                            ├─ overlay ──► /
-/dev/vda  erofs, read-only   the image's disk              ─┘
-```
-
-Each sandbox makes an upper disk of its own, named by the sandbox's id and gone with it. A sandbox's machine is
-parked -- stopped, its disk kept -- once nothing uses the sandbox (`VIRTX_PARK_AFTER_MS` for a while after,
-`0` for never) and booted again over the same upper disk when something does: see
-[`sandbox`](../virtx-uvm/src/sandbox/sandbox.rs). Each machine's coming up and going down, with when and for how long, is told in order to
-whoever embeds `virtx-uvm` and subscribes ([`sandbox::runs`](../virtx-uvm/src/sandbox/runs.rs)). Each boot asks whoever embeds `virtx-uvm` for room first, if it set
-an [`Admission`](../virtx-uvm/src/admission.rs), and holds it until the machine is down. The devices a machine has, and why each, are in
-[`machine/boot.rs`](../virtx-uvm/src/machine/boot.rs).
-
-A sandbox's disk can be copied whole while its machine runs (`Sandbox::copy_disk`), for a backup
-or to keep it elsewhere: the guest puts what it has written on the disk (`Sandbox::sync`, which
-can be asked alone), the machine's process is paused -- `SIGSTOP`, `NtSuspendProcess` on
-Windows -- and the disk copied, cloned at once where the host's filesystem clones files (APFS,
-Btrfs, XFS made with reflink), and the machine resumed.
-
-A machine ends when its guest does: a reboot, a power-off -- through ACPI's sleep register on
-an x86_64 Linux host, PSCI on aarch64 -- or silence. Once the guest is up, the machine's process
-pings its agent every five seconds, and a guest that has answered nothing for
-`VIRTX_GUEST_SILENCE` seconds, a minute unless it says otherwise (`0` for never, and never
-less than ten), is ended: one halted, as `halt -f` leaves it or a Windows host's guest that
-powers off, whose idle vCPUs no host sees, and one too stuck to answer. Its jobs end as killed, as on a power-off. A busy guest answers
-within moments; a minute is as long as the host waits on a guest's files. A machine paused is not
-a silent guest: its process wakes past the silence check's second, which starts the silence
-anew.
-
-A parked sandbox's files are read without booting it ([`files/parked.rs`](../virtx-uvm/src/files/parked.rs)): its upper
-disk's ext4 read on the host for its metadata alone ([`Ext4`](../virtx-uvm/src/fstree/ext4/mod.rs)), stacked over the
-layers' by the rules overlayfs stacks them by ([`FsTree::stack`](../virtx-uvm/src/fstree/tree.rs)), once for each boot
-of the disk, and a file's bytes read from its layer or its inode as a `GET` asks for them. Each read of the
-disk holds the sandbox against a boot and the disk's lock, and goes through the embedder's
-[`Disks::read`](../virtx-uvm/src/disks.rs), so a lazy disk is fetched as it is read. Writes boot it, as before.
-
-**The stacking happens in the guest** -- the host stacks the two only to read a parked
-sandbox's files, in memory -- because overlayfs is a kernel filesystem
-and the host has no way to mount one — let alone an EROFS a macOS kernel cannot
-read at all. libkrun's init already knows how to mount a block device as the
-root and pivot onto it (`KRUN_BLOCK_ROOT_DEVICE`), but it takes exactly one
-device. The patch teaches it the two-device form: `KRUN_BLOCK_LOWER_DEVICE` and
-`KRUN_BLOCK_UPPER_DEVICE`, mounted, overlaid and pivoted onto through the same
-code path, in `init/init-binary/src/fs.rs`. A boot that names neither variable behaves exactly
-as before.
-
-**Two block devices and not a virtio-fs share for the upper layer**, which would
-need no patch at all and does not work. The guest kernel refuses a FUSE
-filesystem as an upperdir outright — `filesystem on %s not supported as
-upperdir` — and even past that, deleting a file the image shipped is recorded as
-a character device numbered `0:0`, which `mknod` on a macOS host refuses to
-anything but root. It is the same wall [`fstree`](../virtx-uvm/src/fstree/) is
-written around, and the reason layers become EROFS images rather than extracted
-directories.
-
-**The patch carries a second, smaller thing**, in `init/init-binary/src/exec.rs`: the guest's
-exit status. libkrun's init reports it as an ioctl on the virtiofs mount, and any boot that
-pivots onto a block root — the existing `KRUN_BLOCK_ROOT_DEVICE` one as much as this — has
-left that mount under no path by the time the workload exits, so the status was
-dropped and the host always saw 0. The init now holds a descriptor on the
-virtiofs root across the pivot and sends the ioctl to that.
-
-### `with-storage`: an embedder's disks
-
-A sandbox's upper disk is a file, which libkrun opens and reads and writes itself. A server built
-on `virtx-uvm` can say otherwise ([`disks`](../virtx-uvm/src/disks.rs), `set_disks`, in its own process and in
-each machine's, which is the same binary). Before a sandbox's machine boots, the server's process
-is asked what the machine fetches the disk's data from while it runs, such as a socket that
-answers for data kept elsewhere, and holds what serves it until the machine is down. The
-machine's process opens the disk through a storage of the embedder's, given that source, and
-tells it when the guest is up. Each removed disk is reported to the embedder too. A disk the
-embedder serves is its to copy: `Sandbox::copy_disk` refuses it, and `Sandbox::sync` has the guest
-put what it wrote on the disk first. A build's disk,
-made and thrown away within its step, is always a file.
-
-**The patch** is `BlockDevice::with_storage`: a block device that reads and writes its image
-through an `imago` storage the embedder gives, rather than through the file opened plainly. The
-file still names the disk.
-
-### `kernel-pages`
-
-On Linux, the guest kernel is copied into the guest's memory whole rather than mapped from its
-file page by page. Mapped, a boot waited on page faults the guest took one at a time: a machine
-booted in 490 ms on an EC2 node, and in 161 ms with the kernel copied.
-
-### `session-mounts`: volumes
-
-A sandbox can be given volumes, each one a virtio-fs share, and one more for each remote store
-mounted in the volume (see [`volume`](../virtx-uvm/src/volume/)).
-
-**The host half needs no patch.** Sharing a directory under a tag is what
-libkrun has always done — `krun_add_virtiofs` in the C API, `FsDevice::new` and
-`FsDevice::new_read_only` in the Rust one — and read-only is a parameter of the
-device rather than something bolted on afterwards.
-
-**The guest half is what is missing, and deliberately so.** A virtio-fs share
-has no notion of where it belongs: it exports a directory under a tag, and
-something in the guest has to run `mount -t virtiofs <tag> <dir>`. libkrun's init
-mounts the root and one tmpfs and stops there, which leaves automounting to
-whoever builds the guest's boot — and for a machine that is `virtx-uvm`. The patch
-reads the rest of the `mounts` list the init already parses out of
-`/.krun_config.json`, and mounts each entry as the config spells it. It touches
-`init/init-binary/src/config.rs` and `init/init-binary/src/main.rs` and adds
-`init/init-binary/src/mounts.rs`; the overlay-root patch owns `fs.rs`, so the two
-do not stack on one file.
-
-**The mounts go on after the pivot**, once the root is the overlay, in the order given, so a
-store's share lands over the directory the volume's own share holds for it. One made before
-the pivot would sit on the boot root the pivot leaves behind, which afterwards is under no path
-at all. The directory a share lands on is created if the image shipped none, which puts it on
-the upper layer.
-
-**Read-only is the host's, not the guest's.** A read-only volume is attached read-only at the
-device, and the virtiofs server then refuses every write whatever the guest mounted it with. A
-guest that writes anyway gets an error from the write rather than from the mount, and
-`/proc/mounts` inside the guest still says `rw` — the flag a guest could remount away is not
-where the guarantee lives.
-
-Nothing here is a sandbox of the host's filesystem by itself. libkrun's own README is explicit
-that a virtio-fs share offers no protection against a guest reaching other directories on the
-same host filesystem, and read-only bounds what a guest may write, not what it may read.
 
 ### `virtiofs-external`: a volume's remote stores
 
@@ -182,11 +51,9 @@ In the muxer rather than in each proxy, because the muxer is the one place every
 request passes through on every host — the unix and Windows proxies below it are
 two implementations of the same thing.
 
-**And a resolver, since there is no lease to name one.** The same patch has the
-init write `nameserver $KRUN_NAMESERVER` into `/etc/resolv.conf` once the root is
-in place, the same moment libkrun's DHCP client writes its own. A datagram's reply is
-stamped by the guest kernel with the address it was sent to, so the guest never
-sees that its resolver was answered from somewhere else.
+**And a resolver, since there is no lease to name one.**
+The agent writes `nameserver 10.0.2.3` into `/etc/resolv.conf` once the root is in place, and the policy carries a query sent there to this host's resolver.
+A datagram's reply is stamped by the guest kernel with the address it was sent to, so the guest never sees that its resolver was answered from somewhere else.
 
 **A socket listened on again stays where its first listen put it.** A program that listens on a
 socket twice (nginx does, to set its backlog) had its second listen sent to the policy, which,
@@ -310,6 +177,9 @@ never boots a guest. The first two are on the path every `execve` takes.
   no-follow path with it, because the mode bits of a link belong on the link
   and nothing on the host can resolve an LX reparse tag — a plain `fs::write`
   to the stream fails with `ERROR_CANT_ACCESS_FILE`.
+  Upstream's `check_symlink_target`, which refuses a link whose target leaves the share, is
+  taken out with it: that guards a native symlink, which Windows follows, and an LX one the
+  host follows nowhere, whatever it names.
 
 - **`rename` moved the file and left every cached inode pointing at the old
   path.** An inode's stored path is how `getattr`, `open` and `setattr` reach
@@ -409,49 +279,6 @@ There is no external-kernel payload on Windows: `linux-loader` is under
 `cfg(unix)` upstream, because no `linux-loader` release builds for Windows. The
 guest kernel comes from `libkrunfw.dll` and nothing here needs the other path.
 
-### `x86_64-mptable`
-
-The twelfth virtio-mmio device on an x86_64 guest got an interrupt line nothing
-had told the kernel about, and the machine stopped there without saying so.
-
-`MMIODeviceManager` hands out GSIs from `IRQ_BASE` to `IRQ_MAX`, which
-`arch/x86_64/layout.rs` sets to 5 and 23 — its comment says as much: "The I/O
-APIC has 24 pins (0-23) … leaving GSIs 5-23 for virtio-mmio devices." The MP
-table describing those pins was still writing the 16 legacy ISA entries
-Firecracker's original `for i in 0..16` produced. A GSI with no `MP_INTSRC`
-entry is one the kernel never routes, so the device holding it waits for an
-interrupt that cannot arrive — and waits silently, because nothing failed.
-
-Which device that is depends on the machine's shape. A machine with a GPU, a
-network and three shares lands on:
-
-```
-fs 5 · console 6 · rng 7 · balloon 8 · vsock 9 · gpu 10 · block 11 · block 12
-fs 13 · fs 14 · fs 15 · fs 16   ← the line no MP_INTSRC covers
-```
-
-The guest's boot then stops where that fs device is mounted, which is before
-the command is started at all — libkrun's init mounts the shares first. What a
-server saw, back when a guest agent answered it, was that agent's handshake
-never arriving: "the guest connected but did not say it was there within 60s",
-naming nothing that would lead here. The
-`ioapic: write: ioredtbl register N` line for 16 is simply absent from a debug
-log that has 5, 13, 14 and 15.
-
-The table now carries one entry per pin, counted from `IRQ_MAX` rather than
-from a literal of its own, so the two cannot drift apart again. That is eleven
-virtio-mmio devices before the fix and nineteen after — with the nine a machine
-always has, two user mounts and ten.
-
-**Not a Windows bug**, although this is where it was found: the MP table and
-the IRQ range are both generic x86_64. A Linux host on x86_64 describes the
-machine in ACPI instead (`VmmBuilder::acpi`), which writes no MP table and gives
-each virtio-mmio device's GSI as an `Interrupt` resource in the DSDT, so the
-table is the Windows host's alone now. `a_sandbox_mounting_many_volumes_reaches_each`
-in `tests/machine.rs` boots a machine past GSI 15 on either. macOS is aarch64,
-where the interrupt controller is a GIC and `IRQ_BASE`/`IRQ_MAX` are 32 and
-159, and never reaches it.
-
 ### `whp-prefault`
 
 Under WHP each page the guest first touches is a fault the hypervisor resolves
@@ -482,6 +309,36 @@ for 4 GiB at once. The price is that all of the guest's RAM is resident on the
 host from the start, used or not, so it is off by default; `boot.rs` turns it
 on for `VIRTX_PREFAULT_MEMORY=1`, which is for a runner and nothing else. The
 machine tests on that runner take 59s with it and 182s without.
+
+### `with-storage`: an embedder's disks
+
+A sandbox's upper disk is a file, which libkrun opens and reads and writes itself. A server built
+on `virtx-uvm` can say otherwise ([`disks`](../virtx-uvm/src/disks.rs), `set_disks`, in its own
+process and in each machine's, which is the same binary). Before a sandbox's machine boots, the
+server's process is asked what the machine fetches the disk's data from while it runs, such as a
+socket that answers for data kept elsewhere, and holds what serves it until the machine is down.
+The machine's process opens the disk through a storage of the embedder's, given that source, and
+tells it when the guest is up. Each removed disk is reported to the embedder too. A disk the
+embedder serves is its to copy: `Sandbox::copy_disk` refuses it, and `Sandbox::sync` has the guest
+put what it wrote on the disk first. A build's disk,
+made and thrown away within its step, is always a file.
+
+**The patch** is `BlockDevice::with_storage`: a block device that reads and writes its image
+through an `imago` storage the embedder gives, rather than through the file opened plainly. The
+file still names the disk.
+
+### `kernel-pages`: the guest kernel copied whole
+
+On Linux, the guest kernel is copied into the guest's memory whole rather than mapped from its
+file page by page. Mapped, a boot waited on page faults the guest took one at a time: a machine
+booted in 490 ms on an EC2 node, and in 161 ms with the kernel copied.
+
+### `rng-seed`: the guest's random pool seeded as it boots
+
+On aarch64, the device tree's `/chosen` carries 64 bytes of the host's entropy as `rng-seed`.
+Without one the guest's random pool starts empty, and each random number the kernel takes early
+in its boot asks whether the CPU has `RNDR` by reading `ID_AA64ISAR0_EL1`, which traps to the
+hypervisor every time: 40 ms of a 120 ms boot on an M3 Pro, before the kernel's clock starts.
 
 ## rutabaga_gfx: `virgl-renderer`
 
@@ -746,6 +603,81 @@ Each is small and self-contained; the reasoning is worth keeping because none of
 obvious from the symptoms.
 
 ## Background
+
+### Machines
+
+[`fstree::erofs`](../virtx-uvm/src/fstree/erofs/) makes an image's layers into a disk: one
+read-only EROFS filesystem -- the layers merged into a metadata image that points into
+them, rather than a copy of them -- shared by every machine ever booted on those layers.
+An upper disk is what makes one of those machines writable: an ext4 of its own, made by
+[`create_upper`](../virtx-uvm/src/machine/machine.rs) and stacked over it by [`machine`](../virtx-uvm/src/machine/):
+
+```
+/dev/vdb  ext4,  writable    the upper disk                ─┐
+                                                            ├─ overlay ──► /
+/dev/vda  erofs, read-only   the image's disk              ─┘
+```
+
+Each sandbox makes an upper disk of its own, named by the sandbox's id and gone with it. A sandbox's machine is
+stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
+unless it says otherwise, `0` for never) and booted again over the same upper disk when something
+does: see [`sandbox`](../virtx-uvm/src/sandbox/sandbox.rs). Each boot asks whoever embeds `virtx-uvm` for room first, if it set
+an [`Admission`](../virtx-uvm/src/admission.rs), and holds it until the machine is down. Each machine's coming up and going down, with when and for how long, is told in order
+to whoever embeds `virtx-uvm` and subscribes ([`runs`](../virtx-uvm/src/sandbox/runs.rs)). A sandbox made with keys, as `virtx-server-tcp`
+makes each, is kept past its process too: a record beside its upper disk, `<id>.json`, says what
+it boots as, and the next server over the same root knows it again, parked
+(`Sandbox::kept`), or, where it cannot be -- its record not read, its image gone -- holds what it
+kept as `Unknown` until it is removed; `virtx-stdio`'s go with it. The devices a machine has, and why each, are in
+[`machine/boot.rs`](../virtx-uvm/src/machine/boot.rs).
+
+A sandbox's disk can be copied whole while its machine runs (`Sandbox::copy_disk`), for a backup
+or to keep it elsewhere: the guest puts what it has written on the disk (`Sandbox::sync`, which
+can be asked alone), the machine's process is paused -- `SIGSTOP`, `NtSuspendProcess` on
+Windows -- and the disk copied, cloned at once where the host's filesystem clones files (APFS,
+Btrfs, XFS made with reflink), and the machine resumed.
+
+A machine ends when its guest does: a reboot, a power-off -- through ACPI's sleep register on
+an x86_64 Linux host, PSCI on aarch64 -- or silence. Once the guest is up, the machine's process
+pings its agent every five seconds, and a guest that has answered nothing for
+`VIRTX_GUEST_SILENCE` seconds, a minute unless it says otherwise (`0` for never, and never
+less than ten), is ended: one halted, as `halt -f` leaves it or a Windows host's guest that
+powers off, whose idle vCPUs no host sees, and one too stuck to answer. Its jobs end as killed, as on a power-off. A busy guest answers
+within moments; a minute is as long as the host waits on a guest's files. A machine paused is not
+a silent guest: its process wakes past the silence check's second, which starts the silence
+anew.
+
+**The stacking happens in the guest**, because overlayfs is a kernel filesystem and the host has no way to mount one — let alone an EROFS a macOS kernel cannot read at all.
+libkrun's init knows how to mount one block device as the root, not two, so it is not asked to: it runs the agent on the boot root, and the agent mounts both disks, overlays them, and steps into the overlay before it takes a command ([`virtx-uvm-guest`](../virtx-uvm-guest/src/main.rs)).
+The init stays behind on the boot root as PID 1, which is the virtio-fs mount it reports the guest's exit status through.
+
+**Two block devices and not a virtio-fs share for the upper layer**, which does not work.
+The guest kernel refuses a FUSE filesystem as an upperdir outright — `filesystem on %s not supported as upperdir` — and even past that, deleting a file the image shipped is recorded as a character device numbered `0:0`, which `mknod` on a macOS host refuses to anything but root.
+It is the same wall [`fstree`](../virtx-uvm/src/fstree/) is written around, and the reason layers become EROFS images rather than extracted directories.
+
+### Volumes
+
+A sandbox can be given volumes, each one a virtio-fs share, and one more for each remote store
+mounted in the volume (see [`volume`](../virtx-uvm/src/volume/)).
+
+**The host half is libkrun's as it is.**
+Sharing a directory under a tag is what libkrun has always done — `FsDevice::new` and `FsDevice::new_read_only` — and read-only is a parameter of the device rather than something bolted on afterwards.
+
+**The guest half is the agent's.**
+A virtio-fs share has no notion of where it belongs: it exports a directory under a tag, and something in the guest has to mount that tag somewhere.
+libkrun's init mounts the root and stops there, so the agent is told each share's tag and where it goes ([`MachineInfo`](../virtx-uvm/src/machine/wire.rs)) and mounts them itself.
+
+**The mounts go on once the root is the overlay**, in the order given, so a store's share lands over the directory the volume's own share holds for it.
+The directory a share lands on is created if the image shipped none, which puts it on the upper layer.
+
+**Read-only is the host's, not the guest's.** A read-only volume is attached read-only at the
+device, and the virtiofs server then refuses every write whatever the guest mounted it with. A
+guest that writes anyway gets an error from the write rather than from the mount, and
+`/proc/mounts` inside the guest still says `rw` — the flag a guest could remount away is not
+where the guarantee lives.
+
+Nothing here is a sandbox of the host's filesystem by itself. libkrun's own README is explicit
+that a virtio-fs share offers no protection against a guest reaching other directories on the
+same host filesystem, and read-only bounds what a guest may write, not what it may read.
 
 ### The `gpu` feature
 

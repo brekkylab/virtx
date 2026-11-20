@@ -3,6 +3,15 @@
   "version": "0.2.0",
   "description": "A virtx client for Node, over libvirtx_core's C ABI.",
   "license": "Apache-2.0",
+  "keywords": [
+    "vm",
+    "microvm",
+    "sandbox",
+    "agent"
+  ],
+  "bugs": {
+    "url": "https://github.com/brekkylab/virtx/issues"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "bin": {

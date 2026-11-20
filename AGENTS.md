@@ -5,10 +5,10 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 ## One behaviour, two ends
 
 - The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx` (the Rust crate in `virtx-rs/`), `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
-- A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md` and its translations (`README.*.md`), each package's own `README.md`, and the examples.
+- A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md`, which every package ships as its own, and its translations (`README.*.md`), and the examples.
 - That is the standard for a change you make: the library first, every package connected, before the work is done. It is not the gate for a person's pull request: `CONTRIBUTING.md` accepts a change that reaches one package only, and a review holds a PR to that, with the library-first shape as a suggestion or a follow-up.
 - Names follow each language's convention and nothing else: `create_sandbox` in Rust and Python, `createSandbox` in Node. The thing they name is the same.
-- The wire between client and server is `virtx-core/PROTOCOL.md`, and both ends of it are here: the types and both transports in `virtx-core`, the servers that answer them beside it. A change to the protocol moves both ends in the same pull request.
+- The wire between client and server is the protocol, `docs/content/reference/protocol.mdx` (what code comments mean by "the protocol"), and both ends of it are here: the types and both transports in `virtx-core`, the servers that answer them beside it. A change to the protocol moves both ends in the same pull request.
 
 ## Where a change goes
 
@@ -16,8 +16,8 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `virtx-rs/`, `virtx-py/`, `virtx-node/` — the packages: Rust over `libloading`, Python over `ctypes`, Node over `koffi`.
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), the sandboxes the servers make of them and the jobs run in each (`sandbox/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
 - `virtx-server-stdio/` and `virtx-server-tcp/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-stdio` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in. `virtx-server-tcp` is a library too, which its binary and a server with an authenticator and routes of its own are built from.
-- `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs a sandbox gets at `/abin`, those its `abins` name. What every VM gets at `/alib` is built by `xtask/scripts/build-alib.sh`.
-- `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies.
+- `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs a sandbox gets at `/abin`, those its `abins` name; each one's `SKILL.md` is its `--help` copied by hand, so a clap string that changes is a `SKILL.md` to regenerate. What every VM gets at `/alib` is built by `xtask/scripts/build-alib.sh`.
+- `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies. `3rdparty/FORKS.md` says what each fork's commits are for.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the workflows run to pack and smoke-test the client's packages.
 - `.github/workflows/` — `pipeline` lints and tests every platform, and in full also builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and smoke-tests them; `ci` runs it on a pull request (lint and tests) and on `main` (in full), and `release` runs it in full on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `pipeline` refuses any other spelling of), runs `publish`'s checks over what was built, and attaches it to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
@@ -32,7 +32,10 @@ git clone https://github.com/brekkylab/virtx && cd virtx
 
 ### Server
 
-The servers need more of the host than Rust; [virtx-uvm/README.md](virtx-uvm/README.md) lists what each host needs.
+The servers need more of the host than Rust, and Docker on every host, which builds the guest kernel:
+
+- **macOS**, Apple silicon: `brew install lld llvm meson ninja`, and Docker running Linux containers (Docker Desktop or colima). lld links the guest's init, llvm's `llvm-ar` archives `virtx-abins/` (Apple's `ar` writes a symbol table `rust-lld` reads as empty), and meson and ninja build the GPU libraries. Without Docker, `LIBKRUNFW_KERNEL_C=<path>` names a `kernel.c` built elsewhere.
+- **Windows**, x86_64: the Windows Hypervisor Platform feature, MSVC build tools, clang and lld, and Docker in Linux-container mode. The `gpu` feature also needs `LIBCLANG_PATH` naming the directory `libclang.dll` is in, best set in `%USERPROFILE%\.cargo\config.toml` since the path is the machine's; no Vulkan SDK is needed. Smart App Control blocks every unsigned build script, failing with `os error 4551`, so it has to be off.
 
 ```bash
 cargo xtask init                                  # checks out the submodules and adds the guest's musl target; the servers need it
@@ -40,6 +43,12 @@ cargo xtask build kernel server-stdio server-tcp  # the guest kernel and both se
 cargo xtask install --prefix ~/.local             # what was built, into ~/.local/bin
 export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, in place of a downloaded one
 ```
+
+- The first `build kernel` is a full kernel build, 10 to 20 minutes; `LIBKRUNFW_REBUILD=1` builds it again. `build abin` and `build alib` (which needs Docker) make what sandboxes get at `/abin` and `/alib`, and `install` copies them with the rest.
+- `cargo xtask build` and `test` put the guest kernel beside a server, where it looks for it, and on macOS sign the server with `com.apple.security.hypervisor`, which Hypervisor.framework requires; `cargo xtask run` only signs. A plain `cargo build`, `run` or `test`, an IDE's Run button included, does neither, and its server cannot boot a machine.
+- Set no library search path for the servers: one wide enough to find the kernel lets another virglrenderer, such as krunkit's, stand in for the one in `build/`, silently.
+- `KRUN_LOG=debug` (or `info`, `warn`, `trace`) turns on libkrun's log, which reaches the server with the guest's console.
+- `build/` is untracked and reproducible from `xtask/scripts/`: the kernel, the GPU libraries, alib's builds, the musl sysroot and the meson venv.
 
 ### Clients
 
@@ -57,6 +66,8 @@ Then, in your own project, install the package for your language from the clone:
 - **Node:** `npm install path/to/virtx/virtx-node`
 - **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in and needs none of the above; with `--no-default-features` it opens the one above instead.
 
+- `load(path)` opens a library from the program itself, in place of `VIRTX_CORE_LIB`; a process opens one.
+- A module that takes a client from another opens the file `library_path()` answers, and takes the client from the pointer `client.clone().into_raw()` answers, with `Client.from_raw`. In Node, `libraryPath()`, `intoRaw()` and `fromRaw`.
 - A change to the client needs nothing of `init`. A change to the servers needs `init` and the guest kernel.
 
 ## Tests

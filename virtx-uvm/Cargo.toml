@@ -66,8 +66,8 @@ imago = { version = "0.2.4", default-features = false, features = ["sync"] }
 # guest's root. Our fork, at a commit on its `cloud` branch -- its `virtx` branch, and what
 # virtx cloud needs beside: a block device reading through the embedder's storage
 # (with-storage), the kernel copied into the guest's memory (kernel-pages), a socket listened on
-# again left where it is (tsi); what each commit there is for is in README.md. To work on
-# libkrun from a local clone, override the source outside the repository, in
+# again left where it is (tsi); what each commit there is for is in 3rdparty/FORKS.md. To
+# work on libkrun from a local clone, override the source outside the repository, in
 # `~/.cargo/config.toml`:
 #     [patch."https://github.com/brekkylab/libkrun"]
 #     libkrun = { path = "../libkrun/src/libkrun" }

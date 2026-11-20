@@ -33,7 +33,7 @@ use std::time::{Duration, UNIX_EPOCH};
 mod wire;
 
 use wire::{
-    CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME,
+    CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME, Taken,
 };
 
 /// The port's writing half, shared by everything that says something on it, so two messages
@@ -75,6 +75,10 @@ static WATCHED: Mutex<std::collections::BTreeMap<PathBuf, Thrash>> =
 /// memory limit before it is killed.
 const THRASH_LOOK: Duration = Duration::from_secs(1);
 const THRASH_LOOKS: u32 = 3;
+/// What of its memory limit a command out of memory has left for pages reclaim can take, at
+/// most: a thirty-second of it. One whose own memory fills its limit has its program's pages
+/// alone, a few MiB.
+const THRASH_ROOM: u64 = 32;
 
 /// A command's memory as [`watch_thrashing`] last saw it: how often it had hit its limit, how
 /// many pages it had read back after letting them go, how many looks in a row it thrashed, and
@@ -87,12 +91,15 @@ struct Thrash {
     killed: bool,
 }
 
-/// Kill each command that thrashes at its memory limit, as the kernel's OOM killer kills one
-/// whose memory it cannot take back. The kernel kills only where reclaiming gets nowhere, and a
+/// Kill each command whose memory has run out, as the kernel's OOM killer kills one whose
+/// memory it cannot take back. The kernel kills only where reclaiming gets nowhere, and a
 /// command whose own anonymous memory fills its limit still has its program's pages to let go
 /// of and read back, again and again, for minutes, without end. One that, between two looks,
-/// hit its limit and read back more than a sixteenth of it in pages is thrashing; for
-/// [`THRASH_LOOKS`] looks in a row, its cgroup is killed.
+/// hit its limit, read back more than a sixteenth of it in pages, and holds all but a
+/// [`THRASH_ROOM`]th of it in memory that cannot be reclaimed is out of memory; for
+/// [`THRASH_LOOKS`] looks in a row, its cgroup is killed. A command that only reads more files
+/// than its limit holds hits it and reads back as much, but holds what it read as file pages,
+/// which are reclaimed: it is never killed.
 fn watch_thrashing() {
     let Some(&most) = JOB_MEMORY.get() else {
         return;
@@ -100,21 +107,32 @@ fn watch_thrashing() {
     // SAFETY: `sysconf` has no preconditions.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
     let enough = most / page / 16;
-    let counted = |file: PathBuf, name: &str| -> u64 {
-        let read = fs::read_to_string(file).unwrap_or_default();
+    let counted = |read: &str, name: &str| -> u64 {
         read.lines()
             .find_map(|line| line.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
             .unwrap_or(0)
     };
+    let read = |own: &Path, file: &str| fs::read_to_string(own.join(file)).unwrap_or_default();
     loop {
         thread::sleep(THRASH_LOOK);
         for (own, thrash) in WATCHED.lock().unwrap().iter_mut() {
             if thrash.killed {
                 continue;
             }
-            let max = counted(own.join("memory.events"), "max");
-            let refaults = counted(own.join("memory.stat"), "workingset_refault_file");
-            let thrashing = max > thrash.max && refaults.saturating_sub(thrash.refaults) > enough;
+            let max = counted(&read(own, "memory.events"), "max");
+            let stat = read(own, "memory.stat");
+            let refaults = counted(&stat, "workingset_refault_file");
+            // What it holds less what reclaim can take: the file pages on their lists, and the
+            // kernel's reclaimable caches. Anonymous memory, with no swap, and tmpfs stay.
+            let reclaimable = ["active_file", "inactive_file", "slab_reclaimable"]
+                .map(|name| counted(&stat, name))
+                .iter()
+                .sum::<u64>();
+            let current = read(own, "memory.current").trim().parse().unwrap_or(0u64);
+            let held = current.saturating_sub(reclaimable);
+            let thrashing = max > thrash.max
+                && refaults.saturating_sub(thrash.refaults) > enough
+                && held >= most - most / THRASH_ROOM;
             thrash.strikes = if thrashing { thrash.strikes + 1 } else { 0 };
             (thrash.max, thrash.refaults) = (max, refaults);
             if thrash.strikes >= THRASH_LOOKS {
@@ -249,8 +267,9 @@ fn in_jobs(command: &mut Command) -> Option<(File, PathBuf)> {
 type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 
 /// How many writes to one process's stdin are queued at most. The host sends the next only once
-/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, one is dropped
-/// and said not written, rather than the loop waiting.
+/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, as when writes
+/// were given up on while the process did not read, one is answered [`Full`](Taken::Full) and
+/// not taken, rather than the loop waiting.
 const INPUT_QUEUED: usize = 4;
 
 /// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`. `seq` is
@@ -284,13 +303,14 @@ impl Input {
                 if !whole || eof {
                     to = None;
                 }
+                let taken = if whole { Taken::Whole } else { Taken::Closed };
                 send(
                     &out,
                     &CtrlResp::Written {
                         id,
                         seq,
                         bytes,
-                        whole,
+                        taken,
                     },
                 );
             }
@@ -298,18 +318,20 @@ impl Input {
         Input(queued)
     }
 
-    /// `queued` queued, for process `id`: dropped, and said not written, where the queue is full
-    /// or the writer is gone.
-    fn put(&self, out: &Out, id: u32, queued: Queued) {
+    /// `queued` queued, for process `id`, and whether it was: where the queue is full it is
+    /// answered [`Full`](Taken::Full), and the stdin left as it was.
+    fn put(&self, out: &Out, id: u32, queued: Queued) -> bool {
         let seq = queued.seq;
-        if let Err(e) = self.0.try_send(queued) {
-            if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
-                eprintln!(
-                    "{}: process {id}'s stdin past {INPUT_QUEUED} writes: one dropped",
-                    env!("CARGO_BIN_NAME")
-                );
+        match self.0.try_send(queued) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                send(out, &not_written(id, seq, Taken::Full));
+                false
             }
-            send(out, &not_written(id, seq));
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                send(out, &not_written(id, seq, Taken::Closed));
+                false
+            }
         }
     }
 }
@@ -340,13 +362,13 @@ fn write_counted(pipe: &mut ChildStdin, data: &[u8]) -> (u64, bool) {
     (bytes as u64, bytes == data.len())
 }
 
-/// The answer to write `seq` to process `id` that wrote none of it.
-fn not_written(id: u32, seq: u64) -> CtrlResp {
+/// The answer to write `seq` to process `id` that wrote none of it, `taken` saying why.
+fn not_written(id: u32, seq: u64, taken: Taken) -> CtrlResp {
     CtrlResp::Written {
         id,
         seq,
         bytes: 0,
-        whole: false,
+        taken,
     }
 }
 
@@ -445,14 +467,18 @@ fn serve() -> io::Result<()> {
         match message {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
             // Handed to its writer, never written here: a process not reading holds up no other.
-            // Answered not `Written` at once for a process with no stdin here.
+            // Answered `Closed` at once for a process with no stdin here. An `eof` not queued
+            // leaves the stdin open.
             CtrlReq::Stdin { id, seq, data, eof } => {
                 let mut stdins = stdins.lock().unwrap();
-                match stdins.get(&id) {
+                let queued = match stdins.get(&id) {
                     Some(input) => input.put(&out, id, Queued { seq, data, eof }),
-                    None => send(&out, &not_written(id, seq)),
-                }
-                if eof {
+                    None => {
+                        send(&out, &not_written(id, seq, Taken::Closed));
+                        false
+                    }
+                };
+                if eof && queued {
                     stdins.remove(&id);
                 }
             }
@@ -620,7 +646,7 @@ impl Piped {
                 count,
             };
         };
-        let (woken, wake) = wake_pipe().map_or((None, None), |(r, w)| (Some(r), Some(w)));
+        let (mut woken, wake) = wake_pipe().map_or((None, None), |(r, w)| (Some(r), Some(w)));
         let pipe = Arc::new(File::from(pipe));
         let (out, counted, reading) = (Arc::clone(out), Arc::clone(&count), Arc::clone(&pipe));
         thread::spawn(move || {
@@ -652,6 +678,8 @@ impl Piped {
                     }
                     say(&mut said);
                     let _ = told.send(());
+                    // Nothing waits on the wake past this: its descriptor given back.
+                    woken = None;
                 }
                 // Until its process has ended, the pipe or the wake, whichever comes first; after,
                 // the pipe alone, read only to be dropped.

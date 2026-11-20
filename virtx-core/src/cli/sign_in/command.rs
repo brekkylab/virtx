@@ -388,6 +388,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "against the fixture's provider, as `cargo xtask test` runs it"]
+    fn runs_at_once_refresh_a_session_once_and_share_what_it_gave() {
+        let (_, sign_in) = fixture();
+        let dir = std::env::temp_dir().join(format!("virtx-cli-at-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        login(&dir, &sign_in, "openid", |_| {}).unwrap();
+
+        // The one signing in issued has a minute left, so each would refresh it; the provider takes
+        // a refresh token once.
+        let tokens: Vec<_> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| token(&dir, &sign_in, false)))
+                .collect();
+            let ran = runs.into_iter().map(|run| run.join().unwrap());
+            ran.map(|kept| kept.unwrap().token).collect()
+        });
+        assert!(tokens.iter().all(|token| *token == tokens[0]), "{tokens:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_page_to_approve_on_is_opened_only_where_it_is_a_web_page() {
         let device = "https://idp.example/device?user_code=ABCD";
         let local = "http://127.0.0.1:8080/approve";

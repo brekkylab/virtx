@@ -7,7 +7,7 @@
 # tested as a pull request is, not built in full.
 name: ci
 
-# Markdown is left out, but for the READMEs the packages ship.
+# Markdown and `docs/` are left out.
 on:
   push:
     branches: [main, cloud]
@@ -15,8 +15,6 @@ on:
       - "**"
       - "!**/*.md"
       - "!docs/**"
-      - virtx-py/README.md
-      - virtx-node/README.md
   pull_request:
     paths: *paths
   workflow_dispatch:

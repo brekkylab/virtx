@@ -1,7 +1,7 @@
-//! The server's routes and loops, for an [`Access`]: the endpoints of `virtx-core`'s
-//! `PROTOCOL.md` ([`crate::endpoints`]), each answered from the home its request reaches, the
-//! images as an OCI registry, and each sandbox's ports; and sandboxes reclaimed once unused
-//! for long, images pruned. A server built on this one -- virtx
+//! The server's routes and loops, for an [`Access`]: the endpoints of the protocol
+//! ([`crate::endpoints`]), each answered from the home its request reaches, the images as an OCI
+//! registry, and each sandbox's ports; and sandboxes reclaimed once unused for long, images
+//! pruned. A server built on this one -- virtx
 //! cloud's node -- gives [`router`] an access of its own, and routes of its own beside these;
 //! the server a config alone makes is [`configured`], which does both.
 //!
@@ -764,6 +764,13 @@ mod tests {
         assert_eq!(status("PUT", &alice, "alice", demoted).await, 409);
         assert_eq!(status("DELETE", &carol, "alice", none.clone()).await, 404);
 
+        // Its owner takes a member out.
+        let member = json!({ "role": "member" });
+        assert_eq!(status("PUT", &carol, "alice", member).await, 201);
+        assert_eq!(volumes("carol").await, 200);
+        assert_eq!(status("DELETE", &carol, "alice", none.clone()).await, 204);
+        assert_eq!(volumes("carol").await, 403);
+
         // Bob leaves; Alice removes the project, and everything in it.
         assert_eq!(status("DELETE", &bob, "bob", none.clone()).await, 204);
         assert_eq!(volumes("bob").await, 403);
@@ -1228,9 +1235,9 @@ mod tests {
         assert_eq!(told.pulled.lock().unwrap().len(), 2);
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
-    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
-    /// and a path whose segment does not read as one is `400` `invalid`.
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client reads
+    /// its code: a body over the server's limit is `413` `too_large`, naming the limit, and a path
+    /// whose segment does not read as one is `400` `invalid`.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
         let served = Served::spawn("envelope").await;

@@ -2,7 +2,7 @@
 //! `virtx-server-tcp`, each to what listens on it in the sandbox until the sandbox goes.
 
 use std::{
-    io::Read,
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     sync::Mutex,
     thread,
@@ -48,8 +48,30 @@ fn said(at: impl std::net::ToSocketAddrs + Copy) -> Vec<u8> {
     said
 }
 
-/// Serve `hello` on 8000 in a sandbox of `client`'s that opens it as `port` says, and answer
-/// the sandbox.
+/// What the sandbox's server on 8000 answers `ping` sent to `at`, once it listens, for 30 seconds.
+fn answer(at: impl std::net::ToSocketAddrs + Copy) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect(at) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            line.clear();
+            if stream.write_all(b"ping\n").is_ok() {
+                let _ = BufReader::new(stream).read_line(&mut line);
+            }
+            if !line.is_empty() {
+                return line;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    panic!("nothing answered on the port in 30 seconds");
+}
+
+/// Serve on 8000 in a sandbox of `client`'s that opens it as `port` says, answering a line with
+/// `hello` and the line, and answer the sandbox.
 fn serving(client: &virtx::Client, port: PortSpec) -> virtx::Sandbox {
     common::alpine(client);
     let args = SandboxCreateArgs::new(ALPINE).port(port);
@@ -59,7 +81,8 @@ fn serving(client: &virtx::Client, port: PortSpec) -> virtx::Sandbox {
         ..SandboxExecArgs::new([
             "sh",
             "-c",
-            "while true; do echo hello | nc -l -p 8000; done",
+            "mkfifo /tmp/in; while true; do \
+             cat /tmp/in | (read line; echo \"hello $line\") | nc -l -p 8000 > /tmp/in; done",
         ])
     };
     sandbox.exec(&serve).wait().unwrap();
@@ -94,7 +117,7 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let listed = listed.iter().find(|listed| listed.id() == sandbox.id());
     assert_eq!(listed.unwrap().info().ports, [asked]);
 
-    assert_eq!(said(at.as_str()), b"hello\n");
+    assert_eq!(answer(at.as_str()), "hello ping\n");
     sandbox.remove().wait().unwrap();
     // Its listener goes with it.
     let gone = until(|| TcpStream::connect(at.as_str()).is_err());
@@ -120,7 +143,7 @@ fn a_port_over_http_is_forwarded_to_what_listens_on_it_until_the_sandbox_goes() 
     let at = forwarder.address();
     assert!(at.ip().is_loopback());
 
-    assert_eq!(said(at), b"hello\n");
+    assert_eq!(answer(at), "hello ping\n");
     sandbox.remove().wait().unwrap();
     // The forwarder stays, but what it reached is gone: each connection is closed at once.
     let closed = until(|| {

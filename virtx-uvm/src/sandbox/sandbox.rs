@@ -17,7 +17,7 @@ use virtx_core::{
 use super::hooks::{Held, Hooks, Written};
 use super::record::{Record, Resized};
 use super::{Error, Job};
-use crate::machine::wire::CtrlResp;
+use crate::machine::wire::{CtrlResp, Taken};
 use crate::{
     ImageStore, Machine, MachineConfig, MachineSpec, Network, Ports, SandboxDisk, SnapshotError,
     SnapshotLock, SnapshotStore, VolumeMount, VolumeStore,
@@ -871,7 +871,9 @@ impl Sandbox {
     /// answered once it is in the process's stdin, which takes a pipe's worth before the process
     /// reads any, so a job that does not read holds the writer back once that is full. A write
     /// its process closed its stdin under part-way is [`StdinCut`](Error::StdinCut), saying how
-    /// much went in.
+    /// much went in. One the guest holds no room for, as when writes given up on while the
+    /// process did not read are still waiting, is [`StdinFull`](Error::StdinFull): not taken,
+    /// `eof` and all, and taken when sent again once the process reads.
     pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
         let ended = || {
             Error::JobEnded(
@@ -885,7 +887,13 @@ impl Sandbox {
         let of = data.len() as u64;
         let send = |seq| Ok(run.machine.write_stdin(pid, seq, data, eof)?);
         match job.write_stdin(eof, send).await? {
-            Some(super::job::Written { whole: true, .. }) => Ok(()),
+            Some(super::job::Written {
+                taken: Taken::Whole,
+                ..
+            }) => Ok(()),
+            Some(super::job::Written {
+                taken: Taken::Full, ..
+            }) => Err(Error::StdinFull),
             Some(super::job::Written { bytes, .. }) if bytes > 0 => {
                 Err(Error::StdinCut { bytes, of })
             }
@@ -1133,10 +1141,10 @@ impl Sandbox {
                     id,
                     seq,
                     bytes,
-                    whole,
+                    taken,
                 } => {
                     if let Some(job) = running.get(&id) {
-                        job.written(seq, super::job::Written { bytes, whole });
+                        job.written(seq, super::job::Written { bytes, taken });
                     }
                 }
                 CtrlResp::Ready(_) | CtrlResp::Pong => {}

@@ -90,8 +90,9 @@ pub enum CtrlResp {
     /// asked.
     Synced,
     /// The process `id` ended with `code`; `128 + signal` for one a signal ended. `oom` where
-    /// it ended `137` and the kernel's OOM killer killed a process of its command's cgroup:
-    /// its memory ran out. The last thing said of it.
+    /// it ended `137` and its memory ran out: the kernel's OOM killer killed a process of its
+    /// command's cgroup, or the agent killed the cgroup, out of memory and thrashing at its
+    /// limit. The last thing said of it.
     Exited {
         id: u32,
         code: i32,
@@ -105,16 +106,30 @@ pub enum CtrlResp {
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
     /// The answer to the [`Stdin`](CtrlReq::Stdin) `seq` to the process `id`: how many `bytes`
-    /// of its `data` went in, and whether all of it did, `whole` false once the process or its
-    /// stdin is gone. An empty `data` is `whole` while the stdin still has a reader.
+    /// of its `data` went in, and what became of it.
     Written {
         id: u32,
         seq: u64,
         bytes: u64,
-        whole: bool,
+        taken: Taken,
     },
     /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
     Pong,
+}
+
+/// What became of a [`Stdin`](CtrlReq::Stdin) write, in its [`Written`](CtrlResp::Written).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Taken {
+    /// All of its `data` is in the process's stdin. An empty `data` is, while the stdin still
+    /// has a reader.
+    Whole,
+    /// The stdin is gone -- its reader closed it, or the process ended -- with `bytes` of it in:
+    /// nothing more will be.
+    Closed,
+    /// None of it taken: the agent already holds as many writes to that stdin as it holds. The
+    /// stdin is as it was, `eof` and all, and takes it once its process reads.
+    Full,
 }
 
 /// What the host asks of the guest's files on the I/O channel, each answered with a

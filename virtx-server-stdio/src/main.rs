@@ -1,9 +1,9 @@
-//! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
-//! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
-//! answered on stdin and stdout to the client that spawned it, until it closes stdin. That client
-//! is the host's admin, who reaches every project here, each a directory of its own in the cache
-//! (see [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those
-//! a `virtx-server-tcp` over the same cache keeps for its users, by id.
+//! `virtx-stdio` -- a virtx server over stdio: the endpoints the protocol names, with the images as
+//! an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]), answered on stdin and
+//! stdout to the client that spawned it, until it closes stdin. That client is the host's admin,
+//! who reaches every project here, each a directory of its own in the cache (see
+//! [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those a
+//! `virtx-server-tcp` over the same cache keeps for its users, by id.
 //!
 //! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
@@ -1385,10 +1385,9 @@ mod tests {
             .collect()
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
-    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
-    /// and a path whose segment does not read as one is `400` `invalid`. A file's body has no
-    /// such limit.
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client reads
+    /// its code: a body over the server's limit is `413` `too_large`, naming the limit, and a path
+    /// whose segment does not read as one is `400` `invalid`. A file's body has no such limit.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
         let server = Server::spawn("envelope").await;

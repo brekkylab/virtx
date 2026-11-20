@@ -1,5 +1,5 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
-//! ([`router`]), each answered from the [`Home`] of the project its request reaches, which
+//! The endpoints the protocol names, but the images' registry: those in a project ([`router`]),
+//! each answered from the [`Home`] of the project its request reaches, which
 //! [`access`](crate::access) puts in its extensions; and those of the projects themselves
 //! ([`projects`]), answered from the [`Access`] there.
 //!
@@ -533,7 +533,7 @@ impl HomeHooks {
 
 /// What a home refused, as its sandboxes refuse it.
 fn hooked(e: impl Into<Refused>) -> SandboxError {
-    let Refused(status, code, message, _) = e.into();
+    let Refused(status, code, message, ..) = e.into();
     SandboxError::Refused {
         status: status.as_u16(),
         code,
@@ -1605,10 +1605,16 @@ async fn sandbox_job_signal(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// The seconds a write to a job's stdin turned away for now asks to wait: room comes as its
+/// process reads.
+const STDIN_FULL_RETRY: u16 = 1;
+
 /// Write to the stdin of a job started with one, and close it if `eof`: answered once it is in
 /// the process's stdin, which takes a pipe's worth before the process reads any. Refused `409`,
 /// `ended`, for one started without, one whose stdin is closed, one that has ended, and a write
-/// its process closed its stdin under, which says how much of it went in.
+/// its process closed its stdin under, which says how much of it went in. Turned away for now,
+/// `503`, `capacity`, where the machine already holds as many writes to it as it takes, none of
+/// it taken.
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
@@ -1718,8 +1724,8 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
 /// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
 const BODY_LIMIT: usize = 2 << 20;
 
-/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
-/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid` if
+/// it broke off, as any refusal here is, in the protocol's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused: answered with its body unread, the connection is closed with
@@ -1765,8 +1771,8 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
     }
 }
 
-/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope and the server's words.
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when they
+/// do not read as one, in the protocol's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>
@@ -1894,22 +1900,36 @@ fn created(location: String, value: &impl Serialize) -> Response {
 /// Why an image job failed, for a person.
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-/// A refusal: its status, `code` and `message`, and the members its error has beside them.
+/// A refusal: its status, `code` and `message`, the members its error has beside them, and the
+/// seconds its `Retry-After` asks, if any.
 pub struct Refused(
     StatusCode,
     &'static str,
     String,
     serde_json::Map<String, serde_json::Value>,
+    Option<u16>,
 );
 
 pub fn refused(status: StatusCode, code: &'static str, message: impl Display) -> Refused {
-    Refused(status, code, message.to_string(), serde_json::Map::new())
+    Refused(
+        status,
+        code,
+        message.to_string(),
+        serde_json::Map::new(),
+        None,
+    )
 }
 
 impl Refused {
     /// It with `name` beside its `code` and `message`.
     fn with(mut self, name: &str, value: impl Into<serde_json::Value>) -> Refused {
         self.3.insert(name.to_owned(), value.into());
+        self
+    }
+
+    /// It asking to be sent again after `seconds`.
+    fn after(mut self, seconds: u16) -> Refused {
+        self.4 = Some(seconds);
         self
     }
 }
@@ -1952,12 +1972,16 @@ const CAPACITY_RETRY_AFTER: &str = "5";
 
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
-        let Refused(status, code, message, members) = self;
+        let Refused(status, code, message, members, after) = self;
         let mut error = serde_json::json!({"code": code, "message": message});
         error.as_object_mut().unwrap().extend(members);
         let body = serde_json::json!({ "error": error });
         let mut response = (status, json(&body)).into_response();
-        if code == "capacity" {
+        if let Some(seconds) = after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, seconds.into());
+        } else if code == "capacity" {
             let wait = http::HeaderValue::from_static(CAPACITY_RETRY_AFTER);
             response.headers_mut().insert(header::RETRY_AFTER, wait);
         }
@@ -2111,6 +2135,11 @@ impl From<SandboxError> for Refused {
             SandboxError::StdinCut { bytes, .. } => {
                 refused(StatusCode::CONFLICT, "ended", e).with("written", bytes)
             }
+            // Nothing was taken, and room comes as the process reads: sent again, as any
+            // `capacity` is.
+            SandboxError::StdinFull => {
+                refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e).after(STDIN_FULL_RETRY)
+            }
             SandboxError::Image(e) => e.into(),
             SandboxError::Snapshot(e) => e.into(),
             SandboxError::Volume(e) => e.into(),
@@ -2252,5 +2281,20 @@ mod failures {
             ended,
             serde_json::json!({"error": {"code": "ended", "message": "the job has ended"}})
         );
+    }
+
+    /// A write the machine holds no room for is turned away for now, as `capacity`, with a
+    /// `Retry-After`: not `ended`, which would say the stdin takes nothing more.
+    #[tokio::test]
+    async fn a_write_with_no_room_for_it_is_turned_away_for_now() {
+        let response = Refused::from(SandboxError::StdinFull).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "capacity");
+        assert_eq!(body["error"].as_object().unwrap().len(), 2, "{body}");
     }
 }

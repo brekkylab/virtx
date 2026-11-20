@@ -5,11 +5,16 @@ edition = "2024"
 description = "The virtx client: the types every request takes and answers, the wire, and the C ABI of libvirtx_core."
 license = "Apache-2.0"
 repository = "https://github.com/brekkylab/virtx"
+readme = "README.md"
+homepage = "https://virtx.sh"
+documentation = "https://docs.rs/virtx-core"
+keywords = ["vm", "microvm", "sandbox", "agent", "virtualization"]
+categories = ["virtualization", "api-bindings"]
 
 [lib]
 # `rlib` for Rust (this crate's tests, and any crate that depends on it); `cdylib` and
-# `staticlib` for C, as `libvirtx_core.{so,dylib,dll}` and `libvirtx_core.a`, declared by
-# `include/virtx.h`.
+# `staticlib` for C, as `libvirtx_core.{so,dylib}` (`virtx_core.dll` on Windows) and
+# `libvirtx_core.a`, declared by `include/virtx.h`.
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]

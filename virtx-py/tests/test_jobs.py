@@ -209,6 +209,12 @@ def test_a_reason_this_version_does_not_know_is_kept_as_the_server_said_it() -> 
     assert known == SandboxJobEnd(137, SandboxJobEndReason.TIMEOUT)
 
 
+def test_a_port_protocol_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:
+    port = SandboxPort.from_dict({"port": 53, "protocol": "udp"})
+    assert port.protocol == "udp"
+    assert SandboxPort.from_dict({"port": 80, "protocol": "http"}).protocol == PortProtocol.HTTP
+
+
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Client) -> None:
     await alpine(client)
     reference = f"{unique('built')}:latest"

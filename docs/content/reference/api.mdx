@@ -90,7 +90,7 @@ In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image
 
 A port in `create_sandbox`'s `ports` is a number, for TCP, or a `PortSpec(port, label, protocol, inbound)`; in Node.js, `{ port, label?, protocol?, inbound? }`.
 Each comes back as a `SandboxPort`: its `port` and `url`, its `label` and `protocol` as given, an `address` where the server gives a TCP port one, and an `inbound_error` where it opened one whose rules it could not set.
-`list_sandbox` and `get_sandbox` answer each port with its `port`, `label`, `protocol` and `address`, and no `url`: `create_sandbox` alone answers that, since it carries the port's credentials.
+`list_sandbox` and `get_sandbox` answer each port with its `port`, `label`, `protocol` and `address`, and no `url`: `create_sandbox` alone answers that, since it carries the port's credentials. A `protocol` this version does not know is kept as the server's string: a `str` in Python, `PortProtocol::Other` in Rust.
 An `InboundRule(source, description)` lets in `source`, an IPv4 or IPv6 CIDR or one address; a server that keeps no rules, as `virtx-stdio` and `virtx-server-tcp` do not, refuses `inbound` with `400`.
 
 A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.

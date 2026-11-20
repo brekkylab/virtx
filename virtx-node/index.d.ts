@@ -408,8 +408,8 @@ export interface SandboxPort {
   url?: string
   /** What it is for, as it was opened with. */
   label?: string
-  /** Absent for `'tcp'`. */
-  protocol?: PortProtocol
+  /** Absent for `'tcp'`. Any other string is a protocol this version does not know, as the server said it. */
+  protocol?: PortProtocol | (string & {})
   /** A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it one. Not secret, as `url` is: what listens there answers whoever connects. */
   address?: string
   /** Why its inbound rules were not set, from a server that made the port all the same: it lets no one in, and is reached at no `address`, until they are. */

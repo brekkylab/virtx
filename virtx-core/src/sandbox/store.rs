@@ -313,8 +313,12 @@ pub struct InboundError {
 }
 
 /// How a port is reached from outside its sandbox.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// A protocol a later version of the protocol adds is read as [`Other`](Self::Other), as it was
+/// sent, so a sandbox with such a port still reads. A port asked for with one is refused.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PortProtocol {
     /// TCP: at a loopback address, or carried in a WebSocket of the subprotocol `virtx.tcp` to
     /// its `url`.
@@ -325,11 +329,25 @@ pub enum PortProtocol {
     /// reachable from other machines -- by a browser as by any client, WebSockets included. A
     /// server that cannot reach a port so refuses it.
     Http,
+
+    /// One this version does not know, as the server said it.
+    #[serde(untagged)]
+    Other(String),
 }
 
 impl PortProtocol {
     pub fn is_tcp(&self) -> bool {
-        *self == PortProtocol::Tcp
+        matches!(self, PortProtocol::Tcp)
+    }
+}
+
+/// A port's protocol as a request names it: one this version knows, as a server opens no other.
+fn known_protocol<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PortProtocol, D::Error> {
+    match PortProtocol::deserialize(deserializer)? {
+        PortProtocol::Other(other) => Err(serde::de::Error::custom(format!(
+            "{other:?} is not a protocol this server opens"
+        ))),
+        known => Ok(known),
     }
 }
 
@@ -404,7 +422,11 @@ struct PortSpecObject {
     port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
-    #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
+    #[serde(
+        default,
+        deserialize_with = "known_protocol",
+        skip_serializing_if = "PortProtocol::is_tcp"
+    )]
     protocol: PortProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inbound: Option<Vec<InboundRule>>,
@@ -418,7 +440,7 @@ impl Serialize for PortSpec {
         PortSpecObject {
             port: self.port,
             label: self.label.clone(),
-            protocol: self.protocol,
+            protocol: self.protocol.clone(),
             inbound: self.inbound.clone(),
         }
         .serialize(serializer)
@@ -663,6 +685,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(web.protocol, PortProtocol::Http);
+    }
+
+    #[test]
+    fn a_protocol_this_version_does_not_know_is_read_in_an_answer_and_refused_in_a_request() {
+        let answered = json!({"port": 53, "url": "ports/z", "protocol": "udp"});
+        let port: SandboxPort = serde_json::from_value(answered.clone()).unwrap();
+        assert_eq!(port.protocol, PortProtocol::Other("udp".into()));
+        assert_eq!(serde_json::to_value(&port).unwrap(), answered);
+
+        let asked = json!({"port": 53, "protocol": "udp"});
+        assert!(serde_json::from_value::<PortSpec>(asked).is_err());
     }
 
     #[test]

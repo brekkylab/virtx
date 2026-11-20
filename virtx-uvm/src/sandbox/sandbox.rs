@@ -510,7 +510,7 @@ impl Sandbox {
                     port: spec.port,
                     url: None,
                     label: spec.label.clone(),
-                    protocol: spec.protocol,
+                    protocol: spec.protocol.clone(),
                     address: None,
                     inbound_error: None,
                 })

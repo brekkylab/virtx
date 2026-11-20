@@ -413,7 +413,7 @@ mod tests {
 
     impl Served {
         /// With every request the tester's, the owner of `demo` and `other`, from
-        /// `https://allowed.example`.
+        /// `https://allowed.example`, and the projects served as the binary serves them.
         async fn spawn(name: &str) -> Served {
             Served::spawn_through(name, None).await
         }
@@ -744,7 +744,23 @@ mod tests {
     /// them elsewhere answers none of its own.
     #[tokio::test]
     async fn the_projects_are_served_only_where_a_server_merges_them() {
-        let served = Served::spawn("unmerged").await;
+        let served = Served::spawn_over("unmerged", async |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
         let (status, body) = served.send("GET", "projects/", None, "").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         let (status, _) = served.send("GET", "projects/demo", None, "").await;

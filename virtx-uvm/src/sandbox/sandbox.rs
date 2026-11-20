@@ -211,6 +211,12 @@ impl Sandbox {
         keys: Option<HashMap<String, u16>>,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
+        if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
+            return Err(Error::Invalid(format!(
+                "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
+                 starting with '.' or '-', 128 at most"
+            )));
+        }
         let mut given = HashSet::new();
         if let Some(port) = args
             .ports

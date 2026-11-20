@@ -468,7 +468,9 @@ class Client:
         and answered here only, each with the ``url`` a ``PortForwarder`` reaches it by. Whatever
         is left out the server picks. ``disk_gib`` is how much it may write over its image, in
         GiB, at most 1024, which goes with it. ``name`` finds it again with ``find_sandbox``,
-        rather than keeping its id; one another sandbox has is refused with ``409``.
+        rather than keeping its id: letters, digits, ``.``, ``_`` and ``-``, not starting with ``.``
+        or ``-``, at most 128, or it is refused with ``400``; one another sandbox has is refused
+        with ``409``.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""

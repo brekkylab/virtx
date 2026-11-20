@@ -378,7 +378,7 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  /** A name to find it again by, with `findSandbox`, rather than keeping its id; one another sandbox has is refused with `409`. */
+  /** A name to find it again by, with `findSandbox`, rather than keeping its id: letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128, or it is refused with `400`; one another sandbox has is refused with `409`. */
   name?: string
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */

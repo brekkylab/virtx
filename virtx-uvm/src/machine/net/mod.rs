@@ -103,11 +103,8 @@ pub(crate) fn attach(network: Network, published: Vec<(u16, TcpListener)>) -> Re
     Ok(device)
 }
 
-/// Told to libkrun's init as `KRUN_NAMESERVER`, which is what it writes into the guest's
-/// `/etc/resolv.conf` -- there being no lease to carry one.
-pub(crate) const NAMESERVER_ENV: &str = "KRUN_NAMESERVER";
-
-/// The resolver the guest is told it has, and which [`policy`] carries to this host's.
+/// The resolver the guest is told it has, which the agent writes into its `/etc/resolv.conf`
+/// -- there being no lease to carry one -- and which [`policy`] carries to this host's.
 ///
 /// An address rather than the host's own resolver, because the host's is often one the
 /// guest could not name -- `127.0.0.53` behind systemd, a VPN's, one that changes when a

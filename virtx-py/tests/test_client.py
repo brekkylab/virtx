@@ -74,15 +74,17 @@ async def test_a_port_forwarder_listens_on_the_loopback_until_closed(tcp_client:
 
         forwarder.close()
         forwarder.close()
-        # Its listener goes a moment after.
+        # Its listener goes a moment after: a connection made as it goes is reset.
         refused = False
         until = time.monotonic() + 5
         while not refused and time.monotonic() < until:
             try:
                 socket.create_connection((forwarder.host, forwarder.port), timeout=5).close()
-                await asyncio.sleep(0.05)
             except ConnectionRefusedError:
                 refused = True
+            except ConnectionResetError:
+                pass
+            await asyncio.sleep(0.05)
         assert refused
     finally:
         await sandbox.remove()

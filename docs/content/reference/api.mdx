@@ -9,7 +9,7 @@ Node.js uses the same names in camelCase, such as `createSandbox` for `create_sa
 What a call returns, once awaited where it is async, is named as Python has it.
 The types share their names in all three: `list[Sandbox]` is `Sandbox[]` in Node.js, inside a `Promise`, and `Vec<Sandbox>` in Rust, inside a `Result`.
 
-A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Follow a job](/docs/guides/running-commands/#follow-a-job) in Running commands.
 In Rust, `complete` is the job's, after awaiting the call.
 Its log, like a job's `log`, yields a `LogEntry` at a time.
 `download_image` and `upload_image` yield `Progress` events, then one event carrying their output.
@@ -101,7 +101,7 @@ A job is a sandbox's process, from `exec`, or an image's build, pull or push.
 
 ### Sandbox jobs
 
-A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Running commands](/docs/guides/running-commands/#set-a-timeout) says, or `restarted`, for one that ran when its server restarted, keeping its sandbox.
+A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Set a timeout](/docs/guides/running-commands/#set-a-timeout) in Running commands says, or `restarted`, for one that ran when its server restarted, keeping its sandbox.
 
 | Call | Returns | What it does |
 | --- | --- | --- |

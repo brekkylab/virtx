@@ -371,7 +371,8 @@ async fn a_job_s_log_ends_when_its_sandbox_is_closed(home: Home) {
     let rest = tokio::time::timeout(Duration::from_secs(10), reading).await;
     let rest: Vec<_> = rest.expect("the log ended").unwrap();
     let rest: Vec<_> = rest.iter().map(|event| entry(event)).collect();
-    // Its end is read by a reader woken before the job is removed, and by no other.
+    // A job removed while its log is read ends the stream where it is (PROTOCOL.md): its end is
+    // read only by a reader woken before the removal.
     let ended = matches!(rest.as_slice(), [SandboxJobEntry::End(end)] if end.code == 137);
     assert!(rest.is_empty() || ended, "{rest:?}");
 }

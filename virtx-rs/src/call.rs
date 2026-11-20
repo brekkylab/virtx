@@ -209,6 +209,8 @@ struct Failure {
     status: Option<u16>,
     #[serde(default)]
     code: Option<String>,
+    #[serde(default)]
+    written: Option<u64>,
 }
 
 /// # Safety
@@ -231,11 +233,13 @@ unsafe fn take_with<T>(
                     message,
                     status: Some(status),
                     code,
+                    written,
                     ..
                 }) => Error::Status {
                     status,
                     code,
                     message,
+                    written,
                 },
                 Ok(Failure {
                     message, source, ..

@@ -291,7 +291,7 @@ impl PortForwarder {
 
 /// The protocol's code `refusal` said, as `not_found` of `not_found: ...`, where it said one.
 fn code(refusal: &Error) -> Option<String> {
-    let Error::Status(_, said) = refusal else {
+    let Error::Status(_, said, _) = refusal else {
         return None;
     };
     let (code, _) = said.split_once(": ")?;

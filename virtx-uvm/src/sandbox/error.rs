@@ -36,6 +36,18 @@ pub enum Error {
     #[error("{0}")]
     JobEnded(&'static str),
 
+    /// A write to a job's stdin that its process closed the stdin under: `bytes` of its `of`
+    /// went in, and nothing more will.
+    #[error("the job's stdin closed after {bytes} of the {of} bytes written to it")]
+    StdinCut { bytes: u64, of: u64 },
+
+    /// A write to a job's stdin not taken, `eof` and all: as many writes to it as the guest
+    /// holds wait for its process to read. The stdin is as it was.
+    #[error(
+        "the job's stdin holds as many writes as it takes until its process reads: none of this one was taken"
+    )]
+    StdinFull,
+
     #[error(transparent)]
     Image(#[from] ImageStoreError),
 

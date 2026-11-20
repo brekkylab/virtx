@@ -44,7 +44,7 @@ const PLATFORM_PACKAGE = {
 }[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
-  constructor(message, status = null, body = null, source = 'client', code = null) {
+  constructor(message, status = null, body = null, source = 'client', code = null, written = null) {
     super(message)
     this.name = 'VirtxError'
     // Where it failed: `server`, `job`, `transport` or `client`.
@@ -56,6 +56,9 @@ class VirtxError extends Error {
     this.code = code
     // The server's response body, where it was not a JSON error.
     this.body = body
+    // How many bytes of a write to a job's stdin went in before its process closed the stdin
+    // under it: that `409`, `ended`, alone has it.
+    this.written = written
   }
 }
 
@@ -222,6 +225,7 @@ class Library {
         failure.body ?? null,
         failure.source,
         failure.code ?? null,
+        failure.written ?? null,
       )
     }
     throw new VirtxError(`unknown status ${status}`)

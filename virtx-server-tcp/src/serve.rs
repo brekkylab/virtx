@@ -554,7 +554,7 @@ mod tests {
     /// The HTTP status a request was refused with.
     fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
         match answered {
-            Err(virtx_core::Error::Status(status, _)) => status,
+            Err(virtx_core::Error::Status(status, _, _)) => status,
             other => panic!("expected a status, got {other:?}"),
         }
     }
@@ -1732,8 +1732,8 @@ mod tests {
                 b.write_file(&root, "read", from_b.clone(), Some(&etag)),
             );
             let landed = match (by_a, by_b) {
-                (Ok(()), Err(virtx_core::Error::Status(412, _))) => &from_a,
-                (Err(virtx_core::Error::Status(412, _)), Ok(())) => &from_b,
+                (Ok(()), Err(virtx_core::Error::Status(412, _, _))) => &from_a,
+                (Err(virtx_core::Error::Status(412, _, _)), Ok(())) => &from_b,
                 (by_a, by_b) => panic!("round {round}, over one etag: {by_a:?} and {by_b:?}"),
             };
             let read = a.read_file(&root, "read", 0, None).await.unwrap();

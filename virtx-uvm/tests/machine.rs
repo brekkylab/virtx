@@ -182,7 +182,7 @@ struct Opened(PathBuf);
 
 impl MachineDisk for Opened {
     fn storage(&self) -> Box<dyn DynStorage> {
-        use imago::Storage as _;
+        use virtx_uvm::disks::imago::{self, Storage as _};
         let options = imago::StorageOpenOptions::new()
             .write(true)
             .filename(&self.0);
@@ -1257,7 +1257,7 @@ fn filter(mut args: impl Iterator<Item = String>) -> Option<String> {
 
 fn main() -> ExitCode {
     // In this process and each machine's, before either does anything with a disk.
-    set_disks(Arc::new(Embedded));
+    assert!(set_disks(Arc::new(Embedded)), "said first");
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
         let Err(_) = virtx_uvm::enter_machine();

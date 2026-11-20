@@ -303,6 +303,31 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     close(sandbox).await;
 }
 
+/// A machine's process leads a process group of its own, so what is sent its starter's group --
+/// a terminal's ctrl-c -- reaches its starter alone, which stops it.
+#[cfg(unix)]
+async fn a_machine_s_process_leads_a_process_group_of_its_own(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,args="])
+        .output()
+        .unwrap();
+    let ps = String::from_utf8(ps.stdout).unwrap();
+    let ours = std::process::id().to_string();
+    // Each machine this process started: its pid and its process group.
+    let machines: Vec<_> = ps
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| fields.get(1) == Some(&ours.as_str()) && fields.get(4) == Some(&MACHINE))
+        .map(|fields| (fields[0].to_owned(), fields[2].to_owned()))
+        .collect();
+    assert_eq!(machines.len(), 1, "{ps}");
+    let (pid, group) = &machines[0];
+    assert_eq!(group, pid);
+    close(sandbox).await;
+}
+
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&small(), park).await;
@@ -1211,6 +1236,8 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
+    #[cfg(unix)]
+    tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {

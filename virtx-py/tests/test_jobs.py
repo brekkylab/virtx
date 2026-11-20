@@ -17,6 +17,7 @@ from virtx import (
     Recipe,
     SandboxJob,
     SandboxJobEnd,
+    SandboxJobEndReason,
     SandboxJobKind,
     SandboxVolume,
     Stderr,
@@ -145,8 +146,31 @@ async def test_a_signal_ends_a_process(client: Client) -> None:
     assert log[-1] == SandboxJobEnd(128 + 15)
     assert await sleep.complete() == 128 + 15
     got = await client.get_sandbox(sandbox.id)
-    assert not (await got.job(sleep.id)).running
+    ended = await got.job(sleep.id)
+    assert not ended.running and ended.reason is None
     await sandbox.remove()
+
+
+async def test_a_process_past_its_timeout_ends_with_the_reason(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    sleep = await sandbox.exec(["sleep", "60"], timeout_ms=200)
+    log = [entry.entry async for entry in sleep.log()]
+    assert log[-1] == SandboxJobEnd(137, SandboxJobEndReason.TIMEOUT)
+    ended = await sleep.get()
+    assert (ended.code, ended.reason) == (137, SandboxJobEndReason.TIMEOUT)
+    await sandbox.remove()
+
+
+async def test_a_process_whose_sandbox_is_removed_ends_with_the_reason(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    up = await sandbox.exec(["sh", "-c", "echo up; sleep 60"])
+    log = up.log()
+    assert (await anext(log)).entry == Stdout("up")
+    await sandbox.remove()
+    rest = [entry.entry async for entry in log]
+    assert rest[-1] == SandboxJobEnd(137, SandboxJobEndReason.SANDBOX_DELETED)
 
 
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Client) -> None:

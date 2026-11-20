@@ -194,7 +194,7 @@ virtx's client does so by itself over TCP: a stream that breaks, or a `502` to `
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.
 A job that has ended answers its whole log at once, and ends there.
-A job removed while a client reads its log ends that stream where it is.
+A job removed while a client reads its log ends that stream at its `end`, or where it is if it has none.
 
 A log is kept whole up to the server's limit, and no further: an entry past it is neither kept nor sent, and the first one past it is replaced by `{"truncated": {}}`, once.
 The `end` entry is kept and sent anyway.
@@ -310,7 +310,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
-Either stops its VM, ends every job in it as a cancellation does, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
+Either stops its VM, kills every job in it that runs, as its [reason](#sandbox-jobs) `sandbox_deleted` says, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
 
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
@@ -366,13 +366,20 @@ Its log's entries are each an object with one member:
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
-The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
+The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, when its sandbox is deleted, with its sandbox's VM, or with its server, which keeps its sandbox.
+In each of the last five, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+A server MAY say which, in its end and in its job, with `reason`:
+
+- `"timeout"`: its `timeout_ms` ran out.
+- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed. Its sandbox is still there.
+- `"sandbox_deleted"`: its sandbox was deleted while it ran, by the sandbox's `DELETE` or by the server, which then ends its log with this end before the job goes with the sandbox.
+- `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
+- `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
+
+A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
 A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
 A sandbox [kept](#sandboxes) across its server's end keeps its jobs, as many as the server keeps: started again, the server knows each that had ended as it ended, and each that ran as killed then, its `code` `137` and its `reason` `"restarted"`. A job so kept has its `end` alone for its log.
-A server MAY say why it killed a process with `reason`, in its end and in its job:
-
-- `"restarted"`: its server ended, keeping its sandbox, while it ran.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

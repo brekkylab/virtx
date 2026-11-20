@@ -20,10 +20,12 @@ use std::{
 use axum::body::Body;
 use futures_util::{StreamExt as _, future::join_all};
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
+use virtx_core::{
+    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
+};
 use virtx_uvm::{
-    DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, VolumeError,
-    VolumeStore,
+    DEFAULT_DISK_GIB, Files, ImageStore, RegistryClient, Sandbox, SandboxError, SandboxJob,
+    VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -175,10 +177,15 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     let gone = home.sandbox(&small(), None).await;
     let write = ["sh", "-c", "echo kept > /root/kept"];
     assert_eq!(run(&kept, &write, None).await.unwrap().1, 0);
-    let sleeping = kept
+    let running = kept
         .exec(vec!["sleep".into(), "600".into()], false, None)
         .await;
-    let sleeping = sleeping.unwrap().get().id;
+    let running = running.unwrap();
+    let sleeping = running.get().id;
+    let deleted = gone
+        .exec(vec!["sleep".into(), "600".into()], false, None)
+        .await;
+    let deleted = deleted.unwrap();
     assert!(
         home.kept().is_empty(),
         "one this process knows is no other's"
@@ -186,6 +193,12 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
 
     let id = kept.id().to_owned();
     tokio::join!(leave(kept), leave(gone));
+    // This server ends each job as the next one knows it: restarted where its sandbox is kept,
+    // its sandbox deleted where it is deleted.
+    let restarted = Some(SandboxJobEndReason::Restarted);
+    assert_eq!(running.get().reason, restarted);
+    let sandbox_deleted = Some(SandboxJobEndReason::SandboxDeleted);
+    assert_eq!(deleted.get().reason, sandbox_deleted);
     let known = home.kept();
     assert_eq!(known.len(), 1, "the one made without keys goes");
     let again = &known[0];
@@ -198,7 +211,6 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
         .into_iter()
         .map(|job| (job.id == sleeping, job.running, job.code, job.reason))
         .collect();
-    let restarted = Some(SandboxJobEndReason::Restarted);
     assert!(ended.contains(&(false, false, Some(0), None)), "{ended:?}");
     assert!(
         ended.contains(&(true, false, Some(137), restarted)),
@@ -527,6 +539,93 @@ async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(hom
     assert!(ended(&refused), "{refused:?}");
     assert!(cut.get().running);
     close(sandbox).await;
+}
+
+async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let start = async |cmd: &[&str], timeout: Option<Duration>| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        sandbox.exec(cmd, false, timeout).await.unwrap()
+    };
+    // The last entry of `job`'s log, read to its end.
+    let end = async |job: &SandboxJob| {
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => end,
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Its own exit, 137 too: no reason.
+    for code in [0, 137] {
+        let job = start(&["sh", "-c", &format!("exit {code}")], None).await;
+        assert_eq!(end(&job).await, SandboxJobEnd::exited(code));
+        assert_eq!(job.get().reason, None);
+    }
+    // `SIGKILL` sent it: its own end, as the signal made it.
+    let job = start(&["sleep", "300"], None).await;
+    sandbox.signal(&job.get().id, 9).unwrap();
+    assert_eq!(end(&job).await, SandboxJobEnd::exited(137));
+    // Past its timeout: killed, for its timeout.
+    let job = start(&["sleep", "300"], Some(Duration::from_millis(200))).await;
+    let timed_out = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(end(&job).await, timed_out);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::Timeout));
+    // Removed while it runs: its log, read from before, reads on to its end, cancelled.
+    let job = start(&["sleep", "300"], None).await;
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    sandbox.remove_job(&job.get().id).unwrap();
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let cancelled = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Cancelled),
+    };
+    assert_eq!(read.unwrap(), cancelled);
+    // Its machine ended under it -- reset, which every arch takes: killed with it.
+    let job = start(&["sh", "-c", "sleep 1; sync; reboot -f"], None).await;
+    let ended = tokio::time::timeout(HANG, end(&job))
+        .await
+        .expect("the machine ends");
+    let exited = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::VmExited),
+    };
+    assert_eq!(ended, exited);
+    assert!(!sandbox.answer().running);
+    close(sandbox).await;
+    // Its sandbox deleted under it: its log, read from before, reads on to its end, which says
+    // so, apart from its own removal.
+    let deleting = home.sandbox(&small(), None).await;
+    let cmd = ["sleep", "300"].map(String::from).to_vec();
+    let job = deleting.exec(cmd, false, None).await.unwrap();
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    close(deleting).await;
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(read.unwrap(), deleted);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::SandboxDeleted));
 }
 
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
@@ -1426,6 +1525,7 @@ fn main() -> ExitCode {
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,
+        a_job_s_end_says_why_the_server_ended_it_and_only_then,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,

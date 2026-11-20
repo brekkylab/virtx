@@ -23,7 +23,8 @@ struct State<E> {
     entries: Vec<E>,
     truncated: bool,
     ended: bool,
-    /// The job was removed: a reader's stream ends where it is.
+    /// The job was removed: a reader's stream ends where it is, or at the end of one that has
+    /// ended.
     removed: bool,
 }
 
@@ -77,14 +78,16 @@ impl<E: Clone + Serialize + Send + Sync + 'static> Log<E> {
         true
     }
 
-    /// End every reader's stream where it is: the job is gone.
+    /// End every reader's stream where it is, or, once the log has ended, at its end: the job
+    /// is gone.
     pub fn remove(&self) {
         self.state.lock().unwrap().removed = true;
         self.changed.send_replace(());
     }
 
     /// The entries after the one `Last-Event-ID` in `headers` names, or all of them, as the
-    /// body of a `text/event-stream`: each as it comes, until the end or the job's removal.
+    /// body of a `text/event-stream`: each as it comes, until the end, or the removal of a job
+    /// that has none.
     pub fn events(
         self: Arc<Self>,
         headers: &HeaderMap,
@@ -101,7 +104,7 @@ impl<E: Clone + Serialize + Send + Sync + 'static> Log<E> {
                 loop {
                     let (entry, ended) = {
                         let state = log.state.lock().unwrap();
-                        if state.removed {
+                        if state.removed && !state.ended {
                             return None;
                         }
                         (state.entries.get(next).cloned(), state.ended)
@@ -180,5 +183,26 @@ mod tests {
         assert_eq!(event, "id: 1\ndata: {\"stdout\":\"a\"}\n\n");
         log.remove();
         assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_log_ended_then_removed_is_read_to_its_end() {
+        let log = Log::new(10, Line::Truncated {});
+        let events = std::pin::pin!(Arc::clone(&log).events(&HeaderMap::new()));
+        log.push(Line::Stdout("a".into()));
+        assert!(log.end(Line::End {}, || {}));
+        log.remove();
+        let got: Vec<_> = events.collect().await;
+        assert_eq!(
+            got.into_iter()
+                .map(|event| String::from_utf8(event.unwrap().to_vec()).unwrap())
+                .collect::<String>(),
+            "id: 1\ndata: {\"stdout\":\"a\"}\n\n\
+             id: 2\ndata: {\"end\":{}}\n\n"
+        );
+        assert_eq!(
+            read(&log, &after("1")).await,
+            "id: 2\ndata: {\"end\":{}}\n\n"
+        );
     }
 }

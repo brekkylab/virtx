@@ -135,8 +135,12 @@ impl SandboxJobEnd {
 }
 
 /// Why a process did not end by itself: it was killed, as `SIGKILL` does, its `code` `137`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// A reason a later version of the protocol adds is read as [`Other`](Self::Other), as it was
+/// sent, so a job and its log still read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SandboxJobEndReason {
     /// Its `timeout_ms` ran out.
     Timeout,
@@ -157,6 +161,11 @@ pub enum SandboxJobEndReason {
     /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
     /// each that ran then is ended so.
     Restarted,
+
+    /// One this version does not know, as the server said it. A server never sends it for one
+    /// above.
+    #[serde(untagged)]
+    Other(String),
 }
 
 /// What an exec read with its log yields
@@ -313,6 +322,20 @@ mod tests {
         let value = serde_json::to_value(&job).unwrap();
         assert_eq!(value["reason"], "timeout");
         assert_eq!(serde_json::from_value::<SandboxJob>(value).unwrap(), job);
+    }
+
+    #[test]
+    fn a_reason_this_version_does_not_know_is_read_as_the_server_said_it() {
+        let value = json!({"end": {"code": 137, "reason": "disk_full"}});
+        let entry = serde_json::from_value::<SandboxJobEntry>(value.clone()).unwrap();
+        assert_eq!(
+            entry,
+            SandboxJobEntry::End(SandboxJobEnd {
+                code: 137,
+                reason: Some(SandboxJobEndReason::Other("disk_full".into())),
+            })
+        );
+        assert_eq!(serde_json::to_value(&entry).unwrap(), value);
     }
 
     #[test]

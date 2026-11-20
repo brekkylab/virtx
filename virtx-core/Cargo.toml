@@ -31,6 +31,8 @@ http-body-util = { version = "0.1", optional = true }
 # Every body is JSON; a job's log is a `text/event-stream`, read and written as SSE.
 serde_json = { version = "1", optional = true }
 sse-stream = { version = "0.2", optional = true }
+# Which member of a request's body did not read, for the server's refusal of it.
+serde_path_to_error = { version = "0.1", optional = true }
 # `Stream`, which a job's log is, and the macro that writes one.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
 async-stream = { version = "0.3", optional = true }
@@ -54,6 +56,8 @@ sha2 = { version = "0.10", optional = true }
 flate2 = { version = "1", optional = true }
 # The `virtx` command's arguments.
 clap = { version = "4", features = ["derive", "env"], optional = true }
+# Signing in from the `virtx` command: an ID token's claims, read for when it runs out.
+base64 = { version = "0.22", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # `signal(SIGPIPE, SIG_DFL)`, so `virtx images | head` ends quietly.
@@ -71,6 +75,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 hyper-util = { version = "0.1", features = ["service"] }
 # Names no two of the ensure tests' scratch directories alike.
 uuid = { version = "1", features = ["v4"] }
+# A test of how long a request is sent again for runs on a clock it moves on itself.
+tokio = { version = "1", features = ["test-util"] }
 # The transport tests serve as well as call, so a bare `cargo test` builds the server's end. A
 # dev dependency's features reach no build but the tests'.
 virtx-core = { path = ".", features = ["server"] }
@@ -113,6 +119,7 @@ server = [
     "dep:http-body",
     "dep:tokio",
     "dep:serde_json",
+    "dep:serde_path_to_error",
     "dep:futures-util",
 ]
 ffi = ["client"]
@@ -120,4 +127,15 @@ ffi = ["client"]
 # served in the test's own process. Taken only as a dev-dependency's feature, it is in no build
 # but a test's.
 test-util = ["client"]
-cli = ["client", "dep:clap", "dep:libc", "tokio/signal"]
+cli = [
+    "client",
+    "dep:clap",
+    "dep:libc",
+    "tokio/signal",
+    # Signing in: the provider's discovery document, device flow and tokens, asked before the
+    # command's runtime starts.
+    "reqwest/json",
+    "reqwest/form",
+    "reqwest/blocking",
+    "dep:base64",
+]

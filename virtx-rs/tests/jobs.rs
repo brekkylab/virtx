@@ -40,7 +40,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
         read,
         [
             SandboxJobEntry::Stdout("hi".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
     let whole = common::entries(job.log(None));
@@ -72,10 +72,7 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     sleep.signal("SIGTERM").wait().unwrap();
     assert_eq!(sleep.complete(false).wait().unwrap(), 128 + 15);
     let ended = common::entries(sleep.log(None)).pop().unwrap().entry;
-    assert_eq!(
-        ended,
-        SandboxJobEntry::End(SandboxJobEnd { code: 128 + 15 })
-    );
+    assert_eq!(ended, SandboxJobEntry::End(SandboxJobEnd::exited(128 + 15)));
     let again = sandbox.job(sleep.id()).wait().unwrap();
     assert!(!again.info().running, "{again:?}");
     again.remove().wait().unwrap();
@@ -110,7 +107,7 @@ fn stdin_written_comes_back_until_it_is_closed() {
         read,
         [
             SandboxJobEntry::Stdout("a".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
     sandbox.remove().wait().unwrap();
@@ -201,7 +198,7 @@ fn a_started_job_is_read_as_its_log() {
         read,
         [
             SandboxJobEntry::Stdout("hi".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
 
@@ -219,7 +216,7 @@ fn a_started_job_is_read_as_its_log() {
         read,
         [
             SandboxJobEntry::Stdout("b".into()),
-            SandboxJobEntry::End(SandboxJobEnd { code: 0 }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
 
@@ -358,6 +355,30 @@ fn a_built_image_runs_with_what_its_steps_made() {
         .wait()
         .unwrap_err();
     assert_eq!(refused.status(), Some(404), "{refused}");
+    client.remove_image(&reference).wait().unwrap();
+}
+
+#[test]
+fn an_image_whose_working_dir_is_empty_builds_and_boots_in_the_root() {
+    // busybox 1.36.0, whose config sets `WorkingDir` to "" as images of older tools do: by
+    // digest, so that it is that build whatever its tag points at later.
+    let base = "busybox@sha256:9e2bbca079387d7965c3a9cee6d0c53f4f4e63ff7637877a83c4c05f2a666112";
+    let client = common::client();
+    let reference = format!("{}:latest", common::unique("rootdir"));
+    let recipe = Recipe::new(base).step(Step::run("pwd > /built-in"));
+    client
+        .build_image(recipe, &reference)
+        .complete(false)
+        .wait()
+        .unwrap();
+
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(reference.as_str()))
+        .wait()
+        .unwrap();
+    let ran = common::run(&sandbox, &["sh", "-c", "cat /built-in && pwd"]);
+    assert_eq!(ran, (vec!["/".to_owned(), "/".to_owned()], 0));
+    sandbox.remove().wait().unwrap();
     client.remove_image(&reference).wait().unwrap();
 }
 

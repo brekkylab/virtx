@@ -68,6 +68,9 @@ pub enum CtrlReq {
     /// Put what the guest has written on its disks, and end the machine. Not answered: its
     /// process ends.
     Shutdown,
+    /// Answered with [`Pong`](CtrlResp::Pong), from the machine's process to the agent: how it
+    /// hears a guest that is up. The host never sends it.
+    Ping,
 }
 
 /// What the machine's process tells the host.
@@ -92,6 +95,8 @@ pub enum CtrlResp {
     /// could not be built or broke, logged as an error as the process's last word -- so a
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
+    /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
+    Pong,
 }
 
 /// What the host asks of the guest's files on the I/O channel, each answered with a

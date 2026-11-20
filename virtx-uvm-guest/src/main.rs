@@ -249,6 +249,7 @@ fn serve() -> io::Result<()> {
                 libc::sync();
                 libc::reboot(libc::RB_AUTOBOOT);
             },
+            CtrlReq::Ping => send(&out, &CtrlResp::Pong),
         }
     }
     Ok(())

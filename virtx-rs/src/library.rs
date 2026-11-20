@@ -4,8 +4,12 @@
 //! Opened, one per process: every client is made by the library first opened, which stays open
 //! until the process ends. A client handed between modules is only good in the same library, so
 //! a module that shares one opens the path [`library_path`] answers.
+//!
+//! What the library warns of beside an answer, such as a forwarded connection that reached
+//! nothing in its sandbox, is logged as a warning by the [`log`] crate, under the target
+//! `virtx`.
 
-use std::ffi::{OsStr, OsString, c_char, c_int, c_void};
+use std::ffi::{CStr, OsStr, OsString, c_char, c_int, c_void};
 
 use crate::Error;
 
@@ -217,7 +221,9 @@ api! {
         forwarder: *mut *mut Opaque,
         out: *mut VirtxBytes,
     ) -> c_int,
+    virtx_port_forwarder_last_error: fn(forwarder: *mut Opaque, out: *mut VirtxBytes) -> c_int,
     virtx_port_forwarder_free: fn(forwarder: *mut Opaque),
+    virtx_set_warn: fn(warn: Option<unsafe extern "C" fn(message: *const c_char)>),
     virtx_bytes_free: fn(bytes: VirtxBytes),
     virtx_future_poll: fn(future: *mut Opaque, waker: VirtxWaker, out: *mut VirtxBytes) -> c_int,
     virtx_future_wait: fn(future: *mut Opaque, out: *mut VirtxBytes) -> c_int,
@@ -255,11 +261,23 @@ pub fn load(path: impl AsRef<OsStr>) -> Result<(), Error> {
                 path.display()
             ))),
             None => {
-                *api = Some(Box::leak(Box::new(Api::open(path)?)));
+                let opened: &'static Api = Box::leak(Box::new(Api::open(path)?));
+                unsafe { (opened.virtx_set_warn)(Some(warn)) };
+                *api = Some(opened);
                 Ok(())
             }
         }
     }
+}
+
+/// A warning of the library's, logged.
+///
+/// # Safety
+///
+/// `message` is a NUL-terminated string, as `virtx_set_warn` calls it with.
+unsafe extern "C" fn warn(message: *const c_char) {
+    let message = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    log::warn!(target: "virtx", "{message}");
 }
 
 /// The path the open library was opened by, as given; `None` before the first client or
@@ -284,7 +302,11 @@ pub(crate) fn api() -> Result<&'static Api, Error> {
     #[cfg(feature = "embedded")]
     {
         static API: std::sync::OnceLock<Api> = std::sync::OnceLock::new();
-        Ok(API.get_or_init(Api::embedded))
+        Ok(API.get_or_init(|| {
+            let api = Api::embedded();
+            unsafe { (api.virtx_set_warn)(Some(warn)) };
+            api
+        }))
     }
     #[cfg(not(feature = "embedded"))]
     {

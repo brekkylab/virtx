@@ -595,13 +595,12 @@ impl RegistryClient {
             }
         }
         if let Some(public) = &self.public {
+            // Said as nothing more than a pull's own: whose it was, and where it is kept, are
+            // not the asker's.
             match public.fetch(&self.store, &digest).await {
-                Ok(Some(image)) => {
-                    report(format!("{digest}: shared, not pulled"));
-                    return Ok((digest, image));
-                }
+                Ok(Some(image)) => return Ok((digest, image)),
                 Ok(None) => {}
-                Err(e) => report(format!("not shared ({e:#}): from the registry")),
+                Err(e) => log::warn!("sharing {digest}: {e:#}"),
             }
         }
 
@@ -645,8 +644,16 @@ impl RegistryClient {
             let store = self.store.clone();
             tokio::task::spawn_blocking(move || store.insert_image(&config, &layers)).await??
         };
-        self.store
-            .insert_image_origin(&digest, &served, &config_served, &image)?;
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        match anonymous {
+            true => self.store.insert_anonymous_image_origin(
+                &digest,
+                &served,
+                &config_served,
+                &image,
+            )?,
+            false => (self.store).insert_image_origin(&digest, &served, &config_served, &image)?,
+        }
         if let Some(public) = &self.public {
             public.pulled(&digest, &served, &config_served, &image);
         }
@@ -1326,13 +1333,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pulled, (digest.clone(), image.clone()));
-        assert_eq!(
-            said,
-            vec![
-                format!("pulling {reference}"),
-                format!("{digest}: shared, not pulled")
-            ]
-        );
+        assert_eq!(said, vec![format!("pulling {reference}")]);
         assert_eq!(second.0.get_image_origin(&digest).unwrap(), Some(image));
     }
 }

@@ -62,8 +62,8 @@ mod tests {
     use super::*;
 
     /// A pull in one project of an image another pulled anonymously files that one's, its
-    /// layers one file with theirs; one no other project pulled, or the asking project's own,
-    /// is not shared.
+    /// layers one file with theirs; one no other project pulled, one pulled with credentials or
+    /// pushed, or the asking project's own, is not shared.
     #[tokio::test]
     async fn a_project_s_pull_shares_what_another_pulled() {
         let home = tempfile::tempdir().unwrap();
@@ -77,7 +77,7 @@ mod tests {
             .insert_image(&ImageConfiguration::default(), std::slice::from_ref(&layer))
             .unwrap();
         let origin: Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
-        from.insert_image_origin(&origin, b"served", b"its config", &image)
+        from.insert_anonymous_image_origin(&origin, b"served", b"its config", &image)
             .unwrap();
 
         let shared = SharedPulls::new(projects);
@@ -96,6 +96,13 @@ mod tests {
 
         let other: Digest = format!("sha256:{}", "b".repeat(64)).parse().unwrap();
         assert_eq!(shared.fetch(&to, &other).await.unwrap(), None);
+
+        // One pulled with credentials, or pushed, is not shared, whoever asks.
+        let private: Digest = format!("sha256:{}", "c".repeat(64)).parse().unwrap();
+        from.insert_image_origin(&private, b"served", b"its config", &image)
+            .unwrap();
+        assert_eq!(shared.fetch(&to, &private).await.unwrap(), None);
+        assert_eq!(to.get_image_origin(&private).unwrap(), None);
         let own = ImageStore::new(home.path().join("elsewhere")).unwrap();
         let alone = SharedPulls::new(ProjectStore::new(home.path().join("none")));
         assert_eq!(alone.fetch(&own, &origin).await.unwrap(), None);

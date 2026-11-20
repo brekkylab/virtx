@@ -144,6 +144,14 @@ pub trait StorageBackend: Send + Sync {
     fn tags(&self) -> BoxFuture<'_, anyhow::Result<Vec<Reference>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+
+    /// Tag `tag`, which the home's registry is asked to remove and does not have here, removed
+    /// where it is kept -- its image not [wanted](Self::want) for it, so a tag whose image
+    /// cannot be brought here still goes: whether it was kept.
+    fn untag<'a>(&'a self, tag: &'a Reference) -> BoxFuture<'a, anyhow::Result<bool>> {
+        let _ = tag;
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// A home's [`StorageBackend`], once it is given one: shared by the home and each of its

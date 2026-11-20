@@ -797,6 +797,69 @@ async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(hom
     close(sandbox).await;
 }
 
+async fn writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // Reads nothing until it is told to, then counts what it reads to its stdin's end.
+    let cmd = [
+        "sh",
+        "-c",
+        "until [ -e /tmp/go ]; do sleep 0.1; done; exec wc -c",
+    ]
+    .map(String::from)
+    .to_vec();
+    let counter = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = counter.get().id;
+    // Writes given up on unanswered: the first past what its pipe holds, the rest held in the
+    // guest behind it, until one finds no room.
+    let mut given_up = Vec::new();
+    let refused = loop {
+        let size = if given_up.is_empty() { 1 << 20 } else { 1 };
+        let write = sandbox.write_stdin(&id, "x".repeat(size), false);
+        match tokio::time::timeout(Duration::from_millis(500), write).await {
+            Err(_) => given_up.push(size),
+            Ok(answered) => break answered,
+        }
+        assert!(given_up.len() <= 16, "never turned away");
+    };
+    assert!(
+        matches!(refused, Err(SandboxError::StdinFull)),
+        "{refused:?}"
+    );
+    // Its eof, with no room either, is turned away too, and closes nothing.
+    let eof = sandbox.write_stdin(&id, String::new(), true).await;
+    assert!(matches!(eof, Err(SandboxError::StdinFull)), "{eof:?}");
+    assert!(counter.get().running);
+
+    // Once it reads, what was given up on goes in, and its eof, sent again until there is room
+    // for it, ends it, having read those and none that was turned away.
+    assert_eq!(
+        run(&sandbox, &["touch", "/tmp/go"], None).await.unwrap().1,
+        0
+    );
+    let mut eof = sandbox.write_stdin(&id, String::new(), true).await;
+    let since = std::time::Instant::now();
+    while matches!(eof, Err(SandboxError::StdinFull)) && since.elapsed() < HANG {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        eof = sandbox.write_stdin(&id, String::new(), true).await;
+    }
+    eof.unwrap();
+    let mut events = std::pin::pin!(Arc::clone(counter.log()).events(&HeaderMap::new()));
+    let mut said = Vec::new();
+    while let Some(Ok(event)) = tokio::time::timeout(HANG, events.next()).await.unwrap() {
+        let event = String::from_utf8(event.to_vec()).unwrap();
+        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+        said.push(serde_json::from_str(data.unwrap()).unwrap());
+    }
+    let read = given_up.iter().sum::<usize>().to_string();
+    assert!(
+        matches!(&said[..], [SandboxJobEntry::Stdout(count), SandboxJobEntry::End(end)]
+            if count.trim() == read && end.code == 0),
+        "{said:?}, {} given up",
+        given_up.len()
+    );
+    close(sandbox).await;
+}
+
 async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let start = async |cmd: &[&str], timeout: Option<Duration>| {
@@ -954,69 +1017,6 @@ async fn a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed(
     let ended = tokio::time::timeout(HANG * 5, run(&sandbox, &read, None));
     let (lines, code) = ended.await.expect("the reads end").unwrap();
     assert_eq!((lines, code), (vec![], 0));
-    close(sandbox).await;
-}
-
-async fn writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open(home: Home) {
-    let sandbox = home.sandbox(&small(), None).await;
-    // Reads nothing until it is told to, then counts what it reads to its stdin's end.
-    let cmd = [
-        "sh",
-        "-c",
-        "until [ -e /tmp/go ]; do sleep 0.1; done; exec wc -c",
-    ]
-    .map(String::from)
-    .to_vec();
-    let counter = sandbox.exec(cmd, true, None).await.unwrap();
-    let id = counter.get().id;
-    // Writes given up on unanswered: the first past what its pipe holds, the rest held in the
-    // guest behind it, until one finds no room.
-    let mut given_up = Vec::new();
-    let refused = loop {
-        let size = if given_up.is_empty() { 1 << 20 } else { 1 };
-        let write = sandbox.write_stdin(&id, "x".repeat(size), false);
-        match tokio::time::timeout(Duration::from_millis(500), write).await {
-            Err(_) => given_up.push(size),
-            Ok(answered) => break answered,
-        }
-        assert!(given_up.len() <= 16, "never turned away");
-    };
-    assert!(
-        matches!(refused, Err(SandboxError::StdinFull)),
-        "{refused:?}"
-    );
-    // Its eof, with no room either, is turned away too, and closes nothing.
-    let eof = sandbox.write_stdin(&id, String::new(), true).await;
-    assert!(matches!(eof, Err(SandboxError::StdinFull)), "{eof:?}");
-    assert!(counter.get().running);
-
-    // Once it reads, what was given up on goes in, and its eof, sent again until there is room
-    // for it, ends it, having read those and none that was turned away.
-    assert_eq!(
-        run(&sandbox, &["touch", "/tmp/go"], None).await.unwrap().1,
-        0
-    );
-    let mut eof = sandbox.write_stdin(&id, String::new(), true).await;
-    let since = std::time::Instant::now();
-    while matches!(eof, Err(SandboxError::StdinFull)) && since.elapsed() < HANG {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        eof = sandbox.write_stdin(&id, String::new(), true).await;
-    }
-    eof.unwrap();
-    let mut events = std::pin::pin!(Arc::clone(counter.log()).events(&HeaderMap::new()));
-    let mut said = Vec::new();
-    while let Some(Ok(event)) = tokio::time::timeout(HANG, events.next()).await.unwrap() {
-        let event = String::from_utf8(event.to_vec()).unwrap();
-        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
-        said.push(serde_json::from_str(data.unwrap()).unwrap());
-    }
-    let read = given_up.iter().sum::<usize>().to_string();
-    assert!(
-        matches!(&said[..], [SandboxJobEntry::Stdout(count), SandboxJobEntry::End(end)]
-            if count.trim() == read && end.code == 0),
-        "{said:?}, {} given up",
-        given_up.len()
-    );
     close(sandbox).await;
 }
 

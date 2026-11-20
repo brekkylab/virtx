@@ -221,6 +221,9 @@ pub struct Sandbox {
     /// Whether the embedder's disks served its disk to its last machine
     /// ([`Disks::serve`](crate::disks::Disks::serve)): `None` until one has booted here.
     pub(super) served: Mutex<Option<bool>>,
+    /// Room asked for its first machine as it was made, before anything of it was: what its
+    /// first boot runs in, rather than asking again.
+    pub(super) room: Mutex<Option<Option<crate::Room>>>,
 }
 
 impl Sandbox {
@@ -243,6 +246,7 @@ impl Sandbox {
             active: AtomicUsize::new(0),
             writing: Arc::default(),
             served: Mutex::default(),
+            room: Mutex::default(),
         })
     }
 
@@ -431,8 +435,12 @@ impl Sandbox {
             .ok_or_else(|| Error::NotFound(format!("no image here is {}", self.record.image)))?;
         let began = Instant::now();
         // Room for it first, as the embedder's admission says, held while it runs: a machine
-        // there is none for is never started.
-        let room = crate::admit(&spec)?;
+        // there is none for is never started. Its first was asked for as it was made.
+        let given = self.room.lock().unwrap().take();
+        let room = match given {
+            Some(room) => room,
+            None => crate::admit(&spec)?,
+        };
         let mut held = shared.hooks.booting(self, &spec).await?;
         held.extend(room);
 

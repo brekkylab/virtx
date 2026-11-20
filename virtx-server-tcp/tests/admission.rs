@@ -3,7 +3,8 @@
 //! protocol says, `503` `capacity` with `Retry-After`, nothing of it made. Its own test binary,
 //! since an admission is the process's.
 
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_util::future::BoxFuture;
 use http::StatusCode;
@@ -23,15 +24,21 @@ impl Identity for Tester {
     }
 }
 
-/// Room for no machine, and each machine it was asked for, by its vCPUs and memory.
+/// Room for no machine, and each machine it was asked for, by its vCPUs and memory, with how
+/// much was under `sandboxes` as it was asked.
 #[derive(Default)]
 struct Full {
     asked: Mutex<Vec<(u8, u32)>>,
+    sandboxes: OnceLock<PathBuf>,
+    there: Mutex<Vec<usize>>,
 }
 
 impl Admission for Full {
     fn admit(&self, spec: &MachineSpec) -> Result<Room, NoRoom> {
         self.asked.lock().unwrap().push((spec.vcpus, spec.ram_mib));
+        let dir = self.sandboxes.get().map(std::fs::read_dir);
+        let there = dir.map_or(0, |dir| dir.map_or(0, Iterator::count));
+        self.there.lock().unwrap().push(there);
         Err(NoRoom(format!(
             "no room for {} vCPUs and {} MiB",
             spec.vcpus, spec.ram_mib
@@ -42,7 +49,9 @@ impl Admission for Full {
 #[tokio::test]
 async fn a_machine_the_embedder_has_no_room_for_is_refused_capacity_and_nothing_is_made() {
     let full = Arc::new(Full::default());
-    virtx_uvm::set_admission(Arc::clone(&full) as Arc<dyn Admission>);
+    assert!(virtx_uvm::set_admission(
+        Arc::clone(&full) as Arc<dyn Admission>
+    ));
 
     let root = std::env::temp_dir().join(format!("virtx-tcp-admission-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -51,6 +60,7 @@ async fn a_machine_the_embedder_has_no_room_for_is_refused_capacity_and_nothing_
     let tester = Principal::new("tester");
     let demo = projects.create(&tester, "demo").await.unwrap();
     let home = ProjectStore::new(&root).path(&demo.id);
+    full.sandboxes.set(home.join("sandbox")).unwrap();
     let store = ProjectStore::new(&root);
     let access = Access::new(
         Vec::new(),
@@ -106,6 +116,11 @@ async fn a_machine_the_embedder_has_no_room_for_is_refused_capacity_and_nothing_
     let message = refused(send(http::Method::POST, "/sandboxes/", Some(made)).await);
     assert_eq!(message, "no room for 2 vCPUs and 512 MiB");
     assert_eq!(*full.asked.lock().unwrap(), [(2, 512)]);
+    assert_eq!(
+        *full.there.lock().unwrap(),
+        [0],
+        "asked before its disk was made"
+    );
     // Nothing of it is left: not listed, and no disk of its own.
     let (status, _, listed) = send(http::Method::GET, "/sandboxes/", None).await;
     assert_eq!((status, listed.as_str()), (StatusCode::OK, "[]"));

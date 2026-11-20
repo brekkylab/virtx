@@ -1107,7 +1107,9 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     let mirror = home.mirror();
     let recipe = args.recipe;
     // Room for one machine as the build is asked for, if a step of it boots one -- its steps
-    // boot one at a time -- so a build there is none for is refused as a sandbox is.
+    // boot one at a time -- so a build there is none for is refused `503` as a sandbox is,
+    // rather than failing as a job. It is held from then on, its base's pull and the steps
+    // before its first `RUN` included.
     let boots = recipe.steps.iter().any(|step| matches!(step, Step::Run(_)));
     let room = match boots {
         true => virtx_uvm::admit(&BUILD_MACHINE)?,

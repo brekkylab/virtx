@@ -201,7 +201,7 @@ impl Sandboxes {
                 spec.port
             )));
         }
-        spec_of(&args)?;
+        let spec = spec_of(&args)?;
         match args.disk_gib {
             Some(0) => {
                 return Err(Error::Invalid(
@@ -217,6 +217,11 @@ impl Sandboxes {
             _ => {}
         }
         super::sandbox::abins_refused(&args.abins, &super::sandbox::abin_programs(&shared.vm))?;
+        // Room for its machine before anything of it is made, held for its first boot.
+        let room = match booted {
+            true => Some(crate::admit(&spec)?),
+            false => None,
+        };
 
         let digest = match &args.image {
             ImageName::Tag { tag } => {
@@ -313,6 +318,7 @@ impl Sandboxes {
                 jobs: Mutex::default(),
             };
             let sandbox = Sandbox::new(record, Arc::clone(shared));
+            *sandbox.room.lock().unwrap() = room;
             all.insert(id, Arc::clone(&sandbox));
             sandbox
         };

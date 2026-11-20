@@ -1769,6 +1769,11 @@ impl Refused {
         self.4 = Some(seconds);
         self
     }
+
+    /// The status it is answered with.
+    pub fn status(&self) -> StatusCode {
+        self.0
+    }
 }
 
 fn invalid(message: impl Display) -> Refused {
@@ -1967,6 +1972,32 @@ impl From<tokio::task::JoinError> for Refused {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_s_status_is_the_one_it_is_answered_with() {
+        let refusals: [Refused; 4] = [
+            refused(StatusCode::CONFLICT, "in_use", "in use").after(5),
+            refusal(StatusCode::FORBIDDEN),
+            refusal(StatusCode::BAD_GATEWAY),
+            SandboxError::NotFound("no sandbox".into()).into(),
+        ];
+        let statuses = refusals.map(|refused| {
+            let status = refused.status();
+            (status, refused.into_response().status())
+        });
+        assert_eq!(
+            statuses.map(|(status, _)| status),
+            [
+                StatusCode::CONFLICT,
+                StatusCode::FORBIDDEN,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::NOT_FOUND,
+            ]
+        );
+        for (status, answered) in statuses {
+            assert_eq!(status, answered);
+        }
+    }
 
     #[tokio::test]
     async fn a_failure_on_the_server_s_files_is_answered_without_their_paths() {

@@ -13,7 +13,7 @@ The image has to be on the server already, pulled or built as [Images](/docs/gui
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `name` | none | A name to find it again by, with `find_sandbox`, rather than keeping its id. One another sandbox has is refused with `409`, `exists`, until that one is removed. |
+| `name` | none | A name to find it again by, with `find_sandbox`, rather than keeping its id: letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128. One another sandbox has is refused with `409`, `exists`, until that one is removed. |
 | `vcpus` | 4 | Its CPUs. |
 | `memory_mib` | 4096 | Its memory, in MiB. |
 | `disk_gib` | 2 | How much it may write over its image, in GiB, at most 1024. What it writes there goes when it is removed. |
@@ -102,6 +102,61 @@ let named = client.find_sandbox("task-42").await?; // None if no sandbox has the
 
 </TabItem>
 </Tabs>
+
+### Find it or make it
+
+A program that names its sandboxes, such as one per task, looks for the name first and makes the sandbox only when none has it. Two programs doing that at once can both find none: one makes it, and the other is refused with `409` and finds the one just made.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.find_sandbox("task-42")
+if sandbox is None:
+    try:
+        sandbox = await client.create_sandbox("alpine:latest", name="task-42")
+    except VirtxError as error:
+        if error.status != 409:
+            raise
+        sandbox = await client.find_sandbox("task-42")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+let sandbox = await client.findSandbox('task-42')
+if (sandbox === undefined) {
+  try {
+    sandbox = await client.createSandbox('alpine:latest', { name: 'task-42' })
+  } catch (error) {
+    if (!(error instanceof VirtxError) || error.status !== 409) throw error
+    sandbox = await client.findSandbox('task-42')
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let sandbox = match client.find_sandbox("task-42").await? {
+    Some(sandbox) => Some(sandbox),
+    None => match client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:latest").name("task-42"))
+        .await
+    {
+        Ok(sandbox) => Some(sandbox),
+        Err(error) if error.status() == Some(409) => client.find_sandbox("task-42").await?,
+        Err(error) => return Err(error),
+    },
+};
+```
+
+</TabItem>
+</Tabs>
+
+A sandbox found so comes without its ports; see [Networks and ports](/docs/guides/networks-ports/).
 
 ## Remove a sandbox
 

@@ -1715,7 +1715,7 @@ mod tests {
 
     /// A home's sandboxes, as a server built on this one reads them for routes of its own: each
     /// found by its id, and counted with how many have their machine up, none while each is
-    /// parked; one not known again is none of them.
+    /// parked; one not known again is none of them, and counted apart.
     #[tokio::test]
     async fn a_home_s_sandboxes_are_found_and_counted() {
         let access = Arc::new(OnceLock::new());
@@ -1759,7 +1759,8 @@ mod tests {
         let home = access.get().unwrap().homes().pop().unwrap();
 
         let sandboxes = home.sandboxes();
-        assert_eq!(sandboxes.counts(), (2, 0));
+        let counts = |known, up, unknown| crate::endpoints::Counts { known, up, unknown };
+        assert_eq!(sandboxes.counts(), counts(2, 0, 1));
         let mut listed: Vec<_> = sandboxes
             .list()
             .iter()
@@ -1774,7 +1775,7 @@ mod tests {
 
         let (status, _) = served.send("DELETE", "sandboxes/b", Some("demo"), "").await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(home.sandboxes().counts(), (1, 0));
+        assert_eq!(home.sandboxes().counts(), counts(1, 0, 1));
         assert!(home.sandboxes().get("b").is_none());
     }
 

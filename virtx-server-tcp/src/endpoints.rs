@@ -395,14 +395,16 @@ impl Home {
     }
 
     /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
-    /// was used, side by side; those in use are left as they are.
+    /// was used, side by side; those in use are left as they are. These are the sandboxes here
+    /// as it is called: one made meanwhile is left up, so a server that drains its host stops
+    /// sending it work first.
     pub async fn park_unused(&self) {
         self.sandboxes.park_unused().await;
     }
 
     /// Park every sandbox here, in use or not ([`Sandbox::park_anyway`]), side by side: what
     /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
-    /// used.
+    /// used. As [`park_unused`](Home::park_unused), the sandboxes here as it is called.
     pub async fn park_all(&self) {
         self.sandboxes.park_all().await;
     }
@@ -442,8 +444,20 @@ impl Home {
 
 /// A home's sandboxes, as each is when it is asked: those the home knows, each whether its
 /// machine is up or not ([`Home::sandboxes`]). One kept in the home and not known again, which
-/// takes only its `DELETE`, is none of them.
+/// takes only its `DELETE`, is none of them, and is [counted](Sandboxes::counts) apart.
 pub struct Sandboxes<'a>(&'a Home);
+
+/// How many sandboxes a home holds, as [`Sandboxes::counts`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// Those it knows.
+    pub known: usize,
+    /// Of those, the ones whose machine is up.
+    pub up: usize,
+    /// Those kept in it and not known again, each holding its disk and record under the home's
+    /// root until it is removed.
+    pub unknown: usize,
+}
 
 impl Sandboxes<'_> {
     /// Each of them, in no set order.
@@ -460,14 +474,22 @@ impl Sandboxes<'_> {
         self.0.sandboxes.get(id).ok()
     }
 
-    /// How many there are, and how many of those have their machine up now.
-    pub fn counts(&self) -> (usize, usize) {
+    /// How many there are, how many of those have their machine up now, and how many more the
+    /// home holds and does not know.
+    pub fn counts(&self) -> Counts {
         let all = self.list();
         let up = all.iter().filter(|sandbox| sandbox.is_up()).count();
-        (all.len(), up)
+        let unknown = self.0.sandboxes.unknown();
+        Counts {
+            known: all.len(),
+            up,
+            unknown,
+        }
     }
 
-    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk.
+    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk
+    /// at the moment it is asked. Nothing holds it up after, and a park or a boot may change
+    /// the answer as soon as it is given.
     pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
         self.0.sandboxes.running_on(id)
     }

@@ -528,6 +528,11 @@ impl Sandboxes {
         (up.len(), jobs)
     }
 
+    /// How many sandboxes kept here are not known again, each taking only its `DELETE`.
+    pub fn unknown(&self) -> usize {
+        self.0.unknown.lock().unwrap().len()
+    }
+
     /// What the machines up now may write.
     pub fn writes(&self) -> Vec<Written> {
         self.up()

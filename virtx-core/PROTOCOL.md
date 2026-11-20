@@ -309,7 +309,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
-Either stops its VM, ends every job in it as a cancellation does, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
+Either stops its VM, kills every job in it that runs, as its [reason](#sandbox-jobs) `sandbox_deleted` says, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
 
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
@@ -365,12 +365,13 @@ Its log's entries are each an object with one member:
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
-The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, with its sandbox's VM, or with its server, which keeps its sandbox.
-In each of the last four, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, when its sandbox is deleted, with its sandbox's VM, or with its server, which keeps its sandbox.
+In each of the last five, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
 A server MAY say which, in its end and in its job, with `reason`:
 
 - `"timeout"`: its `timeout_ms` ran out.
-- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed, or by its sandbox's deletion.
+- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed. Its sandbox is still there.
+- `"sandbox_deleted"`: its sandbox was deleted while it ran, by the sandbox's `DELETE` or by the server, which then ends its log with this end before the job goes with the sandbox.
 - `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
 - `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
 

@@ -135,6 +135,18 @@ describe('against virtx-stdio', () => {
     await sandbox.remove()
   })
 
+  test('a process whose sandbox is removed ends with the reason', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const up = await sandbox.exec(['sh', '-c', 'echo up; sleep 60'])
+    const log = up.log()[Symbol.asyncIterator]()
+    assert.equal((await log.next()).value.stdout, 'up')
+    await sandbox.remove()
+    const rest = []
+    for (let next = await log.next(); !next.done; next = await log.next()) rest.push(next.value)
+    assert.deepEqual(rest.at(-1).end, { code: 137, reason: 'sandbox_deleted' })
+  })
+
   test('an image build is a job whose log ends with its digest', async () => {
     await alpine(client)
     const reference = `${unique('built')}:latest`

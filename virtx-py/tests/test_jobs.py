@@ -156,6 +156,17 @@ async def test_a_process_past_its_timeout_ends_with_the_reason(client: Client) -
     await sandbox.remove()
 
 
+async def test_a_process_whose_sandbox_is_removed_ends_with_the_reason(client: Client) -> None:
+    await alpine(client)
+    sandbox = await client.create_sandbox(ALPINE)
+    up = await sandbox.exec(["sh", "-c", "echo up; sleep 60"])
+    log = up.log()
+    assert (await anext(log)).entry == Stdout("up")
+    await sandbox.remove()
+    rest = [entry.entry async for entry in log]
+    assert rest[-1] == SandboxJobEnd(137, SandboxJobEndReason.SANDBOX_DELETED)
+
+
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Client) -> None:
     await alpine(client)
     reference = f"{unique('built')}:latest"

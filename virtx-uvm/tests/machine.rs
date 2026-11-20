@@ -190,11 +190,11 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     let id = kept.id().to_owned();
     tokio::join!(leave(kept), leave(gone));
     // This server ends each job as the next one knows it: restarted where its sandbox is kept,
-    // cancelled where it is deleted.
+    // its sandbox deleted where it is deleted.
     let restarted = Some(SandboxJobEndReason::Restarted);
     assert_eq!(running.get().reason, restarted);
-    let cancelled = Some(SandboxJobEndReason::Cancelled);
-    assert_eq!(deleted.get().reason, cancelled);
+    let sandbox_deleted = Some(SandboxJobEndReason::SandboxDeleted);
+    assert_eq!(deleted.get().reason, sandbox_deleted);
     let known = home.kept();
     assert_eq!(known.len(), 1, "the one made without keys goes");
     let again = &known[0];
@@ -383,6 +383,25 @@ async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
     assert_eq!(ended, exited);
     assert!(!sandbox.answer().running);
     close(sandbox).await;
+    // Its sandbox deleted under it: its log, read from before, reads on to its end, which says
+    // so, apart from its own removal.
+    let deleting = home.sandbox(&small(), None).await;
+    let cmd = ["sleep", "300"].map(String::from).to_vec();
+    let job = deleting.exec(cmd, None).await.unwrap();
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    close(deleting).await;
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(read.unwrap(), deleted);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::SandboxDeleted));
 }
 
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {

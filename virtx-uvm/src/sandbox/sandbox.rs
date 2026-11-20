@@ -657,11 +657,11 @@ impl Sandbox {
 
     /// Stop its machine for good, and end and remove every job in it; its upper disk deleted,
     /// or left where it is kept and `leaving`. A job that runs ends as `restarted` where the
-    /// sandbox is kept past its server, and as `cancelled` where it is deleted.
+    /// sandbox is kept past its server, and as `sandbox_deleted` where it is deleted.
     fn end(&self, leaving: bool) {
         let reason = match leaving && self.record.lock().unwrap().is_some() {
             true => SandboxJobEndReason::Restarted,
-            false => SandboxJobEndReason::Cancelled,
+            false => SandboxJobEndReason::SandboxDeleted,
         };
         *self.ended_for.lock().unwrap() = Some(reason);
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
@@ -841,7 +841,7 @@ impl Sandbox {
                 .ended_for
                 .lock()
                 .unwrap()
-                .unwrap_or(SandboxJobEndReason::Cancelled),
+                .unwrap_or(SandboxJobEndReason::SandboxDeleted),
         };
         for job in running.into_values() {
             job.cut(reason);

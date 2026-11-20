@@ -134,7 +134,10 @@ class SandboxJobEndReason(str, Enum):
     """Its ``timeout_ms`` ran out."""
 
     CANCELLED = "cancelled"
-    """Its job was removed while it ran, or its sandbox removed under it."""
+    """Its job was removed while it ran; its sandbox is still there."""
+
+    SANDBOX_DELETED = "sandbox_deleted"
+    """Its sandbox was removed under it, and everything it had with it."""
 
     VM_EXITED = "vm_exited"
     """Its sandbox's VM exited on its own under it."""

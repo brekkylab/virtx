@@ -287,8 +287,20 @@ impl Home {
 
 /// A home's sandboxes, as each is when it is asked: those the home knows, each whether its
 /// machine is up or not ([`Home::sandboxes`]). One kept in the home and not known again, which
-/// takes only its `DELETE`, is none of them.
+/// takes only its `DELETE`, is none of them, and is [counted](Sandboxes::counts) apart.
 pub struct Sandboxes<'a>(&'a Home);
+
+/// How many sandboxes a home holds, as [`Sandboxes::counts`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// Those it knows.
+    pub known: usize,
+    /// Of those, the ones whose machine is up.
+    pub up: usize,
+    /// Those kept in it and not known again, each holding its disk and record under the home's
+    /// root until it is removed.
+    pub unknown: usize,
+}
 
 impl Sandboxes<'_> {
     /// Each of them, in no set order.
@@ -306,14 +318,21 @@ impl Sandboxes<'_> {
         sandboxes.get(id).map(|held| Arc::clone(&held.sandbox))
     }
 
-    /// How many there are, and how many of those have their machine up now.
-    pub fn counts(&self) -> (usize, usize) {
-        let sandboxes = self.0.sandboxes.lock().unwrap();
-        let up = sandboxes.values().filter(|held| held.sandbox.is_up());
-        (sandboxes.len(), up.count())
+    /// How many there are, how many of those have their machine up now, and how many more the
+    /// home holds and does not know.
+    pub fn counts(&self) -> Counts {
+        let (known, up) = {
+            let sandboxes = self.0.sandboxes.lock().unwrap();
+            let up = sandboxes.values().filter(|held| held.sandbox.is_up());
+            (sandboxes.len(), up.count())
+        };
+        let unknown = self.0.unknown.lock().unwrap().len();
+        Counts { known, up, unknown }
     }
 
-    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk.
+    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk
+    /// at the moment it is asked. Nothing holds it up after, and a park or a boot may change
+    /// the answer as soon as it is given.
     pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
         self.get(id).filter(|sandbox| sandbox.is_up())
     }

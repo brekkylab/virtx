@@ -218,7 +218,8 @@ impl Home {
     /// ([`Sandbox::leave`]): its machine stopped if it is up, as parking stops it, and its
     /// record and disk left under this home's root, for a server to [take in](Home::take_in) --
     /// another one it is moved to, this one again, or a backup's. Nothing of it is removed from
-    /// the backend, where the home has one. From then on no request here reaches it. Refused
+    /// the backend, where the home has one: what is kept of it is the embedder's from then on,
+    /// to take in or to remove there itself. From then on no request here reaches it. Refused
     /// `409` `in_use` while it is in use -- a job runs in it, or something reaches it -- and
     /// `404` for an id no sandbox here has. One kept here and not known again is let go of as
     /// it is. Blocks until its machine has stopped.
@@ -999,22 +1000,19 @@ async fn volume_remove(
         home.volumes.remove(&name)?;
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    let here = match home.volumes.open(&name) {
-        Ok(volume) => {
-            drop(volume.hold_alone()?);
-            true
-        }
-        Err(VolumeError::Unknown(_)) => false,
+    // Held alone until it is removed here, so no sandbox mounts it meanwhile.
+    let alone = match home.volumes.open(&name) {
+        Ok(volume) => Some(volume.hold_alone()?),
+        Err(VolumeError::Unknown(_)) => None,
         Err(e) => return Err(e.into()),
     };
     match backend.remove(Stored::Volume(&name)).await {
         Ok(()) => {}
-        Err(Refusal::Unknown(_)) if here => {}
+        Err(Refusal::Unknown(_)) if alone.is_some() => {}
         Err(e) => return Err(e.into()),
     }
-    match home.volumes.remove(&name) {
-        Ok(()) | Err(VolumeError::Unknown(_)) => {}
-        Err(e) => return Err(e.into()),
+    if let Some(alone) = alone {
+        home.volumes.remove_held(&name, alone)?;
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }

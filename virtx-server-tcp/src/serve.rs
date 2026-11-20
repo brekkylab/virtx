@@ -1463,7 +1463,8 @@ mod tests {
     /// a server beside this one would find them: each brought here as it is read or written, and
     /// kept there again once a write lets go of it. It refuses what `held` names as held
     /// elsewhere, says what it removed, and keeps nothing of a sandbox's disk but files the empty
-    /// image here as it is wanted.
+    /// image here as it is wanted. A volume it is removing fails where a sandbox could mount it
+    /// here meanwhile.
     struct Beyond {
         kept: VolumeStore,
         here: VolumeStore,
@@ -1545,6 +1546,14 @@ mod tests {
                 let (Stored::Volume(name) | Stored::Disk(name)) = what;
                 self.refuse(name)?;
                 if let Stored::Volume(name) = what {
+                    if self
+                        .here
+                        .open(name)
+                        .is_ok_and(|volume| volume.hold().is_ok())
+                    {
+                        let mounted = anyhow::anyhow!("{name} could be mounted as it was removed");
+                        return Err(Refusal::Failed(mounted));
+                    }
                     self.kept
                         .remove(name)
                         .map_err(|_| Refusal::Unknown(format!("no volume {name} is kept")))?;

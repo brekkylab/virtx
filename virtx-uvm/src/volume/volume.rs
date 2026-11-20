@@ -162,19 +162,17 @@ impl Store {
             Err(fs::TryLockError::WouldBlock) => return Err(Error::InUse(name.to_owned())),
             Err(fs::TryLockError::Error(e)) => return Err(Error::io(format!("locking {name}"), e)),
         }
-        // Its contents while it is held, so no machine mounts it half gone; then the rest, which
-        // a machine that takes the lock now finds no files in. The rest is moved out of the name
-        // first, under one no volume can have, so what is made in it meanwhile, as a conditional
-        // write's `writing` is, goes with it and leaves the name free.
-        fs::remove_dir_all(&files)
-            .map_err(|e| Error::io(format!("removing {}", files.display()), e))?;
-        drop(lock);
-        let gone = dir.with_file_name(format!(
-            ".{name}.{}.removing",
-            uuid::Uuid::new_v4().simple()
-        ));
-        fs::rename(&dir, &gone).map_err(|e| Error::io(format!("removing {}", dir.display()), e))?;
-        fs::remove_dir_all(&gone).map_err(|e| Error::io(format!("removing {}", gone.display()), e))
+        delete(&dir, name, Hold(lock))
+    }
+
+    /// Delete volume `name` as [`remove`](Self::remove) does, held alone already by `alone`
+    /// ([`Volume::hold_alone`]), so that nothing has taken it since.
+    pub fn remove_held(&self, name: &str, alone: Hold) -> Result<()> {
+        let dir = self.dir(name)?;
+        if !dir.join("files").is_dir() {
+            return Err(Error::Unknown(name.to_owned()));
+        }
+        delete(&dir, name, alone)
     }
 
     /// Volume `name`'s own directory, refused unless `name` [is one](crate::is_name).
@@ -622,6 +620,24 @@ impl Volume {
 }
 
 /// The file volume `name`, whose own directory is `dir`, is locked by.
+/// Delete volume `name`, whose own directory is `dir`, held alone by `alone`: its contents while it
+/// is held, so no machine mounts it half gone; then the rest, which a machine that takes the lock
+/// now finds no files in. The rest is moved out of the name first, under one no volume can have,
+/// so what is made in it meanwhile, as a conditional write's `writing` is, goes with it and
+/// leaves the name free.
+fn delete(dir: &Path, name: &str, alone: Hold) -> Result<()> {
+    let files = dir.join("files");
+    fs::remove_dir_all(&files)
+        .map_err(|e| Error::io(format!("removing {}", files.display()), e))?;
+    drop(alone);
+    let gone = dir.with_file_name(format!(
+        ".{name}.{}.removing",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::rename(dir, &gone).map_err(|e| Error::io(format!("removing {}", dir.display()), e))?;
+    fs::remove_dir_all(&gone).map_err(|e| Error::io(format!("removing {}", gone.display()), e))
+}
+
 fn lock(dir: &Path, name: &str) -> Result<File> {
     if !dir.is_dir() {
         return Err(Error::Unknown(name.to_owned()));

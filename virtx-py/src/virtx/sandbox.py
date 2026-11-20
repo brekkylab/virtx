@@ -247,7 +247,8 @@ class SandboxJobKind(str, Enum):
 
 class SandboxJobEndReason(str, Enum):
     """Why a process did not end by itself: the server, or the kernel, killed it, as ``SIGKILL``
-    does, its code ``137``."""
+    does, its code ``137``. A reason this version does not know is read as the server's string
+    itself."""
 
     TIMEOUT = "timeout"
     """Its ``timeout_ms`` ran out."""
@@ -296,8 +297,9 @@ class SandboxJob:
     code: int | None = None
     """Once it has ended, its exit code."""
 
-    reason: SandboxJobEndReason | None = None
-    """Once it has ended, why, if it did not end by itself."""
+    reason: SandboxJobEndReason | str | None = None
+    """Once it has ended, why, if it did not end by itself: a ``str`` for a reason this version
+    does not know."""
 
     @classmethod
     def from_dict(cls, client: Client, sandbox_id: str, value: Mapping[str, Any]) -> SandboxJob:
@@ -385,14 +387,20 @@ class SandboxJobEnd:
 
     code: int
 
-    reason: SandboxJobEndReason | None = None
-    """Why, if it did not end by itself."""
+    reason: SandboxJobEndReason | str | None = None
+    """Why, if it did not end by itself: a ``str`` for a reason this version does not know."""
 
 
-def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | None:
-    """A job's, or its end's, ``reason``, if it has one."""
+def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | str | None:
+    """A job's, or its end's, ``reason``, if it has one: as the server said it where this version
+    does not know it."""
     reason = value.get("reason")
-    return None if reason is None else SandboxJobEndReason(reason)
+    if reason is None:
+        return None
+    try:
+        return SandboxJobEndReason(reason)
+    except ValueError:
+        return str(reason)
 
 
 SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd

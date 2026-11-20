@@ -415,6 +415,8 @@ A server MAY say which, in its end and in its job, with `reason`:
 - `"oom"`: its memory ran out: it ended `137`, killed, or a process it started killed, for want of memory. A server that holds a command to a memory limit SHOULD say it, so that one is told apart from a `SIGKILL` sent.
 - `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
 
+A later version of this protocol may add a reason. A client keeps one it does not know as it was sent, and reads the job and its end as it would otherwise.
+
 A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
 A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.

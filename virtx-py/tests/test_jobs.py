@@ -34,6 +34,7 @@ from virtx import (
     VirtxError,
     Volume,
 )
+from virtx.sandbox import sandbox_job_entry
 
 
 async def test_a_volume_is_created_and_got(client: Client) -> None:
@@ -187,6 +188,13 @@ async def test_a_process_whose_sandbox_is_removed_ends_with_the_reason(client: C
     await sandbox.remove()
     rest = [entry.entry async for entry in log]
     assert rest[-1] == SandboxJobEnd(137, SandboxJobEndReason.SANDBOX_DELETED)
+
+
+def test_a_reason_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:
+    end = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "disk_full"}}).entry
+    assert end == SandboxJobEnd(137, "disk_full")
+    known = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "timeout"}}).entry
+    assert known == SandboxJobEnd(137, SandboxJobEndReason.TIMEOUT)
 
 
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Client) -> None:

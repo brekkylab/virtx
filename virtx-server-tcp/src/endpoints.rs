@@ -33,9 +33,9 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxPort, SandboxSignalArgs, SandboxStdinArgs, Step, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream,
-    described_type, from_body,
+    SandboxExecItem, SandboxPort, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    accepts_event_stream, described_type, from_body,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
@@ -607,7 +607,12 @@ pub fn router() -> Router {
         .route("/sandboxes/{id}/files/", any(sandbox_files))
         .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
-        .route("/sandboxes/{id}", get(sandbox_get).delete(sandbox_remove))
+        .route(
+            "/sandboxes/{id}",
+            get(sandbox_get)
+                .patch(sandbox_resize)
+                .delete(sandbox_remove),
+        )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
         .route(
@@ -1449,6 +1454,18 @@ async fn sandbox_get(
         return Ok(json(&unknown.answer()));
     }
     Ok(json(&home.sandbox(&id)?.answer()))
+}
+
+/// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
+/// if it is up and nothing uses it, and refused `409`, `in_use`, if something does; its disk
+/// grown, never shrunk, as its VM next boots, without parking it.
+async fn sandbox_resize(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(id): Segments<String>,
+    Whole(request): Whole,
+) -> Answer {
+    let args: SandboxResizeArgs = body(&request)?;
+    Ok(json(&home.sandbox(&id)?.resize(&args).await?))
 }
 
 /// Remove it, and its disk kept beyond this machine first: refused, and nothing removed, where

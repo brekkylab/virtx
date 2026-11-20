@@ -229,6 +229,7 @@ fn cors(origins: &[String]) -> CorsLayer {
             Method::HEAD,
             Method::POST,
             Method::PUT,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
             method(b"PROPFIND"),
@@ -829,7 +830,7 @@ mod tests {
         );
         let methods = header("access-control-allow-methods").unwrap();
         assert!(
-            methods.contains("PROPFIND") && methods.contains("MKCOL"),
+            methods.contains("PROPFIND") && methods.contains("MKCOL") && methods.contains("PATCH"),
             "{methods}"
         );
         let headers = header("access-control-allow-headers")
@@ -1255,6 +1256,12 @@ mod tests {
                 "signl: not a member; the members are `signal`",
             ),
             (
+                "PATCH",
+                "sandboxes/nobody",
+                r#"{"cpus": 2}"#,
+                "cpus: not a member; the members are `vcpus`, `memory_mib`, `disk_gib`",
+            ),
+            (
                 "POST",
                 "images/jobs/pull/",
                 "x",
@@ -1309,6 +1316,7 @@ mod tests {
             (Method::POST, "sandboxes/"),
             (Method::POST, "sandboxes/nobody/jobs/exec/"),
             (Method::POST, "sandboxes/nobody/jobs/j/signal"),
+            (Method::PATCH, "sandboxes/nobody"),
         ] {
             for (size, status, code) in [
                 (limit + 1, StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
@@ -1638,6 +1646,7 @@ mod tests {
             ("POST", "sandboxes/unread/jobs/exec/", exec),
             ("GET", "sandboxes/unread/jobs/", ""),
             ("GET", "sandboxes/unread/files/", ""),
+            ("PATCH", "sandboxes/unread", r#"{"vcpus": 2}"#),
         ];
         for (method, path, body) in used {
             let (status, refused) = served.send(method, path, Some("demo"), body).await;
@@ -1657,6 +1666,11 @@ mod tests {
         assert!(left.is_empty(), "{left:?}");
         let (status, _) = served
             .send("GET", "sandboxes/unread", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let resize = r#"{"vcpus": 2}"#;
+        let (status, _) = served
+            .send("PATCH", "sandboxes/unread", Some("demo"), resize)
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = served.send("DELETE", "projects/demo", None, "").await;

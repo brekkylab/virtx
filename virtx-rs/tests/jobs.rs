@@ -6,7 +6,7 @@ use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
     SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEndReason,
-    SandboxJobEntry, Source, Step,
+    SandboxJobEntry, SandboxResizeArgs, SandboxResources, Source, Step,
 };
 
 mod common;
@@ -110,6 +110,43 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     assert_eq!(ended, SandboxJobEntry::End(deleted));
     let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
+}
+
+/// Over each server: resized, a sandbox's VM boots with its new vCPUs and memory, its disk
+/// grown, and a smaller disk is refused.
+#[test]
+fn a_resized_sandbox_boots_so_and_its_disk_only_grows() {
+    for client in [common::client(), common::tcp_client()] {
+        common::alpine(&client);
+        let args = SandboxCreateArgs::new(ALPINE)
+            .vcpus(1)
+            .memory_mib(512)
+            .disk_gib(1);
+        let sandbox = client.create_sandbox(&args).wait().unwrap();
+        assert_eq!(common::run(&sandbox, &["nproc"]).0, ["1"]);
+
+        let grown = SandboxResizeArgs::default().vcpus(2).disk_gib(2);
+        let resized = sandbox.resize(&grown).wait().unwrap();
+        let parked = SandboxResources {
+            vcpus: 2,
+            memory_mib: 512,
+            disk_gib: 2,
+            up: false,
+        };
+        assert_eq!(resized, parked);
+        assert_eq!(common::run(&sandbox, &["nproc"]).0, ["2"]);
+        let df = ["sh", "-c", "df -k / | awk 'NR==2 {print $2}'"];
+        let kib: u64 = common::run(&sandbox, &df).0[0].parse().unwrap();
+        assert!(
+            kib > 1 << 20 && kib <= 2 << 20,
+            "{kib} KiB, past 1 GiB and within 2"
+        );
+
+        let shrunk = SandboxResizeArgs::default().disk_gib(1);
+        let refused = sandbox.resize(&shrunk).wait().unwrap_err();
+        assert_eq!(refused.status(), Some(400), "{refused}");
+        sandbox.remove().wait().unwrap();
+    }
 }
 
 #[test]

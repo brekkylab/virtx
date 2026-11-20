@@ -28,6 +28,25 @@ pub(crate) async fn list(client: &TransportClient) -> Result<Vec<Sandbox>, Error
     http::get(client, "/sandboxes/").await
 }
 
+/// The sandbox named `name`, if one is: of what the server answers, the one named so. Two named
+/// so is an answer this cannot read, since a name is one sandbox's.
+pub(crate) async fn find(client: &TransportClient, name: &str) -> Result<Option<Sandbox>, Error> {
+    let found: Vec<Sandbox> =
+        http::get(client, &format!("/sandboxes/?name={}", segment(name))).await?;
+    let mut named = found
+        .into_iter()
+        .filter(|sandbox| sandbox.name.as_deref() == Some(name));
+    let first = named.next();
+    if let Some(other) = named.next() {
+        return Err(Error::Client(format!(
+            "the server answered sandboxes {} and {} both named {name}, which is one sandbox's",
+            first.map(|sandbox| sandbox.id).unwrap_or_default(),
+            other.id
+        )));
+    }
+    Ok(first)
+}
+
 /// Make a sandbox as `args` says.
 pub(crate) async fn create(
     client: &TransportClient,

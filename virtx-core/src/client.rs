@@ -449,6 +449,11 @@ impl Client {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
+    /// The sandbox named `name`, without its ports, if one is.
+    pub async fn find_sandbox(&self, name: impl AsRef<str>) -> Result<Option<Sandbox>, Error> {
+        sandbox::client::find(&self.inner, name.as_ref()).await
+    }
+
     /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
     /// its volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
@@ -1764,7 +1769,7 @@ pub(crate) mod ffi {
     }
 
     /// Makes a sandbox, given
-    /// `{"image": {...}, "network": bool, "ports": [n],
+    /// `{"image": {...}, "name": "...", "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or
@@ -1799,6 +1804,23 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move { client.get_sandbox(args?.id).await })
+    }
+
+    /// Answers with the sandbox named `name`, given `{"name": "..."}`, as
+    /// `virtx_client_list_sandbox` answers each, or `null` if none is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_find_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.find_sandbox(args?.name).await })
     }
 
     /// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers

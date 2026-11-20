@@ -332,6 +332,8 @@ export class Volume extends Files implements VolumeInfo {
 /** What the server answers about a sandbox. */
 export interface SandboxInfo {
   id: string
+  /** The name it was made with, which `findSandbox` finds it by. */
+  name?: string
   /** The digest of the image it was made from. */
   image: string
   /** Whether it takes processes: `false` once its VM has exited on its own. */
@@ -352,6 +354,7 @@ export interface SandboxInfo {
 export class Sandbox extends Files implements SandboxInfo {
   private constructor()
   id: string
+  name?: string
   image: string
   running: boolean
   ports?: SandboxPort[]
@@ -375,6 +378,8 @@ export interface SandboxPort {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
+  /** A name to find it again by, with `findSandbox`, rather than keeping its id: letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128, or it is refused with `400`; one another sandbox has is refused with `409`. */
+  name?: string
   network?: boolean
   /** TCP ports in it to open, reserved as it is made. */
   ports?: number[]
@@ -589,6 +594,8 @@ export class Client {
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
   getSandbox(id: string): Promise<Sandbox>
+  /** The sandbox named `name`, without its ports, or `undefined` if none is. */
+  findSandbox(name: string): Promise<Sandbox | undefined>
 }
 
 /**

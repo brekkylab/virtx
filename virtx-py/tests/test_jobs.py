@@ -266,6 +266,22 @@ async def test_a_push_that_fails_raises_its_error_from_its_log_and_its_complete(
     await client.remove_image(reference)
 
 
+async def test_a_sandbox_is_found_by_its_name_which_no_other_has(client: Client) -> None:
+    await alpine(client)
+    name = unique("named")
+    made = await client.create_sandbox(ALPINE, name=name)
+    assert made.name == name
+    found = await client.find_sandbox(name)
+    assert found is not None and found.id == made.id and found.name == name
+    assert found.client is client
+    assert await client.find_sandbox(unique("nobody")) is None
+    with pytest.raises(VirtxError) as refused:
+        await client.create_sandbox(ALPINE, name=name)
+    assert (refused.value.source, refused.value.status) == ("server", 409)
+    await made.remove()
+    assert await client.find_sandbox(name) is None
+
+
 async def test_a_forwarded_port_nothing_listens_on_says_so(
     tcp_client: Client, caplog: pytest.LogCaptureFixture
 ) -> None:

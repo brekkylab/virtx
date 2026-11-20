@@ -57,6 +57,9 @@ class Sandbox(Files):
 
     id: str
 
+    name: str | None
+    """The name it was made with, which ``find_sandbox`` finds it by."""
+
     image: str
     """The digest of the image it booted, as ``algorithm:hex``."""
 
@@ -77,6 +80,7 @@ class Sandbox(Files):
         return cls(
             client,
             value["id"],
+            value.get("name"),
             value["image"],
             value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],

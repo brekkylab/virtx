@@ -142,6 +142,7 @@ const SIGNATURES = {
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
+  virtx_client_find_sandbox: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -737,6 +738,12 @@ class Client {
 
   async getSandbox(id) {
     return new Sandbox(this, await this._call('virtx_client_get_sandbox', { id }))
+  }
+
+  // `undefined` where no sandbox has the name.
+  async findSandbox(name) {
+    const info = await this._call('virtx_client_find_sandbox', { name })
+    return info ? new Sandbox(this, info) : undefined
   }
 }
 

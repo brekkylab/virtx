@@ -1,6 +1,6 @@
 ---
 name: virtx
-description: Run a task in a Linux microVM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx.
+description: "Run a task in a Linux microVM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx."
 ---
 
 # virtx

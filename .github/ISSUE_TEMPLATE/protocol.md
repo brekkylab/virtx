@@ -1,6 +1,6 @@
 ---
-name: Protocol change
-about: A change to what a client and the server say to each other
+name: "Protocol change"
+about: "A change to what a client and the server say to each other"
 title: ''
 labels: protocol
 ---

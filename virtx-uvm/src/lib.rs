@@ -40,6 +40,7 @@ pub use project::{
     Error as ProjectError, Owner as ProjectOwner, Project, ProjectId, Store as ProjectStore,
     is_name as is_project_name,
 };
+pub use sandbox::runs;
 pub use sandbox::{
     Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
     Job as SandboxJob, KEEP_ENDED, Kept as KeptSandboxes, LOG_LIMIT, Sandbox,

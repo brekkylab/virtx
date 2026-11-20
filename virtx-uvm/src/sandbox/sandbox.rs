@@ -149,6 +149,10 @@ enum State {
 pub struct Sandbox {
     /// Its upper disk's name, and so its own.
     id: String,
+    /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
+    root: PathBuf,
+    /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
+    up_since: Mutex<Option<(SystemTime, Instant)>>,
     /// Where its upper disk and its record are.
     dir: PathBuf,
     /// What is kept of it past its process, for one made so: `None` for one that goes with its
@@ -469,6 +473,8 @@ impl Sandbox {
         let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
         Ok(Sandbox {
             id: upper.id.clone(),
+            root: root.to_owned(),
+            up_since: Mutex::default(),
             dir,
             record: Mutex::new(record),
             image: digest,
@@ -503,6 +509,11 @@ impl Sandbox {
     /// What it is named by, which no other sandbox over the same root has while it is there.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// When its machine came up, while it is up; `None` while it is parked or has exited.
+    pub fn up_since(&self) -> Option<SystemTime> {
+        self.up_since.lock().unwrap().map(|(at, _)| at)
     }
 
     /// The sandbox as the server answers it, with no ports: only its making answers those.
@@ -703,6 +714,7 @@ impl Sandbox {
         let record = self.record.lock().unwrap().take();
         if let State::Up(machine, _room) = state {
             machine.stop();
+            self.went_down();
         }
         // Its machine down, and its disk and volumes still here: the backend's to keep now.
         self.holding.lock().unwrap().clear();
@@ -759,6 +771,10 @@ impl Sandbox {
             let closed = matches!(*state, State::Exited);
             if !closed {
                 *state = State::Up(Arc::clone(&machine), room.take());
+                // Told while the state is held, so its going down, however soon, is told after.
+                let at = SystemTime::now();
+                *self.up_since.lock().unwrap() = Some((at, Instant::now()));
+                super::runs::up(&self.id, &self.root, at);
             }
             closed
         };
@@ -838,7 +854,17 @@ impl Sandbox {
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
         self.holding.lock().unwrap().clear();
         drop(room);
+        self.went_down();
         Ok(())
+    }
+
+    /// Its machine told down, once it is, if it was told up: called by whatever took it out of
+    /// [`State::Up`], once, and before another can boot -- a park and a close hold the turn
+    /// while they do -- so that each machine's going down is told once and in its order.
+    fn went_down(&self) {
+        if let Some((started, since)) = self.up_since.lock().unwrap().take() {
+            super::runs::down(&self.id, &self.root, started, since);
+        }
     }
 
     /// Its machine while one runs.
@@ -923,6 +949,7 @@ impl Sandbox {
             let exited = matches!(&*state, State::Up(up, _) if Arc::ptr_eq(up, machine));
             if exited {
                 *state = State::Exited;
+                self.went_down();
             }
             exited
         };

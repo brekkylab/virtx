@@ -14,6 +14,7 @@
 mod error;
 mod job;
 mod record;
+pub mod runs;
 #[allow(clippy::module_inception)]
 mod sandbox;
 mod upper;

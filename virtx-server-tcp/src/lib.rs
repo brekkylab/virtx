@@ -22,6 +22,8 @@
 //! - [`virtx_uvm::set_admission`]: room for its machines, every project's together. A sandbox
 //!   or a build there is none for is refused `503` `capacity`, nothing of it made. The binary
 //!   sets none, and every machine boots.
+//! - [`virtx_uvm::runs`]: each machine's coming up and going down, with when, in order, for it to
+//!   meter or report machine time by.
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.

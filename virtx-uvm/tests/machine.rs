@@ -26,6 +26,7 @@ use futures_util::{
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
+use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
     Admission, DEFAULT_DISK_GIB, Files, ImageStore, MachineSpec, NoRoom, Reference, RegistryClient,
     Room, Sandbox, SandboxError, StorageBackend, VolumeError, VolumeStore,
@@ -587,6 +588,63 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         .unwrap()
         .count();
     assert_eq!(left, 0);
+}
+
+async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home: Home) {
+    let _woken = runs::subscribe();
+    let before = runs::since(0, usize::MAX).last;
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let first = sandbox.up_since().expect("up as it is made");
+    run(&sandbox, &["true"], None).await.unwrap();
+    // Idle, it is parked; a job boots it again; closed, it is down for good.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(sandbox.up_since(), None, "parked");
+    run(&sandbox, &["true"], None).await.unwrap();
+    let second = sandbox.up_since().expect("up again");
+    assert!(second > first);
+    let id = sandbox.id().to_owned();
+    close(Arc::clone(&sandbox)).await;
+    assert_eq!(sandbox.up_since(), None, "closed");
+
+    let told = runs::since(before, usize::MAX);
+    assert!(told.all);
+    assert_eq!(told.runs.last().map(|run| run.seq), Some(told.last));
+    let ours: Vec<_> = (told.runs.into_iter())
+        .filter(|run| run.root == home.root)
+        .collect();
+    assert!(ours.iter().all(|run| run.sandbox == id));
+    assert!(ours.windows(2).all(|two| two[0].seq < two[1].seq));
+    let ran: Vec<_> = ours.into_iter().map(|run| run.ran).collect();
+    let [
+        Ran::Up { at: up },
+        Ran::Down {
+            started,
+            ended,
+            took,
+        },
+        Ran::Up { at: again },
+        Ran::Down {
+            started: started_again,
+            ended: ended_again,
+            took: took_again,
+        },
+    ] = ran[..]
+    else {
+        panic!("up, down, up and down, not {ran:?}");
+    };
+    assert_eq!((up, started), (first, first));
+    assert_eq!((again, started_again), (second, second));
+    assert!(started < ended && ended <= again && again < ended_again);
+    // How long each was up, by the clock no one sets, is about what the wall clock says.
+    for (took, started, ended) in [(took, started, ended), (took_again, again, ended_again)] {
+        let wall = ended.duration_since(started).unwrap();
+        assert!(
+            took.abs_diff(wall) < Duration::from_millis(100),
+            "{took:?} by {wall:?}"
+        );
+    }
 }
 
 async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
@@ -1555,6 +1613,7 @@ fn main() -> ExitCode {
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
+        each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
         a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
         a_guest_that_halts_ends_its_machine_and_its_jobs,

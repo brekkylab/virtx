@@ -336,7 +336,8 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
 }
 
 async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home: Home) {
-    let (_, before, _) = runs::since(0);
+    let _woken = runs::subscribe();
+    let before = runs::since(0, usize::MAX).last;
     let sandbox = home
         .sandbox(&small(), Some(Duration::from_millis(500)))
         .await;
@@ -352,11 +353,10 @@ async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home
     close(Arc::clone(&sandbox)).await;
     assert_eq!(sandbox.up_since(), None, "closed");
 
-    let (told, last, all) = runs::since(before);
-    assert!(all);
-    assert_eq!(told.last().map(|run| run.seq), Some(last));
-    let ours: Vec<_> = told
-        .into_iter()
+    let told = runs::since(before, usize::MAX);
+    assert!(told.all);
+    assert_eq!(told.runs.last().map(|run| run.seq), Some(told.last));
+    let ours: Vec<_> = (told.runs.into_iter())
         .filter(|run| run.root == home.root)
         .collect();
     assert!(ours.iter().all(|run| run.sandbox == id));
@@ -364,11 +364,16 @@ async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home
     let ran: Vec<_> = ours.into_iter().map(|run| run.ran).collect();
     let [
         Ran::Up { at: up },
-        Ran::Down { started, ended },
+        Ran::Down {
+            started,
+            ended,
+            took,
+        },
         Ran::Up { at: again },
         Ran::Down {
             started: started_again,
             ended: ended_again,
+            took: took_again,
         },
     ] = ran[..]
     else {
@@ -377,6 +382,14 @@ async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home
     assert_eq!((up, started), (first, first));
     assert_eq!((again, started_again), (second, second));
     assert!(started < ended && ended <= again && again < ended_again);
+    // How long each was up, by the clock no one sets, is about what the wall clock says.
+    for (took, started, ended) in [(took, started, ended), (took_again, again, ended_again)] {
+        let wall = ended.duration_since(started).unwrap();
+        assert!(
+            took.abs_diff(wall) < Duration::from_millis(100),
+            "{took:?} by {wall:?}"
+        );
+    }
 }
 
 async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home) {

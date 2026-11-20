@@ -18,10 +18,12 @@ const library =
     : process.platform === 'darwin'
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
-execFileSync('cargo', ['rustc', '-p', 'virtx-core', '--lib', '--crate-type', 'cdylib'], {
-  cwd: root,
-  stdio: 'inherit',
-})
+if (!process.env[virtx.LIBRARY_ENV]) {
+  execFileSync('cargo', ['rustc', '-p', 'virtx-core', '--lib', '--crate-type', 'cdylib'], {
+    cwd: root,
+    stdio: 'inherit',
+  })
+}
 virtx.load(process.env[virtx.LIBRARY_ENV] || path.join(target, 'debug', library))
 
 // What `cargo xtask fixture` names in the environment: `stdio`, the path of `virtx-stdio`;

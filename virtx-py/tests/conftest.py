@@ -27,15 +27,18 @@ _fixture: subprocess.Popen[str] | None = None
 
 def pytest_configure(config: pytest.Config) -> None:
     global _fixture
-    subprocess.run(
-        ["cargo", "rustc", "-p", "virtx-core", "--lib", "--crate-type", "cdylib"],
-        cwd=ROOT,
-        check=True,
-    )
-    name = {"win32": "virtx_core.dll", "darwin": "libvirtx_core.dylib"}.get(
-        sys.platform, "libvirtx_core.so"
-    )
-    virtx.load(os.environ.get(virtx.LIBRARY_ENV) or TARGET / "debug" / name)
+    library = os.environ.get(virtx.LIBRARY_ENV)
+    if not library:
+        subprocess.run(
+            ["cargo", "rustc", "-p", "virtx-core", "--lib", "--crate-type", "cdylib"],
+            cwd=ROOT,
+            check=True,
+        )
+        name = {"win32": "virtx_core.dll", "darwin": "libvirtx_core.dylib"}.get(
+            sys.platform, "libvirtx_core.so"
+        )
+        library = str(TARGET / "debug" / name)
+    virtx.load(library)
 
     if "VIRTX_TEST_URL" in os.environ:
         return

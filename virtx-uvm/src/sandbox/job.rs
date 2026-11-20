@@ -6,6 +6,7 @@ use tokio::sync::oneshot;
 use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry};
 
 use super::sandbox::{LOG_LIMIT, SIGKILL};
+use crate::machine::wire::Taken;
 
 /// A process in a sandbox, as it is answered, and its log.
 pub struct Job {
@@ -22,21 +23,23 @@ pub struct Job {
     writing: tokio::sync::Mutex<()>,
 }
 
-/// A job's stdin: whether it takes writes still, the number the next write is sent under, and
-/// who waits for each sent to be answered, by that number.
+/// A job's stdin: whether it takes writes still, whether the guest has said it gone, the number
+/// the next write is sent under, and each write sent and not yet answered, by that number:
+/// whether it was `eof`, and who waits.
 #[derive(Default)]
 struct Stdin {
     open: bool,
+    gone: bool,
     next: u64,
-    waiting: HashMap<u64, oneshot::Sender<Written>>,
+    waiting: HashMap<u64, (bool, oneshot::Sender<Written>)>,
 }
 
 /// What the guest answered a write to a job's stdin: how many bytes of its data went in, and
-/// whether all of it did.
+/// what became of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Written {
     pub(super) bytes: u64,
-    pub(super) whole: bool,
+    pub(super) taken: Taken,
 }
 
 impl Job {
@@ -145,8 +148,8 @@ impl Job {
 
     /// Send what `send` sends to its stdin, if it is open, under the number it is given, closing
     /// it if `eof`: done once the guest answers it [written](Job::written), which is once it is
-    /// in the process's stdin. One write at a time. `None` for a stdin closed, or never open, and
-    /// for a write its process went away from before an answer; a write not `whole` closes it.
+    /// in the process's stdin or never will be. One write at a time. `None` for a stdin closed,
+    /// or never open, and for a write its process went away from before an answer.
     pub(super) async fn write_stdin(
         &self,
         eof: bool,
@@ -163,22 +166,26 @@ impl Job {
             send(seq)?;
             stdin.next += 1;
             let (told, written) = oneshot::channel();
-            stdin.waiting.insert(seq, told);
+            stdin.waiting.insert(seq, (eof, told));
             stdin.open = !eof;
             written
         };
         Ok(written.await.ok())
     }
 
-    /// The guest has answered the write `seq` to its stdin. One not `whole` leaves its stdin
-    /// closed: its reader is gone.
+    /// The guest has answered the write `seq` to its stdin. One [`Closed`](Taken::Closed)
+    /// leaves its stdin closed: its reader is gone. One [`Full`](Taken::Full) was not taken, so
+    /// its `eof`, if it had one, did not close it, unless another write found it gone.
     pub(super) fn written(&self, seq: u64, written: Written) {
         let mut stdin = self.stdin.lock().unwrap();
-        if !written.whole {
-            stdin.open = false;
+        let Some((eof, told)) = stdin.waiting.remove(&seq) else {
+            return;
+        };
+        match written.taken {
+            Taken::Whole => {}
+            Taken::Closed => (stdin.open, stdin.gone) = (false, true),
+            Taken::Full => stdin.open |= eof && !stdin.gone,
         }
-        if let Some(told) = stdin.waiting.remove(&seq) {
-            let _ = told.send(written);
-        }
+        let _ = told.send(written);
     }
 }

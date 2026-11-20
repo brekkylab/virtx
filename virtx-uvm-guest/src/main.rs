@@ -33,7 +33,7 @@ use std::time::{Duration, UNIX_EPOCH};
 mod wire;
 
 use wire::{
-    CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME,
+    CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME, Taken,
 };
 
 /// The port's writing half, shared by everything that says something on it, so two messages
@@ -249,8 +249,9 @@ fn in_jobs(command: &mut Command) -> Option<(File, PathBuf)> {
 type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 
 /// How many writes to one process's stdin are queued at most. The host sends the next only once
-/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, one is dropped
-/// and said not written, rather than the loop waiting.
+/// the last is [`Written`](CtrlResp::Written), so one waits at most; past this, as when writes
+/// were given up on while the process did not read, one is answered [`Full`](Taken::Full) and
+/// not taken, rather than the loop waiting.
 const INPUT_QUEUED: usize = 4;
 
 /// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`. `seq` is
@@ -284,13 +285,14 @@ impl Input {
                 if !whole || eof {
                     to = None;
                 }
+                let taken = if whole { Taken::Whole } else { Taken::Closed };
                 send(
                     &out,
                     &CtrlResp::Written {
                         id,
                         seq,
                         bytes,
-                        whole,
+                        taken,
                     },
                 );
             }
@@ -298,18 +300,20 @@ impl Input {
         Input(queued)
     }
 
-    /// `queued` queued, for process `id`: dropped, and said not written, where the queue is full
-    /// or the writer is gone.
-    fn put(&self, out: &Out, id: u32, queued: Queued) {
+    /// `queued` queued, for process `id`, and whether it was: where the queue is full it is
+    /// answered [`Full`](Taken::Full), and the stdin left as it was.
+    fn put(&self, out: &Out, id: u32, queued: Queued) -> bool {
         let seq = queued.seq;
-        if let Err(e) = self.0.try_send(queued) {
-            if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
-                eprintln!(
-                    "{}: process {id}'s stdin past {INPUT_QUEUED} writes: one dropped",
-                    env!("CARGO_BIN_NAME")
-                );
+        match self.0.try_send(queued) {
+            Ok(()) => true,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                send(out, &not_written(id, seq, Taken::Full));
+                false
             }
-            send(out, &not_written(id, seq));
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                send(out, &not_written(id, seq, Taken::Closed));
+                false
+            }
         }
     }
 }
@@ -340,13 +344,13 @@ fn write_counted(pipe: &mut ChildStdin, data: &[u8]) -> (u64, bool) {
     (bytes as u64, bytes == data.len())
 }
 
-/// The answer to write `seq` to process `id` that wrote none of it.
-fn not_written(id: u32, seq: u64) -> CtrlResp {
+/// The answer to write `seq` to process `id` that wrote none of it, `taken` saying why.
+fn not_written(id: u32, seq: u64, taken: Taken) -> CtrlResp {
     CtrlResp::Written {
         id,
         seq,
         bytes: 0,
-        whole: false,
+        taken,
     }
 }
 
@@ -445,14 +449,18 @@ fn serve() -> io::Result<()> {
         match message {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
             // Handed to its writer, never written here: a process not reading holds up no other.
-            // Answered not `Written` at once for a process with no stdin here.
+            // Answered `Closed` at once for a process with no stdin here. An `eof` not queued
+            // leaves the stdin open.
             CtrlReq::Stdin { id, seq, data, eof } => {
                 let mut stdins = stdins.lock().unwrap();
-                match stdins.get(&id) {
+                let queued = match stdins.get(&id) {
                     Some(input) => input.put(&out, id, Queued { seq, data, eof }),
-                    None => send(&out, &not_written(id, seq)),
-                }
-                if eof {
+                    None => {
+                        send(&out, &not_written(id, seq, Taken::Closed));
+                        false
+                    }
+                };
+                if eof && queued {
                     stdins.remove(&id);
                 }
             }

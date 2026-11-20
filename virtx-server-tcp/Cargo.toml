@@ -25,8 +25,9 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde = { workspace = true }
 serde_json = "1"
-# A project store's answer, which one over a database awaits.
-futures-util = { version = "0.3", default-features = false }
+# A project store's answer, which one over a database awaits; and a home's sandboxes parked
+# side by side.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 thiserror = "2"
 # A member's user, as a segment of the path its `Location` names.
 percent-encoding = "2"
@@ -52,6 +53,10 @@ tower = { version = "0.5", default-features = false, features = ["util"] }
 # The wire, spoken by hand, and by virtx-core's client with the project given at connect.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 virtx-core = { workspace = true, features = ["client"] }
-tokio = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["io-util", "process"] }
 # A port's WebSocket, as a client would open it.
 tokio-tungstenite = "0.29"
+
+# Ctrl-break sent to a server, as an operator interrupts it on Windows.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_System_Threading"] }

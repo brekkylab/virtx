@@ -204,7 +204,7 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
     Ok(listener)
 }
 
-/// `router` served on `listener` until this process is interrupted.
+/// `router` served on `listener` until this process is asked to stop.
 pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
     // Each write sent at once: a job's log ends with two small ones, and Nagle's algorithm
     // would hold the second for the first's delayed ACK, some 40 ms.
@@ -217,16 +217,39 @@ pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> a
     Ok(())
 }
 
-/// Once this process is interrupted: by ctrl-c, or on Windows by ctrl-break too, the one
-/// console event a process group of its own can be sent.
+/// Once this process is asked to stop: by ctrl-c; on Unix by `SIGTERM` too, as a service
+/// manager, `docker stop` or a plain `kill` asks; on Windows by ctrl-break, the one console
+/// event a process group of its own can be sent, and by its console's closing, a logoff or a
+/// shutdown, each of which Windows gives a few seconds before it ends the process.
 async fn interrupted() {
-    #[cfg(windows)]
-    if let Ok(mut ctrl_break) = tokio::signal::windows::ctrl_break() {
+    #[cfg(unix)]
+    if let Ok(mut terminate) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
-            _ = ctrl_break.recv() => {}
+            _ = terminate.recv() => {}
         }
         return;
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        if let (Ok(mut ctrl_break), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+            windows::ctrl_break(),
+            windows::ctrl_close(),
+            windows::ctrl_logoff(),
+            windows::ctrl_shutdown(),
+        ) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = ctrl_break.recv() => {}
+                _ = close.recv() => {}
+                _ = logoff.recv() => {}
+                _ = shutdown.recv() => {}
+            }
+            return;
+        }
     }
     let _ = tokio::signal::ctrl_c().await;
 }

@@ -359,6 +359,31 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
+/// A machine's process leads a process group of its own, so what is sent its starter's group --
+/// a terminal's ctrl-c -- reaches its starter alone, which stops it.
+#[cfg(unix)]
+async fn a_machine_s_process_leads_a_process_group_of_its_own(home: Home) {
+    let sandbox = home.sandbox(&small()).await;
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,args="])
+        .output()
+        .unwrap();
+    let ps = String::from_utf8(ps.stdout).unwrap();
+    let ours = std::process::id().to_string();
+    // Each machine this process started: its pid and its process group.
+    let machines: Vec<_> = ps
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| fields.get(1) == Some(&ours.as_str()) && fields.get(4) == Some(&MACHINE))
+        .map(|fields| (fields[0].to_owned(), fields[2].to_owned()))
+        .collect();
+    assert_eq!(machines.len(), 1, "{ps}");
+    let (pid, group) = &machines[0];
+    assert_eq!(group, pid);
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
 async fn a_fork_bomb_leaves_the_sandbox_answering(home: Home) {
     // Large enough for more threads than the kernel's pids, as most are.
     answered_beside_a_bomb(&home, 2048, "f(){ f & f & wait; }; f").await;
@@ -1641,6 +1666,8 @@ fn main() -> ExitCode {
         a_sandbox_mounting_many_volumes_reaches_each,
         a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it,
     ]);
+    #[cfg(unix)]
+    tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {

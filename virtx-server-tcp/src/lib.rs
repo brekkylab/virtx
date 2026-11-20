@@ -8,7 +8,9 @@
 //!   with its members.
 //! - [`access::Homes`]: what makes a project's home as it is first reached. The binary's is
 //!   [`virtx_uvm::ProjectStore`], each home in the project's directory.
-//! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
+//! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in,
+//!   and serve the projects themselves ([`serve::projects`]); a server that keeps its projects
+//!   elsewhere merges none of those.
 //! - [`endpoints::Home::sandboxes`], [`park_unused`](endpoints::Home::park_unused) and
 //!   [`park_all`](endpoints::Home::park_all), and [`access::Access::homes`]: a home's sandboxes,
 //!   for routes of its own to count, or to park -- each one's machine stopped, the sandbox

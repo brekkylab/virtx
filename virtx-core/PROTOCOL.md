@@ -99,6 +99,7 @@ The client's `role` in each is `owner`, and the server serves no `/projects/{pro
 
 Projects and their members are made, read and removed with the requests below, as [Resources](#resources) says.
 They name the project in their path, and take no `virtx-project`.
+A server whose projects are kept and managed elsewhere, as one built for a service that has its own, may serve none of them: each is then answered `404`, `not_found`, and a request that names a project in `virtx-project` reaches it as above.
 
 | Request | Body | Answer |
 | --- | --- | --- |

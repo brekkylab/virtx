@@ -83,9 +83,15 @@ pub enum CtrlResp {
     Stdout { id: u32, line: String },
     /// A line the process `id` wrote to its stderr, without its newline.
     Stderr { id: u32, line: String },
-    /// The process `id` ended with `code`; `128 + signal` for one a signal ended. The last
-    /// thing said of it.
-    Exited { id: u32, code: i32 },
+    /// The process `id` ended with `code`; `128 + signal` for one a signal ended. `oom` where
+    /// it ended `137` and the kernel's OOM killer killed a process of its command's cgroup:
+    /// its memory ran out. The last thing said of it.
+    Exited {
+        id: u32,
+        code: i32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        oom: bool,
+    },
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
     /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
     /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine

@@ -628,6 +628,49 @@ async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
     assert_eq!(job.get().reason, Some(SandboxJobEndReason::SandboxDeleted));
 }
 
+async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // How `cmd` ended, read from its log to its end.
+    let ended = async |cmd: &[&str]| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        let job = sandbox.exec(cmd, false, None).await.unwrap();
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => (end, job.get().reason),
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Holding more than one command may, 64 KiB at a time: the kernel kills it for its memory.
+    let hungry = [
+        "awk",
+        r#"BEGIN { while (1) held[i++] = sprintf("%65536s", "") }"#,
+    ];
+    let (end, reason) = tokio::time::timeout(HANG, ended(&hungry))
+        .await
+        .expect("its memory runs out");
+    let oom = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Oom),
+    };
+    assert_eq!((end, reason), (oom, Some(SandboxJobEndReason::Oom)));
+    // `SIGKILL` from itself, within its memory: its own end, as before.
+    let (end, reason) = ended(&["sh", "-c", "kill -9 $$"]).await;
+    assert_eq!((end, reason), (SandboxJobEnd::exited(137), None));
+    // The sandbox answers on.
+    assert_eq!(
+        run(&sandbox, &["echo", "on"], None).await.unwrap().0,
+        ["on"]
+    );
+    close(sandbox).await;
+}
+
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&small(), park).await;
@@ -1526,6 +1569,7 @@ fn main() -> ExitCode {
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,
         a_job_s_end_says_why_the_server_ended_it_and_only_then,
+        a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,

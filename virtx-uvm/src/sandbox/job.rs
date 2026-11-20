@@ -98,10 +98,11 @@ impl Job {
     }
 
     /// End it with `code`, as its process ended, if it runs still: killed, for why the server
-    /// killed it, if it did.
-    pub(super) fn end(&self, code: i32) {
+    /// killed it, if it did, or for its memory running out where the guest says `oom`.
+    pub(super) fn end(&self, code: i32, oom: bool) {
         let killed = code == 128 + SIGKILL;
         let reason = killed.then(|| *self.killing.lock().unwrap()).flatten();
+        let reason = reason.or((killed && oom).then_some(SandboxJobEndReason::Oom));
         self.end_as(SandboxJobEnd { code, reason });
     }
 

@@ -150,6 +150,10 @@ pub enum SandboxJobEndReason {
     /// Its sandbox's VM exited on its own under it.
     VmExited,
 
+    /// Its memory ran out: the kernel killed it, or a process it started, for want of memory,
+    /// at the most its command may take or the machine's.
+    Oom,
+
     /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
     /// each that ran then is ended so.
     Restarted,
@@ -200,6 +204,13 @@ mod tests {
                     reason: Some(SandboxJobEndReason::VmExited),
                 }),
                 json!({"end": {"code": 137, "reason": "vm_exited"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Oom),
+                }),
+                json!({"end": {"code": 137, "reason": "oom"}}),
             ),
             (
                 SandboxJobEntry::End(SandboxJobEnd {

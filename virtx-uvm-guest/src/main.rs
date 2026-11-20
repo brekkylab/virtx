@@ -131,6 +131,17 @@ fn held_cgroup() -> Option<PathBuf> {
     Some(jobs)
 }
 
+/// Whether the kernel's OOM killer has killed a process in the cgroup `own`: its
+/// `memory.events`' `oom_kill`, which is none where the kernel has no `memory` controller.
+fn oom_killed(own: &Path) -> bool {
+    let events = std::fs::read_to_string(own.join("memory.events")).unwrap_or_default();
+    events.lines().any(|line| {
+        line.strip_prefix("oom_kill ")
+            .and_then(|n| n.trim().parse::<u64>().ok())
+            .is_some_and(|n| n > 0)
+    })
+}
+
 /// The machine's memory, in bytes: `MemTotal` in `/proc/meminfo`.
 fn memory_total() -> Option<u64> {
     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
@@ -476,6 +487,9 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         // wrote before it ended is said first, so its end is the last thing said of it: each
         // pipe read up to what was in it as the process ended, or to its end if sooner.
         let code = code(&mut child);
+        // Killed, and the kernel's OOM killer killed in its cgroup: its memory ran out. Read
+        // before the cgroup goes.
+        let oom = code == 128 + libc::SIGKILL && cgroup.as_deref().is_some_and(oom_killed);
         // Its cgroup gone with it, unless a program it left running is in it still.
         if let Some(own) = &cgroup {
             let _ = fs::remove_dir(own);
@@ -489,7 +503,7 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
                 break;
             }
         }
-        send(&out, &CtrlResp::Exited { id, code });
+        send(&out, &CtrlResp::Exited { id, code, oom });
     });
 }
 

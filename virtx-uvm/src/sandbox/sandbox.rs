@@ -830,9 +830,9 @@ impl Sandbox {
                         job.write(SandboxJobEntry::Stderr(line));
                     }
                 }
-                CtrlResp::Exited { id, code } => {
+                CtrlResp::Exited { id, code, oom } => {
                     if let Some(job) = running.remove(&id) {
-                        job.end(code);
+                        job.end(code, oom);
                         *self.used.lock().unwrap() = Instant::now();
                         self.keep_jobs();
                     }
@@ -1216,7 +1216,7 @@ mod tests {
                 false,
             );
             if ended {
-                job.end(0);
+                job.end(0, false);
             }
             (id.to_owned(), job)
         };

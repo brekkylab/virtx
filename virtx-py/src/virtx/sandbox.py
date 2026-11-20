@@ -127,8 +127,8 @@ class SandboxJobKind(str, Enum):
 
 
 class SandboxJobEndReason(str, Enum):
-    """Why a process did not end by itself: the server killed it, as ``SIGKILL`` does, its code
-    ``137``."""
+    """Why a process did not end by itself: the server, or the kernel, killed it, as ``SIGKILL``
+    does, its code ``137``."""
 
     TIMEOUT = "timeout"
     """Its ``timeout_ms`` ran out."""
@@ -141,6 +141,9 @@ class SandboxJobEndReason(str, Enum):
 
     VM_EXITED = "vm_exited"
     """Its sandbox's VM exited on its own under it."""
+
+    OOM = "oom"
+    """Its memory ran out: the kernel killed it, or a process it started, for want of memory."""
 
     RESTARTED = "restarted"
     """Its server restarted while it ran, keeping its sandbox."""

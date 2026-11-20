@@ -7,7 +7,13 @@ pub(crate) mod client;
 #[cfg(feature = "server")]
 pub(crate) mod server;
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, IgnoredAny, MapAccess, Visitor},
+    ser::SerializeMap,
+};
 
 /// One entry of a job's log, as its event stream carries it: its number in the log, `1` for
 /// the first, and the entry. As JSON, the entry with `id` beside its member, as
@@ -17,6 +23,48 @@ pub struct LogEntry<E> {
     pub id: u64,
     #[serde(flatten)]
     pub entry: E,
+}
+
+/// A log entry of a kind this version does not know, by the member it was sent as: to be passed
+/// over, its `id` still counting where a log is read from. What it carried is not kept, so it is
+/// written back as that member alone, as `{"kind": null}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownEntry {
+    pub kind: String,
+}
+
+impl Serialize for UnknownEntry {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(&self.kind, &())?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for UnknownEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct OneMember;
+
+        impl<'de> Visitor<'de> for OneMember {
+            type Value = UnknownEntry;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("an object of one member")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<UnknownEntry, A::Error> {
+                let Some((kind, IgnoredAny)) = map.next_entry::<String, IgnoredAny>()? else {
+                    return Err(de::Error::invalid_length(0, &self));
+                };
+                if map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {
+                    return Err(de::Error::invalid_length(2, &self));
+                }
+                Ok(UnknownEntry { kind })
+            }
+        }
+
+        deserializer.deserialize_map(OneMember)
+    }
 }
 
 #[cfg(test)]

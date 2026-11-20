@@ -222,8 +222,8 @@ class Sandbox(Files):
             async for item in self.client._items("virtx_client_exec_sandbox_log", request):
                 if "job" in item:
                     yield SandboxJob.from_dict(self.client, self.id, item["job"])
-                else:
-                    yield sandbox_job_entry(item)
+                elif (entry := sandbox_job_entry(item)) is not None:
+                    yield entry
 
         return StartedJob(start, lambda job: job.log(), run)
 
@@ -346,7 +346,8 @@ class SandboxJob:
         async for item in self.client._items(
             "virtx_client_sandbox_job_log", self._args(after=after)
         ):
-            yield sandbox_job_entry(item)
+            if (entry := sandbox_job_entry(item)) is not None:
+                yield entry
 
     async def complete(self, print: bool = False) -> int:
         """Follow it to its end, printing what its process writes to stdout and stderr as it
@@ -415,9 +416,9 @@ SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd
 """An entry of a sandbox job's log."""
 
 
-def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
+def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry] | None:
     """An item of ``SandboxJob.log``'s stream, as ``{"id": n, "stdout": "..."}`` and the
-    like."""
+    like; ``None`` for an entry of a kind this version does not know, to be passed over."""
     entry: SandboxJobEntry
     if "stdout" in item:
         entry = Stdout(item["stdout"])
@@ -425,6 +426,8 @@ def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
         entry = Stderr(item["stderr"])
     elif "truncated" in item:
         entry = Truncated()
-    else:
+    elif "end" in item:
         entry = SandboxJobEnd(item["end"]["code"], _reason(item["end"]))
+    else:
+        return None
     return LogEntry(item["id"], entry)

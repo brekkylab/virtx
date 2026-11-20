@@ -197,6 +197,8 @@ impl Ends for SandboxJob {
                 None
             }
             SandboxJobEntry::End(end) => Some(Ok(end.code)),
+            // A kind of entry this version does not know: passed over.
+            _ => None,
         }
     }
 }

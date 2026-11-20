@@ -107,7 +107,7 @@ A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cm
 | --- | --- | --- |
 | `get()` | `SandboxJob` | The job as the server has it now. |
 | `complete(print)` | `int` | Follows it to its end, printing its output if `print`, and answers its exit code. |
-| `log(after)` | a `LogEntry` at a time | Its output, from its start or after entry `after`, until its end. |
+| `log(after)` | a `LogEntry` at a time | Its output, from its start or after entry `after`, until its end. An entry of a kind this version does not know is passed over in Python and Node, and is `SandboxJobEntry::Other` in Rust, which `complete` passes over. |
 | `signal(signal)` | `None` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
 | `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. A write its process closed its stdin under part-way raises `409`, `ended`, its `written` how many bytes went in. One the server has no room for yet, after writes given up on while the process did not read, is turned away for now as `503` `capacity`, nothing of it taken, and, if its request is at most 1 MiB, sent again as below. |
 | `remove()` | `None` | Kills its process if it runs, and forgets the job. |
@@ -128,7 +128,7 @@ It has its `id`, its `kind`, the `reference` it points or pushes, whether it is 
 | --- | --- | --- |
 | `get()` | `ImageJob` | The job as the server has it now. |
 | `complete(print)` | `str` | Follows it to its end, printing its log if `print`, and answers the digest it made. Raises the error it failed with. |
-| `log(after)` | a `LogEntry` at a time | Its log, from its start or after entry `after`, until its end, or the error it failed with in place of its end. |
+| `log(after)` | a `LogEntry` at a time | Its log, from its start or after entry `after`, until its end, or the error it failed with in place of its end. An entry of a kind this version does not know is passed over in Python and Node, and is `ImageJobEntry::Other` in Rust, which `complete` passes over. |
 | `remove()` | `None` | Cancels it if it runs, and forgets the job. |
 
 In Rust, `ImageJob` answers `id()` and `info()`.

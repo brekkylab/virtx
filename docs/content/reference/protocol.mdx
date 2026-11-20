@@ -240,6 +240,7 @@ A server MAY refuse to connect to a registry, or to a host that registry sends i
 The job then fails, its `error` naming the host.
 
 A build builds an image from `recipe` into the server's images and tags it `reference`, as a push of it would.
+The image's config keeps `recipe`, as its JSON, in the label `sh.virtx.recipe`.
 
 Cancelling one stops it:
 

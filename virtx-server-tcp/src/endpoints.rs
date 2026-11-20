@@ -43,7 +43,7 @@ use virtx_uvm::{
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, Network, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
     RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend, UnknownSandbox,
-    VolumeError, VolumeStore, build_step, park_after, signal_number,
+    VolumeError, VolumeStore, build_step, park_after, recipe_kept, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -1030,6 +1030,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                 )
                 .await?;
             }
+            recipe_kept(&mut image, &recipe);
             let store = images.clone();
             let digest =
                 tokio::task::spawn_blocking(move || store.insert_image(&image, &layers)).await??;

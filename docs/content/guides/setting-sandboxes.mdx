@@ -1,6 +1,6 @@
 ---
 title: "Setting up sandboxes"
-description: "Create a sandbox with the CPUs, memory, network, ports, storage, and GPU a task needs."
+description: "Create a sandbox with the CPUs, memory, network, ports, storage, and GPU a task needs, and resize it later."
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -54,6 +54,45 @@ let args = SandboxCreateArgs::new("alpine:latest")
     .memory_mib(2048)
     .network(false);
 let sandbox = client.create_sandbox(&args).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Resize a sandbox
+
+`resize` changes a sandbox's `vcpus`, `memory_mib` and `disk_gib` after it is made, each held to what `create_sandbox` holds it to; whatever is left out stays as it is. It answers the sandbox's size as it is to be, and `up`, whether its VM is up now.
+
+- A VM is the size it booted with, so `vcpus` and `memory_mib` take effect at its next boot. A sandbox in which nothing runs has its VM stopped at once, and boots with its new size for its next command; one with a command running, or its files or ports in use, is refused with `409` and keeps its size.
+- `disk_gib` only grows, keeping what the sandbox wrote; one smaller than the disk the VM last booted with is refused with `400`, and one down to it takes back a grow not yet made. The disk grows at the VM's next boot too, but a resize of the disk alone stops nothing and is never refused for the sandbox being in use: it answers at once, `up` still `true` for a VM that is up, which keeps its old size until it is next stopped and boots again. A grow that cannot be made boots the VM on its disk as it was, and is tried again at each boot.
+
+A [server you run](/docs/guides/self-hosting/) keeps the new size across its restart.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+resized = await sandbox.resize(vcpus=8, memory_mib=8192, disk_gib=16)
+print(resized.vcpus, resized.memory_mib, resized.disk_gib, resized.up)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const resized = await sandbox.resize({ vcpus: 8, memoryMib: 8192, diskGib: 16 })
+console.log(resized.vcpus, resized.memoryMib, resized.diskGib, resized.up)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxResizeArgs::default()
+    .vcpus(8)
+    .memory_mib(8192)
+    .disk_gib(16);
+let resized = sandbox.resize(&args).await?;
 ```
 
 </TabItem>

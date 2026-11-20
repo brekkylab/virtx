@@ -4,6 +4,7 @@
 //! ```text
 //! <dir>/<id>.ext4        the disk
 //! <dir>/<id>.ext4.lock   what the sandbox holds for as long as it is in a process
+//! <dir>/<id>.ext4.part   the disk being grown, renamed over the disk once whole
 //! <dir>/<id>.json        its record, for one kept past its process (see `record`)
 //! ```
 //!
@@ -58,6 +59,23 @@ impl Upper {
         Ok(Some(upper))
     }
 
+    /// How large it is on the host, in GiB, rounded up: what it was made or last grown to.
+    pub(super) fn gib(&self) -> Result<u32, Error> {
+        let len = fs::metadata(&self.path)
+            .map_err(|e| io(format!("reading {}", self.path.display()), e))?
+            .len();
+        Ok(u32::try_from(len.div_ceil(1 << 30)).unwrap_or(u32::MAX))
+    }
+
+    /// Grow it to `gib` GiB, with what is on it kept, while no machine runs over it.
+    pub(super) fn grow(&self, gib: u32) -> Result<(), Error> {
+        Ok(crate::machine::grow_upper(
+            &self.path,
+            &part(&self.path),
+            gib,
+        )?)
+    }
+
     /// The disk of each sandbox kept under `dir` that no process holds, held now. A record whose
     /// disk is gone is deleted.
     pub(super) fn kept(dir: &Path) -> Vec<Upper> {
@@ -100,6 +118,7 @@ impl Upper {
                     _lock: lock,
                 };
                 let _ = fs::remove_file(Record::part(dir, &upper.id));
+                let _ = fs::remove_file(part(&upper.path));
                 drop(upper);
             }
         }
@@ -145,7 +164,7 @@ fn ids(dir: &Path) -> BTreeSet<String> {
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            [".ext4", ".ext4.lock", ".json", ".json.part"]
+            [".ext4", ".ext4.lock", ".ext4.part", ".json", ".json.part"]
                 .iter()
                 .find_map(|suffix| name.strip_suffix(suffix))
                 .map(str::to_owned)
@@ -182,6 +201,7 @@ fn delete(path: &Path) -> io::Result<()> {
         let _ = fs::remove_file(Record::path(dir, &id));
         let _ = fs::remove_file(Record::part(dir, &id));
     }
+    let _ = fs::remove_file(part(path));
     match fs::remove_file(path) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
@@ -198,6 +218,13 @@ fn lock_path(path: &Path) -> PathBuf {
     let mut lock = path.as_os_str().to_owned();
     lock.push(".lock");
     PathBuf::from(lock)
+}
+
+/// Where the disk at `path` is written as it grows, before it is renamed over it.
+fn part(path: &Path) -> PathBuf {
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    PathBuf::from(part)
 }
 
 fn io(context: String, source: io::Error) -> Error {
@@ -308,8 +335,11 @@ mod tests {
             "a kept one lives with nothing holding it"
         );
 
+        // What a growing cut short leaves beside it.
+        fs::write(part(&path), b"").unwrap();
         Upper::sweep(dir.path());
         assert!(path.is_file(), "a kept one is not swept");
+        assert!(!part(&path).exists(), "a part of it is");
         assert!(
             Upper::create(dir.path(), "kept", 2).unwrap().is_none(),
             "its id is not made again"

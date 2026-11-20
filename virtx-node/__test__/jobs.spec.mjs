@@ -33,11 +33,26 @@ describe('against virtx-stdio', () => {
 
   test('a command in a sandbox is a job whose log ends with its code', async () => {
     await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, { diskGib: 4, abins: ['index'] })
+    const sandbox = await client.createSandbox(ALPINE, {
+      diskGib: 4,
+      abins: ['index'],
+      ports: [8000, { port: 5173, label: 'dev server', protocol: 'http' }],
+    })
     assert.equal(sandbox.running, true)
     assert.deepEqual(sandbox.abins, ['index'])
-    assert.deepEqual((await client.getSandbox(sandbox.id)).abins, ['index'])
-    assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
+    assert.deepEqual(
+      sandbox.ports.map(({ url, ...port }) => port),
+      [{ port: 8000 }, { port: 5173, label: 'dev server', protocol: 'http' }],
+    )
+    assert.ok(sandbox.ports.every(({ url }) => typeof url === 'string'))
+    const again = await client.getSandbox(sandbox.id)
+    assert.deepEqual(again.abins, ['index'])
+    assert.equal(again.id, sandbox.id)
+    // Asked for again, each port without the `url` only its making answers.
+    const asked = sandbox.ports.map(({ url, ...port }) => port)
+    assert.deepEqual(again.ports, asked)
+    const found = (await client.listSandbox()).find(({ id }) => id === sandbox.id)
+    assert.deepEqual(found.ports, asked)
 
     const job = await sandbox.exec(['echo', 'hi'])
     assert.ok(job instanceof virtx.SandboxJob)
@@ -70,6 +85,12 @@ describe('against virtx-stdio', () => {
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
   })
 
+  test('a port with inbound rules is refused by a server that keeps none', async () => {
+    await alpine(client)
+    const ssh = { port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }
+    await assert.rejects(client.createSandbox(ALPINE, { ports: [ssh] }), { status: 400 })
+  })
+
   test('a sandbox is found by its name, which no other has', async () => {
     await alpine(client)
     const name = unique('named')
@@ -88,9 +109,7 @@ describe('against virtx-stdio', () => {
     assert.equal(await client.findSandbox(name), undefined)
   })
 
-  test('a job reads its stdin until it is closed', {
-    skip: 'no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused',
-  }, async () => {
+  test('a job reads its stdin until it is closed', async () => {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE)
     try {
@@ -102,6 +121,20 @@ describe('against virtx-stdio', () => {
         log.filter((entry) => 'stdout' in entry).map((entry) => entry.stdout),
         ['one', 'two'],
       )
+
+      // Its process closes its stdin under a write: refused, saying how much of it went in.
+      const cut = await sandbox.exec(['sh', '-c', 'head -c 1 >/dev/null; exec 0<&-; sleep 300'], {
+        stdin: true,
+      })
+      const of = 1 << 20
+      const refused = await cut.writeStdin('x'.repeat(of)).then(
+        () => assert.fail('a write its stdin closed under is refused'),
+        (error) => error,
+      )
+      assert.ok(refused instanceof virtx.VirtxError)
+      assert.deepEqual([refused.status, refused.code], [409, 'ended'])
+      assert.ok(refused.written > 0 && refused.written < of, `${refused.written} of ${of}`)
+      await assert.rejects(cut.writeStdin('x'), { code: 'ended', written: null })
     } finally {
       await sandbox.remove()
     }
@@ -313,6 +346,13 @@ test('a forwarded port nothing listens on says so', async () => {
   try {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE, { ports: [7000] })
+    // The port asked for again has no `url` to forward: the one its making answered has.
+    const again = await client.getSandbox(sandbox.id)
+    assert.throws(() => PortForwarder.open(client, again.ports[0]), {
+      name: 'VirtxError',
+      source: 'client',
+      message: /^port 7000 has no url/,
+    })
     const forwarder = PortForwarder.open(client, sandbox.ports[0])
     try {
       assert.equal(forwarder.lastError, null)

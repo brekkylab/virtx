@@ -38,8 +38,8 @@ impl Sandbox {
         self.info.name.as_deref()
     }
 
-    /// What the server answered about it: its image, whether it runs, and its ports, which
-    /// only making it answers.
+    /// What the server answered about it: its image, whether it runs, and its ports, each
+    /// with the `url` it is reached at only where making it answered.
     pub fn info(&self) -> &SandboxInfo {
         &self.info
     }

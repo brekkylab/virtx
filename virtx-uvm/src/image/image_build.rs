@@ -135,7 +135,7 @@ pub async fn build_step(
     let cmd = cmd.map(str::to_owned).to_vec();
     let (lines, mut said) = tokio::sync::mpsc::unbounded_channel();
     let ran = tokio::task::spawn_blocking(move || {
-        machine.exec(cmd)?;
+        machine.exec(cmd, false)?;
         let id = loop {
             match machine.recv() {
                 Some(CtrlResp::Started(started)) => {
@@ -156,7 +156,7 @@ pub async fn build_step(
                 {
                     let _ = lines.send(line);
                 }
-                Some(CtrlResp::Exited { id: of, code }) if of == id => return Ok(code),
+                Some(CtrlResp::Exited { id: of, code, .. }) if of == id => return Ok(code),
                 Some(_) => {}
                 None => {
                     return Err(machine::Error::Died(
@@ -226,5 +226,69 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_workdir_is_under_the_one_before_and_an_env_set_again_takes_the_last_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("images")).unwrap();
+        let mut image = ImageConfiguration::default();
+        let mut layers = Vec::new();
+        let spec = MachineSpec {
+            vcpus: 1,
+            ram_mib: 512,
+            gpu: false,
+            gpu_memory_mib: None,
+            network: Default::default(),
+        };
+        let steps = [
+            Step::Workdir("/app".into()),
+            Step::Workdir("src".into()),
+            Step::Env {
+                key: "MODE".into(),
+                value: "dev".into(),
+            },
+            Step::Env {
+                key: "MODE_X".into(),
+                value: "kept".into(),
+            },
+            Step::Env {
+                key: "MODE".into(),
+                value: "prod".into(),
+            },
+        ];
+        for step in &steps {
+            build_step(&store, &mut image, &mut layers, step, &[], &spec, |_| {})
+                .await
+                .unwrap();
+        }
+        let config = image.config().clone().unwrap();
+        assert_eq!(config.working_dir().as_deref(), Some("/app/src"));
+        // In no order it promises.
+        let mut env = config.env().clone().unwrap();
+        env.sort();
+        assert_eq!(env, ["MODE=prod", "MODE_X=kept"]);
+        // Neither boots a machine nor makes a layer.
+        assert!(layers.is_empty());
+
+        let absolute = Step::Workdir("/srv".into());
+        build_step(
+            &store,
+            &mut image,
+            &mut layers,
+            &absolute,
+            &[],
+            &spec,
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let config = image.config().clone().unwrap();
+        assert_eq!(config.working_dir().as_deref(), Some("/srv"));
     }
 }

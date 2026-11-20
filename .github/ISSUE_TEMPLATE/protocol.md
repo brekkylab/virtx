@@ -1,6 +1,6 @@
 ---
-name: Protocol change
-about: A change to what a client and the server say to each other
+name: "Protocol change"
+about: "A change to what a client and the server say to each other"
 title: ''
 labels: protocol
 ---
@@ -9,12 +9,12 @@ labels: protocol
 
 **What the client cannot say today** — the gap, as a user of one of the packages meets it, and what they do instead.
 
-**The change on the wire** — the call, field or response to add or change, with its shape. `virtx-core/PROTOCOL.md` is the vocabulary to spell it in.
+**The change on the wire** — the call, field or response to add or change, with its shape. [The protocol](https://virtx.sh/docs/reference/protocol/) is the vocabulary to spell it in.
 
 **What the server does with it** — the behaviour inside the VM the message asks for.
 
 **Compatibility** — whether a current client against the new server, and the new client against a current server, still work, and if not, what fails.
 
-**What else moves** — the packages it reaches, the servers, `PROTOCOL.md`.
+**What else moves** — the packages it reaches, the servers, the protocol's page.
 
 **Who does it** — say if you intend to send the pull request, or are reporting the need only.

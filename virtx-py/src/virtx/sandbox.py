@@ -20,17 +20,123 @@ if TYPE_CHECKING:
     from .client import Client
 
 
+class PortProtocol(str, Enum):
+    """How a sandbox's port is reached from outside it."""
+
+    TCP = "tcp"
+    """TCP: at a loopback address, or through a ``PortForwarder`` opened with its ``url``."""
+
+    HTTP = "http"
+    """HTTP served in the sandbox, reached at its ``url`` as HTTP by a browser as by any client,
+    WebSockets included. A server that cannot reach a port so refuses it."""
+
+
+@dataclass(frozen=True)
+class InboundError:
+    """Why a port's inbound rules were not set, in the shape of a refusal."""
+
+    code: str
+    """As a refusal's, such as ``quota`` or ``unavailable``."""
+
+    message: str
+    """For a person to read."""
+
+    reason: str | None = None
+    """What a ``quota`` is past, as a refusal's ``reason``."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> InboundError:
+        return cls(value["code"], value["message"], value.get("reason"))
+
+
 @dataclass(frozen=True)
 class SandboxPort:
-    """A TCP port in a sandbox, opened as it was made, and the ``url`` a ``PortForwarder``
-    reaches it by."""
+    """A port opened in a sandbox as it was made, and the ``url`` it is reached by: a
+    ``PortForwarder``'s for TCP, a browser's for HTTP."""
 
     port: int
-    url: str
+
+    url: str | None = None
+    """Answered by ``create_sandbox`` alone, as secret as the credentials it carries: ``None``
+    in a sandbox ``get_sandbox`` or ``list_sandbox`` answers."""
+
+    label: str | None = None
+    """What it is for, as it was opened with."""
+
+    protocol: PortProtocol = PortProtocol.TCP
+
+    address: str | None = None
+    """A ``host:port`` any TCP client reaches a TCP port at directly, from a server that gives it
+    one. Not secret, as ``url`` is: what listens there answers whoever connects."""
+
+    inbound_error: InboundError | None = None
+    """Why its inbound rules were not set, from a server that made the port all the same: it lets
+    no one in, and is reached at no ``address``, until they are."""
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxPort:
-        return cls(value["port"], value["url"])
+        why = value.get("inbound_error")
+        return cls(
+            value["port"],
+            value.get("url"),
+            value.get("label"),
+            PortProtocol(value.get("protocol", "tcp")),
+            value.get("address"),
+            InboundError.from_dict(why) if why is not None else None,
+        )
+
+
+@dataclass(frozen=True)
+class InboundRule:
+    """One of a port's inbound rules: the addresses it lets in, and whose they are."""
+
+    source: str
+    """An IPv4 or IPv6 CIDR, as ``203.0.113.0/24``, or one address, as ``203.0.113.7``."""
+
+    description: str | None = None
+    """What it is for: whose they are."""
+
+    def to_dict(self) -> dict[str, Any]:
+        """As the wire has it."""
+        rule: dict[str, Any] = {"source": self.source}
+        if self.description is not None:
+            rule["description"] = self.description
+        return rule
+
+
+@dataclass(frozen=True)
+class PortSpec:
+    """A port to open in a sandbox as ``create_sandbox`` makes it: its number, what it is for,
+    how it is reached, and whom it lets in. ``ports`` takes a plain ``int`` for a TCP port that
+    says nothing more."""
+
+    port: int
+
+    label: str | None = None
+    """What it is for, up to 128 characters, answered with it."""
+
+    protocol: PortProtocol | str = PortProtocol.TCP
+
+    inbound: Iterable[InboundRule | Mapping[str, Any]] | None = None
+    """Its inbound rules, each an ``InboundRule`` or its ``{source, description?}``. ``None``
+    leaves whom it lets in to the server, and ``[]`` lets in no one. A server that keeps no rules
+    refuses them."""
+
+    def to_dict(self) -> int | dict[str, Any]:
+        """As the wire has it: the number alone when it says no more."""
+        protocol = PortProtocol(self.protocol)
+        if self.label is None and protocol == PortProtocol.TCP and self.inbound is None:
+            return self.port
+        spec: dict[str, Any] = {"port": self.port}
+        if self.label is not None:
+            spec["label"] = self.label
+        if protocol != PortProtocol.TCP:
+            spec["protocol"] = protocol.value
+        if self.inbound is not None:
+            spec["inbound"] = [
+                r.to_dict() if isinstance(r, InboundRule) else dict(r) for r in self.inbound
+            ]
+        return spec
 
 
 @dataclass(frozen=True)
@@ -66,7 +172,7 @@ class Sandbox(Files):
     running: bool
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` only."""
+    """Its opened ports, each with its ``url`` where ``create_sandbox`` answered it only."""
 
     abins: list[str] = field(default_factory=list)
     """virtx's own programs it has at ``/abin``."""
@@ -140,8 +246,8 @@ class SandboxJobKind(str, Enum):
 
 
 class SandboxJobEndReason(str, Enum):
-    """Why a process did not end by itself: the server killed it, as ``SIGKILL`` does, its code
-    ``137``."""
+    """Why a process did not end by itself: the server, or the kernel, killed it, as ``SIGKILL``
+    does, its code ``137``."""
 
     TIMEOUT = "timeout"
     """Its ``timeout_ms`` ran out."""
@@ -154,6 +260,9 @@ class SandboxJobEndReason(str, Enum):
 
     VM_EXITED = "vm_exited"
     """Its sandbox's VM exited on its own under it."""
+
+    OOM = "oom"
+    """Its memory ran out: it, or a process it started, was killed for want of memory."""
 
     RESTARTED = "restarted"
     """Its server restarted while it ran, keeping its sandbox."""

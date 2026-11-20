@@ -1,13 +1,15 @@
 // The client where no request is sent, and over HTTP to the fixture's server.
 
 import assert from 'node:assert/strict'
+import net from 'node:net'
 import { test } from 'node:test'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import virtx from '../index.js'
 
-import { fixture, unique } from './fixture.mjs'
+import { ALPINE, alpine, fixture, unique } from './fixture.mjs'
 
-const { Client } = virtx
+const { Client, PortForwarder } = virtx
 
 test('a second library is refused', () => {
   assert.throws(() => virtx.load('/nonexistent/libvirtx_core'), /is open already/)
@@ -35,6 +37,48 @@ test('a client over HTTP sends its token and project', async () => {
     await assert.rejects(anonymous.listVolume(), { status: 401 })
   } finally {
     await anonymous.close()
+  }
+})
+
+test('a port forwarder listens on the loopback until it is closed', async () => {
+  const { url, token, project } = fixture()
+  const client = Client.connect(url, { type: 'bearer', token }, project)
+  try {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE, { ports: [8000] })
+    try {
+      const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+      assert.equal(typeof forwarder.port, 'number')
+      assert.equal(forwarder.address, `${forwarder.host}:${forwarder.port}`)
+      assert.equal(forwarder.host, '127.0.0.1')
+      // What connecting comes to: `connected`, or the error's code.
+      const connect = () =>
+        new Promise((resolve) => {
+          const stream = net.connect(forwarder.port, forwarder.host)
+          stream.on('connect', () => {
+            stream.destroy()
+            resolve('connected')
+          })
+          stream.on('error', (error) => resolve(error.code))
+        })
+      // A connection is taken, whatever the sandbox does with it.
+      assert.equal(await connect(), 'connected')
+
+      forwarder.close()
+      forwarder.close()
+      // Its listener goes a moment after.
+      let connected = 'connected'
+      const until = Date.now() + 5_000
+      while (connected !== 'ECONNREFUSED' && Date.now() < until) {
+        connected = await connect()
+        await sleep(50)
+      }
+      assert.equal(connected, 'ECONNREFUSED')
+    } finally {
+      await sandbox.remove()
+    }
+  } finally {
+    await client.close()
   }
 })
 

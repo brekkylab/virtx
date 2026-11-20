@@ -220,4 +220,70 @@ rABUOPQZw+SIzclThn/7Vcn7i0rAcmmlVj8sdMeJsFeMZ3CehtnTDGVK
         assert_eq!(principal.claims["aud"], "node");
         task.abort();
     }
+
+    #[tokio::test]
+    async fn a_token_of_another_issuer_or_keys_another_issuer_names_are_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = format!("http://{}", listener.local_addr().unwrap());
+        let keys = json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256", "use": "sig", "x": X, "y": Y,
+        }]});
+        // Two issuers here, both with the keys here: one whose discovery document names it, one
+        // whose names another.
+        let discovery = |issuer: String| {
+            let document = json!({"issuer": issuer, "jwks_uri": format!("{at}/keys")});
+            axum::routing::get(move || async move { document.to_string() })
+        };
+        let served = axum::Router::new()
+            .route(
+                "/keys",
+                axum::routing::get(move || async move { keys.to_string() }),
+            )
+            .route(
+                "/own/.well-known/openid-configuration",
+                discovery(format!("{at}/own")),
+            )
+            .route(
+                "/another/.well-known/openid-configuration",
+                discovery("https://elsewhere.example".into()),
+            );
+        let task = tokio::spawn(async move { axum::serve(listener, served).await });
+
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some("k1".into());
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let key = EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap();
+        let signed = |issuer: &str| {
+            let claims =
+                json!({"iss": issuer, "aud": "node", "exp": now.as_secs() + 600, "sub": "agent"});
+            jsonwebtoken::encode(&header, &claims, &key).unwrap()
+        };
+        let oidc = |issuer: String| {
+            Oidc::new(Config {
+                issuer,
+                client_id: "node".into(),
+                username_claim: "sub".into(),
+                jwks_uri: None,
+            })
+        };
+
+        let own = oidc(format!("{at}/own"));
+        assert!(own.principal(&signed(&format!("{at}/own"))).await.is_some());
+        assert!(
+            own.principal(&signed(&format!("{at}/another")))
+                .await
+                .is_none()
+        );
+        // Its keys would check the token, but the document they are named in is another's.
+        let another = oidc(format!("{at}/another"));
+        assert!(
+            another
+                .principal(&signed(&format!("{at}/another")))
+                .await
+                .is_none()
+        );
+        task.abort();
+    }
 }

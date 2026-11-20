@@ -2,14 +2,17 @@
 //! `virtx-server-tcp`, each to what listens on it in the sandbox until the sandbox goes.
 
 use std::{
-    io::Read,
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
-use virtx::{Error, PortForwarder, SandboxCreateArgs, SandboxExecArgs};
+use virtx::{
+    Error, PortForwarder, PortProtocol, PortSpec, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
+    Source,
+};
 
 mod common;
 
@@ -29,20 +32,41 @@ fn said(at: impl std::net::ToSocketAddrs + Copy) -> Vec<u8> {
     }
 }
 
-/// Serve `hello` on 8000 in a sandbox of `client`'s that opens it, and answer the sandbox.
-fn serving(client: &virtx::Client) -> virtx::Sandbox {
+/// What the sandbox's server on 8000 answers `ping` sent to `at`, once it listens, for 30 seconds.
+fn answer(at: impl std::net::ToSocketAddrs + Copy) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect(at) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            line.clear();
+            if stream.write_all(b"ping\n").is_ok() {
+                let _ = BufReader::new(stream).read_line(&mut line);
+            }
+            if !line.is_empty() {
+                return line;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    panic!("nothing answered on the port in 30 seconds");
+}
+
+/// Serve on 8000 in a sandbox of `client`'s that opens it as `port` says, answering a line with
+/// `hello` and the line, and answer the sandbox.
+fn serving(client: &virtx::Client, port: PortSpec) -> virtx::Sandbox {
     common::alpine(client);
-    let args = SandboxCreateArgs {
-        ports: vec![8000],
-        ..SandboxCreateArgs::new(ALPINE)
-    };
+    let args = SandboxCreateArgs::new(ALPINE).port(port);
     let sandbox = client.create_sandbox(&args).wait().unwrap();
     let serve = SandboxExecArgs {
         timeout_ms: Some(30_000),
         ..SandboxExecArgs::new([
             "sh",
             "-c",
-            "while true; do echo hello | nc -l -p 8000; done",
+            "mkfifo /tmp/in; while true; do \
+             cat /tmp/in | (read line; echo \"hello $line\") | nc -l -p 8000 > /tmp/in; done",
         ])
     };
     sandbox.exec(&serve).wait().unwrap();
@@ -52,15 +76,32 @@ fn serving(client: &virtx::Client) -> virtx::Sandbox {
 #[test]
 fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let client = common::client();
-    let sandbox = serving(&client);
-    let url = &sandbox.info().ports[0].url;
+    // Over HTTP, which the loopback carries as it carries any TCP, and saying what it is for.
+    let port = PortSpec::new(8000)
+        .label("greeting")
+        .protocol(PortProtocol::Http);
+    let sandbox = serving(&client, port);
+    let opened = &sandbox.info().ports[0];
+    assert_eq!(
+        (opened.label.as_deref(), opened.protocol, &opened.address),
+        (Some("greeting"), PortProtocol::Http, &None)
+    );
+    let url = opened.url.as_deref().unwrap();
     let at = url.strip_prefix("http://").unwrap_or(url).to_owned();
     assert!(at.starts_with("127.0.0.1:"), "{at}");
-    // Answered only on its making: the URLs are as secret as what reaches them.
+    // Asked for again, it says what it is for, without the URL: that is as secret as what
+    // reaches it, and answered only on its making.
+    let asked = SandboxPort {
+        url: None,
+        ..opened.clone()
+    };
     let got = client.get_sandbox(sandbox.id()).wait().unwrap();
-    assert!(got.info().ports.is_empty());
+    assert_eq!(got.info().ports, std::slice::from_ref(&asked));
+    let listed = client.list_sandbox().wait().unwrap();
+    let listed = listed.iter().find(|listed| listed.id() == sandbox.id());
+    assert_eq!(listed.unwrap().info().ports, [asked]);
 
-    assert_eq!(said(at.as_str()), b"hello\n");
+    assert_eq!(answer(at.as_str()), "hello ping\n");
     sandbox.remove().wait().unwrap();
     // Its listener goes with it, a moment after.
     thread::sleep(Duration::from_millis(500));
@@ -70,12 +111,28 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
 #[test]
 fn a_port_over_http_is_forwarded_to_what_listens_on_it_until_the_sandbox_goes() {
     let client = common::tcp_client();
-    let sandbox = serving(&client);
-    let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0].url).unwrap();
+    let sandbox = serving(&client, PortSpec::new(8000).label("greeting"));
+    assert_eq!(sandbox.info().ports[0].label.as_deref(), Some("greeting"));
+    // Asked for again, without the URL, which carries the capability that reaches it.
+    let got = client.get_sandbox(sandbox.id()).wait().unwrap();
+    assert_eq!(
+        got.info().ports,
+        [SandboxPort {
+            url: None,
+            ..sandbox.info().ports[0].clone()
+        }]
+    );
+    // Forwarded as making it answered it: the port asked for again has no URL to reach.
+    let refused = PortForwarder::open(&client, &got.info().ports[0])
+        .err()
+        .unwrap();
+    assert_eq!(refused.source_kind(), Source::Client, "{refused}");
+    assert!(refused.to_string().contains("port 8000 "), "{refused}");
+    let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0]).unwrap();
     let at = forwarder.address();
     assert!(at.ip().is_loopback());
 
-    assert_eq!(said(at), b"hello\n");
+    assert_eq!(answer(at), "hello ping\n");
     sandbox.remove().wait().unwrap();
     // The forwarder stays, but what it reached is gone: each connection is closed at once.
     thread::sleep(Duration::from_millis(500));
@@ -144,7 +201,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
     let named = format!("port 7000, forwarded at {}: ", forwarder.address());
     assert!(failed.starts_with(&named), "{failed}");
     assert!(failed.contains("before the port sent a byte"), "{failed}");
-    assert!(!failed.contains(&port.url), "{failed}");
+    assert!(!failed.contains(port.url.as_deref().unwrap()), "{failed}");
     let warned = until(|| WARNED.lock().unwrap().contains(&failed));
     assert!(warned, "not warned of: {:?}", WARNED.lock().unwrap());
 

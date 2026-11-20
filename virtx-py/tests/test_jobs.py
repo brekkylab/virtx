@@ -3,6 +3,7 @@ against the fixture's ``virtx-stdio``, and its ``virtx-server-tcp`` where a port
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,13 +16,18 @@ from virtx import (
     ImageJobEnd,
     ImageJobKind,
     ImageUploadOutput,
+    InboundError,
+    InboundRule,
     Output,
     PortForwarder,
+    PortProtocol,
+    PortSpec,
     Recipe,
     SandboxJob,
     SandboxJobEnd,
     SandboxJobEndReason,
     SandboxJobKind,
+    SandboxPort,
     SandboxVolume,
     Stderr,
     Stdout,
@@ -48,12 +54,15 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
         ALPINE,
         disk_gib=4,
         volumes=[SandboxVolume(volume, "/data", readonly=True)],
-        ports=[8000],
+        ports=[8000, PortSpec(5173, label="dev server", protocol="http")],
         abins=["index"],
     )
     assert sandbox.running
     assert sandbox.abins == ["index"]
-    assert [port.port for port in sandbox.ports] == [8000]
+    assert [(p.port, p.label, p.protocol) for p in sandbox.ports] == [
+        (8000, None, PortProtocol.TCP),
+        (5173, "dev server", PortProtocol.HTTP),
+    ]
     assert SandboxVolume(volume, "/data").to_dict() == {
         "volume": volume.name,
         "path": "/data",
@@ -61,7 +70,11 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
     }
     got = await client.get_sandbox(sandbox.id)
     assert got.id == sandbox.id and got.abins == ["index"]
-    assert sandbox.id in [item.id for item in await client.list_sandbox()]
+    asked = [replace(p, url=None) for p in sandbox.ports]
+    assert all(p.url is not None for p in sandbox.ports)
+    assert got.ports == asked
+    listed = {item.id: item for item in await client.list_sandbox()}
+    assert listed[sandbox.id].ports == asked
 
     job = await sandbox.exec(["echo", "hi"])
     assert isinstance(job, SandboxJob) and job.sandbox_id == sandbox.id
@@ -104,11 +117,6 @@ async def test_a_log_is_read_again_after_an_entry(client: Client) -> None:
     await sandbox.remove()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=VirtxError,
-    reason="no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused",
-)
 async def test_stdin_written_comes_back_until_it_is_closed(client: Client) -> None:
     await alpine(client)
     sandbox = await client.create_sandbox(ALPINE)
@@ -117,6 +125,17 @@ async def test_stdin_written_comes_back_until_it_is_closed(client: Client) -> No
     await cat.write_stdin(eof=True)
     log = [entry.entry async for entry in cat.log()]
     assert log == [Stdout("a"), Stdout("b"), SandboxJobEnd(0)]
+
+    # Its process closes its stdin under a write: refused, saying how much of it went in.
+    cut = await sandbox.exec(["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"], stdin=True)
+    of = 1 << 20
+    with pytest.raises(VirtxError) as refused:
+        await cut.write_stdin("x" * of)
+    assert (refused.value.status, refused.value.code) == (409, "ended")
+    assert refused.value.written is not None and 0 < refused.value.written < of
+    with pytest.raises(VirtxError) as after:
+        await cut.write_stdin("x")
+    assert (after.value.code, after.value.written) == ("ended", None)
     await sandbox.remove()
 
 
@@ -290,6 +309,35 @@ async def test_a_push_that_fails_raises_its_error_from_its_log_and_its_complete(
     await client.remove_image(reference)
 
 
+async def test_a_port_says_what_it_is_for_and_whom_it_lets_in(client: Client) -> None:
+    assert PortSpec(22).to_dict() == 22
+    ssh = PortSpec(22, label="ssh", inbound=[InboundRule("203.0.113.7", "office")])
+    assert ssh.to_dict() == {
+        "port": 22,
+        "label": "ssh",
+        "inbound": [{"source": "203.0.113.7", "description": "office"}],
+    }
+    assert PortSpec(22, inbound=[]).to_dict() == {"port": 22, "inbound": []}
+    assert PortSpec(80, protocol=PortProtocol.HTTP).to_dict() == {"port": 80, "protocol": "http"}
+
+    answered = SandboxPort.from_dict(
+        {
+            "port": 22,
+            "url": "ports/x",
+            "address": "tcp.example:20001",
+            "inbound_error": {"code": "quota", "message": "past", "reason": "public_ports"},
+        }
+    )
+    assert answered.address == "tcp.example:20001"
+    assert answered.inbound_error == InboundError("quota", "past", "public_ports")
+
+    # The fixture's server keeps no inbound rules, and refuses them before anything boots.
+    await alpine(client)
+    with pytest.raises(VirtxError) as refused:
+        await client.create_sandbox(ALPINE, ports=[ssh])
+    assert refused.value.status == 400
+
+
 async def test_a_sandbox_is_found_by_its_name_which_no_other_has(client: Client) -> None:
     await alpine(client)
     name = unique("named")
@@ -312,6 +360,14 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
     caplog.set_level(logging.WARNING, logger="virtx")
     await alpine(tcp_client)
     sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
+    # The port asked for again has no ``url`` to forward: the one its making answered has.
+    again = await tcp_client.get_sandbox(sandbox.id)
+    with pytest.raises(VirtxError) as refused:
+        PortForwarder.open(tcp_client, again.ports[0])
+    assert refused.value.source == "client"
+    assert str(refused.value).startswith("port 7000 has no url")
+    url = sandbox.ports[0].url
+    assert url is not None
     with PortForwarder.open(tcp_client, sandbox.ports[0]) as forwarder:
         assert forwarder.last_error is None
         reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
@@ -327,7 +383,7 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
         assert isinstance(error, VirtxError), "no error was kept"
         assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
         assert "before the port sent a byte" in str(error)
-        assert sandbox.ports[0].url not in str(error)
+        assert url not in str(error)
 
         for _ in range(6000):
             if any(r.name == "virtx" and r.getMessage() == str(error) for r in caplog.records):

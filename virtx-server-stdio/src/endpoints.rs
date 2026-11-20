@@ -1,7 +1,7 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
-//! ([`router`]), answered from the [`Home`] of the project a request names, and those of the
-//! projects themselves ([`projects`]), answered from the [`Host`]. One client is on the other end
-//! of stdio, so all of it is its.
+//! The endpoints the protocol names, but the images' registry: those in a project ([`router`]),
+//! answered from the [`Home`] of the project a request names, and those of the projects themselves
+//! ([`projects`]), answered from the [`Host`]. One client is on the other end of stdio, so all of
+//! it is its.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -29,8 +29,8 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort, SandboxSignalArgs,
-    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
-    accepts_event_stream, described_type, from_body,
+    SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListOutputItem, accepts_event_stream, described_type, from_body,
 };
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
@@ -732,13 +732,22 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // No inbound rules are kept here, so a port given some is refused rather than opened to
+    // whoever they were meant to keep out.
+    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+        return Err(invalid(format!(
+            "ports: {}'s inbound rules are not kept by this server",
+            spec.port
+        )));
+    }
     let _naming = home.naming(args.name.as_deref())?;
 
     // Each port on this host's loopback, which only this machine reaches, taken to the
-    // sandbox's machine while it runs.
+    // sandbox's machine while it runs: TCP as it is, so an `http` port is HTTP at its URL too.
     let mut opened = Vec::new();
     let mut listeners = Vec::new();
-    for &port in &args.ports {
+    for spec in &args.ports {
+        let port = spec.port;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
@@ -747,7 +756,11 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
         opened.push(SandboxPort {
             port,
-            url: format!("http://{at}"),
+            url: Some(format!("http://{at}")),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
+            address: None,
+            inbound_error: None,
         });
         listeners.push((port, listener));
     }
@@ -839,16 +852,9 @@ async fn sandbox_exec(
     if args.cmd.is_empty() {
         return Err(invalid("cmd: an exec names a command"));
     }
-    if args.stdin {
-        return Err(refused(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "not_started",
-            "stdin: this server gives a process none to write to",
-        ));
-    }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?;
+    let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
     let answered = job.get();
     let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
     if !accepts_event_stream(&headers) {
@@ -894,12 +900,26 @@ async fn sandbox_job_signal(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Refused for every job: none is started with a stdin to write to.
+/// The seconds a write to a job's stdin turned away for now asks to wait: room comes as its
+/// process reads.
+const STDIN_FULL_RETRY: u16 = 1;
+
+/// Write to the stdin of a job started with one, and close it if `eof`: answered once it is in
+/// the process's stdin, which takes a pipe's worth before the process reads any. Refused `409`,
+/// `ended`, for one started without, one whose stdin is closed, one that has ended, and a write
+/// its process closed its stdin under, which says how much of it went in. Turned away for now,
+/// `503`, `capacity`, where the machine already holds as many writes to it as it takes, none of
+/// it taken.
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
+    Whole(request): Whole,
 ) -> Answer {
-    home.sandbox(&id)?.stdin(&job)?;
+    let args: SandboxStdinArgs = body(&request)?;
+    let sandbox = home.sandbox(&id)?;
+    sandbox
+        .write_stdin(&job, args.data.unwrap_or_default(), args.eof)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -930,8 +950,8 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
 /// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
 const BODY_LIMIT: usize = 2 << 20;
 
-/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
-/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid` if
+/// it broke off, as any refusal here is, in the protocol's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused, as `virtx-server-tcp` reads one: there a connection closed
@@ -976,8 +996,8 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
     }
 }
 
-/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope and the server's words.
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when they
+/// do not read as one, in the protocol's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>
@@ -1052,11 +1072,38 @@ fn created(location: String, value: &impl Serialize) -> Response {
 /// Why an image job failed, for a person.
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-/// A request's refusal: its status, and the `code` and `message` of its body.
-pub struct Refused(StatusCode, &'static str, String);
+/// A refusal: its status, `code` and `message`, the members its error has beside them, and the
+/// seconds its `Retry-After` asks, if any.
+pub struct Refused(
+    StatusCode,
+    &'static str,
+    String,
+    serde_json::Map<String, serde_json::Value>,
+    Option<u16>,
+);
 
 pub fn refused(status: StatusCode, code: &'static str, message: impl Display) -> Refused {
-    Refused(status, code, message.to_string())
+    Refused(
+        status,
+        code,
+        message.to_string(),
+        serde_json::Map::new(),
+        None,
+    )
+}
+
+impl Refused {
+    /// It with `name` beside its `code` and `message`.
+    fn with(mut self, name: &str, value: impl Into<serde_json::Value>) -> Refused {
+        self.3.insert(name.to_owned(), value.into());
+        self
+    }
+
+    /// It asking to be sent again after `seconds`.
+    fn after(mut self, seconds: u16) -> Refused {
+        self.4 = Some(seconds);
+        self
+    }
 }
 
 pub fn forbidden(message: impl Display) -> Refused {
@@ -1077,9 +1124,17 @@ pub fn internal(message: impl Display) -> Refused {
 
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
-        let Refused(status, code, message) = self;
-        let body = serde_json::json!({"error": {"code": code, "message": message}});
-        (status, json(&body)).into_response()
+        let Refused(status, code, message, members, after) = self;
+        let mut error = serde_json::json!({"code": code, "message": message});
+        error.as_object_mut().unwrap().extend(members);
+        let body = serde_json::json!({ "error": error });
+        let mut response = (status, json(&body)).into_response();
+        if let Some(seconds) = after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -1160,6 +1215,14 @@ impl From<SandboxError> for Refused {
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
+            SandboxError::StdinCut { bytes, .. } => {
+                refused(StatusCode::CONFLICT, "ended", e).with("written", bytes)
+            }
+            // Nothing was taken, and room comes as the process reads: sent again, as any
+            // `capacity` is.
+            SandboxError::StdinFull => {
+                refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e).after(STDIN_FULL_RETRY)
+            }
             SandboxError::Image(e) => e.into(),
             SandboxError::Io { .. } => internal(e),
             SandboxError::Volume(e) => e.into(),
@@ -1176,5 +1239,53 @@ impl From<SandboxError> for Refused {
 impl From<tokio::task::JoinError> for Refused {
     fn from(e: tokio::task::JoinError) -> Refused {
         internal(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write its process closed its stdin under part-way is `409`, `ended`, with how much of
+    /// it went in as `written`; no other refusal carries it.
+    #[tokio::test]
+    async fn a_write_cut_part_way_says_how_much_went_in() {
+        let answered = async |refusal: Refused| {
+            let response = refusal.into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let cut = answered(SandboxError::StdinCut { bytes: 5, of: 9 }.into()).await;
+        assert_eq!(
+            cut,
+            serde_json::json!({"error": {
+                "code": "ended",
+                "message": "the job's stdin closed after 5 of the 9 bytes written to it",
+                "written": 5,
+            }})
+        );
+        let ended = answered(SandboxError::JobEnded("the job has ended").into()).await;
+        assert_eq!(
+            ended,
+            serde_json::json!({"error": {"code": "ended", "message": "the job has ended"}})
+        );
+    }
+
+    /// A write the machine holds no room for is turned away for now, as `capacity`, with a
+    /// `Retry-After`: not `ended`, which would say the stdin takes nothing more.
+    #[tokio::test]
+    async fn a_write_with_no_room_for_it_is_turned_away_for_now() {
+        let response = Refused::from(SandboxError::StdinFull).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "capacity");
+        assert_eq!(body["error"].as_object().unwrap().len(), 2, "{body}");
     }
 }

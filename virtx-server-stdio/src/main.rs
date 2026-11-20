@@ -1,9 +1,9 @@
-//! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
-//! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
-//! answered on stdin and stdout to the client that spawned it, until it closes stdin. That client
-//! is the host's admin, who reaches every project here, each a directory of its own in the cache
-//! (see [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those
-//! a `virtx-server-tcp` over the same cache keeps for its users, by id.
+//! `virtx-stdio` -- a virtx server over stdio: the endpoints the protocol names, with the images as
+//! an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]), answered on stdin and
+//! stdout to the client that spawned it, until it closes stdin. That client is the host's admin,
+//! who reaches every project here, each a directory of its own in the cache (see
+//! [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those a
+//! `virtx-server-tcp` over the same cache keeps for its users, by id.
 //!
 //! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
@@ -290,8 +290,8 @@ mod tests {
     };
 
     use virtx_core::{
-        Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, Recipe,
-        SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
+        Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
+        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -486,9 +486,18 @@ mod tests {
 
         for ports in [vec![0], vec![8080, 8080]] {
             let mut args = here();
-            args.ports = ports;
+            args.ports = ports.into_iter().map(PortSpec::new).collect();
             assert_eq!(refused(args).await, 400);
         }
+        // Inbound rules are kept by no server here, and a label is at most 128 characters.
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        assert_eq!(refused(here().port(ssh)).await, 400);
+        assert_eq!(
+            refused(here().port(PortSpec::new(22).inbound([]))).await,
+            400
+        );
+        let long = PortSpec::new(80).label("x".repeat(129));
+        assert_eq!(refused(here().port(long)).await, 400);
         let long = "x".repeat(129);
         for name in [
             "",
@@ -572,7 +581,7 @@ mod tests {
             .create_sandbox(&here().abin("index").abin("index"))
             .await
         {
-            Err(Error::Status(400, body)) => assert!(body.contains("given twice"), "{body}"),
+            Err(Error::Status(400, body, _)) => assert!(body.contains("given twice"), "{body}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
 
@@ -1397,10 +1406,9 @@ mod tests {
             .collect()
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
-    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
-    /// and a path whose segment does not read as one is `400` `invalid`. A file's body has no
-    /// such limit.
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client reads
+    /// its code: a body over the server's limit is `413` `too_large`, naming the limit, and a path
+    /// whose segment does not read as one is `400` `invalid`. A file's body has no such limit.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
         let server = Server::spawn("envelope").await;
@@ -1494,7 +1502,7 @@ mod tests {
                 "POST",
                 "/sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
             ),
             (
                 "GET",

@@ -36,7 +36,7 @@ const common = {
     url: 'git+https://github.com/brekkylab/virtx.git',
     directory: 'virtx-node',
   },
-  homepage: 'https://github.com/brekkylab/virtx/tree/main/virtx-node#readme',
+  homepage: 'https://virtx.sh',
   publishConfig: { registry: 'https://registry.npmjs.org/', access: 'public' },
 }
 
@@ -94,6 +94,6 @@ const files = Object.fromEntries(root.files.map((file) => [file, path.join(node,
 const { devDependencies, scripts, ...published } = root
 pack(
   { ...published, ...common, optionalDependencies: optional },
-  { ...files, 'README.md': path.join(node, 'README.md') },
+  { ...files, 'README.md': path.join(repo, 'README.md') },
 )
 console.log(`packed ${packed + 1} packages into ${out}`)

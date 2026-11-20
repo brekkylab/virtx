@@ -1,5 +1,5 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
-//! ([`router`]), each answered from the [`Home`] of the project its request reaches, which
+//! The endpoints the protocol names, but the images' registry: those in a project ([`router`]),
+//! each answered from the [`Home`] of the project its request reaches, which
 //! [`access`](crate::access) puts in its extensions; and those of the projects themselves
 //! ([`projects`]), answered from the [`Access`] there.
 //!
@@ -33,9 +33,9 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxPort, SandboxSignalArgs, Step, VolumeCreateArgs, VolumeListOutputItem,
-    VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
-    from_body,
+    SandboxExecItem, SandboxPort, SandboxSignalArgs, SandboxStdinArgs, Step, VolumeCreateArgs,
+    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream,
+    described_type, from_body,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored};
 use virtx_uvm::{
@@ -353,16 +353,11 @@ impl Home {
         Ok(Naming(self, Some(name.to_owned())))
     }
 
-    /// Its sandboxes, whether each one's machine is up or not: for routes of a server's own
-    /// ([`serve::router`](crate::serve::router)'s `own`), which may count them or park them.
-    /// Those a restart could not know again are not among them, though each keeps its disk and
-    /// record under the home's root until it is removed.
-    pub fn sandboxes(&self) -> Vec<Arc<Sandbox>> {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes
-            .values()
-            .map(|held| Arc::clone(&held.sandbox))
-            .collect()
+    /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
+    /// ([`serve::router`](crate::serve::router)'s `own`) and its work between requests, which
+    /// may find, count or park them.
+    pub fn sandboxes(&self) -> Sandboxes<'_> {
+        Sandboxes(self)
     }
 
     /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
@@ -370,9 +365,13 @@ impl Home {
     /// as it is called: one made meanwhile is left up, so a server that drains its host stops
     /// sending it work first.
     pub async fn park_unused(&self) {
-        let parked = self.sandboxes().into_iter().map(|sandbox| async move {
-            let _ = sandbox.park().await;
-        });
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                let _ = sandbox.park().await;
+            });
         futures_util::future::join_all(parked).await;
     }
 
@@ -380,9 +379,13 @@ impl Home {
     /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
     /// used. As [`park_unused`](Home::park_unused), the sandboxes here as it is called.
     pub async fn park_all(&self) {
-        let parked = self.sandboxes().into_iter().map(|sandbox| async move {
-            sandbox.park_anyway().await;
-        });
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                sandbox.park_anyway().await;
+            });
         futures_util::future::join_all(parked).await;
     }
 
@@ -426,6 +429,59 @@ impl Home {
             ));
         }
         Err(not_found(format!("no sandbox here has the id {id}")))
+    }
+}
+
+/// A home's sandboxes, as each is when it is asked: those the home knows, each whether its
+/// machine is up or not ([`Home::sandboxes`]). One kept in the home and not known again, which
+/// takes only its `DELETE`, is none of them, and is [counted](Sandboxes::counts) apart.
+pub struct Sandboxes<'a>(&'a Home);
+
+/// How many sandboxes a home holds, as [`Sandboxes::counts`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counts {
+    /// Those it knows.
+    pub known: usize,
+    /// Of those, the ones whose machine is up.
+    pub up: usize,
+    /// Those kept in it and not known again, each holding its disk and record under the home's
+    /// root until it is removed.
+    pub unknown: usize,
+}
+
+impl Sandboxes<'_> {
+    /// Each of them, in no set order.
+    pub fn list(&self) -> Vec<Arc<Sandbox>> {
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes
+            .values()
+            .map(|held| Arc::clone(&held.sandbox))
+            .collect()
+    }
+
+    /// The sandbox `id`, if it is one of them.
+    pub fn get(&self, id: &str) -> Option<Arc<Sandbox>> {
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes.get(id).map(|held| Arc::clone(&held.sandbox))
+    }
+
+    /// How many there are, how many of those have their machine up now, and how many more the
+    /// home holds and does not know.
+    pub fn counts(&self) -> Counts {
+        let (known, up) = {
+            let sandboxes = self.0.sandboxes.lock().unwrap();
+            let up = sandboxes.values().filter(|held| held.sandbox.is_up());
+            (sandboxes.len(), up.count())
+        };
+        let unknown = self.0.unknown.lock().unwrap().len();
+        Counts { known, up, unknown }
+    }
+
+    /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk
+    /// at the moment it is asked. Nothing holds it up after, and a park or a boot may change
+    /// the answer as soon as it is given.
+    pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
+        self.get(id).filter(|sandbox| sandbox.is_up())
     }
 }
 
@@ -1266,6 +1322,21 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // A port's URL here is a tunnel for TCP, which a browser does not open.
+    if let Some(spec) = args.ports.iter().find(|spec| !spec.protocol.is_tcp()) {
+        return Err(invalid(format!(
+            "ports: {} is asked for over HTTP, which this server does not serve a port over",
+            spec.port
+        )));
+    }
+    // No inbound rules are kept here, so a port given some is refused rather than opened to
+    // whoever they were meant to keep out.
+    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+        return Err(invalid(format!(
+            "ports: {}'s inbound rules are not kept by this server",
+            spec.port
+        )));
+    }
     let _naming = home.naming(args.name.as_deref())?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
@@ -1274,17 +1345,21 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     // sandbox, so that its URLs reach it across this server's restart.
     let mut opened = Vec::new();
     let mut capabilities = HashMap::new();
-    for &port in &args.ports {
+    for spec in &args.ports {
         let capability = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
         opened.push(SandboxPort {
-            port,
-            url: format!("ports/{capability}"),
+            port: spec.port,
+            url: Some(format!("ports/{capability}")),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
+            address: None,
+            inbound_error: None,
         });
-        capabilities.insert(capability, port);
+        capabilities.insert(capability, spec.port);
     }
     let sandbox = Sandbox::create(
         &home.images,
@@ -1383,16 +1458,9 @@ async fn sandbox_exec(
     if args.cmd.is_empty() {
         return Err(invalid("cmd: an exec names a command"));
     }
-    if args.stdin {
-        return Err(refused(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "not_started",
-            "stdin: this server gives a process none to write to",
-        ));
-    }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?;
+    let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
     let answered = job.get();
     let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
     if !accepts_event_stream(&headers) {
@@ -1438,12 +1506,26 @@ async fn sandbox_job_signal(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Refused for every job: none is started with a stdin to write to.
+/// The seconds a write to a job's stdin turned away for now asks to wait: room comes as its
+/// process reads.
+const STDIN_FULL_RETRY: u16 = 1;
+
+/// Write to the stdin of a job started with one, and close it if `eof`: answered once it is in
+/// the process's stdin, which takes a pipe's worth before the process reads any. Refused `409`,
+/// `ended`, for one started without, one whose stdin is closed, one that has ended, and a write
+/// its process closed its stdin under, which says how much of it went in. Turned away for now,
+/// `503`, `capacity`, where the machine already holds as many writes to it as it takes, none of
+/// it taken.
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
+    Whole(request): Whole,
 ) -> Answer {
-    home.sandbox(&id)?.stdin(&job)?;
+    let args: SandboxStdinArgs = body(&request)?;
+    let sandbox = home.sandbox(&id)?;
+    sandbox
+        .write_stdin(&job, args.data.unwrap_or_default(), args.eof)
+        .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1474,8 +1556,8 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
 /// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
 const BODY_LIMIT: usize = 2 << 20;
 
-/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
-/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid` if
+/// it broke off, as any refusal here is, in the protocol's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused: answered with its body unread, the connection is closed with
@@ -1521,8 +1603,8 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
     }
 }
 
-/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope and the server's words.
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when they
+/// do not read as one, in the protocol's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>
@@ -1597,11 +1679,38 @@ fn created(location: String, value: &impl Serialize) -> Response {
 /// Why an image job failed, for a person.
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-/// A request's refusal: its status, and the `code` and `message` of its body.
-pub struct Refused(StatusCode, &'static str, String);
+/// A refusal: its status, `code` and `message`, the members its error has beside them, and the
+/// seconds its `Retry-After` asks, if any.
+pub struct Refused(
+    StatusCode,
+    &'static str,
+    String,
+    serde_json::Map<String, serde_json::Value>,
+    Option<u16>,
+);
 
 pub fn refused(status: StatusCode, code: &'static str, message: impl Display) -> Refused {
-    Refused(status, code, message.to_string())
+    Refused(
+        status,
+        code,
+        message.to_string(),
+        serde_json::Map::new(),
+        None,
+    )
+}
+
+impl Refused {
+    /// It with `name` beside its `code` and `message`.
+    fn with(mut self, name: &str, value: impl Into<serde_json::Value>) -> Refused {
+        self.3.insert(name.to_owned(), value.into());
+        self
+    }
+
+    /// It asking to be sent again after `seconds`.
+    fn after(mut self, seconds: u16) -> Refused {
+        self.4 = Some(seconds);
+        self
+    }
 }
 
 fn invalid(message: impl Display) -> Refused {
@@ -1635,10 +1744,16 @@ const CAPACITY_RETRY_AFTER: &str = "5";
 
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
-        let Refused(status, code, message) = self;
-        let body = serde_json::json!({"error": {"code": code, "message": message}});
+        let Refused(status, code, message, members, after) = self;
+        let mut error = serde_json::json!({"code": code, "message": message});
+        error.as_object_mut().unwrap().extend(members);
+        let body = serde_json::json!({ "error": error });
         let mut response = (status, json(&body)).into_response();
-        if code == "capacity" {
+        if let Some(seconds) = after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, seconds.into());
+        } else if code == "capacity" {
             let wait = http::HeaderValue::from_static(CAPACITY_RETRY_AFTER);
             response.headers_mut().insert(header::RETRY_AFTER, wait);
         }
@@ -1746,6 +1861,14 @@ impl From<SandboxError> for Refused {
             }
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
+            }
+            SandboxError::StdinCut { bytes, .. } => {
+                refused(StatusCode::CONFLICT, "ended", e).with("written", bytes)
+            }
+            // Nothing was taken, and room comes as the process reads: sent again, as any
+            // `capacity` is.
+            SandboxError::StdinFull => {
+                refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e).after(STDIN_FULL_RETRY)
             }
             SandboxError::Image(e) => e.into(),
             SandboxError::Io { ref source, .. } => internal(io_failure(source, &e)),
@@ -1977,5 +2100,48 @@ mod tests {
             Some("the server's files: permission denied")
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A write its process closed its stdin under part-way is `409`, `ended`, with how much of
+    /// it went in as `written`; no other refusal carries it.
+    #[tokio::test]
+    async fn a_write_cut_part_way_says_how_much_went_in() {
+        let answered = async |refusal: Refused| {
+            let response = refusal.into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let cut = answered(SandboxError::StdinCut { bytes: 5, of: 9 }.into()).await;
+        assert_eq!(
+            cut,
+            serde_json::json!({"error": {
+                "code": "ended",
+                "message": "the job's stdin closed after 5 of the 9 bytes written to it",
+                "written": 5,
+            }})
+        );
+        let ended = answered(SandboxError::JobEnded("the job has ended").into()).await;
+        assert_eq!(
+            ended,
+            serde_json::json!({"error": {"code": "ended", "message": "the job has ended"}})
+        );
+    }
+
+    /// A write the machine holds no room for is turned away for now, as `capacity`, with a
+    /// `Retry-After`: not `ended`, which would say the stdin takes nothing more.
+    #[tokio::test]
+    async fn a_write_with_no_room_for_it_is_turned_away_for_now() {
+        let response = Refused::from(SandboxError::StdinFull).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "capacity");
+        assert_eq!(body["error"].as_object().unwrap().len(), 2, "{body}");
     }
 }

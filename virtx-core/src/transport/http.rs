@@ -1,5 +1,5 @@
-//! What every endpoint's client shares over HTTP: a path segment percent-encoded, a refusal
-//! read as an [`Error`], and a JSON request and its answer, as `PROTOCOL.md`'s Resources says.
+//! What every endpoint's client shares over HTTP: a path segment percent-encoded, a refusal read as
+//! an [`Error`], and a JSON request and its answer, as the protocol's Resources says.
 
 use bytes::Bytes;
 use http::{Method, header};
@@ -8,7 +8,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{Body, TransportClient, full};
-use crate::Error;
+use crate::{Error, Members};
 
 /// What a path segment keeps as it is: the unreserved characters of RFC 3986.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -50,7 +50,8 @@ pub(crate) fn resolved(path: &str) -> Vec<&str> {
 
 /// `response`, a refusal, as the [`Error::Status`] or [`Error::Refusal`] it is: its body read
 /// for a person -- the `{"error": {"code", "message"}}` a resource answers as `code: message`,
-/// plain text as it is -- or what any other refusal was rather than its body.
+/// with the [`Members`] beside them, plain text as it is -- or what any other refusal was
+/// rather than its body.
 pub(crate) async fn refused(response: http::Response<Body>) -> Error {
     #[derive(Deserialize)]
     struct Refusal {
@@ -60,6 +61,8 @@ pub(crate) async fn refused(response: http::Response<Body>) -> Error {
     struct Reason {
         code: String,
         message: String,
+        #[serde(default)]
+        written: Option<u64>,
     }
     let (parts, body) = response.into_parts();
     let status = parts.status.as_u16();
@@ -76,17 +79,28 @@ pub(crate) async fn refused(response: http::Response<Body>) -> Error {
         .map(|body| body.to_bytes())
         .unwrap_or_default();
     if body.is_empty() {
-        return Error::Status(status, String::new());
+        return Error::Status(status, String::new(), Members::default());
     }
     match serde_json::from_slice::<Refusal>(&body) {
         Ok(Refusal { error }) => {
-            Error::Status(status, format!("{}: {}", error.code, error.message))
+            let members = Members {
+                written: error.written,
+            };
+            Error::Status(
+                status,
+                format!("{}: {}", error.code, error.message),
+                members,
+            )
         }
         // Words, as a server or a proxy in front of it may answer: said as they are. A page,
         // such as a proxy's HTML, is not words to a person.
         Err(_) if content_type.eq_ignore_ascii_case("text/plain") => {
             match std::str::from_utf8(&body) {
-                Ok(said) => Error::Status(status, said.trim().chars().take(TEXT_MOST).collect()),
+                Ok(said) => Error::Status(
+                    status,
+                    said.trim().chars().take(TEXT_MOST).collect(),
+                    Members::default(),
+                ),
                 Err(_) => Error::Refusal {
                     status,
                     description: format!(
@@ -299,7 +313,7 @@ mod tests {
             let error = refused(response).await;
             assert_eq!(error.to_string(), said);
             assert!(
-                matches!(error, Error::Status(s, _) if s == status),
+                matches!(error, Error::Status(s, _, _) if s == status),
                 "{error:?}"
             );
         }
@@ -319,6 +333,21 @@ mod tests {
             error.to_string(),
             "the server answered 422 Unprocessable Entity: not_started: no such binary"
         );
+        assert_eq!(error.written(), None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_keeps_the_members_beside_its_code_and_message() {
+        let response = http::Response::builder()
+            .status(409)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(full(Bytes::from(
+                r#"{"error": {"code": "ended", "message": "cut", "written": 65536, "x": 1}}"#,
+            )))
+            .unwrap();
+        let error = refused(response).await;
+        assert_eq!(error.code(), Some("ended"));
+        assert_eq!(error.written(), Some(65536));
     }
 
     #[tokio::test]

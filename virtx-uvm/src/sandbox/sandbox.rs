@@ -14,13 +14,15 @@ use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{
     ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+    SandboxPort,
 };
 
+use super::job::Written;
 use super::record::Record;
 use super::upper::Upper;
 use super::{Error, Job};
 use crate::backend::{Backing, Held, Stored, Wanted};
-use crate::machine::wire::CtrlResp;
+use crate::machine::wire::{CtrlResp, Taken};
 use crate::{
     Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
     Ports, Reference, Room, VolumeHold, VolumeMount, VolumeStore,
@@ -45,6 +47,9 @@ const SANDBOX: &str = "sandbox";
 const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
+
+/// The most characters a port's label has.
+const LABEL_MOST: usize = 128;
 
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
@@ -127,8 +132,9 @@ pub fn signal_number(name: &str) -> Option<i32> {
     Some(index as i32 + 1)
 }
 
-/// A command sent to the machine and not yet answered, and who waits for its job.
-type Starting = (Vec<String>, oneshot::Sender<Result<Arc<Job>, String>>);
+/// A command sent to the machine and not yet answered, whether it was started with a stdin,
+/// and who waits for its job.
+type Starting = (Vec<String>, bool, oneshot::Sender<Result<Arc<Job>, String>>);
 
 /// Where a sandbox's machine is.
 enum State {
@@ -168,6 +174,9 @@ pub struct Sandbox {
     _held: ImageHold,
     /// The upper disk it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
+    /// The ports it was made with, as asked for again: what each is for and how it is reached,
+    /// with no `url`, which is its server's.
+    ports_opened: Vec<SandboxPort>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
     abins: Vec<String>,
@@ -241,13 +250,24 @@ impl Sandbox {
             )));
         }
         let mut given = HashSet::new();
-        if let Some(port) = args
+        if let Some(spec) = args
             .ports
             .iter()
-            .find(|port| **port == 0 || !given.insert(**port))
+            .find(|spec| spec.port == 0 || !given.insert(spec.port))
         {
             return Err(Error::Invalid(format!(
-                "ports: {port} is not a port, or is given twice"
+                "ports: {} is not a port, or is given twice",
+                spec.port
+            )));
+        }
+        if let Some(spec) = args.ports.iter().find(|spec| {
+            spec.label
+                .as_ref()
+                .is_some_and(|label| label.chars().count() > LABEL_MOST)
+        }) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s label is past {LABEL_MOST} characters",
+                spec.port
             )));
         }
         let mut at = HashSet::new();
@@ -478,7 +498,7 @@ impl Sandbox {
             spec: machine_spec(args),
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
-            ports: args.ports.clone(),
+            ports: args.ports.iter().map(|spec| spec.port).collect(),
         };
         let exited = record.as_ref().is_some_and(|record| record.exited);
         let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());
@@ -492,6 +512,18 @@ impl Sandbox {
             record: Mutex::new(record),
             image: digest,
             _held: held_image,
+            ports_opened: args
+                .ports
+                .iter()
+                .map(|spec| SandboxPort {
+                    port: spec.port,
+                    url: None,
+                    label: spec.label.clone(),
+                    protocol: spec.protocol,
+                    address: None,
+                    inbound_error: None,
+                })
+                .collect(),
             abins: args.abins.clone(),
             upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
@@ -535,14 +567,15 @@ impl Sandbox {
         self.up_since.lock().unwrap().map(|(at, _)| at)
     }
 
-    /// The sandbox as the server answers it, with no ports: only its making answers those.
+    /// The sandbox as the server answers it, each port with what it is for and how it is
+    /// reached but no `url`: only its making answers those, which its server forms.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
             name: self.name.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
-            ports: Vec::new(),
+            ports: self.ports_opened.clone(),
             abins: self.abins.clone(),
             error: None,
         }
@@ -587,10 +620,12 @@ impl Sandbox {
         }
     }
 
-    /// Start `cmd` in it, beside whatever else runs there, and kill it after `timeout`.
+    /// Start `cmd` in it, beside whatever else runs there, with a stdin to
+    /// [write](Sandbox::write_stdin) if `stdin`, and kill it after `timeout`.
     pub async fn exec(
         self: &Arc<Self>,
         cmd: Vec<String>,
+        stdin: bool,
         timeout: Option<Duration>,
     ) -> Result<Arc<Job>, Error> {
         // In use until the job runs, which keeps it in use from there.
@@ -602,8 +637,8 @@ impl Sandbox {
             if !self.is(&machine) {
                 return Err(Error::Ended);
             }
-            machine.exec(cmd.clone())?;
-            starting.push_back((cmd, waiter));
+            machine.exec(cmd.clone(), stdin)?;
+            starting.push_back((cmd, stdin, waiter));
         }
         let job = started
             .await
@@ -656,10 +691,36 @@ impl Sandbox {
         Ok(())
     }
 
-    /// Refused for every job: none is started with a stdin to write to.
-    pub fn stdin(&self, id: &str) -> Result<(), Error> {
-        self.job(id)?;
-        Err(Error::JobEnded("the job was started without stdin"))
+    /// Write `data` to the stdin of the job `id`, started with one, and close it if `eof`:
+    /// answered once it is in the process's stdin, which takes a pipe's worth before the process
+    /// reads any, so a job that does not read holds the writer back once that is full. A write
+    /// its process closed its stdin under part-way is [`StdinCut`](Error::StdinCut), saying how
+    /// much went in. One the guest holds no room for, as when writes given up on while the
+    /// process did not read are still waiting, is [`StdinFull`](Error::StdinFull): not taken,
+    /// `eof` and all, and taken when sent again once the process reads.
+    pub async fn write_stdin(&self, id: &str, data: String, eof: bool) -> Result<(), Error> {
+        let ended = || {
+            Error::JobEnded(
+                "the job has ended, or its stdin is closed, or it was started without one",
+            )
+        };
+        let job = self.job(id)?;
+        let (pid, running) = job.pid();
+        // A job that runs keeps the machine it runs in up.
+        let machine = self.up().filter(|_| running).ok_or_else(ended)?;
+        let of = data.len() as u64;
+        let send = |seq| Ok(machine.write_stdin(pid, seq, data, eof)?);
+        match job.write_stdin(eof, send).await? {
+            Some(Written {
+                taken: Taken::Whole,
+                ..
+            }) => Ok(()),
+            Some(Written {
+                taken: Taken::Full, ..
+            }) => Err(Error::StdinFull),
+            Some(Written { bytes, .. }) if bytes > 0 => Err(Error::StdinCut { bytes, of }),
+            _ => Err(ended()),
+        }
     }
 
     /// Its machine, booted again if it was parked, to ask of its files. The caller holds an
@@ -927,22 +988,26 @@ impl Sandbox {
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some((cmd, waiter)) = self.starting.lock().unwrap().pop_front() else {
+                    let Some((cmd, stdin, waiter)) = self.starting.lock().unwrap().pop_front()
+                    else {
                         continue;
                     };
                     let started = started.map(|pid| {
                         let mut jobs = self.jobs.lock().unwrap();
                         keep_ended(&mut jobs, KEEP_ENDED);
                         let id = pick(|id| jobs.contains_key(id));
-                        let job = Job::new(SandboxJob {
-                            id: id.clone(),
-                            kind: SandboxJobKind::Exec,
-                            pid,
-                            cmd,
-                            running: true,
-                            code: None,
-                            reason: None,
-                        });
+                        let job = Job::new(
+                            SandboxJob {
+                                id: id.clone(),
+                                kind: SandboxJobKind::Exec,
+                                pid,
+                                cmd,
+                                running: true,
+                                code: None,
+                                reason: None,
+                            },
+                            stdin,
+                        );
                         jobs.insert(id, Arc::clone(&job));
                         running.insert(pid, Arc::clone(&job));
                         job
@@ -960,11 +1025,21 @@ impl Sandbox {
                         job.write(SandboxJobEntry::Stderr(line));
                     }
                 }
-                CtrlResp::Exited { id, code } => {
+                CtrlResp::Exited { id, code, oom } => {
                     if let Some(job) = running.remove(&id) {
-                        job.end(code);
+                        job.end(code, oom);
                         *self.used.lock().unwrap() = Instant::now();
                         self.keep_jobs();
+                    }
+                }
+                CtrlResp::Written {
+                    id,
+                    seq,
+                    bytes,
+                    taken,
+                } => {
+                    if let Some(job) = running.get(&id) {
+                        job.written(seq, Written { bytes, taken });
                     }
                 }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
@@ -1346,7 +1421,7 @@ impl Unknown {
     }
 
     /// It as a sandbox is answered: its image as its record names it, empty where that is not
-    /// read, not `running`, and why in `error`.
+    /// read, not `running`, with no ports, since none is open, and why in `error`.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
@@ -1404,17 +1479,20 @@ mod tests {
     #[test]
     fn the_ended_jobs_past_the_limit_go_the_first_ended_first_and_none_that_runs() {
         let job = |id: &str, ended: bool| {
-            let job = Job::new(SandboxJob {
-                id: id.into(),
-                kind: SandboxJobKind::Exec,
-                pid: 1,
-                cmd: vec!["true".into()],
-                running: true,
-                code: None,
-                reason: None,
-            });
+            let job = Job::new(
+                SandboxJob {
+                    id: id.into(),
+                    kind: SandboxJobKind::Exec,
+                    pid: 1,
+                    cmd: vec!["true".into()],
+                    running: true,
+                    code: None,
+                    reason: None,
+                },
+                false,
+            );
             if ended {
-                job.end(0);
+                job.end(0, false);
             }
             (id.to_owned(), job)
         };

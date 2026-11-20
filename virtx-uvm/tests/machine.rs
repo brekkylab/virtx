@@ -995,32 +995,36 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     let write = "echo kept > /root/kept && chmod 700 /root/kept && rm /etc/alpine-release";
     said(&sandbox, write).await;
 
-    // In use: its vCPUs and memory refused, and its disk too, each left as it is.
+    // In use: its vCPUs and memory refused, and its disk grown at its next boot, left up.
     let sleeping = sandbox.exec(vec!["sleep".into(), "600".into()], None);
     let sleeping = sleeping.await.unwrap().get().id;
-    for refused in [resize(Some(3), None, None), resize(None, None, Some(3))] {
-        let answered = sandbox.resize(&refused).await;
-        assert!(
-            matches!(answered, Err(SandboxError::InUse(_))),
-            "{refused:?}: {answered:?}"
-        );
-    }
-    assert_eq!(disk(&sandbox).await, 1, "the size it booted with");
-    let same = sandbox
-        .resize(&resize(Some(2), None, Some(1)))
-        .await
-        .unwrap();
+    let refused = sandbox.resize(&resize(Some(3), None, None)).await;
+    assert!(
+        matches!(refused, Err(SandboxError::InUse(_))),
+        "{refused:?}"
+    );
+    let grown = sandbox.resize(&resize(None, None, Some(3))).await.unwrap();
     let up = SandboxResources {
         vcpus: 2,
         memory_mib: 1024,
-        disk_gib: 1,
+        disk_gib: 3,
         up: true,
     };
-    assert_eq!(same, up, "its own size, asked again, is no change");
+    assert_eq!(grown, up);
+    assert!(sandbox.is_up(), "not parked for its disk");
+    assert_eq!(disk(&sandbox).await, 1, "the size it booted with");
 
-    // Unused: parked, and booted so.
+    // Parked, and booted again with its disk grown.
     sandbox.remove_job(&sleeping).unwrap();
-    let resized = sandbox.resize(&resize(Some(3), Some(1536), Some(3))).await;
+    sandbox.park().await.unwrap();
+    assert_eq!(disk(&sandbox).await, 3);
+    assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
+    assert_eq!(said(&sandbox, "stat -c %a /root/kept").await, "700");
+    let release = "test -e /etc/alpine-release && echo there || echo gone";
+    assert_eq!(said(&sandbox, release).await, "gone");
+
+    // Unused: parked for its vCPUs and memory, and booted so.
+    let resized = sandbox.resize(&resize(Some(3), Some(1536), None)).await;
     let parked = SandboxResources {
         vcpus: 3,
         memory_mib: 1536,
@@ -1033,10 +1037,6 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     let kib: u64 = said(&sandbox, meminfo).await.parse().unwrap();
     assert!((1300 << 10..=1536 << 10).contains(&kib), "{kib} KiB");
     assert_eq!(disk(&sandbox).await, 3);
-    assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
-    assert_eq!(said(&sandbox, "stat -c %a /root/kept").await, "700");
-    let release = "test -e /etc/alpine-release && echo there || echo gone";
-    assert_eq!(said(&sandbox, release).await, "gone");
 
     // Never shrunk, and no size a sandbox is not made with.
     for refused in [
@@ -1060,8 +1060,8 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     let grown = again.resize(&resize(None, None, Some(4))).await.unwrap();
     assert_eq!(
         (grown.disk_gib, grown.up),
-        (4, false),
-        "parked for its disk alone"
+        (4, true),
+        "left up for its disk"
     );
     leave(Arc::clone(again)).await;
     let known = home.kept();

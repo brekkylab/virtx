@@ -1324,7 +1324,7 @@ async fn sandbox_get(
 
 /// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
 /// if it is up and nothing uses it, and refused `409`, `in_use`, if something does; its disk
-/// grown, never shrunk, as its VM next boots.
+/// grown, never shrunk, as its VM next boots, without parking it.
 async fn sandbox_resize(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,

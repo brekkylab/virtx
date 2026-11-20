@@ -1101,7 +1101,7 @@ impl From<SandboxError> for Refused {
             SandboxError::Volume(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
-            // Never, since no admission is set here; the protocol's refusal all the same.
+            // Where whatever embeds this sets an admission: the protocol's refusal.
             SandboxError::NoRoom(_) => refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e),
         }
     }

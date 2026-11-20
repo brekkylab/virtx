@@ -1260,7 +1260,7 @@ fn main() -> ExitCode {
     let scratch = env::temp_dir().join(format!("virtx-uvm-machine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    virtx_uvm::set_admission(Arc::new(Limit));
+    assert!(virtx_uvm::set_admission(Arc::new(Limit)));
     let images = ImageStore::new(scratch.join("images")).unwrap();
     // Only where `VIRTX_TEST_GPU=1` says the host has a GPU with a Vulkan driver: a `gpu` build
     // runs on hosts without one too, and there a guest finds no device. Said on a build without

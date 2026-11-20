@@ -296,6 +296,9 @@ impl Sandbox {
             }
         }
 
+        // Room for its machine before anything of it is made, held for its first boot.
+        let room = crate::admit(&machine_spec(args))?;
+
         let digest = match &args.image {
             ImageName::Tag { tag } => {
                 let reference: Reference = tag
@@ -331,7 +334,7 @@ impl Sandbox {
             )
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
-        sandbox.wake().await?;
+        sandbox.wake_in(Some(room)).await?;
         if let Some(keys) = keys {
             let record = Record {
                 args,
@@ -387,7 +390,6 @@ impl Sandbox {
             .collect::<Result<_, Error>>()?;
 
         let rootfs = images.insert_rootfs(&layers)?;
-        let gpu = args.gpu.unwrap_or(false);
         let dir = root.join(SANDBOX);
         let upper = match upper {
             Some(upper) => upper,
@@ -413,16 +415,7 @@ impl Sandbox {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
             upper: upper.path.clone(),
-            spec: MachineSpec {
-                vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
-                ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
-                gpu,
-                gpu_memory_mib: args.gpu_memory_mib,
-                network: match args.network {
-                    true => Network::Public,
-                    false => Network::None,
-                },
-            },
+            spec: machine_spec(args),
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.clone(),
@@ -675,6 +668,12 @@ impl Sandbox {
 
     /// Its machine, booting one if it is parked.
     async fn wake(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
+        self.wake_in(None).await
+    }
+
+    /// Its machine, booting one if it is parked in the room `given`, where it is given --
+    /// asked for as its sandbox is made -- and otherwise in room asked for now.
+    async fn wake_in(self: &Arc<Self>, given: Option<Option<Room>>) -> Result<Arc<Machine>, Error> {
         let _turn = self.turn.lock().await;
         match &*self.state.lock().unwrap() {
             State::Up(machine, _) => return Ok(Arc::clone(machine)),
@@ -682,7 +681,10 @@ impl Sandbox {
             State::Parked => {}
         }
         // Room for it first, so a machine there is none for is never started.
-        let mut room = crate::admit(&self.config.spec)?;
+        let mut room = match given {
+            Some(room) => room,
+            None => crate::admit(&self.config.spec)?,
+        };
         // Booting is blocking work, until the guest takes commands.
         let (config, vm) = (self.config.clone(), self.vm.clone());
         let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
@@ -1131,6 +1133,20 @@ impl Unknown {
     /// Delete its disk and record. Blocking work.
     pub fn remove(mut self) {
         self.upper.kept = false;
+    }
+}
+
+/// The machine a sandbox made as `args` asks boots as, each time.
+fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
+    MachineSpec {
+        vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
+        ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
+        gpu: args.gpu.unwrap_or(false),
+        gpu_memory_mib: args.gpu_memory_mib,
+        network: match args.network {
+            true => Network::Public,
+            false => Network::None,
+        },
     }
 }
 

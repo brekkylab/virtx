@@ -1,21 +1,21 @@
 //! The tests that boot machines: sandboxes over `virtx-uvm` itself, with no server in front.
 //!
 //! A machine is a process its binary spawns of itself (see `machine/`), so this test has a
-//! `main` of its own: spawned with `vm`, it becomes the machine; otherwise it runs each test.
-//! `cargo xtask test -p virtx-uvm` signs it and puts the guest kernel beside it, which a
-//! machine needs. The images are pulled once, into a store every test shares; each test keeps
-//! its sandboxes' upper disks and its volumes under a home of its own.
+//! `main` of its own: spawned with `vm`, it becomes the machine; otherwise it runs each test,
+//! those that look at the whole process one at a time, then the rest several at once
+//! ([`at_once`]). `cargo xtask test -p virtx-uvm` signs it and puts the guest kernel beside it,
+//! which a machine needs. The images are pulled once, into a store every test shares; each test
+//! keeps its sandboxes' upper disks and its volumes under a home of its own.
 
 use std::{
     collections::HashMap,
     env,
     ffi::OsString,
-    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::body::Body;
@@ -1016,7 +1016,8 @@ async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does
 }
 
 async fn a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed(home: Home) {
-    let sandbox = home.sandbox(&small(), None).await;
+    // Half of `small()`'s memory, so the file past it is half as large to write and read.
+    let sandbox = home.sandbox(&small().memory_mib(512), None).await;
     // A file half as large again as one command's memory, out of the page cache.
     let write = "own=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); \
         mib=$(( $(cat $own/memory.max) * 3 / 2 >> 20 )); \
@@ -1034,7 +1035,7 @@ async fn a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed(
         "-c",
         "for i in 1 2 3 4; do sha256sum /root/big >/dev/null || exit; done",
     ];
-    // A guard against a hang: four passes over a GiB and more take a while on a slow disk.
+    // A guard against a hang: four passes over its file take a while on a slow disk.
     let ended = tokio::time::timeout(HANG * 5, run(&sandbox, &read, None));
     let (lines, code) = ended.await.expect("the reads end").unwrap();
     assert_eq!((lines, code), (vec![], 0));
@@ -1304,10 +1305,12 @@ async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
     )
     .await
     .unwrap();
+    // Busy for 13 s, saying nothing of its own: past the 10 s after which one that answered no
+    // ping would have been ended, by a margin.
     let busy = [
         "sh",
         "-c",
-        "for i in 1 2; do timeout 15 sh -c 'while :; do :; done' & done; wait; true",
+        "for i in 1 2; do timeout 13 sh -c 'while :; do :; done' & done; wait; true",
     ];
     let lived = run(&sandbox, &busy, None).await;
     assert_eq!(lived.unwrap().1, 0, "a busy guest is ended");
@@ -2319,6 +2322,16 @@ fn filter(mut args: impl Iterator<Item = String>) -> Option<String> {
     None
 }
 
+/// How many tests run beside each other: `VIRTX_MACHINE_TESTS_AT_ONCE`, or half this host's
+/// CPUs up to 8, each test's machines having 4 vCPUs of their own; one at least.
+fn at_once() -> usize {
+    let asked = env::var("VIRTX_MACHINE_TESTS_AT_ONCE").ok();
+    let cpus = std::thread::available_parallelism().map_or(1, |cpus| cpus.get());
+    (asked.and_then(|n| n.parse().ok()))
+        .unwrap_or((cpus / 2).min(8))
+        .max(1)
+}
+
 fn main() -> ExitCode {
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
@@ -2371,25 +2384,44 @@ fn main() -> ExitCode {
             [$((stringify!($test), (|home| Box::pin($test(home))) as Test)),*]
         };
     }
-    let mut tests = Vec::from(tests![
-        a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
-        a_removed_job_is_killed_and_its_sandbox_kept,
-        a_job_ends_with_its_process_not_with_what_it_left_running,
+    // Each of these looks at what the whole process holds -- the room its admission gives, the
+    // machines it started -- or at the host's GPU, so it runs with no other test beside it.
+    let mut alone = Vec::from(tests![
+        a_machine_boots_only_with_room_given_back_as_it_goes_down
+    ]);
+    #[cfg(unix)]
+    alone.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
+    if gpu {
+        alone.extend(tests![
+            a_gpu_sandbox_finds_the_host_s_gpu_through_venus,
+            a_sandbox_that_asks_for_no_gpu_finds_none,
+            a_gpu_sandbox_s_heaps_are_the_memory_it_asked_for,
+            a_gpu_sandbox_runs_a_compute_shader_and_reads_its_answer,
+            a_gpu_sandbox_s_mappings_end_at_its_memory,
+            a_parked_gpu_sandbox_boots_again_with_its_gpu,
+            gpu_sandboxes_made_at_once_each_compute_their_own,
+        ]);
+    }
+    // The rest run beside each other, each over a home of its own: the slowest first, so the
+    // run does not end waiting on one.
+    let mut beside = Vec::from(tests![
+        a_guest_that_halts_ends_its_machine_and_its_jobs,
+        a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed,
+        a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_fork_bomb_leaves_the_sandbox_answering,
         a_fork_bomb_out_of_memory_leaves_the_sandbox_answering,
+        a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
+        an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
+        a_removed_job_is_killed_and_its_sandbox_kept,
+        a_job_ends_with_its_process_not_with_what_it_left_running,
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
         a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,
         writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open,
         a_job_s_end_says_why_the_server_ended_it_and_only_then,
         a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not,
-        a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed,
-        an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
-        a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
-        a_guest_that_halts_ends_its_machine_and_its_jobs,
-        a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
         a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
@@ -2412,42 +2444,51 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
-    #[cfg(unix)]
-    tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {
-        tests.extend(tests![
+        beside.extend(tests![
             a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs
         ]);
     }
-    if gpu {
-        tests.extend(tests![
-            a_gpu_sandbox_finds_the_host_s_gpu_through_venus,
-            a_sandbox_that_asks_for_no_gpu_finds_none,
-            a_gpu_sandbox_s_heaps_are_the_memory_it_asked_for,
-            a_gpu_sandbox_runs_a_compute_shader_and_reads_its_answer,
-            a_gpu_sandbox_s_mappings_end_at_its_memory,
-            a_parked_gpu_sandbox_boots_again_with_its_gpu,
-            gpu_sandboxes_made_at_once_each_compute_their_own,
-        ]);
-    }
     let filter = filter(env::args().skip(1));
-    let mut failed = 0;
-    for (name, test) in tests {
-        if filter
-            .as_deref()
-            .is_some_and(|filter| !name.contains(filter))
-        {
-            continue;
+    let chosen = |tests: Vec<(&'static str, Test)>| {
+        let chosen = tests
+            .into_iter()
+            .filter(|(name, _)| (filter.as_deref()).is_none_or(|filter| name.contains(filter)));
+        Mutex::new(chosen.collect::<Vec<_>>().into_iter())
+    };
+    let (alone, beside) = (chosen(alone), chosen(beside));
+    let at_once = at_once();
+    eprintln!("the tests that boot machines, {at_once} at once (VIRTX_MACHINE_TESTS_AT_ONCE)");
+    let failed = AtomicUsize::new(0);
+    // Each test on a thread named for it, which a panic names; the runtime's `block_on` is
+    // called from each at once.
+    let run_from = |queue: &Mutex<std::vec::IntoIter<(&'static str, Test)>>| loop {
+        let Some((name, test)) = queue.lock().unwrap().next() else {
+            return;
+        };
+        let started = Instant::now();
+        let passed = std::thread::scope(|scope| {
+            let thread = std::thread::Builder::new().name(name.to_owned());
+            let ran = thread.spawn_scoped(scope, || {
+                runtime.block_on(test(Home::new(&images, &scratch, name)))
+            });
+            ran.unwrap().join().is_ok()
+        });
+        let took = started.elapsed().as_secs_f64();
+        let outcome = if passed { "ok" } else { "FAILED" };
+        println!("test {name} ... {outcome} ({took:.1}s)");
+        failed.fetch_add(usize::from(!passed), Ordering::SeqCst);
+    };
+    run_from(&alone);
+    std::thread::scope(|scope| {
+        for _ in 0..at_once {
+            scope.spawn(|| run_from(&beside));
         }
-        let home = Home::new(&images, &scratch, name);
-        let passed = panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(test(home)))).is_ok();
-        println!("test {name} ... {}", if passed { "ok" } else { "FAILED" });
-        failed += usize::from(!passed);
-    }
+    });
     let _ = std::fs::remove_dir_all(&scratch);
-    if failed == 0 {
+    if failed.into_inner() == 0 {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

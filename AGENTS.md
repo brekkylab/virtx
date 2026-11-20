@@ -94,7 +94,7 @@ Each test goes in the lowest layer that can show what it tests, fastest first:
 
 ```bash
 cargo xtask test                                  # every suite, each summed up at the end; those that need the servers are skipped until they can be built
-cargo xtask test --no-run                         # compiles everything `test` would and runs none; needs no guest kernel
+cargo xtask test --no-run                         # compiles and installs everything `test` would and runs none; needs no guest kernel
 cargo xtask test -p virtx-core                    # one crate's tests
 cargo xtask test -p virtx-uvm                     # its unit tests, and the tests that boot machines
 cargo xtask test -p virtx-server-stdio            # a server's own, its app served in the test's process

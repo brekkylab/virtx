@@ -43,8 +43,10 @@ usage: cargo xtask init     [--force]
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
             the fixture where they name virtx or virtx-cli. With --no-run alone, compiles
-            everything `test` would -- the crates' tests, the servers, the packages' cargo
-            tests -- and runs none, which needs no guest kernel
+            and installs everything `test` would -- the crates' tests, the servers, abin, the
+            packages' cargo tests, the library they open and the bindings' packages -- and
+            runs none, which needs no guest kernel. With XTASK_TESTS_COMPILED set after it,
+            `test` fails if cargo compiles anything
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
@@ -213,20 +215,31 @@ fn main() -> anyhow::Result<()> {
         Some("run") => run_target(args.collect(), false, &[]),
         Some("test") => {
             let args: Vec<OsString> = args.collect();
-            if let Some(sign_in) = sign_in_args(&args) {
-                let fixture = Fixture::start()?;
-                return run_target(sign_in, true, &fixture.vars());
+            if matches!(args.as_slice(), [no_run] if no_run == "--no-run") {
+                return compile_tests();
             }
-            match args.as_slice() {
-                [] => test_all(),
-                [no_run] if no_run == "--no-run" => compile_tests(),
-                // virtx-rs's tests are against the fixture too.
-                _ if args.iter().any(|arg| arg == "virtx") => {
-                    let fixture = Fixture::start()?;
-                    run_target(args, true, &fixture.vars())
+            let started = std::time::SystemTime::now();
+            let tested = test(args);
+            // CI compiles everything first (`test --no-run`): a unit compiled here is one that
+            // step built some other way.
+            if env::var_os(TESTS_COMPILED).is_some() {
+                let compiled = compiled_since(started);
+                if !compiled.is_empty() {
+                    eprintln!(
+                        "xtask: cargo compiled {} during the tests, which {TESTS_COMPILED} says \
+                         `cargo xtask test --no-run` built: {}",
+                        compiled.len(),
+                        compiled.join(", ")
+                    );
                 }
-                _ => run_target(args, true, &[]),
+                tested?;
+                ensure!(
+                    compiled.is_empty(),
+                    "cargo compiled during the tests what `cargo xtask test --no-run` did not build"
+                );
+                return Ok(());
             }
+            tested
         }
         Some("fixture") => {
             let rest: Vec<OsString> = args.collect();
@@ -524,14 +537,7 @@ fn lint_bindings() -> anyhow::Result<()> {
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     let missing: Vec<&str> = ["uv", npm]
         .into_iter()
-        .filter(|tool| {
-            Command::new(tool)
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_err()
-        })
+        .filter(|tool| !on_path(tool))
         .collect();
     if !missing.is_empty() {
         let why = format!("no {} on PATH", missing.join(" or "));
@@ -603,6 +609,16 @@ fn lint_bindings() -> anyhow::Result<()> {
     )
 }
 
+/// Whether `tool` runs from PATH.
+fn on_path(tool: &str) -> bool {
+    Command::new(tool)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
 /// `cargo <args>` at the root, said first as `what`, which it fails as.
 fn cargo_in_root(args: &[&str], what: &str) -> anyhow::Result<()> {
     eprintln!("xtask: {what}");
@@ -648,12 +664,18 @@ fn client_library() -> String {
     )
 }
 
-/// The library alone, with the features its default is: no kernel and nothing to sign.
+/// The library alone, with the features its default is: no kernel and nothing to sign. Its
+/// crate builds an rlib alone, so the library for C is asked for here.
 fn build_client(options: &Options) -> anyhow::Result<()> {
     let mut cargo = cargo();
-    cargo
-        .current_dir(root_path())
-        .args(["build", "-p", CLIENT_PACKAGE, "--lib"]);
+    cargo.current_dir(root_path()).args([
+        "rustc",
+        "-p",
+        CLIENT_PACKAGE,
+        "--lib",
+        "--crate-type",
+        "cdylib,staticlib",
+    ]);
     if let Some(target) = &options.target {
         cargo.args(["--target", target]);
     }
@@ -1447,6 +1469,133 @@ fn serve_fixture() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `test` with arguments other than `--no-run`: the sign-in tests, or cargo test, against the
+/// fixture where they name virtx; every suite without any.
+fn test(args: Vec<OsString>) -> anyhow::Result<()> {
+    if let Some(sign_in) = sign_in_args(&args) {
+        let fixture = Fixture::start()?;
+        return run_target(sign_in, true, &fixture.vars());
+    }
+    match args.as_slice() {
+        [] => test_all(),
+        // virtx-rs's tests are against the fixture too.
+        _ if args.iter().any(|arg| arg == "virtx") => {
+            let fixture = Fixture::start()?;
+            run_target(args, true, &fixture.vars())
+        }
+        _ => run_target(args, true, &[]),
+    }
+}
+
+/// Set where abin is put in place built already, as CI hands it on from the job that built it:
+/// neither `test --no-run` nor the fixture builds it then.
+const ABIN_BUILT: &str = "XTASK_ABIN_BUILT";
+
+/// The variable each package opens the library named in, in place of building its own.
+const LIBRARY_ENV: &str = "VIRTX_CORE_LIB";
+
+/// Set where `cargo xtask test --no-run` has run, as CI's compile step has: `test` then fails if
+/// cargo compiles anything during it.
+const TESTS_COMPILED: &str = "XTASK_TESTS_COMPILED";
+
+/// The units cargo compiled since `since`, by their directories' names (`<crate>-<hash>`): those
+/// under a profile's `.fingerprint`, this host's or a target's, with a file written since. A
+/// fresh unit's are left as they were.
+fn compiled_since(since: std::time::SystemTime) -> Vec<String> {
+    let dirs = |path: &Path| -> Vec<PathBuf> {
+        fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect()
+    };
+    let target = target_path();
+    let profiles = dirs(&target)
+        .into_iter()
+        .flat_map(|dir| [vec![dir.clone()], dirs(&dir)].concat());
+    let mut compiled: Vec<String> = profiles
+        .flat_map(|profile| dirs(&profile.join(".fingerprint")))
+        .filter(|unit| {
+            dirs(unit).iter().any(|file| {
+                fs::metadata(file)
+                    .and_then(|meta| meta.modified())
+                    .is_ok_and(|modified| modified >= since)
+            })
+        })
+        .filter_map(|unit| Some(unit.file_name()?.to_string_lossy().into_owned()))
+        .collect();
+    compiled.sort();
+    compiled
+}
+
+/// The library the packages' tests open, as their fixtures build it: `libvirtx_core` in the
+/// `dev` profile, with its default features.
+fn test_library() -> PathBuf {
+    target_path().join("debug").join(client_library())
+}
+
+fn build_test_library() -> anyhow::Result<()> {
+    cargo_in_root(
+        &[
+            "rustc",
+            "-p",
+            CLIENT_PACKAGE,
+            "--lib",
+            "--crate-type",
+            "cdylib",
+        ],
+        "the library the packages' tests open",
+    )
+}
+
+/// Each binding's install, as its directory, its command, the file the command leaves, and the
+/// manifests that file is to be newer than: what `uv run` and `npm test` run with.
+const INSTALLS: &[(&str, &[&str], &str, &[&str])] = &[
+    (
+        "virtx-py",
+        &["uv", "sync"],
+        ".venv/pyvenv.cfg",
+        &["pyproject.toml", "uv.lock"],
+    ),
+    (
+        "virtx-node",
+        &["npm", "install", "--no-audit", "--no-fund"],
+        "node_modules/.package-lock.json",
+        &["package.json", "package-lock.json"],
+    ),
+];
+
+/// Whether `left`, in `dir`, is newer than each of `manifests`.
+fn installed(dir: &Path, left: &str, manifests: &[&str]) -> bool {
+    let modified = |name: &str| fs::metadata(dir.join(name)).and_then(|meta| meta.modified());
+    let Ok(left) = modified(left) else {
+        return false;
+    };
+    manifests
+        .iter()
+        .all(|manifest| modified(manifest).is_ok_and(|manifest| manifest <= left))
+}
+
+/// Install the packages of the binding in `dir`, if it is one: with `always` whatever is there,
+/// else only where they are older than its manifests.
+fn install_binding(dir: &str, always: bool) -> anyhow::Result<()> {
+    for (_, argv, left, manifests) in INSTALLS.iter().filter(|install| install.0 == dir) {
+        let dir = root_path().join(dir);
+        if !always && installed(&dir, left, manifests) {
+            continue;
+        }
+        eprintln!("xtask: {} in {}", argv.join(" "), dir.display());
+        let status = Command::new(argv[0])
+            .args(&argv[1..])
+            .current_dir(&dir)
+            .status()
+            .with_context(|| format!("running {}", argv[0]))?;
+        ensure!(status.success(), "`{}` failed", argv.join(" "));
+    }
+    Ok(())
+}
+
 /// The crates whose own tests [`test_all`] runs first, each by itself.
 const TEST_CRATES: &[&str] = &[
     "virtx-core",
@@ -1503,7 +1652,8 @@ fn sign_in_args(args: &[OsString]) -> Option<Vec<OsString>> {
 
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
-/// pytest, and virtx-node's with Node's own runner.
+/// pytest, and virtx-node's with Node's own runner. Those that open the library open
+/// [`test_library`], and the bindings run with what [`INSTALLS`] installs.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     (
         "virtx-rs",
@@ -1515,11 +1665,7 @@ const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     ),
     ("virtx-cli", ".", &[SIGN_IN_TESTS]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
-    (
-        "virtx-node",
-        "virtx-node",
-        &[&["npm", "install"], &["npm", "test"]],
-    ),
+    ("virtx-node", "virtx-node", &[&["npm", "test"]]),
 ];
 
 /// How a suite of `test_all` ended.
@@ -1540,9 +1686,10 @@ fn fixture_servers() -> Options {
     }
 }
 
-/// Everything [`test_all`] compiles, compiled the same way and run not at all: the crates'
-/// tests, the fixture's servers and the packages' cargo tests. It takes no guest kernel, so CI
-/// does it while the kernel is still being built elsewhere.
+/// Everything [`test_all`] compiles and installs, the same way, and nothing run: the crates'
+/// tests, the fixture's servers and abin (unless `XTASK_ABIN_BUILT` says abin comes built), the
+/// packages' cargo tests, the library the packages open, and the bindings' packages. It takes
+/// no guest kernel, so CI does it while the kernel is still being built elsewhere.
 fn compile_tests() -> anyhow::Result<()> {
     if let Some(why) = servers_unready()? {
         bail!("{why} -- `cargo xtask init` readies the servers");
@@ -1553,7 +1700,11 @@ fn compile_tests() -> anyhow::Result<()> {
             &format!("the tests of {name}"),
         )?;
     }
-    compile_servers(&fixture_servers())?;
+    let servers = fixture_servers();
+    compile_servers(&servers)?;
+    if env::var_os(ABIN_BUILT).is_none() {
+        abin::build(servers.debug, &servers.out().join("abin"))?;
+    }
     for (name, _, commands) in PACKAGES {
         for argv in commands
             .iter()
@@ -1563,6 +1714,15 @@ fn compile_tests() -> anyhow::Result<()> {
             args.extend(&argv[2..]);
             cargo_in_root(&args, &format!("the tests of {name}"))?;
         }
+    }
+    build_test_library()?;
+    for (dir, argv, ..) in INSTALLS {
+        // As the bindings' lint is: left out, saying so, but under CI.
+        if !on_path(argv[0]) && env::var_os("CI").is_none() {
+            eprintln!("xtask: {dir}'s packages left out: no {} on PATH", argv[0]);
+            continue;
+        }
+        install_binding(dir, true)?;
     }
     eprintln!("xtask: compiled, nothing run");
     Ok(())
@@ -1594,31 +1754,37 @@ fn test_all() -> anyhow::Result<()> {
 
     let fixture = match &unready {
         Some(why) => Err(Outcome::Skipped(why.clone())),
-        None => Fixture::start().map_err(|e| Outcome::Failed(format!("the fixture: {e:#}"))),
+        None => build_test_library()
+            .and_then(|()| Fixture::start())
+            .map_err(|e| Outcome::Failed(format!("the fixture: {e:#}"))),
     };
     for (name, dir, commands) in PACKAGES {
         let outcome = match &fixture {
             Err(Outcome::Skipped(why)) => Outcome::Skipped(why.clone()),
             Err(Outcome::Failed(why)) => Outcome::Failed(why.clone()),
             Err(Outcome::Passed) => unreachable!("the fixture started"),
-            Ok(fixture) => {
-                let mut outcome = Outcome::Passed;
-                for argv in *commands {
-                    let ran = Command::new(argv[0])
-                        .args(&argv[1..])
-                        .envs(fixture.vars())
-                        .current_dir(root_path().join(dir))
-                        .status();
-                    let why = match ran {
-                        Ok(status) if status.success() => continue,
-                        Ok(status) => format!("`{}` {status}", argv.join(" ")),
-                        Err(e) => format!("`{}` did not run: {e}", argv.join(" ")),
-                    };
-                    outcome = Outcome::Failed(why);
-                    break;
+            Ok(fixture) => match install_binding(dir, false) {
+                Err(e) => Outcome::Failed(format!("installing its packages: {e:#}")),
+                Ok(()) => {
+                    let mut outcome = Outcome::Passed;
+                    for argv in *commands {
+                        let ran = Command::new(argv[0])
+                            .args(&argv[1..])
+                            .envs(fixture.vars())
+                            .env(LIBRARY_ENV, test_library())
+                            .current_dir(root_path().join(dir))
+                            .status();
+                        let why = match ran {
+                            Ok(status) if status.success() => continue,
+                            Ok(status) => format!("`{}` {status}", argv.join(" ")),
+                            Err(e) => format!("`{}` did not run: {e}", argv.join(" ")),
+                        };
+                        outcome = Outcome::Failed(why);
+                        break;
+                    }
+                    outcome
                 }
-                outcome
-            }
+            },
         };
         outcomes.push((name, outcome));
     }
@@ -1667,7 +1833,7 @@ impl Fixture {
         // `XTASK_ABIN_BUILT` says the ones there were built from this tree already (CI hands
         // them on from the job that built them).
         let abin = options.out().join("abin");
-        if env::var_os("XTASK_ABIN_BUILT").is_some() && abin.is_dir() {
+        if env::var_os(ABIN_BUILT).is_some() && abin.is_dir() {
             eprintln!("xtask: abin as built already, in {}", abin.display());
         } else {
             abin::build(options.debug, &abin)?;

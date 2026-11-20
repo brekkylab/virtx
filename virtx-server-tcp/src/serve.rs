@@ -1,8 +1,8 @@
-//! The server's routes, for an [`Access`]: the endpoints of `virtx-core`'s `PROTOCOL.md`
-//! ([`crate::endpoints`]), each answered from the home its request reaches, the images as an
-//! OCI registry, and each sandbox's ports. A server built on this one gives [`router`] an
-//! authenticator of its own in the access, and routes of its own beside these; the server a
-//! config alone makes is [`configured`], which does both.
+//! The server's routes, for an [`Access`]: the endpoints of the protocol ([`crate::endpoints`]),
+//! each answered from the home its request reaches, the images as an OCI registry, and each
+//! sandbox's ports. A server built on this one gives [`router`] an authenticator of its own in the
+//! access, and routes of its own beside these; the server a config alone makes is [`configured`],
+//! which does both.
 //!
 //! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
@@ -1170,9 +1170,9 @@ mod tests {
         assert_eq!(told.pulled.lock().unwrap().len(), 2);
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
-    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
-    /// and a path whose segment does not read as one is `400` `invalid`.
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client reads
+    /// its code: a body over the server's limit is `413` `too_large`, naming the limit, and a path
+    /// whose segment does not read as one is `400` `invalid`.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
         let served = Served::spawn("envelope").await;
@@ -2093,5 +2093,68 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert_eq!(*beyond.removed.lock().unwrap(), ["moved"]);
         assert!(!dir.join("moved.ext4").exists() && !dir.join("moved.json").exists());
+    }
+
+    /// A home's sandboxes, as a server built on this one reads them for routes of its own: each
+    /// found by its id, and counted with how many have their machine up, none while each is
+    /// parked; one not known again is none of them, and counted apart.
+    #[tokio::test]
+    async fn a_home_s_sandboxes_are_found_and_counted() {
+        let access = Arc::new(OnceLock::new());
+        let kept = Arc::clone(&access);
+        let served = Served::spawn_over("counted", async move |home| {
+            let projects = TcpMembership::new(home);
+            let tester = Principal::new("tester");
+            projects.create(&tester, "demo").await.unwrap();
+            let store = ProjectStore::new(home);
+            let made = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            let made = Arc::new(made);
+            let _ = kept.set(Arc::clone(&made));
+            super::router(made, axum::Router::new())
+        })
+        .await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = format!("sha256:{}", "0".repeat(64));
+        for (id, image) in [("a", &digest), ("b", &digest), ("lost", &gone)] {
+            let image = json!({ "type": "digest", "digest": image });
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let record = json!({ "args": { "image": image } });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        let (status, _) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let home = access.get().unwrap().homes().pop().unwrap();
+
+        let sandboxes = home.sandboxes();
+        let counts = |known, up, unknown| crate::endpoints::Counts { known, up, unknown };
+        assert_eq!(sandboxes.counts(), counts(2, 0, 1));
+        let mut listed: Vec<_> = sandboxes
+            .list()
+            .iter()
+            .map(|sandbox| sandbox.id().to_owned())
+            .collect();
+        listed.sort();
+        assert_eq!(listed, ["a", "b"]);
+        assert_eq!(sandboxes.get("a").unwrap().id(), "a");
+        assert!(sandboxes.get("lost").is_none(), "not known again");
+        assert!(sandboxes.get("none").is_none());
+        assert!(sandboxes.running_on("a").is_none(), "parked");
+
+        let (status, _) = served.send("DELETE", "sandboxes/b", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(home.sandboxes().counts(), counts(1, 0, 1));
+        assert!(home.sandboxes().get("b").is_none());
     }
 }

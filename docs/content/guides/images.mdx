@@ -196,11 +196,11 @@ An image built on your machine can go to a server without a registry in between.
 ```python
 from virtx import BearerAuth, Client
 
-with Client.spawn() as local:
+async with Client.spawn() as local:
     async for _ in local.download_image("jq:latest", "jq.tar"):
         pass
 
-with Client.connect(
+async with Client.connect(
     "https://virtx.example.com", BearerAuth("<token>")
 ) as remote:
     async for _ in remote.upload_image("jq.tar", "jq:latest"):

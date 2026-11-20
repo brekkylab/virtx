@@ -1,5 +1,5 @@
-//! How a client reaches a server's endpoints, as `PROTOCOL.md`'s Transport says: HTTP over TCP,
-//! or one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
+//! How a client reaches a server's endpoints, as the protocol's Transport says: HTTP over TCP, or
+//! one HTTP/2 connection over the server's stdin and stdout; and what every endpoint's client
 //! shares on it: a JSON request and its refusal ([`http`]), a job's log as an event stream
 //! ([`sse`], whose server end keeps the log too), and the files of a volume or a sandbox over
 //! WebDAV ([`webdav`]); and, on the server's end, a request's body read as its args ([`args`]).

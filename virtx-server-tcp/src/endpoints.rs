@@ -1240,10 +1240,24 @@ fn created(location: String, value: &impl Serialize) -> Response {
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 /// A request's refusal: its status, and the `code` and `message` of its body.
-pub struct Refused(StatusCode, &'static str, String);
+/// A refusal: its status, `code` and `message`, and the members its error has beside them.
+pub struct Refused(
+    StatusCode,
+    &'static str,
+    String,
+    serde_json::Map<String, serde_json::Value>,
+);
 
 pub fn refused(status: StatusCode, code: &'static str, message: impl Display) -> Refused {
-    Refused(status, code, message.to_string())
+    Refused(status, code, message.to_string(), serde_json::Map::new())
+}
+
+impl Refused {
+    /// It with `name` beside its `code` and `message`.
+    fn with(mut self, name: &str, value: impl Into<serde_json::Value>) -> Refused {
+        self.3.insert(name.to_owned(), value.into());
+        self
+    }
 }
 
 fn invalid(message: impl Display) -> Refused {
@@ -1274,8 +1288,10 @@ fn internal(message: impl Display) -> Refused {
 
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
-        let Refused(status, code, message) = self;
-        let body = serde_json::json!({"error": {"code": code, "message": message}});
+        let Refused(status, code, message, members) = self;
+        let mut error = serde_json::json!({"code": code, "message": message});
+        error.as_object_mut().unwrap().extend(members);
+        let body = serde_json::json!({ "error": error });
         (status, json(&body)).into_response()
     }
 }
@@ -1371,8 +1387,11 @@ impl From<SandboxError> for Refused {
             SandboxError::NotStarted(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "not_started", e)
             }
-            SandboxError::Ended | SandboxError::JobEnded(_) | SandboxError::StdinCut { .. } => {
+            SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
+            }
+            SandboxError::StdinCut { bytes, .. } => {
+                refused(StatusCode::CONFLICT, "ended", e).with("written", bytes)
             }
             SandboxError::Image(e) => e.into(),
             SandboxError::Io { ref source, .. } => internal(io_failure(source, &e)),
@@ -1459,5 +1478,33 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["message"], "the server's projects failed");
+    }
+
+    /// A write its process closed its stdin under part-way is `409`, `ended`, with how much of
+    /// it went in as `written`; no other refusal carries it.
+    #[tokio::test]
+    async fn a_write_cut_part_way_says_how_much_went_in() {
+        let answered = async |refusal: Refused| {
+            let response = refusal.into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let cut = answered(SandboxError::StdinCut { bytes: 5, of: 9 }.into()).await;
+        assert_eq!(
+            cut,
+            serde_json::json!({"error": {
+                "code": "ended",
+                "message": "the job's stdin closed after 5 of the 9 bytes written to it",
+                "written": 5,
+            }})
+        );
+        let ended = answered(SandboxError::JobEnded("the job has ended").into()).await;
+        assert_eq!(
+            ended,
+            serde_json::json!({"error": {"code": "ended", "message": "the job has ended"}})
+        );
     }
 }

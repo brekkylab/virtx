@@ -103,7 +103,7 @@ A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cm
 | `complete(print)` | `int` | Follows it to its end, printing its output if `print`, and answers its exit code. |
 | `log(after)` | a `LogEntry` at a time | Its output, from its start or after entry `after`, until its end. |
 | `signal(signal)` | `None` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
-| `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. |
+| `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. A write its process closed its stdin under part-way raises `409`, `ended`, its `written` how many bytes went in. |
 | `remove()` | `None` | Kills its process if it runs, and forgets the job. |
 
 Code that holds only ids gets the job back with `get_sandbox(id)`, then its `job(id)`.
@@ -141,7 +141,8 @@ Its `source` says where it failed, and `status` the HTTP status when the server 
 
 Where the server answered its refusal as the protocol does, `code` is the protocol's code for it, such as `not_found` or `in_use`, and otherwise none.
 Tell errors apart by `source`, `status` and `code`, not by the message.
-In Rust, `source_kind()` answers the `Source`, `status()` the status and `code()` the code.
+A write to a job's stdin that its process closed the stdin under part-way also has `written`, how many bytes of it went in; every other error has none.
+In Rust, `source_kind()` answers the `Source`, `status()` the status, `code()` the code and `written()` that count.
 
 A request the server turns away for now, such as `503` `capacity` while it has no room for a sandbox, is sent again after the wait the server asks for, for up to 30 seconds, before the call fails with it.
 A `429` `quota` for a limit that frees up only as you close or delete something, such as the sandboxes you have, fails at once.

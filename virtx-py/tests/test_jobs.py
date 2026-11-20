@@ -108,6 +108,17 @@ async def test_stdin_written_comes_back_until_it_is_closed(client: Client) -> No
     await cat.write_stdin(eof=True)
     log = [entry.entry async for entry in cat.log()]
     assert log == [Stdout("a"), Stdout("b"), SandboxJobEnd(0)]
+
+    # Its process closes its stdin under a write: refused, saying how much of it went in.
+    cut = await sandbox.exec(["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"], stdin=True)
+    of = 1 << 20
+    with pytest.raises(VirtxError) as refused:
+        await cut.write_stdin("x" * of)
+    assert (refused.value.status, refused.value.code) == (409, "ended")
+    assert refused.value.written is not None and 0 < refused.value.written < of
+    with pytest.raises(VirtxError) as after:
+        await cut.write_stdin("x")
+    assert (after.value.code, after.value.written) == ("ended", None)
     await sandbox.remove()
 
 

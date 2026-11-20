@@ -81,6 +81,20 @@ describe('against virtx-stdio', () => {
         log.filter((entry) => 'stdout' in entry).map((entry) => entry.stdout),
         ['one', 'two'],
       )
+
+      // Its process closes its stdin under a write: refused, saying how much of it went in.
+      const cut = await sandbox.exec(['sh', '-c', 'head -c 1 >/dev/null; exec 0<&-; sleep 300'], {
+        stdin: true,
+      })
+      const of = 1 << 20
+      const refused = await cut.writeStdin('x'.repeat(of)).then(
+        () => assert.fail('a write its stdin closed under is refused'),
+        (error) => error,
+      )
+      assert.ok(refused instanceof virtx.VirtxError)
+      assert.deepEqual([refused.status, refused.code], [409, 'ended'])
+      assert.ok(refused.written > 0 && refused.written < of, `${refused.written} of ${of}`)
+      await assert.rejects(cut.writeStdin('x'), { code: 'ended', written: null })
     } finally {
       await sandbox.remove()
     }

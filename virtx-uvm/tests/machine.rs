@@ -232,13 +232,18 @@ impl Limit {
 /// file, opened as libkrun would -- and served only under a test's home with a `serve` file in
 /// it, as an embedder serves some disks and not others. What each is served from and when its
 /// machine booted noted in `marks/` beside the test's `sandbox/`, how many are served counted,
-/// and those removed noted.
+/// and those served, made whole and forgotten noted; made whole refused under a test's home with
+/// a `whole-fails` file in it.
 struct Embedded;
 
 /// How many sandbox disks are served now, each while its machine is up.
 static SERVING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// The disks forgotten, as their sandboxes went.
+/// The disks forgotten, as their sandboxes went or as each was grown.
 static FORGOTTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// The disks served, each with how long its file was then.
+static SERVED: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+/// The disks made whole, each with how long its file was then.
+static WHOLE: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
 
 /// A disk served, until it drops.
 struct Serving;
@@ -285,6 +290,8 @@ impl Disks for Embedded {
         {
             return Ok(None);
         }
+        let len = std::fs::metadata(disk)?.len();
+        SERVED.lock().unwrap().push((disk.to_owned(), len));
         SERVING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Some((mark(disk, "source"), Box::new(Serving))))
     }
@@ -298,6 +305,16 @@ impl Disks for Embedded {
         let source = source.map(|source| source.to_str().unwrap().to_owned());
         std::fs::write(mark(disk, "opened"), source.unwrap_or_default())?;
         Ok(Some(Arc::new(Opened(disk.to_owned()))))
+    }
+
+    fn whole(&self, disk: &Path) -> std::io::Result<()> {
+        let len = std::fs::metadata(disk)?.len();
+        WHOLE.lock().unwrap().push((disk.to_owned(), len));
+        let home = disk.parent().unwrap().parent().unwrap();
+        if home.join("whole-fails").exists() {
+            return Err(std::io::Error::other("not made whole"));
+        }
+        Ok(())
     }
 
     fn forget(&self, disk: &Path) -> std::io::Result<()> {
@@ -1822,6 +1839,72 @@ async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
     close(sandbox).await;
 }
 
+/// A sandbox's disk is made all its file by the embedder's disks before it is grown, and
+/// forgotten by them once it is, and served as grown; one they fail to make whole is left as it
+/// was.
+async fn a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown(home: Home) {
+    std::fs::write(home.root.join("serve"), "").unwrap();
+    let mut args = small();
+    args.disk_gib = Some(1);
+    let sandbox = home.sandbox(&args, None).await;
+    let disk = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    let made_whole = || -> Vec<u64> {
+        let whole = WHOLE.lock().unwrap();
+        whole
+            .iter()
+            .filter(|(d, _)| *d == disk)
+            .map(|(_, len)| *len)
+            .collect()
+    };
+    let forgotten = || {
+        FORGOTTEN
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| **d == disk)
+            .count()
+    };
+    let served_last = || -> u64 {
+        let served = SERVED.lock().unwrap();
+        served.iter().rev().find(|(d, _)| *d == disk).unwrap().1
+    };
+    let len = || std::fs::metadata(&disk).unwrap().len();
+    let resize = |disk_gib| SandboxResizeArgs {
+        disk_gib: Some(disk_gib),
+        ..SandboxResizeArgs::default()
+    };
+    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await
+        .unwrap();
+
+    // Booted again with nothing to grow: nothing asked of the embedder.
+    sandbox.park().await.unwrap();
+    run(&sandbox, &["true"], None).await.unwrap();
+    assert_eq!(made_whole(), Vec::<u64>::new());
+
+    // Not made whole: not grown, and booted on as it was.
+    std::fs::write(home.root.join("whole-fails"), "").unwrap();
+    sandbox.resize(&resize(2)).await.unwrap();
+    sandbox.park().await.unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert_eq!(made_whole(), [1 << 30]);
+    assert_eq!((len(), forgotten()), (1 << 30, 0));
+
+    // Made whole as it was, then grown, then forgotten.
+    std::fs::remove_file(home.root.join("whole-fails")).unwrap();
+    sandbox.park().await.unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert_eq!(made_whole(), [1 << 30, 1 << 30]);
+    assert_eq!((len().div_ceil(1 << 30), forgotten()), (2, 1));
+    assert_eq!(served_last(), len(), "served as grown");
+    close(sandbox).await;
+}
+
 async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home) {
     // A public address by number, so no name has to resolve: Google's DNS, over HTTPS.
     let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
@@ -2753,6 +2836,7 @@ fn main() -> ExitCode {
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
         a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
+        a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,

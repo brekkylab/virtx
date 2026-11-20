@@ -22,10 +22,10 @@ pub type Held = Box<dyn Send + Sync>;
 
 /// What a sandbox's upper disk is, past its file.
 pub trait Disks: Send + Sync {
-    /// In the server's process, as a sandbox's machine is about to boot over the disk at `disk`:
-    /// what the machine fetches the disk's data from while it runs -- a path it is given, such
-    /// as a socket -- and what answers there, held until the machine is down. `None` for a disk
-    /// all in its file.
+    /// In the server's process, as a sandbox's machine is about to boot over the disk at `disk`,
+    /// grown first where it was to be ([`whole`](Disks::whole)): what the machine fetches the
+    /// disk's data from while it runs -- a path it is given, such as a socket -- and what
+    /// answers there, held until the machine is down. `None` for a disk all in its file.
     fn serve(&self, disk: &Path) -> io::Result<Option<(PathBuf, Held)>> {
         let _ = disk;
         Ok(None)
@@ -39,10 +39,19 @@ pub trait Disks: Send + Sync {
         Ok(None)
     }
 
+    /// In the server's process, its machine down: the disk at `disk` all in its file, about to
+    /// be read whole and written again there -- grown, as a sandbox's disk is at the boot after
+    /// it was resized larger. A failure leaves the disk as it was, not grown.
+    fn whole(&self, disk: &Path) -> io::Result<()> {
+        let _ = disk;
+        Ok(())
+    }
+
     /// In the server's process: the disk at `disk` removed with its sandbox, or as one left
-    /// over: whatever beside it says what it is goes with it. Called once the disk's file is
-    /// gone, as the sandbox's disk is dropped, where there is no one to answer to: a failure is
-    /// logged and nothing more, and what the embedder kept for the disk is its own to remove.
+    /// over, or written again whole ([`whole`](Disks::whole)): whatever beside it says what it
+    /// was goes with it. Called once the disk's file is gone or new, where there is no one to
+    /// answer to: a failure is logged and nothing more, and what the embedder kept for the disk
+    /// is its own to remove.
     fn forget(&self, disk: &Path) -> io::Result<()> {
         let _ = disk;
         Ok(())

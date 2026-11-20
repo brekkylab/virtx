@@ -721,7 +721,7 @@ mod tests {
     }
 
     /// A sandbox is found by its name in `?name=`, encoded; of what a server answers, only one
-    /// named so is taken.
+    /// named so is taken, and two named so are refused.
     #[tokio::test]
     async fn a_sandbox_is_found_by_its_name_encoded() {
         use axum::extract::RawQuery;
@@ -736,6 +736,8 @@ mod tests {
                 Json(json!([
                     {"id": "s1", "image": "sha256:00", "running": true},
                     {"id": "s2", "name": "a b&c", "image": "sha256:00", "running": true},
+                    {"id": "s3", "name": "twice", "image": "sha256:00", "running": true},
+                    {"id": "s4", "name": "twice", "image": "sha256:00", "running": true},
                 ]))
             }
         };
@@ -748,11 +750,14 @@ mod tests {
         assert_eq!(found.map(|s| s.id).as_deref(), Some("s2"));
         let found = crate::sandbox::client::find(&client, "s1").await.unwrap();
         assert_eq!(found, None);
+        let twice = crate::sandbox::client::find(&client, "twice").await;
+        assert!(matches!(twice, Err(crate::Error::Client(_))), "{twice:?}");
         assert_eq!(
             *asked.lock().unwrap(),
             [
                 Some("name=a%20b%26c".to_owned()),
-                Some("name=s1".to_owned())
+                Some("name=s1".to_owned()),
+                Some("name=twice".to_owned())
             ]
         );
     }

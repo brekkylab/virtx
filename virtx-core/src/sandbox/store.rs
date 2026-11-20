@@ -134,7 +134,8 @@ impl SandboxCreateArgs {
         }
     }
 
-    /// Named `name`, which finds it again.
+    /// Named `name`, which finds it again: letters, digits, `.`, `_` and `-`, not starting with
+    /// `.` or `-`, at most 128, or it is refused `400`.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self

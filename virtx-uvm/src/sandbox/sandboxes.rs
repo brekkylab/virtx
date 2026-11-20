@@ -201,6 +201,12 @@ impl Sandboxes {
                 spec.port
             )));
         }
+        if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
+            return Err(Error::Invalid(format!(
+                "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
+                 starting with '.' or '-', 128 at most"
+            )));
+        }
         let spec = spec_of(&args)?;
         match args.disk_gib {
             Some(0) => {

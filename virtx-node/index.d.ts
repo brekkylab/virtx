@@ -451,7 +451,7 @@ export interface InboundRule {
 
 /** Whatever is left out the server picks. */
 export interface SandboxCreateOptions {
-  /** A name to find it again by, with `findSandbox`, rather than keeping its id; one another sandbox has is refused with `409`. */
+  /** A name to find it again by, with `findSandbox`, rather than keeping its id: letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128, or it is refused with `400`; one another sandbox has is refused with `409`. */
   name?: string
   network?: boolean
   /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev', protocol: 'http' }]`. */

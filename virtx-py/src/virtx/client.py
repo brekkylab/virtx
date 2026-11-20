@@ -495,12 +495,13 @@ class Client:
         """Make a sandbox of ``image``, running, with ``volumes`` mounted into it, each a
         ``SandboxVolume``. It is kept, with what it wrote, until ``Sandbox.remove``: the server
         may stop its VM while nothing uses it, and boots it again for the next job or write to
-        its files; its files are read from its disk meanwhile. ``name`` finds it again with ``find_sandbox``. ``ports`` are ports in it to
-        open -- a number for TCP, or a ``PortSpec`` to say what it is for, whether it is HTTP and
-        whom it lets in -- each
-        answered here only with the ``url`` it is reached by. ``abins`` names virtx's programs it
-        gets at ``/abin``, each with its ``SKILL.md`` at ``/abin/skills/{name}/``. Whatever is
-        left out the server picks.
+        its files; its files are read from its disk meanwhile. ``name`` finds it again with
+        ``find_sandbox``: letters, digits, ``.``, ``_`` and ``-``, not starting with ``.`` or ``-``,
+        at most 128, or it is refused with ``400``; one another sandbox has is refused with
+        ``409``. ``ports`` are ports in it to open -- a number for TCP, or a ``PortSpec`` to say
+        what it is for, whether it is HTTP and whom it lets in -- each answered here only with
+        the ``url`` it is reached by. ``abins`` names virtx's programs it gets at ``/abin``, each
+        with its ``SKILL.md`` at ``/abin/skills/{name}/``. Whatever is left out the server picks.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""

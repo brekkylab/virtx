@@ -306,7 +306,7 @@ Its disk lasts until the sandbox is deleted: the server MAY [park](#parking) its
 A sandbox is `{id, name?, image, running, abins?, error?}`, and in the answer to its `POST`, `ports` too:
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
-- `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
+- `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. It is letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 characters, as a volume's, compared as written, so case counts; any other is refused with `400`, `invalid`. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM is parked is `true`.
 - `disk_gib` is how much it may write to its root filesystem over its image, in GiB. Without it the server picks it, and `0` is refused.
 - `network` is whether its processes reach a network at all, and is `true` without it.

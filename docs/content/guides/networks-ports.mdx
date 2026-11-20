@@ -68,6 +68,7 @@ How the forwarding works depends on where the server runs:
 
 Because everything goes through the server's own HTTP address, the server's machine needs no other port open.
 The `url` holds the credentials for its port, so keep it secret.
+It is answered once, by `create_sandbox`: a sandbox found again with `get_sandbox`, `list_sandbox` or `find_sandbox` comes without its ports, so a program that reaches a port later keeps its `url` itself.
 
 In the example below, the sandbox opens port 8000 and runs an HTTP server on it, and the forwarder makes it reachable at a local address that a browser or `curl` can open:
 

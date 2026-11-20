@@ -9,7 +9,7 @@ Node.js uses the same names in camelCase, such as `createSandbox` for `create_sa
 What a call returns, once awaited where it is async, is named as Python has it.
 The types share their names in all three: `list[Sandbox]` is `Sandbox[]` in Node.js, inside a `Promise`, and `Vec<Sandbox>` in Rust, inside a `Result`.
 
-A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Follow a job](/docs/guides/running-commands/#follow-a-job) in Running commands.
 In Rust, `complete` is the job's, after awaiting the call.
 Its log, like a job's `log`, yields a `LogEntry` at a time.
 `download_image` and `upload_image` yield `Progress` events, then one event carrying their output.
@@ -20,7 +20,6 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 | --- | --- | --- |
 | `Client.spawn(program, args)` | `Client` | Starts a server as a child process and talks to it over its stdin and stdout. Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`. |
 | `Client.connect(url, auth, project, headers)` | `Client` | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`. A token, given as `auth` or as an `Authorization` header, is sent over plain `http` only to this machine's loopback. |
-| `Client.from_env()` | `Client` | Reaches virtx cloud, or the server `VIRTX_URL` names, as its [environment variables](#environment-variables) say: with `VIRTX_API_KEY`, as that key, which is one project's; with `VIRTX_PROJECT` and no key, as the person `virtx login` signed in, running `virtx token --json` for each token, every request in that project. Node.js calls it `fromEnv`. |
 | `set_auth(auth)`, `set_headers(headers)`, `set_project(project)` | `None` | Replace what every later request sends. `set_auth` and `set_headers` refuse a token that `connect` would, and what was sent stays as it was. Without a project, a request is in its user's own, `default`. |
 | `clone()` | `Client` | Another hold of the same session. |
 | `close()` | `None` | Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop. |
@@ -82,11 +81,12 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. Iterated before it is awaited, the job is started and its log read as one request where the server answers so. In Rust, `exec_with_log(args)` yields the job, then its log. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
+| `resize(vcpus, memory_mib, disk_gib)` | `SandboxResources` | Its vCPUs and memory from its VM's next boot on, its VM stopped now if nothing uses it and refused `409` if something does; its disk grown, never shrunk, at its VM's next boot, stopping nothing. Answers `vcpus`, `memory_mib`, `disk_gib` and `up`, whether its VM is up now. See [Resize a sandbox](/docs/guides/setting-sandboxes/#resize-a-sandbox). |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.
 
-In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image`, `running` and `ports`.
+In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image`, `running` and `ports`, and `resize` takes a `SandboxResizeArgs`, chained from `SandboxResizeArgs::default()`.
 
 A port in `create_sandbox`'s `ports` is a number, for TCP, or a `PortSpec(port, label, protocol, inbound)`; in Node.js, `{ port, label?, protocol?, inbound? }`.
 Each comes back as a `SandboxPort`: its `port` and `url`, its `label` and `protocol` as given, an `address` where the server gives a TCP port one, and an `inbound_error` where it opened one whose rules it could not set.
@@ -101,7 +101,7 @@ A job is a sandbox's process, from `exec`, or an image's build, pull or push.
 
 ### Sandbox jobs
 
-A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Running commands](/docs/guides/running-commands/#set-a-timeout) says, or `restarted`, for one that ran when its server restarted, keeping its sandbox.
+A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Set a timeout](/docs/guides/running-commands/#set-a-timeout) in Running commands says, or `restarted`, for one that ran when its server restarted, keeping its sandbox.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -211,11 +211,7 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_HOME` | `spawn`, CLI | Where virtx keeps what it fetches on this machine. |
 | `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP when neither `--host` nor `--server` is given. |
 | `VIRTX_TOKEN` | CLI | The bearer token sent to the server reached over HTTP, at `--host` or `VIRTX_HOST`. |
-| `VIRTX_PROJECT` | `from_env`, CLI | The project the requests belong to; for the CLI, when `--project` is not given. With it and no `VIRTX_API_KEY`, `from_env` authenticates as the person `virtx login` signed in; for virtx cloud it is a project's ID. |
-| `VIRTX_URL` | `from_env` | A server's base URL, reached in place of virtx cloud. |
-| `VIRTX_API_KEY` | `from_env` | An API key of virtx cloud, sent as the bearer token. |
-| `VIRTX_REGION` | `from_env` | Without `VIRTX_URL`, the region of virtx cloud to reach, at `https://<VIRTX_REGION>.api.<VIRTX_DOMAIN>`. Without it, the region nearest this machine, when `VIRTX_API_KEY` or `VIRTX_PROJECT` is set. |
-| `VIRTX_DOMAIN` | `from_env`, CLI | Where virtx cloud is, when `--domain` is not given; `virtx.sh` by default. |
+| `VIRTX_PROJECT` | CLI | The project the requests belong to, when `--project` is not given. |
 | `VIRTX_OIDC_ISSUER`, `VIRTX_OIDC_CLIENT_ID` | CLI | The provider `virtx login` signs in to and the client it signs in as, when `--issuer` and `--client-id` are not given. See [Signing in](/docs/reference/cli/#signing-in). |
 | `VIRTX_OIDC_CLIENT_SECRET` | CLI | That client's secret, for a provider that gives its public clients one, when `--client-secret` is not given. |
 | `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. Five minutes by default. |

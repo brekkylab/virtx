@@ -216,6 +216,15 @@ pub(crate) async fn put<T: DeserializeOwned>(
     read(&send(client, Method::PUT, path, Some(body)).await?)
 }
 
+/// What `PATCH path` with `body` answers.
+pub(crate) async fn patch<T: DeserializeOwned>(
+    client: &TransportClient,
+    path: &str,
+    body: &impl Serialize,
+) -> Result<T, Error> {
+    read(&send(client, Method::PATCH, path, Some(body)).await?)
+}
+
 /// `DELETE path`, answered with nothing.
 pub(crate) async fn delete(client: &TransportClient, path: &str) -> Result<(), Error> {
     send(client, Method::DELETE, path, None::<&()>)

@@ -62,6 +62,21 @@ pub struct MachineConfig {
     /// [`network`](MachineSpec::network).
     #[serde(default)]
     pub ports: Vec<u16>,
+
+    /// Whether [`upper`](Self::upper) is a sandbox's disk, opened in the machine's process
+    /// through the embedder's [`Disks`](crate::disks::Disks). `None`, as a build's is: its file
+    /// alone.
+    #[serde(default)]
+    pub sandbox_disk: Option<SandboxDisk>,
+}
+
+/// A sandbox's upper disk, as its machine is handed it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxDisk {
+    /// What the machine fetches the disk's data from while it runs, as
+    /// [`Disks::serve`](crate::disks::Disks::serve) answered: `None` for a disk all in its
+    /// file.
+    pub source: Option<PathBuf>,
 }
 
 /// Make an empty upper disk at `path`, where nothing is yet, that may grow to `gib` GiB: a
@@ -76,6 +91,33 @@ pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
         return Err(e.into());
     }
     Ok(())
+}
+
+/// Grow the upper disk at `path`, which no machine runs over, to `gib` GiB, with what is on it
+/// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
+/// no room to grow in place, which a kernel will not grow either -- is read whole and written
+/// again at the new size: at `part`, moved over it once whole, so a failure leaves it as it
+/// was. Each file is read whole, its holes too, so a file larger than the disk could hold is
+/// refused, and the new disk takes on the host what its files are long, not `gib`.
+pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
+    let size = u64::from(gib) << 30;
+    let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);
+    if std::fs::metadata(path).map_err(read)?.len() >= size {
+        return Ok(());
+    }
+    let tree = FsTree::from_ext4(io::BufReader::new(File::open(path).map_err(read)?))?;
+    let _ = std::fs::remove_file(part);
+    let written = File::create_new(part)
+        .map_err(|e| Error::io(format!("creating {}", part.display()), e))
+        .and_then(|file| Ok(tree.to_ext4(sparse(file), size)?))
+        .and_then(|()| {
+            std::fs::rename(part, path)
+                .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(part);
+    }
+    written
 }
 
 /// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not an
@@ -159,6 +201,9 @@ pub struct Machine {
     io: mpsc::Sender<IoJob>,
     /// Where on this host's loopback each of its [`ports`](MachineConfig::ports) is reached.
     pub published: Vec<(u16, SocketAddr)>,
+    /// What the embedder serves its disk with ([`Disks::serve`](crate::disks::Disks::serve)),
+    /// held until its process has been killed and waited for.
+    held: Option<crate::disks::Held>,
 }
 
 impl Drop for Machine {
@@ -170,6 +215,12 @@ impl Drop for Machine {
 }
 
 impl Machine {
+    /// This, holding `held` until it is dropped: once its process has ended.
+    pub(crate) fn holding(mut self, held: Option<crate::disks::Held>) -> Machine {
+        self.held = held;
+        self
+    }
+
     /// Boot `config` in a process of its own, and answer once the guest takes commands.
     ///
     /// The process is `cmd` -- a program and its arguments -- with the machine's boot args
@@ -230,6 +281,7 @@ impl Machine {
                         ctrlout: Mutex::new(ctrlout),
                         io: files(ioin, ioout),
                         published,
+                        held: None,
                     });
                 }
                 Some(CtrlResp::Log { message, .. }) => {
@@ -288,6 +340,51 @@ impl Machine {
         .map_err(|e| Error::io("sending the signal", e))
     }
 
+    /// Have the guest put what it has written on its disks: answered by a
+    /// [`Synced`](CtrlResp::Synced) from [`recv`](Machine::recv).
+    pub fn sync(&self) -> Result<()> {
+        wire::send(&mut *self.ctrlin.lock().unwrap(), &CtrlReq::Sync)
+            .map_err(|e| Error::io("asking the guest to sync", e))
+    }
+
+    /// Pause the machine -- its vCPUs and its devices, its whole process -- until what this
+    /// answers drops: its disks are left as they are meanwhile, to be copied whole. Its process
+    /// is neither stopped nor killed meanwhile: [`stop`](Machine::stop) and
+    /// [`kill`](Machine::kill) wait. Refused once its process has ended.
+    pub fn pause(&self) -> Result<Paused<'_>> {
+        let mut process = self.process.lock().unwrap();
+        // Waited for already, or ended: its pid may be another process's by now.
+        match process.try_wait() {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                let ended = io::Error::other("its process has ended");
+                return Err(Error::io("pausing the machine", ended));
+            }
+            Err(e) => return Err(Error::io("pausing the machine", e)),
+        }
+        #[cfg(unix)]
+        {
+            // SAFETY: a signal to this machine's own process, not waited for above, and not
+            // reaped while its lock is held.
+            if unsafe { libc::kill(process.id() as libc::pid_t, libc::SIGSTOP) } == -1 {
+                return Err(Error::io("pausing the machine", io::Error::last_os_error()));
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            // SAFETY: this machine's own process's handle, open for as long as `process` is.
+            let status = unsafe { NtSuspendProcess(process.as_raw_handle()) };
+            if status < 0 {
+                return Err(Error::io(
+                    "pausing the machine",
+                    io::Error::other(format!("NTSTATUS {status:#x}")),
+                ));
+            }
+        }
+        Ok(Paused(process))
+    }
+
     /// Have the guest put what it has written on its disks and end, killing it if it has not
     /// by [`STOP_TIMEOUT`], and answer once its process has ended and let go of what it held,
     /// so [`recv`](Machine::recv) ends.
@@ -342,6 +439,34 @@ impl Machine {
             .ok()
             .flatten()
     }
+}
+
+/// A machine paused by [`Machine::pause`], resumed as this drops.
+pub struct Paused<'a>(std::sync::MutexGuard<'a, Child>);
+
+impl Drop for Paused<'_> {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // SAFETY: as in `pause`.
+            unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGCONT) };
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle as _;
+            // SAFETY: as in `pause`.
+            unsafe { NtResumeProcess(self.0.as_raw_handle()) };
+        }
+    }
+}
+
+// Every thread of a process suspended, or resumed, at once, as `SIGSTOP` and `SIGCONT` do:
+// exported by ntdll alone.
+#[cfg(windows)]
+#[link(name = "ntdll", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn NtSuspendProcess(process: std::os::windows::io::RawHandle) -> i32;
+    fn NtResumeProcess(process: std::os::windows::io::RawHandle) -> i32;
 }
 
 /// A request for the thread [`files`] starts, and where its answer goes.
@@ -488,6 +613,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks() {
+        use crate::fstree::{Entry, Meta};
+        let dir = tempfile::tempdir().unwrap();
+        let (path, part) = (dir.path().join("w.ext4"), dir.path().join("w.ext4.part"));
+        let mut tree = FsTree::new();
+        let meta = Meta {
+            mode: 0o700,
+            ..Meta::default()
+        };
+        let data = b"kept\n".to_vec();
+        tree.insert(b"kept", Entry::File { meta, data }).unwrap();
+        tree.to_ext4(File::create_new(&path).unwrap(), 1 << 30)
+            .unwrap();
+        let before = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+
+        grow_upper(&path, &part, 3).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
+        let after = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+        assert_eq!(after.digest(), before.digest());
+        assert!(!part.exists());
+
+        grow_upper(&path, &part, 2).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
+    }
+
     /// What the machine's process is handed is what the parent wrote.
     #[test]
     fn a_config_survives_the_trip_to_the_machine_s_process() {
@@ -511,6 +662,9 @@ mod tests {
             }],
             abin: Some(PathBuf::from("/sandbox/abin/work")),
             ports: vec![3000],
+            sandbox_disk: Some(SandboxDisk {
+                source: Some(PathBuf::from("/run/disk.sock")),
+            }),
         };
         let read: MachineConfig =
             serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
@@ -521,5 +675,6 @@ mod tests {
         assert_eq!(read.abin, sent.abin);
         assert_eq!(read.spec.network, sent.spec.network);
         assert_eq!(read.ports, sent.ports);
+        assert_eq!(read.sandbox_disk, sent.sandbox_disk);
     }
 }

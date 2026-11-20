@@ -25,9 +25,11 @@ use futures_util::{
 };
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{
-    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
+    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxResizeArgs,
+    SandboxResources, SandboxVolume,
 };
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
+use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
 use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
     Admission, DEFAULT_DISK_GIB, Files, ImageStore, MachineSpec, NoRoom, Reference, RegistryClient,
@@ -43,6 +45,9 @@ const MACHINE_HEARD_BRIEFLY: &str = "vm-heard-briefly";
 
 /// The image every sandbox here is made of.
 const ALPINE: &str = "alpine:3.20";
+
+/// An image on glibc and bash, as most are: the base of Python's.
+const DEBIAN: &str = "debian:bookworm-slim";
 
 /// The image a GPU sandbox is made of: edge, the one Alpine whose repositories carry venus's
 /// guest driver (`mesa-vulkan-virtio`); no stable branch does yet. Pulled only for the GPU's
@@ -161,15 +166,20 @@ async fn run(
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let mut lines = Vec::new();
     while let Some(Ok(event)) = events.next().await {
-        let event = String::from_utf8(event.to_vec()).unwrap();
-        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
-        match serde_json::from_str(data.expect("an event carries its entry")).unwrap() {
+        match entry(&event) {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => lines.push(line),
             SandboxJobEntry::End(end) => return Ok((lines, end.code)),
             SandboxJobEntry::Truncated {} => {}
         }
     }
     panic!("a job's log ends with its end")
+}
+
+/// The entry an event of a job's log carries.
+fn entry(event: &[u8]) -> SandboxJobEntry {
+    let event = std::str::from_utf8(event).unwrap();
+    let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+    serde_json::from_str(data.expect("an event carries its entry")).unwrap()
 }
 
 /// Room for as many machines as a test says ([`Limit::to`]), and for every one otherwise: this
@@ -215,6 +225,84 @@ impl Limit {
     /// How many machines are up, each holding its room.
     fn taken() -> usize {
         LIMIT.lock().unwrap().1
+    }
+}
+
+/// Sandboxes' disks as an embedder's: each read and written through storage of its own -- the
+/// file, opened as libkrun would -- and served only under a test's home with a `serve` file in
+/// it, as an embedder serves some disks and not others. What each is served from and when its
+/// machine booted noted in `marks/` beside the test's `sandbox/`, how many are served counted,
+/// and those removed noted.
+struct Embedded;
+
+/// How many sandbox disks are served now, each while its machine is up.
+static SERVING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The disks forgotten, as their sandboxes went.
+static FORGOTTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// A disk served, until it drops.
+struct Serving;
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        SERVING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Where what happens to the sandbox disk at `disk` is noted: `<home>/marks/<id>.<what>`.
+fn mark(disk: &Path, what: &str) -> PathBuf {
+    let home = disk.parent().unwrap().parent().unwrap();
+    let id = disk.file_stem().unwrap().to_str().unwrap();
+    home.join("marks").join(format!("{id}.{what}"))
+}
+
+/// A disk opened in its machine's process, through its file.
+struct Opened(PathBuf);
+
+impl MachineDisk for Opened {
+    fn storage(&self) -> Box<dyn DynStorage> {
+        use virtx_uvm::disks::imago::{self, Storage as _};
+        let options = imago::StorageOpenOptions::new()
+            .write(true)
+            .filename(&self.0);
+        Box::new(imago::file::File::open(options).unwrap())
+    }
+
+    fn booted(&self) {
+        std::fs::write(mark(&self.0, "booted"), "").unwrap();
+    }
+}
+
+impl Disks for Embedded {
+    fn serve(&self, disk: &Path) -> std::io::Result<Option<(PathBuf, DiskHeld)>> {
+        if !disk
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("serve")
+            .exists()
+        {
+            return Ok(None);
+        }
+        SERVING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some((mark(disk, "source"), Box::new(Serving))))
+    }
+
+    fn open(
+        &self,
+        disk: &Path,
+        source: Option<&Path>,
+    ) -> std::io::Result<Option<Arc<dyn MachineDisk>>> {
+        std::fs::create_dir_all(mark(disk, "").parent().unwrap())?;
+        let source = source.map(|source| source.to_str().unwrap().to_owned());
+        std::fs::write(mark(disk, "opened"), source.unwrap_or_default())?;
+        Ok(Some(Arc::new(Opened(disk.to_owned()))))
+    }
+
+    fn forget(&self, disk: &Path) -> std::io::Result<()> {
+        FORGOTTEN.lock().unwrap().push(disk.to_owned());
+        Ok(())
     }
 }
 
@@ -552,8 +640,13 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
         matches!(started, Err(SandboxError::NotStarted(_))),
         "{started:?}"
     );
-    let timed = run(&sandbox, &["sleep", "10"], Some(Duration::from_millis(200))).await;
-    assert_eq!(timed.unwrap().1, 137);
+    // Its timeout ends the child it left in the background too, which would run on otherwise.
+    let forks = ["sh", "-c", "sleep 10 & sleep 10"];
+    let timed = run(&sandbox, &forks, Some(Duration::from_secs(1)));
+    let timed = tokio::time::timeout(Duration::from_secs(5), timed).await;
+    assert_eq!(timed.expect("its timeout ends it").unwrap().1, 137);
+    let left = ["sh", "-c", "ps | grep -c '[s]leep 10'"];
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
     // A line past what a frame carries comes in pieces, and the machine goes on.
     let long = ["sh", "-c", "head -c 20000000 /dev/zero | tr '\\0' '\\1'"];
     let (lines, code) = run(&sandbox, &long, None).await.unwrap();
@@ -563,8 +656,14 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
 
 async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
-    let cmd = ["sleep", "30"].map(String::from).to_vec();
+    // It says `started` once its child in the background is there.
+    let cmd = ["sh", "-c", "sleep 30 & echo started; sleep 30"]
+        .map(String::from)
+        .to_vec();
     let job = sandbox.exec(cmd, false, None).await.unwrap();
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
     assert!(job.get().running);
     sandbox.remove_job(&job.get().id).unwrap();
     assert!(sandbox.job(&job.get().id).is_err());
@@ -1051,11 +1150,20 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
     let sandbox = home.sandbox(&small(), park).await;
     // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
     let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
-    let still = ["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"];
+    let hashed = "sha256sum /root/a /root/b";
+    let still = format!("{hashed}; ps | grep -c '[s]leep 1000'");
 
-    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
-        .await
-        .unwrap();
+    // Written whole, over in scattered blocks, zeroed in place, and cut short.
+    let write = "dd if=/dev/urandom of=/root/a bs=1M count=64 2>/dev/null \
+                 && dd if=/dev/urandom of=/root/b bs=1M count=8 2>/dev/null \
+                 && for at in 3 97 512 1500 2047; do \
+                 dd if=/dev/urandom of=/root/b bs=4k count=1 seek=$at conv=notrunc 2>/dev/null; \
+                 done \
+                 && dd if=/dev/zero of=/root/a bs=1M count=4 seek=10 conv=notrunc 2>/dev/null \
+                 && truncate -s 50M /root/a";
+    let wrote = run(&sandbox, &["sh", "-c", write], None).await.unwrap();
+    assert_eq!(wrote.1, 0);
+    let (written, _) = run(&sandbox, &["sh", "-c", hashed], None).await.unwrap();
     run(&sandbox, &behind, None).await.unwrap();
     // A job that runs keeps it up, however long.
     let held = ["sh", "-c", "sleep 2; ps | grep -c '[s]leep 1000'"];
@@ -1064,10 +1172,12 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         (vec!["1".into()], 0)
     );
 
-    // Idle, it stops; a job boots it again, over what it wrote.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let (lines, _) = run(&sandbox, &still, None).await.unwrap();
-    assert_eq!(lines, ["kept", "0"]);
+    // Idle, it stops; a job boots it again, over what it wrote, whole.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (lines, _) = run(&sandbox, &["sh", "-c", still.as_str()], None)
+        .await
+        .unwrap();
+    assert_eq!(lines, [written, vec!["0".into()]].concat());
 
     // Its own upper disk goes with it.
     close(sandbox).await;
@@ -1236,6 +1346,242 @@ async fn a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway(home: Hom
     assert!(matches!(sandbox.park().await, Err(SandboxError::Ended)));
 }
 
+async fn a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs(home: Home) {
+    use std::sync::atomic::Ordering;
+    std::fs::write(home.root.join("serve"), "").unwrap();
+    let serving = SERVING.load(Ordering::SeqCst);
+    // Served no more once its machine's process has ended, a moment after it is stopped.
+    let served_down = async || {
+        for _ in 0..100 {
+            if SERVING.load(Ordering::SeqCst) == serving {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("its disk is still served with its machine down");
+    };
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let disk = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    // Opened in its machine's process through the embedder's storage, given what it is served
+    // from, and told once its machine booted; served while its machine runs.
+    let opened = std::fs::read_to_string(mark(&disk, "opened")).unwrap();
+    assert_eq!(Path::new(&opened), mark(&disk, "source"));
+    assert!(mark(&disk, "booted").is_file());
+    assert_eq!(SERVING.load(Ordering::SeqCst), serving + 1);
+    // Its disk is the embedder's to copy, running or parked.
+    let copy = home.root.join("copy.ext4");
+    let refused = sandbox.copy_disk(&copy).await;
+    assert!(
+        matches!(refused, Err(SandboxError::Unsupported(_))),
+        "{refused:?}"
+    );
+    // What the guest writes goes through it, and is there as it boots again over it.
+    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    served_down().await;
+    let refused = sandbox.copy_disk(&copy).await;
+    assert!(
+        matches!(refused, Err(SandboxError::Unsupported(_))),
+        "{refused:?}"
+    );
+    assert!(!copy.exists());
+    std::fs::remove_file(mark(&disk, "booted")).unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert!(mark(&disk, "booted").is_file(), "booted again through it");
+    assert_eq!(SERVING.load(Ordering::SeqCst), serving + 1);
+    // Closed, its disk is forgotten as it is removed.
+    close(sandbox).await;
+    served_down().await;
+    assert!(FORGOTTEN.lock().unwrap().contains(&disk));
+    assert!(!disk.exists());
+}
+
+/// A running sandbox synced has what its guest wrote in its disk's file, before the guest would
+/// have put it there of itself. Parked, it has already; closed, it is refused.
+async fn a_sandbox_synced_has_what_its_guest_wrote_in_its_disk_s_file(home: Home) {
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let disk = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    // Named and filled in the guest, so that only what the guest wrote holds them: the name in
+    // its directory, which its journal keeps for a few seconds before it writes it.
+    let write =
+        "printf 'virtx-content-%s' $((7919 * 104729)) > /root/virtx-name-$((123457 * 8191))";
+    assert_eq!(
+        run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
+        0
+    );
+    assert!(sandbox.sync().await.unwrap(), "the guest says it synced");
+    let name = format!("virtx-name-{}", 123457 * 8191);
+    let content = format!("virtx-content-{}", 7919 * 104729);
+    let held = holds(&disk, &[name.as_bytes(), content.as_bytes()]);
+    assert_eq!(
+        held,
+        [true, true],
+        "the disk's file has its name and what is in it"
+    );
+
+    // Parked, it has it already; closed, there is nothing to sync.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    std::fs::remove_file(mark(&disk, "booted")).unwrap();
+    assert!(sandbox.sync().await.unwrap());
+    assert!(!mark(&disk, "booted").exists(), "not booted to sync");
+    close(Arc::clone(&sandbox)).await;
+    let refused = sandbox.sync().await;
+    assert!(matches!(refused, Err(SandboxError::Ended)), "{refused:?}");
+}
+
+/// Whether the file at `path` holds each of `whats` anywhere in it.
+fn holds(path: &Path, whats: &[&[u8]]) -> Vec<bool> {
+    use std::io::Read as _;
+    const ZEROS: [u8; 4096] = [0; 4096];
+    let longest = whats.iter().map(|what| what.len()).max().unwrap_or(0);
+    let mut file = std::fs::File::open(path).unwrap();
+    let mut held = vec![false; whats.len()];
+    let mut window = Vec::new();
+    let mut chunk = vec![0; 1 << 20];
+    loop {
+        let read = file.read(&mut chunk).unwrap();
+        if read == 0 {
+            return held;
+        }
+        // The end of the chunk before, for what lies across the two.
+        window.drain(..window.len().saturating_sub(longest));
+        window.extend_from_slice(&chunk[..read]);
+        if chunk[..read]
+            .chunks(ZEROS.len())
+            .all(|page| page == &ZEROS[..page.len()])
+        {
+            continue;
+        }
+        for (what, held) in whats.iter().zip(&mut held) {
+            *held |= window.windows(what.len()).any(|at| at == *what);
+        }
+    }
+}
+
+/// A running sandbox's disk copied while its guest writes all along is a whole filesystem, with
+/// what the guest wrote before the copy and had not yet put on the disk; the machine runs on. A
+/// parked one's is copied as its machine left it, and a closed one's is not.
+async fn a_sandbox_s_disk_copied_as_it_writes_or_parked_is_whole_with_what_was_written(home: Home) {
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let disk = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    let writes =
+        "i=0; while :; do i=$((i+1)); head -c 65536 /dev/urandom > /root/w.$((i % 64)); done";
+    let writing = sandbox
+        .exec(vec!["sh".into(), "-c".into(), writes.into()], false, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // In the guest's cache, not yet on its disk, as the copy is asked for.
+    let kept = ["sh", "-c", "echo kept > /root/kept"];
+    assert_eq!(run(&sandbox, &kept, None).await.unwrap().1, 0);
+    let copies = home.volumes.create("copies").unwrap();
+    let copy = |name: &str| copies.path().join("files").join(name);
+    sandbox.copy_disk(&copy("running.ext4")).await.unwrap();
+    // Its machine runs on, and what ran in it.
+    assert!(writing.get().running, "{:?}", writing.get());
+    let (lines, code) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!((lines, code), (vec!["kept".to_owned()], 0));
+
+    // Parked, its disk is copied with no machine to wake: it boots again only for a job.
+    let parked = ["sh", "-c", "echo parked > /root/parked"];
+    assert_eq!(run(&sandbox, &parked, None).await.unwrap().1, 0);
+    sandbox.remove_job(&writing.get().id).unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    std::fs::remove_file(mark(&disk, "booted")).unwrap();
+    sandbox.copy_disk(&copy("parked.ext4")).await.unwrap();
+    assert!(!mark(&disk, "booted").exists());
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    assert!(mark(&disk, "booted").is_file(), "it was parked");
+    // Closed, it has no disk to copy.
+    close(Arc::clone(&sandbox)).await;
+    let refused = sandbox.copy_disk(&copy("closed.ext4")).await;
+    assert!(matches!(refused, Err(SandboxError::Ended)), "{refused:?}");
+
+    // Each copy, as another machine reads it: its journal replayed as a mount does, and then
+    // clean, with what was written before it.
+    let checking = SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "copies".into(),
+            path: "/copies".into(),
+            readonly: false,
+        }],
+        ..small()
+    };
+    let checker = home.sandbox(&checking, None).await;
+    apk_add(&checker, &["e2fsprogs", "e2fsprogs-extra"]).await;
+    for (name, written) in [("running", "kept"), ("parked", "parked")] {
+        let copy = format!("/copies/{name}.ext4");
+        let replay = ["e2fsck", "-y", "-E", "journal_only", &copy];
+        let (lines, code) = run(&checker, &replay, None).await.unwrap();
+        assert!(code <= 1, "{name}: {code}: {lines:#?}");
+        let check = ["e2fsck", "-f", "-n", &copy];
+        let (lines, code) = run(&checker, &check, None).await.unwrap();
+        assert_eq!(code, 0, "{name}: {lines:#?}");
+        let cat = format!("cat /upper/root/{written}");
+        let (lines, _) = run(&checker, &["debugfs", "-R", &cat, &copy], None)
+            .await
+            .unwrap();
+        assert!(lines.contains(&written.to_owned()), "{name}: {lines:#?}");
+    }
+    close(checker).await;
+}
+
+/// A machine paused for longer than its guest may be silent, as one is while its disk is copied,
+/// runs on once it is resumed, with what ran in it.
+async fn a_machine_paused_past_the_silence_bound_runs_on(home: Home) {
+    let vm = vec![
+        env::current_exe().unwrap().into(),
+        OsString::from(MACHINE_HEARD_BRIEFLY),
+    ];
+    let args = small();
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm,
+        None,
+        None,
+        &Backing::default(),
+    )
+    .await
+    .unwrap();
+    let waiting = sandbox
+        .exec(vec!["sleep".into(), "120".into()], false, None)
+        .await
+        .unwrap();
+    let machine = sandbox.machine().await.unwrap();
+    tokio::task::spawn_blocking(move || {
+        let _paused = machine.pause().unwrap();
+        std::thread::sleep(Duration::from_secs(15));
+    })
+    .await
+    .unwrap();
+    // Past a few of the silence's checks, and pings.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(waiting.get().running, "{:?}", waiting.get());
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    close(sandbox).await;
+}
+
 async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home) {
     let sandbox = home
         .sandbox(&small(), Some(Duration::from_millis(500)))
@@ -1326,6 +1672,246 @@ async fn a_sandbox_s_writable_layer_is_as_large_as_asked(home: Home) {
     }
 }
 
+async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Home) {
+    let mut args = small();
+    args.vcpus = Some(2);
+    args.disk_gib = Some(1);
+    let sandbox = home.making(&args, None, Some(HashMap::new())).await;
+    let sandbox = sandbox.unwrap();
+    let said = async |sandbox: &Arc<Sandbox>, cmd: &str| -> String {
+        let (lines, _) = run(sandbox, &["sh", "-c", cmd], None).await.unwrap();
+        lines.join("\n")
+    };
+    // `df -k /`'s size, in GiB, rounded: the overlay's, whose size is its writable layer's.
+    let disk = async |sandbox: &Arc<Sandbox>| -> u64 {
+        let kib: u64 = said(sandbox, "df -k / | awk 'NR==2 {print $2}'")
+            .await
+            .parse()
+            .unwrap();
+        (kib + (1 << 19)) >> 20
+    };
+    let resize = |vcpus, memory_mib, disk_gib| SandboxResizeArgs {
+        vcpus,
+        memory_mib,
+        disk_gib,
+    };
+    assert_eq!(said(&sandbox, "nproc").await, "2");
+    assert_eq!(disk(&sandbox).await, 1);
+    // Written over its image, and taken from it: both as they were once it is grown.
+    let write = "echo kept > /root/kept && chmod 700 /root/kept && rm /etc/alpine-release";
+    said(&sandbox, write).await;
+
+    // In use: its vCPUs and memory refused, and its disk grown at its next boot, left up.
+    let sleeping = sandbox.exec(vec!["sleep".into(), "600".into()], false, None);
+    let sleeping = sleeping.await.unwrap().get().id;
+    let refused = sandbox.resize(&resize(Some(3), None, None)).await;
+    assert!(
+        matches!(refused, Err(SandboxError::InUse(_))),
+        "{refused:?}"
+    );
+    let grown = sandbox.resize(&resize(None, None, Some(3))).await.unwrap();
+    let up = SandboxResources {
+        vcpus: 2,
+        memory_mib: 1024,
+        disk_gib: 3,
+        up: true,
+    };
+    assert_eq!(grown, up);
+    assert!(sandbox.is_up(), "not parked for its disk");
+    assert_eq!(disk(&sandbox).await, 1, "the size it booted with");
+
+    // Parked, and booted again with its disk grown.
+    sandbox.remove_job(&sleeping).unwrap();
+    sandbox.park().await.unwrap();
+    assert_eq!(disk(&sandbox).await, 3);
+    assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
+    assert_eq!(said(&sandbox, "stat -c %a /root/kept").await, "700");
+    let release = "test -e /etc/alpine-release && echo there || echo gone";
+    assert_eq!(said(&sandbox, release).await, "gone");
+
+    // Unused: parked for its vCPUs and memory, and booted so.
+    let resized = sandbox.resize(&resize(Some(3), Some(1536), None)).await;
+    let parked = SandboxResources {
+        vcpus: 3,
+        memory_mib: 1536,
+        disk_gib: 3,
+        up: false,
+    };
+    assert_eq!(resized.unwrap(), parked);
+    assert_eq!(said(&sandbox, "nproc").await, "3");
+    let meminfo = "awk '/MemTotal/ {print $2}' /proc/meminfo";
+    let kib: u64 = said(&sandbox, meminfo).await.parse().unwrap();
+    assert!((1300 << 10..=1536 << 10).contains(&kib), "{kib} KiB");
+    assert_eq!(disk(&sandbox).await, 3);
+
+    // Never shrunk, and no size a sandbox is not made with.
+    for refused in [
+        resize(None, None, Some(2)),
+        resize(Some(0), None, None),
+        resize(None, Some(32), None),
+        resize(None, None, Some(1025)),
+    ] {
+        let answered = sandbox.resize(&refused).await;
+        assert!(
+            matches!(answered, Err(SandboxError::Invalid(_))),
+            "{refused:?}: {answered:?}"
+        );
+    }
+
+    // Kept so past its server, and grown again there.
+    leave(sandbox).await;
+    let known = home.kept();
+    let again = &known[0];
+    assert_eq!(said(again, "nproc").await, "3");
+    let grown = again.resize(&resize(None, None, Some(4))).await.unwrap();
+    assert_eq!(
+        (grown.disk_gib, grown.up),
+        (4, true),
+        "left up for its disk"
+    );
+    leave(Arc::clone(again)).await;
+    let known = home.kept();
+    let again = &known[0];
+    assert_eq!(disk(again).await, 4);
+    assert_eq!(said(again, "cat /root/kept").await, "kept");
+    close(Arc::clone(again)).await;
+    assert_eq!(home.left(), Vec::<String>::new());
+}
+
+async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
+    let mut args = small();
+    args.disk_gib = Some(1);
+    let sandbox = home.sandbox(&args, None).await;
+    let said = async |sandbox: &Arc<Sandbox>, cmd: &str| -> String {
+        let (lines, _) = run(sandbox, &["sh", "-c", cmd], None).await.unwrap();
+        lines.join("\n")
+    };
+    let disk = async |sandbox: &Arc<Sandbox>| -> u64 {
+        let kib: u64 = said(sandbox, "df -k / | awk 'NR==2 {print $2}'")
+            .await
+            .parse()
+            .unwrap();
+        (kib + (1 << 19)) >> 20
+    };
+    let resize = |disk_gib| SandboxResizeArgs {
+        disk_gib: Some(disk_gib),
+        ..SandboxResizeArgs::default()
+    };
+    // A file with holes larger than the disk, which a grow reads whole and refuses.
+    said(&sandbox, "truncate -s 2G /root/f && echo kept > /root/kept").await;
+    let grown = sandbox.resize(&resize(3)).await.unwrap();
+    assert_eq!((grown.disk_gib, grown.up), (3, true));
+
+    // Its grow fails, and it boots on its disk as it was.
+    sandbox.park().await.unwrap();
+    assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
+    assert_eq!(disk(&sandbox).await, 1);
+
+    // Taken down to the size it has, not under it; and grown at a later boot once it can be.
+    let back = sandbox.resize(&resize(2)).await.unwrap();
+    assert_eq!(back.disk_gib, 2);
+    said(&sandbox, "rm /root/f").await;
+    sandbox.park().await.unwrap();
+    assert_eq!(disk(&sandbox).await, 2);
+    let refused = sandbox.resize(&resize(1)).await;
+    assert!(
+        matches!(refused, Err(SandboxError::Invalid(_))),
+        "{refused:?}"
+    );
+    assert_eq!(sandbox.resize(&resize(2)).await.unwrap().disk_gib, 2);
+    close(sandbox).await;
+}
+
+async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home) {
+    // A public address by number, so no name has to resolve: Google's DNS, over HTTPS.
+    let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
+    let with = home.sandbox(&small(), None).await;
+    assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
+    close(with).await;
+    // A published port gives the machine its network device, and still no way out.
+    for ports in [vec![], vec![8080.into()]] {
+        let args = SandboxCreateArgs {
+            network: false,
+            ports: ports.clone(),
+            ..small()
+        };
+        let without = home.sandbox(&args, None).await;
+        let (lines, code) = run(&without, &out, None).await.unwrap();
+        assert_ne!(code, 0, "reached out with ports {ports:?}: {lines:?}");
+        close(without).await;
+    }
+}
+
+async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home: Home) {
+    let mut args = SandboxCreateArgs::new(DEBIAN);
+    args.memory_mib = Some(1024);
+    let sandbox = home.sandbox(&args, None).await;
+    // The image's PATH, the HOME and directory it leaves to us, and its own bash, on glibc.
+    let ask = "echo $PATH; echo $HOME; pwd; ldd /bin/bash | grep -c libc.so.6";
+    let (lines, code) = run(&sandbox, &["bash", "-c", ask], None).await.unwrap();
+    let path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    assert_eq!(
+        (lines, code),
+        (vec![path.into(), "/root".into(), "/".into(), "1".into()], 0)
+    );
+    close(sandbox).await;
+}
+
+async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
+    for (vcpus, mib) in [(1, 512), (2, 1536)] {
+        let sandbox = home
+            .sandbox(&small().vcpus(vcpus).memory_mib(mib), None)
+            .await;
+        let ask = [
+            "sh",
+            "-c",
+            "nproc; awk '/MemTotal/ {print $2}' /proc/meminfo",
+        ];
+        let (lines, code) = run(&sandbox, &ask, None).await.unwrap();
+        assert_eq!((lines.len(), code), (2, 0), "{lines:?}");
+        assert_eq!(lines[0], vcpus.to_string());
+        let kib: u64 = lines[1].parse().unwrap();
+        // Less what the kernel keeps for itself; on x86_64 a little more, as libkrun gives the
+        // machine the memory below where its kernel loads besides what is asked.
+        let asked = u64::from(mib) << 10;
+        assert!(
+            kib > asked * 8 / 10 && kib < asked * 11 / 10,
+            "{kib} KiB for {mib} MiB"
+        );
+        close(sandbox).await;
+    }
+}
+
+async fn a_signal_ends_a_job_with_every_process_it_started(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // The signal reaches the child it left in the background too, which would run on otherwise.
+    let cmd = ["sh", "-c", "sleep 60 & echo started; sleep 60"]
+        .map(String::from)
+        .to_vec();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
+    // Once it has started its child.
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
+    let term = virtx_uvm::signal_number("SIGTERM").unwrap();
+    sandbox.signal(&job.get().id, term).unwrap();
+    let read = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(_)) = events.next().await {}
+    });
+    read.await.expect("a signal ends it");
+    assert_eq!(job.get().code, Some(128 + term));
+    let left = ["sh", "-c", "ps | grep -c '[s]leep 60'"];
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
+    close(sandbox).await;
+}
+
+async fn a_job_given_no_input_reads_its_end(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let read = tokio::time::timeout(Duration::from_secs(10), run(&sandbox, &["cat"], None));
+    assert_eq!(read.await.expect("cat read an end").unwrap(), (vec![], 0));
+    close(sandbox).await;
+}
+
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
     let args = small();
     let made = join_all((0..3).map(|_| home.sandbox(&args, None))).await;
@@ -1398,8 +1984,8 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
 }
 
 /// A machine with more virtio-mmio devices than the 16 legacy interrupt lines hold boots, and
-/// each answers: five volumes over the eight devices this sandbox has without them, the last
-/// volume and the guest agent's filesystem on lines past 15.
+/// each answers: five volumes over the seven devices this sandbox has without them, the last
+/// two of the twelve on lines past 15.
 async fn a_sandbox_mounting_many_volumes_reaches_each(home: Home) {
     let names = ["v1", "v2", "v3", "v4", "v5"];
     for name in names {
@@ -1686,6 +2272,24 @@ async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
     // Closed, it lets it go.
     close(sandbox).await;
     home.volumes.remove("data").unwrap();
+}
+
+async fn a_volume_mounted_over_etc_is_left_without_a_resolver_file(home: Home) {
+    home.volumes.create("etc").unwrap();
+    let mounting = SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "etc".into(),
+            path: "/etc".into(),
+            readonly: false,
+        }],
+        ..small()
+    };
+    let sandbox = home.sandbox(&mounting, None).await;
+    let listed = run(&sandbox, &["ls", "-A", "/etc"], None).await.unwrap();
+    assert_eq!(listed, (vec![], 0));
+    close(sandbox).await;
+    let files = home.volumes.open("etc").unwrap().files();
+    assert_eq!(std::fs::read_dir(files).unwrap().count(), 0);
 }
 
 async fn a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote(home: Home) {
@@ -2049,6 +2653,8 @@ fn filter(mut args: impl Iterator<Item = String>) -> Option<String> {
 }
 
 fn main() -> ExitCode {
+    // In this process and each machine's, before either does anything with a disk.
+    assert!(set_disks(Arc::new(Embedded)), "said first");
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
         let Err(_) = virtx_uvm::enter_machine();
@@ -2073,7 +2679,11 @@ fn main() -> ExitCode {
     // runs on hosts without one too, and there a guest finds no device. Said on a build without
     // the feature, the test fails -- the sandbox is refused -- rather than passing on nothing.
     let gpu = env::var_os("VIRTX_TEST_GPU").is_some_and(|v| v == "1");
-    let pulled: &[&str] = if gpu { &[ALPINE, GPU_IMAGE] } else { &[ALPINE] };
+    let pulled: &[&str] = if gpu {
+        &[ALPINE, DEBIAN, GPU_IMAGE]
+    } else {
+        &[ALPINE, DEBIAN]
+    };
     runtime.block_on(async {
         let registry = RegistryClient::new(images.clone(), None);
         for name in pulled {
@@ -2113,9 +2723,20 @@ fn main() -> ExitCode {
         each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
         a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
+        a_sandbox_s_disk_is_the_embedder_s_served_while_its_machine_runs,
+        a_sandbox_synced_has_what_its_guest_wrote_in_its_disk_s_file,
+        a_sandbox_s_disk_copied_as_it_writes_or_parked_is_whole_with_what_was_written,
+        a_machine_paused_past_the_silence_bound_runs_on,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
+        a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
+        a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
+        a_sandbox_without_a_network_reaches_nothing_off_its_machine,
+        a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
+        a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
+        a_signal_ends_a_job_with_every_process_it_started,
+        a_job_given_no_input_reads_its_end,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,
@@ -2125,6 +2746,7 @@ fn main() -> ExitCode {
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,
         a_parked_sandbox_holds_its_volume_against_removal,
+        a_volume_mounted_over_etc_is_left_without_a_resolver_file,
         a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote,
         a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it,
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,

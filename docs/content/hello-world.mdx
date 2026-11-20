@@ -147,7 +147,7 @@ import os
 from virtx import BearerAuth
 
 async with Client.connect(
-    "https://run.virtx.sh",
+    "https://cloud.virtx.sh",
     BearerAuth(os.environ["VIRTX_API_KEY"]),
 ) as client:
 ```
@@ -157,7 +157,7 @@ async with Client.connect(
 
 ```js
 const client = Client.connect(
-  'https://run.virtx.sh',
+  'https://cloud.virtx.sh',
   { type: 'bearer', token: process.env.VIRTX_API_KEY }
 )
 ```
@@ -169,7 +169,7 @@ const client = Client.connect(
 use virtx::Auth;
 
 let client = Client::connect(
-    "https://run.virtx.sh",
+    "https://cloud.virtx.sh",
     Auth::Bearer { token: std::env::var("VIRTX_API_KEY")? },
     None,
     [] as [(&str, &str); 0],
@@ -179,7 +179,7 @@ let client = Client::connect(
 </TabItem>
 </Tabs>
 
-The key is its project's, so the program names no project, and `run.virtx.sh` answers from the region of virtx cloud nearest the machine it runs on.
+The key is its project's, so the program names no project, and `cloud.virtx.sh` answers from the region of virtx cloud nearest the machine it runs on.
 
 ### On your machine (stdio)
 

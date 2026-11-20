@@ -15,7 +15,7 @@ use std::{
     process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::body::Body;
@@ -231,6 +231,16 @@ async fn close(sandbox: Arc<Sandbox>) {
     tokio::task::spawn_blocking(move || sandbox.close())
         .await
         .unwrap();
+}
+
+/// Wait until `holds`, failing past [`HANG`]: for what a machine does in its own time, such as
+/// stopping once idle, which a slow host takes longer over.
+async fn until(what: &str, mut holds: impl FnMut() -> bool) {
+    let began = Instant::now();
+    while !holds() {
+        assert!(began.elapsed() < HANG, "not {what} in {HANG:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Let go of `sandbox` as a server that ends does: it blocks while the guest syncs.
@@ -477,14 +487,7 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
 
     // Parked, what it took is let go of.
     let let_go = [format!("let go {disk}"), "let go Volume(\"rw\")".into()];
-    let parked = async {
-        while told.said.lock().unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(30), parked)
-        .await
-        .expect("parked");
+    until("parked", || !told.said.lock().unwrap().is_empty()).await;
     assert_eq!(told.read(), let_go);
 
     // Refused its disk, it does not boot; let, it does.
@@ -784,13 +787,16 @@ async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(hom
         .unwrap();
     sandbox.remove_job(&id).unwrap();
 
-    // Closed by its process, which runs on: an empty write and a write both refused.
-    let cmd = ["sh", "-c", "exec 0<&-; sleep 300"]
+    // Closed by its process, which runs on: an empty write and a write both refused. It says
+    // `closed` once its stdin is closed.
+    let cmd = ["sh", "-c", "exec 0<&-; echo closed; sleep 300"]
         .map(String::from)
         .to_vec();
     let closed = sandbox.exec(cmd, true, None).await.unwrap();
     let id = closed.get().id;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut events = std::pin::pin!(Arc::clone(closed.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("closed".into()));
     let refused = sandbox.write_stdin(&id, String::new(), false).await;
     assert!(ended(&refused), "{refused:?}");
     assert!(closed.get().running);
@@ -856,7 +862,7 @@ async fn writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_op
         0
     );
     let mut eof = sandbox.write_stdin(&id, String::new(), true).await;
-    let since = std::time::Instant::now();
+    let since = Instant::now();
     while matches!(eof, Err(SandboxError::StdinFull)) && since.elapsed() < HANG {
         tokio::time::sleep(Duration::from_millis(100)).await;
         eof = sandbox.write_stdin(&id, String::new(), true).await;
@@ -1093,7 +1099,7 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
     );
 
     // Idle, it stops; a job boots it again, over what it wrote, whole.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    until("parked", || sandbox.up_since().is_none()).await;
     let (lines, _) = run(&sandbox, &["sh", "-c", still.as_str()], None)
         .await
         .unwrap();
@@ -1116,8 +1122,7 @@ async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home
     let first = sandbox.up_since().expect("up as it is made");
     run(&sandbox, &["true"], None).await.unwrap();
     // Idle, it is parked; a job boots it again; closed, it is down for good.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(sandbox.up_since(), None, "parked");
+    until("parked", || sandbox.up_since().is_none()).await;
     run(&sandbox, &["true"], None).await.unwrap();
     let second = sandbox.up_since().expect("up again");
     assert!(second > first);
@@ -1197,8 +1202,7 @@ async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
     assert_eq!(disks(), 1);
 
     // Parked, the first gives its room back, which a second boots in.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(Limit::taken(), 0);
+    until("its room given back", || Limit::taken() == 0).await;
     let second = home.sandbox(&small(), None).await;
     assert_eq!(Limit::taken(), 1);
 
@@ -1751,7 +1755,7 @@ async fn a_parked_gpu_sandbox_boots_again_with_its_gpu(home: Home) {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    until("parked", || sandbox.up_since().is_none()).await;
     let (lines, _) = run(&sandbox, &["sh", "-c", "ps | grep -c '[s]leep 1000'"], None)
         .await
         .unwrap();
@@ -1797,7 +1801,7 @@ async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
         .unwrap();
 
     // Its machine stopped, the volume is still the sandbox's, and there for its next machine.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    until("parked", || sandbox.up_since().is_none()).await;
     let removed = home.volumes.remove("data");
     assert!(matches!(removed, Err(VolumeError::InUse(_))), "{removed:?}");
     let (lines, _) = run(&sandbox, &["cat", "/data/kept"], None).await.unwrap();

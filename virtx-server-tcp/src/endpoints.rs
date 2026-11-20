@@ -973,7 +973,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         );
         opened.push(SandboxPort {
             port: spec.port,
-            url: format!("ports/{capability}"),
+            url: Some(format!("ports/{capability}")),
             label: spec.label.clone(),
             protocol: spec.protocol,
             address: None,

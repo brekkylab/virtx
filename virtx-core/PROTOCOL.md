@@ -294,9 +294,9 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?, error?}` |
+| `GET /sandboxes/` | | `200`, array of `{id, image, running, ports?, abins?, error?}` |
 | `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?, error?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, image, running, ports?, abins?, error?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
@@ -330,7 +330,8 @@ One it kept and cannot know again, such as one whose image is gone, it MAY still
 
 They are reserved when the sandbox is made, and kept until its `DELETE`. `0` and a port given twice are refused.
 
-The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given, and only there: a `GET` does not, since the URLs carry credentials.
+The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given.
+A `GET` of the sandbox, and of them all, answers each as `{port, label?, protocol?, address?}`, in the same order, until the sandbox's `DELETE`, across a restart of the server that keeps it too: with no `url`, which the `POST` alone answers, since the URLs carry credentials. One with an `error` answers none, since none of its ports is open.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.

@@ -55,7 +55,10 @@ class SandboxPort:
     ``PortForwarder``'s for TCP, a browser's for HTTP."""
 
     port: int
-    url: str
+
+    url: str | None = None
+    """Answered by ``create_sandbox`` alone, as secret as the credentials it carries: ``None``
+    in a sandbox ``get_sandbox`` or ``list_sandbox`` answers."""
 
     label: str | None = None
     """What it is for, as it was opened with."""
@@ -75,7 +78,7 @@ class SandboxPort:
         why = value.get("inbound_error")
         return cls(
             value["port"],
-            value["url"],
+            value.get("url"),
             value.get("label"),
             PortProtocol(value.get("protocol", "tcp")),
             value.get("address"),
@@ -166,7 +169,7 @@ class Sandbox(Files):
     running: bool
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports: answered by ``create_sandbox`` only."""
+    """Its opened ports, each with its ``url`` where ``create_sandbox`` answered it only."""
 
     abins: list[str] = field(default_factory=list)
     """virtx's own programs it has at ``/abin``."""

@@ -107,7 +107,8 @@ let sandbox = client
     .await?;
 sandbox.exec(&SandboxExecArgs::new(["httpd", "-f", "-p", "8000"])).await?; // started, left running
 
-let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0].url)?;
+let url = sandbox.info().ports[0].url.as_deref().unwrap(); // answered as it is made
+let forwarder = PortForwarder::open(&client, url)?;
 println!("http://{}", forwarder.address());
 drop(forwarder);
 ```
@@ -117,6 +118,9 @@ drop(forwarder);
 
 Each entry of `sandbox.ports` names the guest's `port` beside its `url`, in the order they were asked for.
 A port given twice, or port `0`, is refused.
+
+The `url` is given only when the sandbox is created, since it carries the port's credentials: keep it if you will reach the port later.
+A sandbox got again with `get_sandbox` or `list_sandbox`, from this program or another, still has its `ports`, each with its `port`, `label`, `protocol` and any `address`, but no `url`.
 
 A connection made while nothing listens on the port in the guest is closed at once, as a closed port's would be: start the service before connecting.
 
@@ -168,7 +172,7 @@ let web = PortSpec::new(5173)
 let sandbox = client
     .create_sandbox(&SandboxCreateArgs::new("node:22").port(web))
     .await?;
-println!("{}", sandbox.info().ports[0].url); // open it in a browser
+println!("{}", sandbox.info().ports[0].url.as_deref().unwrap()); // open it in a browser
 ```
 
 </TabItem>

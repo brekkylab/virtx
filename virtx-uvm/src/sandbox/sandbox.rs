@@ -12,7 +12,9 @@ use sha2::{Digest as _, Sha256};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use virtx_core::{ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind};
+use virtx_core::{
+    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEntry, SandboxJobKind, SandboxPort,
+};
 
 use super::record::Record;
 use super::upper::Upper;
@@ -161,6 +163,9 @@ pub struct Sandbox {
     _held: ImageHold,
     /// The upper disk it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
+    /// The ports it was made with, as asked for again: what each is for and how it is reached,
+    /// with no `url`, which is its server's.
+    ports_opened: Vec<SandboxPort>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
     abins: Vec<String>,
@@ -449,6 +454,18 @@ impl Sandbox {
             record: Mutex::new(record),
             image: digest,
             _held: held_image,
+            ports_opened: args
+                .ports
+                .iter()
+                .map(|spec| SandboxPort {
+                    port: spec.port,
+                    url: None,
+                    label: spec.label.clone(),
+                    protocol: spec.protocol,
+                    address: None,
+                    inbound_error: None,
+                })
+                .collect(),
             abins: args.abins.clone(),
             upper: Mutex::new(Some(upper)),
             abin: Mutex::new(abin),
@@ -476,13 +493,14 @@ impl Sandbox {
         &self.id
     }
 
-    /// The sandbox as the server answers it, with no ports: only its making answers those.
+    /// The sandbox as the server answers it, each port with what it is for and how it is
+    /// reached but no `url`: only its making answers those, which its server forms.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
-            ports: Vec::new(),
+            ports: self.ports_opened.clone(),
             abins: self.abins.clone(),
             error: None,
         }
@@ -1119,7 +1137,7 @@ impl Unknown {
     }
 
     /// It as a sandbox is answered: its image as its record names it, empty where that is not
-    /// read, not `running`, and why in `error`.
+    /// read, not `running`, with no ports, since none is open, and why in `error`.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),

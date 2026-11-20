@@ -711,7 +711,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
         opened.push(SandboxPort {
             port,
-            url: format!("http://{at}"),
+            url: Some(format!("http://{at}")),
             label: spec.label.clone(),
             protocol: spec.protocol,
             address: None,

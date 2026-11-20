@@ -1238,8 +1238,8 @@ mod tests {
 
     /// What a server before this one kept of a project's sandboxes is known again as the project
     /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
-    /// was made with, with its jobs, one that ran then ended `restarted`; what no sandbox keeps
-    /// is deleted. No machine boots for it.
+    /// was made with and answering its ports without them, with its jobs, one that ran then
+    /// ended `restarted`; what no sandbox keeps is deleted. No machine boots for it.
     #[tokio::test]
     async fn a_project_s_sandboxes_are_kept_across_a_restart() {
         let served = Served::spawn("kept").await;
@@ -1255,14 +1255,21 @@ mod tests {
             { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
             { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
         ]);
+        let web = json!({ "port": 8080, "label": "web" });
         let kept = [
-            ("kept", json!({ capability.clone(): 8080 }), false, jobs),
-            ("ended", json!({}), true, json!([])),
+            (
+                "kept",
+                json!({ capability.clone(): 8080 }),
+                false,
+                jobs,
+                web.clone(),
+            ),
+            ("ended", json!({}), true, json!([]), json!(8080)),
         ];
-        for (id, keys, exited, jobs) in kept {
+        for (id, keys, exited, jobs, port) in kept {
             std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
             let image = json!({ "type": "digest", "digest": digest });
-            let args = json!({ "image": image, "ports": [8080] });
+            let args = json!({ "image": image, "ports": [port] });
             let record = json!({ "args": args, "keys": keys, "exited": exited, "jobs": jobs });
             std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
         }
@@ -1277,10 +1284,14 @@ mod tests {
         assert_eq!(
             listed,
             [
-                json!({ "id": "ended", "image": digest, "running": false }),
-                json!({ "id": "kept", "image": digest, "running": true }),
+                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080 }] }),
+                json!({ "id": "kept", "image": digest, "running": true, "ports": [web] }),
             ]
         );
+        let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let got: Value = serde_json::from_str(&got).unwrap();
+        assert_eq!(got, listed[1]);
         let mut left: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())

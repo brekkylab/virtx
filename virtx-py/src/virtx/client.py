@@ -443,7 +443,7 @@ class Client:
         return Volume.from_dict(self, output)
 
     async def list_sandbox(self) -> list[Sandbox]:
-        """Every sandbox the server holds, without its ports."""
+        """Every sandbox the server holds, each port without its ``url``."""
         items = await self._call("virtx_client_list_sandbox")
         return [Sandbox.from_dict(self, item) for item in items]
 
@@ -465,9 +465,8 @@ class Client:
         and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
         ``/abin/skills/{name}/``. ``ports`` are ports in it to open, each a number for TCP or a
         ``PortSpec`` to say what it is for, whether it is HTTP and whom it lets in, reserved as
-        it is made and answered here only, each a ``SandboxPort`` with the ``url`` it is reached
-        by. Whatever
-        is left out the server picks. ``disk_gib`` is how much it may write over its image, in
+        it is made, each answered a ``SandboxPort`` with the ``url`` it is reached by, here only.
+        Whatever is left out the server picks. ``disk_gib`` is how much it may write over its image, in
         GiB, at most 1024, which goes with it.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
@@ -494,5 +493,5 @@ class Client:
         )
 
     async def get_sandbox(self, id: str) -> Sandbox:
-        """The sandbox ``id``, without its ports."""
+        """The sandbox ``id``, each port without its ``url``."""
         return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))

@@ -41,7 +41,7 @@ await cat.writeStdin('hello\n', true)
 for await (const entry of cat.log()) console.log(entry)
 ```
 
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` the sandbox answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `createSandbox` answered for it, the one place it is given: an address on this machine's loopback, for any TCP client, until it is closed.
 
 ```js
 const { PortForwarder } = require('@brekkylab/virtx')

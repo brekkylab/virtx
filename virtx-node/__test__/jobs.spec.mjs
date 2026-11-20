@@ -43,8 +43,15 @@ describe('against virtx-stdio', () => {
       sandbox.ports.map(({ url, ...port }) => port),
       [{ port: 8000 }, { port: 5173, label: 'dev server', protocol: 'http' }],
     )
-    assert.deepEqual((await client.getSandbox(sandbox.id)).abins, ['index'])
-    assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
+    assert.ok(sandbox.ports.every(({ url }) => typeof url === 'string'))
+    const again = await client.getSandbox(sandbox.id)
+    assert.deepEqual(again.abins, ['index'])
+    assert.equal(again.id, sandbox.id)
+    // Asked for again, each port without the `url` only its making answers.
+    const asked = sandbox.ports.map(({ url, ...port }) => port)
+    assert.deepEqual(again.ports, asked)
+    const found = (await client.listSandbox()).find(({ id }) => id === sandbox.id)
+    assert.deepEqual(found.ports, asked)
 
     const job = await sandbox.exec(['echo', 'hi'])
     assert.ok(job instanceof virtx.SandboxJob)

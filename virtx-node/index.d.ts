@@ -336,7 +336,7 @@ export interface SandboxInfo {
   image: string
   /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
-  /** Only as `createSandbox` answers it, if it was given some. */
+  /** Its opened ports, if it was given some: each with its `url` only as `createSandbox` answers it. */
   ports?: SandboxPort[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
@@ -373,7 +373,8 @@ export type PortProtocol = 'tcp' | 'http'
 /** A port opened in a sandbox, and where it is reached from. */
 export interface SandboxPort {
   port: number
-  url: string
+  /** Answered by `createSandbox` alone, as secret as the credentials it carries: absent from a sandbox `getSandbox` or `listSandbox` answers. */
+  url?: string
   /** What it is for, as it was opened with. */
   label?: string
   /** Absent for `'tcp'`. */
@@ -620,9 +621,11 @@ export class Client {
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>
   getVolume(name: string): Promise<Volume>
+  /** Every sandbox the server holds, each port without its `url`. */
   listSandbox(): Promise<Sandbox[]>
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
+  /** The sandbox `id`, each port without its `url`. */
   getSandbox(id: string): Promise<Sandbox>
 }
 

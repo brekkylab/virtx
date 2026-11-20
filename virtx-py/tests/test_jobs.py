@@ -1,6 +1,7 @@
 """Images, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
 against the fixture's ``virtx-stdio``."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,11 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
     }
     got = await client.get_sandbox(sandbox.id)
     assert got.id == sandbox.id and got.abins == ["index"]
-    assert sandbox.id in [item.id for item in await client.list_sandbox()]
+    asked = [replace(p, url=None) for p in sandbox.ports]
+    assert all(p.url is not None for p in sandbox.ports)
+    assert got.ports == asked
+    listed = {item.id: item for item in await client.list_sandbox()}
+    assert listed[sandbox.id].ports == asked
 
     job = await sandbox.exec(["echo", "hi"])
     assert isinstance(job, SandboxJob) and job.sandbox_id == sandbox.id

@@ -65,7 +65,7 @@ async for entry in cat.log():
     ...
 ```
 
-A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `create_sandbox` answered for it: an address on this machine's loopback, for any TCP client, until it is closed.
+A sandbox's port is reached through a `PortForwarder`, opened over the client with the `url` `create_sandbox` answered for it, the one place it is given: an address on this machine's loopback, for any TCP client, until it is closed.
 
 ```python
 from virtx import PortForwarder

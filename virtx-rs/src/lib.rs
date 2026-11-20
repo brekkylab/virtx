@@ -40,7 +40,7 @@ pub use files::Files;
 pub use image::ImageJob;
 pub use job::{JobEnd, JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
-pub use portforward::PortForwarder;
+pub use portforward::{ForwardedPort, PortForwarder};
 pub use project::Project;
 pub use sandbox::{Sandbox, SandboxJob};
 /// What the server answers about an image job; an [`ImageJob`] carries it with its client.
@@ -59,7 +59,7 @@ pub use virtx_core::{
     Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
     MountSource, MountType, Progress, Recipe, RegistryAuth, Role, SandboxCreateArgs,
-    SandboxExecArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
-    SandboxPort, SandboxVolume, Source, Step, VolumeMountListOutputItem,
+    SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry,
+    SandboxJobKind, SandboxPort, SandboxVolume, Source, Step, VolumeMountListOutputItem,
 };
 pub use volume::Volume;

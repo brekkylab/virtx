@@ -16,7 +16,9 @@ header = """
  * until there is something to take, then wakes it. Or block with
  * virtx_future_wait and virtx_stream_wait_next. A stream answers VIRTX_END once it has no item
  * left, and ends after an error. A port forwarder opens over a client, blocking as opening
- * one does, and forwards until it is freed or the client's last release. Free every VirtxBytes
+ * one does, and forwards until it is freed or the client's last release. What the library warns
+ * of beside an answer, such as a forwarded connection that reached nothing, goes to the
+ * function virtx_set_warn sets, and is dropped until one is. Free every VirtxBytes
  * written with virtx_bytes_free, every future with virtx_future_free, every stream with
  * virtx_stream_free, and every forwarder with virtx_port_forwarder_free.
  */"""

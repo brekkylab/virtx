@@ -92,10 +92,10 @@ fn failed_on_host(kind: io::ErrorKind, e: impl ToString) -> Refusal {
     }
 }
 
-impl From<io::Error> for Refusal {
-    fn from(e: io::Error) -> Refusal {
-        failed_on_host(e.kind(), e)
-    }
+/// The refusal of `doing` the file at `path` on this host -- `reading`, say -- failing with an
+/// error, whose account says both.
+fn on_file<'a>(doing: &'a str, path: &'a Path) -> impl FnOnce(io::Error) -> Refusal + 'a {
+    move |e| failed_on_host(e.kind(), format!("{doing} {}: {e}", path.display()))
 }
 
 impl From<store::Error> for Refusal {
@@ -271,8 +271,9 @@ impl RegistryServer {
                     .map(str::to_owned);
                 match method {
                     Method::GET => {
-                        let len = std::fs::metadata(self.upload_path(last)?)?.len();
-                        Ok(self.upload_accepted(name, last, StatusCode::NO_CONTENT, len))
+                        let path = self.upload_path(last)?;
+                        let len = std::fs::metadata(&path).map_err(on_file("reading", &path))?;
+                        Ok(self.upload_accepted(name, last, StatusCode::NO_CONTENT, len.len()))
                     }
                     Method::PATCH => {
                         self.patch_upload(name, last, range.as_deref(), request.into_body())
@@ -284,7 +285,8 @@ impl RegistryServer {
                             .await
                     }
                     Method::DELETE => {
-                        std::fs::remove_file(self.upload_path(last)?)?;
+                        let path = self.upload_path(last)?;
+                        std::fs::remove_file(&path).map_err(on_file("removing", &path))?;
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
                     _ => Err(refusal(
@@ -544,9 +546,13 @@ impl RegistryServer {
     /// A layer, streamed from its file, or a config.
     async fn get_blob(&self, digest: &str, with_body: bool) -> Result<Response<Body>> {
         let blob = blob_digest(digest)?;
-        let (len, body) = match tokio::fs::File::open(self.store.layer_path(&blob)).await {
+        let path = self.store.layer_path(&blob);
+        let (len, body) = match tokio::fs::File::open(&path).await {
             Ok(file) => (
-                file.metadata().await?.len(),
+                file.metadata()
+                    .await
+                    .map_err(on_file("reading", &path))?
+                    .len(),
                 StreamBody::new(
                     ReaderStream::new(file).map(|chunk| chunk.map(http_body::Frame::data)),
                 )
@@ -563,7 +569,7 @@ impl RegistryServer {
                         .boxed_unsync(),
                 )
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(on_file("opening", &path)(e)),
         };
 
         let mut response = Response::new(if with_body {
@@ -598,10 +604,11 @@ impl RegistryServer {
             self.store.remove_layer(&blob).map_err(denied)?;
             return Ok(empty(StatusCode::ACCEPTED));
         }
-        match std::fs::remove_file(self.uploads.join(blob.digest())) {
+        let config = self.uploads.join(blob.digest());
+        match std::fs::remove_file(&config) {
             Ok(()) => return Ok(empty(StatusCode::ACCEPTED)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(on_file("removing", &config)(e)),
         }
         if self.config(&blob)?.is_some() {
             return Err(refusal(
@@ -639,8 +646,12 @@ impl RegistryServer {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let path = self.uploads.join(&id);
         // Another server's sweep takes a directory it finds empty and old, this one's too.
-        tokio::fs::create_dir_all(&self.uploads).await?;
-        tokio::fs::File::create(&path).await?;
+        tokio::fs::create_dir_all(&self.uploads)
+            .await
+            .map_err(on_file("making", &self.uploads))?;
+        tokio::fs::File::create(&path)
+            .await
+            .map_err(on_file("making", &path))?;
         if let Some(digest) = digest {
             append(&path, body).await?;
             return self.finish(name, &path, digest).await;
@@ -661,7 +672,10 @@ impl RegistryServer {
         B::Error: std::fmt::Display,
     {
         let path = self.upload_path(id)?;
-        let len = tokio::fs::metadata(&path).await?.len();
+        let len = tokio::fs::metadata(&path)
+            .await
+            .map_err(on_file("reading", &path))?
+            .len();
         if let Some(range) = range {
             let start = range
                 .split_once('-')
@@ -781,10 +795,11 @@ impl RegistryServer {
 
     /// The config `blob`: one waiting for its manifest, or one an image keeps.
     fn config(&self, blob: &Digest) -> Result<Option<Vec<u8>>> {
-        match std::fs::read(self.uploads.join(blob.digest())) {
+        let waiting = self.uploads.join(blob.digest());
+        match std::fs::read(&waiting) {
             Ok(config) => return Ok(Some(config)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(on_file("reading", &waiting)(e)),
         }
         for image in self.store.images()? {
             if let Some((_, config)) = self.store.get_image_manifest(&image)?
@@ -889,8 +904,9 @@ fn sweep(uploads: &Path) {
 fn file_upload(store: &Store, uploads: &Path, path: &Path, digest: &str) -> Result<Digest> {
     let invalid = |what: String| refusal(StatusCode::BAD_REQUEST, "DIGEST_INVALID", what);
     let blob = blob_digest(digest)?;
+    let opened = || File::open(path).map_err(on_file("opening", path));
     let mut hasher = Sha256::new();
-    io::copy(&mut File::open(path)?, &mut hasher)?;
+    io::copy(&mut opened()?, &mut hasher).map_err(on_file("reading", path))?;
     if format!("{:x}", hasher.finalize()) != blob.digest() {
         return Err(invalid(format!("the blob is not {digest}")));
     }
@@ -898,7 +914,7 @@ fn file_upload(store: &Store, uploads: &Path, path: &Path, digest: &str) -> Resu
         return Ok(blob);
     }
 
-    if let Ok(tree) = FsTree::from_erofs(BufReader::new(File::open(path)?)) {
+    if let Ok(tree) = FsTree::from_erofs(BufReader::new(opened()?)) {
         let layer = store.insert_layer(&tree)?;
         if layer != blob {
             let _ = store.remove_layer(&layer);
@@ -910,14 +926,21 @@ fn file_upload(store: &Store, uploads: &Path, path: &Path, digest: &str) -> Resu
         }
         return Ok(blob);
     }
-    if std::fs::metadata(path)?.len() > LIMIT as u64 {
+    let len = std::fs::metadata(path)
+        .map_err(on_file("reading", path))?
+        .len();
+    if len > LIMIT as u64 {
         return Err(refusal(
             StatusCode::BAD_REQUEST,
             "BLOB_UPLOAD_INVALID",
             format!("{digest} is not an EROFS image, and too large to be a config"),
         ));
     }
-    std::fs::rename(path, uploads.join(blob.digest()))?;
+    let waiting = uploads.join(blob.digest());
+    std::fs::rename(path, &waiting).map_err(|e| {
+        let account = format!("moving {} to {}: {e}", path.display(), waiting.display());
+        failed_on_host(e.kind(), account)
+    })?;
     Ok(blob)
 }
 
@@ -987,7 +1010,8 @@ where
     let mut file = tokio::fs::OpenOptions::new()
         .append(true)
         .open(path)
-        .await?;
+        .await
+        .map_err(on_file("opening", path))?;
     let mut body = std::pin::pin!(body);
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|e| {
@@ -998,11 +1022,14 @@ where
             )
         })?;
         if let Ok(data) = frame.into_data() {
-            file.write_all(&data).await?;
+            file.write_all(&data)
+                .await
+                .map_err(on_file("writing", path))?;
         }
     }
-    file.flush().await?;
-    Ok(file.metadata().await?.len())
+    file.flush().await.map_err(on_file("writing", path))?;
+    let written = file.metadata().await.map_err(on_file("reading", path))?;
+    Ok(written.len())
 }
 
 fn empty(status: StatusCode) -> Response<Body> {
@@ -1431,6 +1458,36 @@ mod tests {
                     assert_eq!(message, "the server's files: not a directory")
                 }
                 HostPaths::Named => assert!(message.starts_with(&named), "{message}"),
+            }
+        }
+    }
+
+    /// An upload that cannot be made: its account says what failed, and at which path.
+    #[tokio::test]
+    async fn an_upload_that_cannot_be_made_is_told_with_where() {
+        let scratch = Scratch::new("upload-not-made");
+        for host_paths in [HostPaths::Hidden, HostPaths::Named] {
+            let server = RegistryServer::new(scratch.0.clone(), "/images")
+                .unwrap()
+                .with_host_paths(host_paths);
+            let uploads = server.uploads.clone();
+            std::fs::remove_dir_all(&uploads).unwrap();
+            std::fs::write(&uploads, b"not a directory").unwrap();
+            let post = "/images/v2/app/blobs/uploads/";
+            let (status, _, body) = send(&server, Method::POST, post, b"").await;
+            std::fs::remove_file(&uploads).unwrap();
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let message = body["errors"][0]["message"].as_str().unwrap();
+            match host_paths {
+                HostPaths::Hidden => assert_eq!(
+                    message,
+                    format!("the server's files: {}", io::ErrorKind::AlreadyExists)
+                ),
+                HostPaths::Named => {
+                    let named = format!("making {}: ", uploads.display());
+                    assert!(message.starts_with(&named), "{message}");
+                }
             }
         }
     }

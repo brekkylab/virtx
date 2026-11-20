@@ -1,7 +1,7 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
-//! ([`router`]), answered from the [`Home`] of the project a request names, and those of the
-//! projects themselves ([`projects`]), answered from the [`Host`]. One client is on the other end
-//! of stdio, so all of it is its.
+//! The endpoints the protocol names, but the images' registry: those in a project ([`router`]),
+//! answered from the [`Home`] of the project a request names, and those of the projects themselves
+//! ([`projects`]), answered from the [`Host`]. One client is on the other end of stdio, so all of
+//! it is its.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -943,8 +943,8 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
 /// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
 const BODY_LIMIT: usize = 2 << 20;
 
-/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
-/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid` if
+/// it broke off, as any refusal here is, in the protocol's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused, as `virtx-server-tcp` reads one: there a connection closed
@@ -989,8 +989,8 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
     }
 }
 
-/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope and the server's words.
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when they
+/// do not read as one, in the protocol's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>

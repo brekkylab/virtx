@@ -1,6 +1,6 @@
 ---
 name: virtx
-description: Run a task in a Linux microVM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx.
+description: "Run a task in a Linux microVM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx."
 ---
 
 # virtx
@@ -76,5 +76,4 @@ Remove the sandbox with `sandbox.remove()` when the task is done, in a `finally`
 
 - [`README.md`](../../README.md): the Quickstart, for a local server and a remote one.
 - [`docs/content/`](../../docs/content/): the guides and the API reference.
-- [`virtx-py/README.md`](../../virtx-py/README.md) and [`virtx-node/README.md`](../../virtx-node/README.md): each package's API.
-- [`virtx-core/PROTOCOL.md`](../../virtx-core/PROTOCOL.md): what client and server say to each other, for a server of your own.
+- [`docs/content/reference/protocol.mdx`](../../docs/content/reference/protocol.mdx): what client and server say to each other, for a server of your own.

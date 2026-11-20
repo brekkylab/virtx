@@ -1,5 +1,5 @@
-//! The typed client: each request `PROTOCOL.md` lists, as a call over a [`TransportClient`],
-//! made by the module of what it names: [`project`](crate::project), [`image`](crate::image),
+//! The typed client: each request the protocol lists, as a call over a [`TransportClient`], made by
+//! the module of what it names: [`project`](crate::project), [`image`](crate::image),
 //! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a
 //! sandbox over WebDAV.
 

@@ -103,7 +103,7 @@ A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cm
 | `complete(print)` | `int` | Follows it to its end, printing its output if `print`, and answers its exit code. |
 | `log(after)` | a `LogEntry` at a time | Its output, from its start or after entry `after`, until its end. |
 | `signal(signal)` | `None` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
-| `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. A write its process closed its stdin under part-way raises `409`, `ended`, its `written` how many bytes went in. |
+| `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. A write its process closed its stdin under part-way raises `409`, `ended`, its `written` how many bytes went in. One the server has no room for yet, after writes given up on while the process did not read, is turned away for now as `503` `capacity`, nothing of it taken, and sent again as below. |
 | `remove()` | `None` | Kills its process if it runs, and forgets the job. |
 
 Code that holds only ids gets the job back with `get_sandbox(id)`, then its `job(id)`.

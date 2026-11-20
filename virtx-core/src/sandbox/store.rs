@@ -1,6 +1,11 @@
 //! Sandboxes: what one is, as the server answers it, and what making one takes.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
+
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, MapAccess, Unexpected, Visitor, value::MapAccessDeserializer},
+};
 
 use crate::image::ImageName;
 
@@ -285,7 +290,7 @@ impl PortProtocol {
 /// A port's protocol as a request names it: one this version knows, as a server opens no other.
 fn known_protocol<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PortProtocol, D::Error> {
     match PortProtocol::deserialize(deserializer)? {
-        PortProtocol::Other(other) => Err(serde::de::Error::custom(format!(
+        PortProtocol::Other(other) => Err(de::Error::custom(format!(
             "{other:?} is not a protocol this server opens"
         ))),
         known => Ok(known),
@@ -390,24 +395,44 @@ impl Serialize for PortSpec {
 
 impl<'de> Deserialize<'de> for PortSpec {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(
-            untagged,
-            expecting = r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
-        )]
-        enum Either {
-            Port(u16),
-            Spec(PortSpecObject),
+        // Told apart by what was sent, so a failure inside the object is told as itself, at its
+        // member, rather than as neither form.
+        struct Either;
+
+        impl<'de> Visitor<'de> for Either {
+            type Value = PortSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str(
+                    r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#,
+                )
+            }
+
+            fn visit_u64<E: de::Error>(self, port: u64) -> Result<PortSpec, E> {
+                u16::try_from(port)
+                    .map(PortSpec::new)
+                    .map_err(|_| E::invalid_value(Unexpected::Unsigned(port), &self))
+            }
+
+            fn visit_i64<E: de::Error>(self, port: i64) -> Result<PortSpec, E> {
+                match u64::try_from(port) {
+                    Ok(port) => self.visit_u64(port),
+                    Err(_) => Err(E::invalid_value(Unexpected::Signed(port), &self)),
+                }
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<PortSpec, A::Error> {
+                let spec = PortSpecObject::deserialize(MapAccessDeserializer::new(map))?;
+                Ok(PortSpec {
+                    port: spec.port,
+                    label: spec.label,
+                    protocol: spec.protocol,
+                    inbound: spec.inbound,
+                })
+            }
         }
-        Ok(match Either::deserialize(deserializer)? {
-            Either::Port(port) => PortSpec::new(port),
-            Either::Spec(spec) => PortSpec {
-                port: spec.port,
-                label: spec.label,
-                protocol: spec.protocol,
-                inbound: spec.inbound,
-            },
-        })
+
+        deserializer.deserialize_any(Either)
     }
 }
 
@@ -566,10 +591,10 @@ mod tests {
 
     #[test]
     fn a_port_that_is_neither_form_is_refused_saying_what_a_port_is() {
-        let refused = serde_json::from_value::<PortSpec>(json!({"port": "5900"})).unwrap_err();
+        let refused = serde_json::from_value::<PortSpec>(json!("5900")).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
+            r#"invalid type: string "5900", expected a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
         );
     }
 

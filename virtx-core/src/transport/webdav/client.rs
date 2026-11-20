@@ -10,7 +10,7 @@ use percent_encoding::percent_decode_str;
 
 use super::{DirEntry, FileRoot, Metadata};
 use crate::{
-    Error,
+    Error, Members,
     transport::{Body, TransportClient, full, http::refused, resolved, segment, segments},
 };
 
@@ -320,7 +320,7 @@ async fn send(
         let xml = std::str::from_utf8(&body)
             .map_err(|e| Error::Client(format!("a 207 answered no XML: {e}")))?;
         if let Some((status, path)) = failure_in(xml) {
-            return Err(Error::Status(status, path));
+            return Err(Error::Status(status, path, Members::default()));
         }
     }
     Ok((status, body))
@@ -692,7 +692,7 @@ mod refusals {
             error.to_string(),
             "the server answered 404 Not Found: no volume here is named v"
         );
-        let Error::Status(status, body) = &error else {
+        let Error::Status(status, body, _) = &error else {
             panic!("expected Error::Status, got {error:?}");
         };
         assert_eq!(*status, 404);

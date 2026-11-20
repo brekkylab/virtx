@@ -30,8 +30,9 @@
 #define VIRTX_OK 0
 
 // Failed: the error is written, as `{"message": "...", "source": "server", "status": 404}`,
-// `source` where it failed, `status` only for a request the server refused with it, and `code`
-// beside it where the server answered the protocol's code, such as `"code": "not_found"`.
+// `source` where it failed, `status` only for a request the server refused with it, `code`
+// beside it where the server answered the protocol's code, such as `"code": "not_found"`, and
+// `written` where that refusal had it, for a write to a job's stdin cut part-way.
 #define VIRTX_ERROR -1
 
 // Not answered yet: the waker given is kept, and woken once it is.

@@ -44,6 +44,9 @@ const MACHINE_HEARD_BRIEFLY: &str = "vm-heard-briefly";
 /// The image every sandbox here is made of.
 const ALPINE: &str = "alpine:3.20";
 
+/// An image on glibc and bash, as most are: the base of Python's.
+const DEBIAN: &str = "debian:bookworm-slim";
+
 /// The image a GPU sandbox is made of: edge, the one Alpine whose repositories carry venus's
 /// guest driver (`mesa-vulkan-virtio`); no stable branch does yet. Pulled only for the GPU's
 /// test.
@@ -161,15 +164,20 @@ async fn run(
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let mut lines = Vec::new();
     while let Some(Ok(event)) = events.next().await {
-        let event = String::from_utf8(event.to_vec()).unwrap();
-        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
-        match serde_json::from_str(data.expect("an event carries its entry")).unwrap() {
+        match entry(&event) {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => lines.push(line),
             SandboxJobEntry::End(end) => return Ok((lines, end.code)),
             SandboxJobEntry::Truncated {} => {}
         }
     }
     panic!("a job's log ends with its end")
+}
+
+/// The entry an event of a job's log carries.
+fn entry(event: &[u8]) -> SandboxJobEntry {
+    let event = std::str::from_utf8(event).unwrap();
+    let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+    serde_json::from_str(data.expect("an event carries its entry")).unwrap()
 }
 
 /// Room for as many machines as a test says ([`Limit::to`]), and for every one otherwise: this
@@ -552,8 +560,13 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
         matches!(started, Err(SandboxError::NotStarted(_))),
         "{started:?}"
     );
-    let timed = run(&sandbox, &["sleep", "10"], Some(Duration::from_millis(200))).await;
-    assert_eq!(timed.unwrap().1, 137);
+    // Its timeout ends the child it left in the background too, which would run on otherwise.
+    let forks = ["sh", "-c", "sleep 10 & sleep 10"];
+    let timed = run(&sandbox, &forks, Some(Duration::from_secs(1)));
+    let timed = tokio::time::timeout(Duration::from_secs(5), timed).await;
+    assert_eq!(timed.expect("its timeout ends it").unwrap().1, 137);
+    let left = ["sh", "-c", "ps | grep -c '[s]leep 10'"];
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
     // A line past what a frame carries comes in pieces, and the machine goes on.
     let long = ["sh", "-c", "head -c 20000000 /dev/zero | tr '\\0' '\\1'"];
     let (lines, code) = run(&sandbox, &long, None).await.unwrap();
@@ -563,8 +576,14 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
 
 async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
-    let cmd = ["sleep", "30"].map(String::from).to_vec();
+    // It says `started` once its child in the background is there.
+    let cmd = ["sh", "-c", "sleep 30 & echo started; sleep 30"]
+        .map(String::from)
+        .to_vec();
     let job = sandbox.exec(cmd, false, None).await.unwrap();
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
     assert!(job.get().running);
     sandbox.remove_job(&job.get().id).unwrap();
     assert!(sandbox.job(&job.get().id).is_err());
@@ -1051,11 +1070,20 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
     let sandbox = home.sandbox(&small(), park).await;
     // What runs past its job ends with the machine, so seeing it gone is seeing it stopped.
     let behind = ["sh", "-c", "sleep 1000 >/dev/null 2>&1 &"];
-    let still = ["sh", "-c", "cat /root/kept; ps | grep -c '[s]leep 1000'"];
+    let hashed = "sha256sum /root/a /root/b";
+    let still = format!("{hashed}; ps | grep -c '[s]leep 1000'");
 
-    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
-        .await
-        .unwrap();
+    // Written whole, over in scattered blocks, zeroed in place, and cut short.
+    let write = "dd if=/dev/urandom of=/root/a bs=1M count=64 2>/dev/null \
+                 && dd if=/dev/urandom of=/root/b bs=1M count=8 2>/dev/null \
+                 && for at in 3 97 512 1500 2047; do \
+                 dd if=/dev/urandom of=/root/b bs=4k count=1 seek=$at conv=notrunc 2>/dev/null; \
+                 done \
+                 && dd if=/dev/zero of=/root/a bs=1M count=4 seek=10 conv=notrunc 2>/dev/null \
+                 && truncate -s 50M /root/a";
+    let wrote = run(&sandbox, &["sh", "-c", write], None).await.unwrap();
+    assert_eq!(wrote.1, 0);
+    let (written, _) = run(&sandbox, &["sh", "-c", hashed], None).await.unwrap();
     run(&sandbox, &behind, None).await.unwrap();
     // A job that runs keeps it up, however long.
     let held = ["sh", "-c", "sleep 2; ps | grep -c '[s]leep 1000'"];
@@ -1064,10 +1092,12 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         (vec!["1".into()], 0)
     );
 
-    // Idle, it stops; a job boots it again, over what it wrote.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let (lines, _) = run(&sandbox, &still, None).await.unwrap();
-    assert_eq!(lines, ["kept", "0"]);
+    // Idle, it stops; a job boots it again, over what it wrote, whole.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (lines, _) = run(&sandbox, &["sh", "-c", still.as_str()], None)
+        .await
+        .unwrap();
+    assert_eq!(lines, [written, vec!["0".into()]].concat());
 
     // Its own upper disk goes with it.
     close(sandbox).await;
@@ -1324,6 +1354,96 @@ async fn a_sandbox_s_writable_layer_is_as_large_as_asked(home: Home) {
         );
         close(sandbox).await;
     }
+}
+
+async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home) {
+    // A public address by number, so no name has to resolve: Google's DNS, over HTTPS.
+    let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
+    let with = home.sandbox(&small(), None).await;
+    assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
+    close(with).await;
+    // A published port gives the machine its network device, and still no way out.
+    for ports in [vec![], vec![8080.into()]] {
+        let args = SandboxCreateArgs {
+            network: false,
+            ports: ports.clone(),
+            ..small()
+        };
+        let without = home.sandbox(&args, None).await;
+        let (lines, code) = run(&without, &out, None).await.unwrap();
+        assert_ne!(code, 0, "reached out with ports {ports:?}: {lines:?}");
+        close(without).await;
+    }
+}
+
+async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home: Home) {
+    let mut args = SandboxCreateArgs::new(DEBIAN);
+    args.memory_mib = Some(1024);
+    let sandbox = home.sandbox(&args, None).await;
+    // The image's PATH, the HOME and directory it leaves to us, and its own bash, on glibc.
+    let ask = "echo $PATH; echo $HOME; pwd; ldd /bin/bash | grep -c libc.so.6";
+    let (lines, code) = run(&sandbox, &["bash", "-c", ask], None).await.unwrap();
+    let path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    assert_eq!(
+        (lines, code),
+        (vec![path.into(), "/root".into(), "/".into(), "1".into()], 0)
+    );
+    close(sandbox).await;
+}
+
+async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
+    for (vcpus, mib) in [(1, 512), (2, 1536)] {
+        let sandbox = home
+            .sandbox(&small().vcpus(vcpus).memory_mib(mib), None)
+            .await;
+        let ask = [
+            "sh",
+            "-c",
+            "nproc; awk '/MemTotal/ {print $2}' /proc/meminfo",
+        ];
+        let (lines, code) = run(&sandbox, &ask, None).await.unwrap();
+        assert_eq!((lines.len(), code), (2, 0), "{lines:?}");
+        assert_eq!(lines[0], vcpus.to_string());
+        let kib: u64 = lines[1].parse().unwrap();
+        // Less what the kernel keeps for itself; on x86_64 a little more, as libkrun gives the
+        // machine the memory below where its kernel loads besides what is asked.
+        let asked = u64::from(mib) << 10;
+        assert!(
+            kib > asked * 8 / 10 && kib < asked * 11 / 10,
+            "{kib} KiB for {mib} MiB"
+        );
+        close(sandbox).await;
+    }
+}
+
+async fn a_signal_ends_a_job_with_every_process_it_started(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // The signal reaches the child it left in the background too, which would run on otherwise.
+    let cmd = ["sh", "-c", "sleep 60 & echo started; sleep 60"]
+        .map(String::from)
+        .to_vec();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
+    // Once it has started its child.
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
+    let term = virtx_uvm::signal_number("SIGTERM").unwrap();
+    sandbox.signal(&job.get().id, term).unwrap();
+    let read = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(_)) = events.next().await {}
+    });
+    read.await.expect("a signal ends it");
+    assert_eq!(job.get().code, Some(128 + term));
+    let left = ["sh", "-c", "ps | grep -c '[s]leep 60'"];
+    assert_eq!(run(&sandbox, &left, None).await.unwrap().0, ["0"]);
+    close(sandbox).await;
+}
+
+async fn a_job_given_no_input_reads_its_end(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let read = tokio::time::timeout(Duration::from_secs(10), run(&sandbox, &["cat"], None));
+    assert_eq!(read.await.expect("cat read an end").unwrap(), (vec![], 0));
+    close(sandbox).await;
 }
 
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
@@ -2073,7 +2193,11 @@ fn main() -> ExitCode {
     // runs on hosts without one too, and there a guest finds no device. Said on a build without
     // the feature, the test fails -- the sandbox is refused -- rather than passing on nothing.
     let gpu = env::var_os("VIRTX_TEST_GPU").is_some_and(|v| v == "1");
-    let pulled: &[&str] = if gpu { &[ALPINE, GPU_IMAGE] } else { &[ALPINE] };
+    let pulled: &[&str] = if gpu {
+        &[ALPINE, DEBIAN, GPU_IMAGE]
+    } else {
+        &[ALPINE, DEBIAN]
+    };
     runtime.block_on(async {
         let registry = RegistryClient::new(images.clone(), None);
         for name in pulled {
@@ -2116,6 +2240,11 @@ fn main() -> ExitCode {
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
+        a_sandbox_without_a_network_reaches_nothing_off_its_machine,
+        a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
+        a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
+        a_signal_ends_a_job_with_every_process_it_started,
+        a_job_given_no_input_reads_its_end,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,

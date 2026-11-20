@@ -60,6 +60,10 @@ class VirtxError(Exception):
     """The HTTP status the server refused the request with, if it did: ``404`` for what does
     not exist, ``409`` for what is in use or has ended, and the like."""
 
+    code: str | None
+    """The protocol's code the server refused the request with, where it answered one:
+    ``not_found``, ``in_use`` and the like -- what to branch on, not the message."""
+
     body: str | None
     """The server's response body, where it was not a JSON error."""
 
@@ -69,10 +73,12 @@ class VirtxError(Exception):
         status: int | None = None,
         body: str | None = None,
         source: Source = "client",
+        code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.source = source
         self.status = status
+        self.code = code
         self.body = body
 
 
@@ -266,7 +272,11 @@ class Library:
                 raise VirtxError("the call failed")
             failure = json.loads(data)
             raise VirtxError(
-                failure["message"], failure.get("status"), failure.get("body"), failure["source"]
+                failure["message"],
+                failure.get("status"),
+                failure.get("body"),
+                failure["source"],
+                failure.get("code"),
             )
         raise VirtxError(f"unknown status {status}")
 

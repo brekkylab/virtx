@@ -150,6 +150,43 @@ fn a_resized_sandbox_boots_so_and_its_disk_only_grows() {
 }
 
 #[test]
+fn a_running_process_s_log_is_read_as_it_writes_it() {
+    let client = common::client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    // `b` waits for a file only a second process makes; 30 seconds without it, and `exit 1`.
+    let waits = "echo a; i=0; until [ -e /tmp/go ]; do \
+                 i=$((i+1)); [ $i -gt 300 ] && exit 1; sleep 0.1; done; echo b";
+    let job = sandbox
+        .exec(&SandboxExecArgs::new(["sh", "-c", waits]))
+        .wait()
+        .unwrap();
+    let mut log = job.log(None);
+    let first = log.wait_next().unwrap().unwrap().entry;
+    assert_eq!(first, SandboxJobEntry::Stdout("a".into()));
+    let got = job.get().wait().unwrap();
+    assert!(got.info().running, "{got:?}");
+
+    let touch = SandboxExecArgs::new(["touch", "/tmp/go"]);
+    assert_eq!(sandbox.exec(&touch).complete(false).wait().unwrap(), 0);
+    let rest: Vec<_> = common::entries(log)
+        .into_iter()
+        .map(|entry| entry.entry)
+        .collect();
+    assert_eq!(
+        rest,
+        [
+            SandboxJobEntry::Stdout("b".into()),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
+        ]
+    );
+    sandbox.remove().wait().unwrap();
+}
+
+#[test]
 fn stdin_written_comes_back_until_it_is_closed() {
     let client = common::client();
     common::alpine(&client);

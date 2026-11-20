@@ -706,6 +706,13 @@ mod tests {
         assert_eq!(status("PUT", &alice, "alice", demoted).await, 409);
         assert_eq!(status("DELETE", &carol, "alice", none.clone()).await, 404);
 
+        // Its owner takes a member out.
+        let member = json!({ "role": "member" });
+        assert_eq!(status("PUT", &carol, "alice", member).await, 201);
+        assert_eq!(volumes("carol").await, 200);
+        assert_eq!(status("DELETE", &carol, "alice", none.clone()).await, 204);
+        assert_eq!(volumes("carol").await, 403);
+
         // Bob leaves; Alice removes the project, and everything in it.
         assert_eq!(status("DELETE", &bob, "bob", none.clone()).await, 204);
         assert_eq!(volumes("bob").await, 403);

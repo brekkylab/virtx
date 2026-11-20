@@ -127,15 +127,24 @@ impl RegistryServer {
         &self.backing
     }
 
-    /// The tags kept beyond this machine and not here, for a listing beside the store's.
-    async fn kept_tags(&self) -> Vec<Reference> {
+    /// The tags kept beyond this machine and not here, for a listing beside the store's: those
+    /// with a tag in them. Refused `500` where the backend fails, which is logged, so that no
+    /// listing is answered short.
+    async fn kept_tags(&self) -> Result<Vec<Reference>> {
         let Some(backend) = self.backing.get() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        backend.tags().await.unwrap_or_else(|e| {
-            eprintln!("listing the tags kept beyond this machine: {e:#}");
-            Vec::new()
-        })
+        match backend.tags().await {
+            Ok(tags) => Ok(tags.into_iter().filter(|tag| tag.tag().is_some()).collect()),
+            Err(e) => {
+                eprintln!("listing the tags kept beyond this machine: {e:#}");
+                Err(refusal(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UNKNOWN",
+                    "the tags kept beyond this machine could not be listed",
+                ))
+            }
+        }
     }
 
     /// The image the manifest `reference` of repository `name` names -- a tag, or a digest --
@@ -216,7 +225,7 @@ impl RegistryServer {
         if path == "_catalog" {
             return match method {
                 Method::GET => {
-                    let also = self.kept_tags().await;
+                    let also = self.kept_tags().await?;
                     self.catalog(&also, asked("n"), asked("last"))
                 }
                 _ => Err(refusal(
@@ -231,7 +240,7 @@ impl RegistryServer {
         if let Some(name) = path.strip_suffix("/tags/list") {
             return match method {
                 Method::GET => {
-                    let also = self.kept_tags().await;
+                    let also = self.kept_tags().await?;
                     self.tags(name, &also, asked("n"), asked("last"))
                 }
                 _ => Err(refusal(
@@ -1440,10 +1449,12 @@ mod tests {
     }
 
     /// An image kept beyond this machine, tagged `kept:v1`, brought here as a backend would
-    /// bring it: by its tag or its digest.
+    /// bring it: by its tag or its digest. It lists a reference by digest alone too, and fails
+    /// to list any while `failing`.
     struct Elsewhere {
         here: Store,
         wanted: std::sync::Mutex<Vec<String>>,
+        failing: bool,
     }
 
     /// File the image [`Elsewhere`] keeps in `store`: the same digest in every store.
@@ -1481,7 +1492,11 @@ mod tests {
         }
 
         fn tags(&self) -> futures_util::future::BoxFuture<'_, anyhow::Result<Vec<Reference>>> {
-            Box::pin(async { Ok(vec!["kept:v1".parse().unwrap()]) })
+            Box::pin(async {
+                anyhow::ensure!(!self.failing, "the backend is down");
+                let untagged = format!("untagged@sha256:{}", "0".repeat(64));
+                Ok(vec!["kept:v1".parse().unwrap(), untagged.parse().unwrap()])
+            })
         }
     }
 
@@ -1495,6 +1510,7 @@ mod tests {
             let elsewhere = std::sync::Arc::new(Elsewhere {
                 here: store.clone(),
                 wanted: std::sync::Mutex::default(),
+                failing: false,
             });
             assert!(server.backing().set(elsewhere.clone()));
             let digest = kept_image(&Scratch::new("kept-digest").0).to_string();
@@ -1531,9 +1547,33 @@ mod tests {
         assert!(scratch.1.backing().set(std::sync::Arc::new(Elsewhere {
             here: scratch.0.clone(),
             wanted: std::sync::Mutex::default(),
+            failing: false,
         })));
         let none = "/images/v2/none/manifests/v1";
         let (status, _, _) = send(&scratch.1, Method::GET, none, b"").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "kept nowhere");
+        let untagged = "/images/v2/untagged/tags/list";
+        let (status, _, _) = send(&scratch.1, Method::GET, untagged, b"").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "no tag of it is kept");
+    }
+
+    /// A registry whose backend cannot list what it keeps refuses its listings `500`, rather
+    /// than answering them with the tags here alone.
+    #[tokio::test]
+    async fn a_backed_registry_refuses_a_listing_its_backend_cannot_give() {
+        let scratch = Scratch::new("backed-down");
+        let (store, server) = (&scratch.0, &scratch.1);
+        store
+            .insert_tag(&"here:v1".parse().unwrap(), &kept_image(store))
+            .unwrap();
+        assert!(server.backing().set(std::sync::Arc::new(Elsewhere {
+            here: store.clone(),
+            wanted: std::sync::Mutex::default(),
+            failing: true,
+        })));
+        for listing in ["/images/v2/_catalog", "/images/v2/here/tags/list"] {
+            let (status, _, _) = send(server, Method::GET, listing, b"").await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{listing}");
+        }
     }
 }

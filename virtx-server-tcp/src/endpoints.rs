@@ -219,8 +219,16 @@ impl Home {
     /// registry lists the tags kept there and brings a manifest it is asked for here. Said
     /// once, as it is made, before any request reaches it. A home given none -- a server on its
     /// own -- keeps nothing beyond its stores. See [`StorageBackend`].
+    ///
+    /// # Panics
+    ///
+    /// Where it has a backend already, given to it or to the registry it was made with: a home
+    /// keeps the one it was given first.
     pub fn backed_by(self, backend: Arc<dyn StorageBackend>) -> Home {
-        self.backing.set(backend);
+        assert!(
+            self.backing.set(backend),
+            "a home is backed once, and this one or its registry has a backend already"
+        );
         self
     }
 
@@ -270,14 +278,15 @@ impl Home {
         Ok(self.sandboxes.create(args, Some(given), booted).await?)
     }
 
-    /// Let go of sandbox `id` here, as this server lets go of each as it ends: its machine
-    /// stopped if it is up, as parking stops it, and its record and disk left under this home's
-    /// root, for a server to [take in](Home::take_in) -- another one it is moved to, this one
-    /// again, or a backup's. Nothing of it is removed from the backend, where the home has one.
-    /// From then on no request here reaches it. Refused `409` `in_use` while it is in use -- a
-    /// job runs in it, or something reaches it -- and `404` for an id no sandbox here has. One
-    /// kept here and not known again is let go of as it is. Blocks until its machine has
-    /// stopped.
+    /// Let go of sandbox `id` here, as this server lets go of each as it ends
+    /// ([`Sandbox::leave`]): its machine stopped if it is up, as parking stops it, and its
+    /// record and disk left under this home's root, for a server to [take in](Home::take_in) --
+    /// another one it is moved to, this one again, or a backup's. Nothing of it is removed from
+    /// the backend, where the home has one: what is kept of it is the embedder's from then on,
+    /// to take in or to remove there itself. From then on no request here reaches it. Refused
+    /// `409` `in_use` while it is in use -- a job runs in it, or something reaches it -- and
+    /// `404` for an id no sandbox here has. One kept here and not known again is let go of as
+    /// it is. Blocks until its machine has stopped.
     pub async fn let_go(&self, id: &str) -> Result<(), Refused> {
         Ok(self.sandboxes.let_go(id).await?)
     }
@@ -1274,23 +1283,23 @@ async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    if let Ok(volume) = home.volumes.open(&name) {
-        // Mounted here: refused before anything is removed.
-        drop(volume.hold_alone()?);
-    }
-    let kept = match home.backing.get() {
-        Some(backend) => match backend.remove(Stored::Volume(&name)).await {
-            Ok(()) => true,
-            // Kept nowhere else: as the volume here says.
-            Err(virtx_uvm::backend::Refusal::Unknown(_)) => false,
-            Err(e) => return Err(e.into()),
-        },
-        None => false,
+    let Some(backend) = home.backing.get() else {
+        home.volumes.remove(&name)?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    match home.volumes.remove(&name) {
-        Ok(()) => {}
-        Err(VolumeError::Unknown(_)) if kept => {}
+    // Held alone until it is removed here, so no sandbox mounts it meanwhile.
+    let alone = match home.volumes.open(&name) {
+        Ok(volume) => Some(volume.hold_alone()?),
+        Err(VolumeError::Unknown(_)) => None,
         Err(e) => return Err(e.into()),
+    };
+    match backend.remove(Stored::Volume(&name)).await {
+        Ok(()) => {}
+        Err(virtx_uvm::backend::Refusal::Unknown(_)) if alone.is_some() => {}
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(alone) = alone {
+        home.volumes.remove_held(&name, alone)?;
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }

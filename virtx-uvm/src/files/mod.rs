@@ -20,6 +20,9 @@
 //! as the guest sees it: a `PUT` before its body is read, the condition of any other write, and
 //! a path the volume's files do not answer for, through a link, by a name they refuse, or in a
 //! mount of the volume's own.
+//!
+//! Where a volume is kept beyond this machine ([`Files::backed_by`]), it is brought up to what is
+//! kept before a request is answered from it, and held there while a request writes it.
 
 mod sandbox;
 mod volume;
@@ -41,6 +44,7 @@ use futures_util::future::BoxFuture;
 use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 
+use crate::backend::{self, Backing, Stored};
 use crate::machine::Machine;
 use crate::sandbox::Activity;
 use crate::volume::{Error as VolumeError, Store as VolumeStore};
@@ -52,6 +56,8 @@ pub struct Files {
     /// its [lock file](writing) too, through its own files or a sandbox that mounts it. A
     /// sandbox's are held by the sandbox's own first.
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Where the volumes are kept beyond this machine, if anywhere.
+    backing: Backing,
 }
 
 impl Files {
@@ -60,7 +66,16 @@ impl Files {
         Files {
             volumes,
             serial: Mutex::default(),
+            backing: Backing::default(),
         }
+    }
+
+    /// These, each volume kept beyond this machine by `backing`'s backend, once it has one:
+    /// [brought up](crate::StorageBackend::bring_up) before a request reads it, and
+    /// [taken](crate::StorageBackend::take) before one writes it, until that is answered.
+    pub fn backed_by(mut self, backing: Backing) -> Files {
+        self.backing = backing;
+        self
     }
 
     /// Answer `request`, one to `/volumes/{name}/files` and what is under it, from the volume
@@ -69,6 +84,24 @@ impl Files {
         let handler = match handler(format!("/volumes/{name}/files"), &request) {
             Ok(handler) => handler,
             Err(refusal) => return refusal.into_response(),
+        };
+        // Held where it is kept until this is answered, for a write.
+        let _taken = match self.backing.get() {
+            None => None,
+            Some(backend) => {
+                let reads = matches!(
+                    request.method().as_str(),
+                    "GET" | "HEAD" | "OPTIONS" | "PROPFIND" | "PATCH"
+                );
+                let taken = match reads {
+                    true => backend.bring_up(Stored::Volume(name)).await.map(|()| None),
+                    false => backend.take(Stored::Volume(name)).await.map(Some),
+                };
+                match taken {
+                    Ok(taken) => taken,
+                    Err(e) => return kept_refused(e).into_response(),
+                }
+            }
         };
         let volume = match self.volumes.open(name) {
             Ok(volume) => Arc::new(volume),
@@ -622,6 +655,24 @@ impl IntoResponse for Refusal {
 /// `status`, saying why.
 fn refused(status: StatusCode, why: impl fmt::Display) -> Refusal {
     Refusal(status, why.to_string())
+}
+
+/// What a request on a volume's files is refused with when its backend refuses it with `e`: a
+/// hold elsewhere as a lock is, `423`. Why a backend failed can name what it runs on, so it goes
+/// to the server's stderr instead.
+fn kept_refused(e: backend::Refusal) -> Refusal {
+    match e {
+        backend::Refusal::InUse(_) => refused(StatusCode::LOCKED, e),
+        backend::Refusal::Exists(_) => refused(StatusCode::CONFLICT, e),
+        backend::Refusal::Unknown(_) => refused(StatusCode::NOT_FOUND, e),
+        backend::Refusal::Failed(e) => {
+            eprintln!("the storage backend failed: {e:#}");
+            refused(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the server's storage failed",
+            )
+        }
+    }
 }
 
 /// The status a request on a volume's files is refused with when it fails with `e`, as a

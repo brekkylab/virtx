@@ -54,11 +54,13 @@ pub enum CtrlReq {
     /// process ends.
     Shutdown,
     /// Write `data` to the stdin of the process `id`, one [`Exec`](CtrlReq::Exec) started with
-    /// it, closed after if `eof`. Answered with [`Written`](CtrlResp::Written) once it is
-    /// written, each in turn: a process that does not read it holds up none but whoever writes
+    /// it, closed after if `eof`. Answered with a [`Written`](CtrlResp::Written) carrying `seq`
+    /// once it is in the process's stdin -- which takes a pipe's worth before the process reads
+    /// any -- or never will be: a process that does not read it holds up none but whoever writes
     /// to it.
     Stdin {
         id: u32,
+        seq: u64,
         data: String,
         #[serde(default)]
         eof: bool,
@@ -90,9 +92,15 @@ pub enum CtrlResp {
     /// could not be built or broke, logged as an error as the process's last word -- so a
     /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log { level: String, message: String },
-    /// The answer to a [`Stdin`](CtrlReq::Stdin) to the process `id`, each in turn: whether
-    /// what it asked was written, or never will be, the process or its stdin gone.
-    Written { id: u32, written: bool },
+    /// The answer to the [`Stdin`](CtrlReq::Stdin) `seq` to the process `id`: how many `bytes`
+    /// of its `data` went in, and whether all of it did, `whole` false once the process or its
+    /// stdin is gone. An empty `data` is `whole` while the stdin still has a reader.
+    Written {
+        id: u32,
+        seq: u64,
+        bytes: u64,
+        whole: bool,
+    },
     /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
     Pong,
 }

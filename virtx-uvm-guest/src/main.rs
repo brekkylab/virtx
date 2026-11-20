@@ -24,7 +24,7 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::UNIX_EPOCH;
@@ -48,35 +48,46 @@ type Stdins = Arc<Mutex<HashMap<u32, Input>>>;
 /// and said not written, rather than the loop waiting.
 const INPUT_QUEUED: usize = 4;
 
-/// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`.
+/// What one write to a process's stdin asks: `data`, then its stdin closed if `eof`. `seq` is
+/// the host's number for it, which its [`Written`](CtrlResp::Written) carries back.
 struct Queued {
+    seq: u64,
     data: String,
     eof: bool,
 }
 
 /// A process's stdin, written on a thread of its own, each write answered
-/// [`Written`](CtrlResp::Written) once it is, or once it never will be: the loop that takes the host's requests never
-/// waits on a process's reading, and what a process has not read is never more than
-/// [`INPUT_QUEUED`] writes. Dropped, what is queued is still written, and then its stdin closed.
+/// [`Written`](CtrlResp::Written) once it is, or once it never will be: the loop that takes the
+/// host's requests never waits on a process's reading, and what a process has not read is never
+/// more than [`INPUT_QUEUED`] writes. Dropped, what is queued is still written, and then its
+/// stdin closed.
 struct Input(std::sync::mpsc::SyncSender<Queued>);
 
 impl Input {
     /// The stdin of process `id`, written to `to`.
-    fn start(out: &Out, id: u32, to: impl io::Write + Send + 'static) -> Input {
+    fn start(out: &Out, id: u32, to: ChildStdin) -> Input {
         let (queued, taken) = std::sync::mpsc::sync_channel::<Queued>(INPUT_QUEUED);
         let out = Arc::clone(out);
         thread::spawn(move || {
             let mut to = Some(to);
-            while let Ok(Queued { data, eof }) = taken.recv() {
-                let written = match &mut to {
-                    Some(writer) => data.is_empty() || writer.write_all(data.as_bytes()).is_ok(),
-                    None => false,
+            while let Ok(Queued { seq, data, eof }) = taken.recv() {
+                let (bytes, whole) = match &mut to {
+                    Some(pipe) => write_counted(pipe, data.as_bytes()),
+                    None => (0, false),
                 };
                 // Its reader gone, or its stdin closed: nothing more is written.
-                if !written || eof {
+                if !whole || eof {
                     to = None;
                 }
-                send(&out, &CtrlResp::Written { id, written });
+                send(
+                    &out,
+                    &CtrlResp::Written {
+                        id,
+                        seq,
+                        bytes,
+                        whole,
+                    },
+                );
             }
         });
         Input(queued)
@@ -85,6 +96,7 @@ impl Input {
     /// `queued` queued, for process `id`: dropped, and said not written, where the queue is full
     /// or the writer is gone.
     fn put(&self, out: &Out, id: u32, queued: Queued) {
+        let seq = queued.seq;
         if let Err(e) = self.0.try_send(queued) {
             if matches!(e, std::sync::mpsc::TrySendError::Full(_)) {
                 eprintln!(
@@ -92,14 +104,44 @@ impl Input {
                     env!("CARGO_BIN_NAME")
                 );
             }
-            send(
-                out,
-                &CtrlResp::Written {
-                    id,
-                    written: false,
-                },
-            );
+            send(out, &not_written(id, seq));
         }
+    }
+}
+
+/// Write `data` to `pipe`: how many bytes of it went in, and whether all did. An empty `data`
+/// writes nothing and asks whether the pipe still has a reader, which is what any write would
+/// find out.
+fn write_counted(pipe: &mut ChildStdin, data: &[u8]) -> (u64, bool) {
+    if data.is_empty() {
+        let mut poll = libc::pollfd {
+            fd: pipe.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd` of a descriptor `pipe` holds open, not waited on.
+        let polled = unsafe { libc::poll(&mut poll, 1, 0) };
+        return (0, polled >= 0 && poll.revents & libc::POLLERR == 0);
+    }
+    let mut bytes = 0;
+    while bytes < data.len() {
+        match pipe.write(&data[bytes..]) {
+            Ok(0) => break,
+            Ok(n) => bytes += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    (bytes as u64, bytes == data.len())
+}
+
+/// The answer to write `seq` to process `id` that wrote none of it.
+fn not_written(id: u32, seq: u64) -> CtrlResp {
+    CtrlResp::Written {
+        id,
+        seq,
+        bytes: 0,
+        whole: false,
     }
 }
 
@@ -197,17 +239,11 @@ fn serve() -> io::Result<()> {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
             // Handed to its writer, never written here: a process not reading holds up no other.
             // Answered not `Written` at once for a process with no stdin here.
-            CtrlReq::Stdin { id, data, eof } => {
+            CtrlReq::Stdin { id, seq, data, eof } => {
                 let mut stdins = stdins.lock().unwrap();
                 match stdins.get(&id) {
-                    Some(input) => input.put(&out, id, Queued { data, eof }),
-                    None => send(
-                        &out,
-                        &CtrlResp::Written {
-                            id,
-                            written: false,
-                        },
-                    ),
+                    Some(input) => input.put(&out, id, Queued { seq, data, eof }),
+                    None => send(&out, &not_written(id, seq)),
                 }
                 if eof {
                     stdins.remove(&id);

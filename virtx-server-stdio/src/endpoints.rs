@@ -823,9 +823,10 @@ async fn sandbox_job_signal(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Write to the stdin of a job started with one, and close it if `eof`: answered once it is
-/// written, so a job that does not read holds the answer back. Refused `409`, `ended`, for one
-/// started without, one whose stdin is closed, and one that has ended.
+/// Write to the stdin of a job started with one, and close it if `eof`: answered once it is in
+/// the process's stdin, which takes a pipe's worth before the process reads any. Refused `409`,
+/// `ended`, for one started without, one whose stdin is closed, one that has ended, and a write
+/// its process closed its stdin under, which says how much of it went in.
 async fn sandbox_job_stdin(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
@@ -1093,7 +1094,7 @@ impl From<SandboxError> for Refused {
             SandboxError::NotStarted(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "not_started", e)
             }
-            SandboxError::Ended | SandboxError::JobEnded(_) => {
+            SandboxError::Ended | SandboxError::JobEnded(_) | SandboxError::StdinCut { .. } => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
             SandboxError::Image(e) => e.into(),

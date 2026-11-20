@@ -10,7 +10,7 @@
 //! That holds only for an upper written without `redirect_dir` or `metacopy`, which keep
 //! part of what changed on the lower: a renamed directory's contents, a file whose data was
 //! never copied up. Read alone, such an upper is not the whole of a session's work. The
-//! guest's init mounts its overlay without either.
+//! guest's agent mounts its overlay without either.
 
 mod reader;
 mod writer;

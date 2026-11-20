@@ -1984,8 +1984,8 @@ async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Hom
 }
 
 /// A machine with more virtio-mmio devices than the 16 legacy interrupt lines hold boots, and
-/// each answers: five volumes over the eight devices this sandbox has without them, the last
-/// volume and the guest agent's filesystem on lines past 15.
+/// each answers: five volumes over the seven devices this sandbox has without them, the last
+/// two of the twelve on lines past 15.
 async fn a_sandbox_mounting_many_volumes_reaches_each(home: Home) {
     let names = ["v1", "v2", "v3", "v4", "v5"];
     for name in names {
@@ -2272,6 +2272,24 @@ async fn a_parked_sandbox_holds_its_volume_against_removal(home: Home) {
     // Closed, it lets it go.
     close(sandbox).await;
     home.volumes.remove("data").unwrap();
+}
+
+async fn a_volume_mounted_over_etc_is_left_without_a_resolver_file(home: Home) {
+    home.volumes.create("etc").unwrap();
+    let mounting = SandboxCreateArgs {
+        volumes: vec![SandboxVolume {
+            volume: "etc".into(),
+            path: "/etc".into(),
+            readonly: false,
+        }],
+        ..small()
+    };
+    let sandbox = home.sandbox(&mounting, None).await;
+    let listed = run(&sandbox, &["ls", "-A", "/etc"], None).await.unwrap();
+    assert_eq!(listed, (vec![], 0));
+    close(sandbox).await;
+    let files = home.volumes.open("etc").unwrap().files();
+    assert_eq!(std::fs::read_dir(files).unwrap().count(), 0);
 }
 
 async fn a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote(home: Home) {
@@ -2728,6 +2746,7 @@ fn main() -> ExitCode {
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,
         a_parked_sandbox_holds_its_volume_against_removal,
+        a_volume_mounted_over_etc_is_left_without_a_resolver_file,
         a_put_to_a_sandbox_s_file_answers_the_etag_of_the_file_it_wrote,
         a_patch_of_a_sandbox_s_file_is_not_allowed_and_leaves_it,
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,

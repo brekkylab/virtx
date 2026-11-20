@@ -37,7 +37,7 @@ use virtx_core::{
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream,
     described_type, from_body,
 };
-use virtx_uvm::backend::{Backing, Refusal, Stored};
+use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
@@ -89,7 +89,7 @@ pub struct Home {
     unknown: Mutex<HashMap<String, UnknownSandbox>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
-    image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
+    image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, Stop)>>,
     /// Set once its project is to be removed: no sandbox or image job is added after.
     closed: AtomicBool,
     /// Where its project's data is kept beyond this machine, once it is given one
@@ -102,7 +102,8 @@ impl Home {
     /// sandboxes' upper disks under `root`, with each sandbox a server before it kept there
     /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
-    /// is made for says otherwise ([`Access::through`]). Blocking work, as knowing each
+    /// is made for says otherwise ([`Access::through`]). `registry` is this home's alone: it is
+    /// backed as the home is ([`backed_by`](Home::backed_by)). Blocking work, as knowing each
     /// sandbox again is.
     pub fn new(
         images: ImageStore,
@@ -114,7 +115,8 @@ impl Home {
             std::env::current_exe()?.into(),
             crate::serve::MACHINE_SUBCOMMAND.into(),
         ];
-        let backing = Backing::default();
+        // One with the registry's: its images are kept where the rest of the home is.
+        let backing = registry.backing().clone();
         let kept = Sandbox::kept(&images, root, &volumes, vm.clone(), park_after(), &backing);
         let unknown = kept
             .unknown
@@ -157,12 +159,21 @@ impl Home {
 
     /// This, its project's data kept beyond this machine by `backend` as well, its own stores
     /// the backend's cache from now on: each of its sandboxes, those known again as it was made
-    /// among them, takes its disk and volumes from the backend as its machine boots, and its
-    /// volumes and their files are made, listed, read, written and removed through it. Said
+    /// among them, takes its disk and volumes from the backend as its machine boots, its
+    /// volumes and their files are made, listed, read, written and removed through it, and its
+    /// registry lists the tags kept there and brings a manifest it is asked for here. Said
     /// once, as it is made, before any request reaches it. A home given none -- a server on its
     /// own -- keeps nothing beyond its stores. See [`StorageBackend`].
+    ///
+    /// # Panics
+    ///
+    /// Where it has a backend already, given to it or to the registry it was made with: a home
+    /// keeps the one it was given first.
     pub fn backed_by(self, backend: Arc<dyn StorageBackend>) -> Home {
-        self.backing.set(backend);
+        assert!(
+            self.backing.set(backend),
+            "a home is backed once, and this one or its registry has a backend already"
+        );
         self
     }
 
@@ -314,8 +325,8 @@ impl Home {
     /// Cancel every image job here, and close every sandbox, as removing each does, side by
     /// side: blocks until each machine has stopped and synced what it wrote.
     pub fn close_all(&self) {
-        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
-            cancel(&job, &task);
+        for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
+            cancel_now(&job, &stop);
         }
         let closed: Vec<_> = self
             .sandboxes
@@ -393,8 +404,8 @@ impl Home {
     /// side, each kept for the next server over this home ([`Sandbox::leave`]): blocks until
     /// each machine has stopped and synced what it wrote.
     pub fn leave_all(&self) {
-        for (_, (job, task)) in self.image_jobs.lock().unwrap().drain() {
-            cancel(&job, &task);
+        for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
+            cancel_now(&job, &stop);
         }
         let left: Vec<_> = self
             .sandboxes
@@ -830,11 +841,14 @@ async fn image_job_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 }
 
 /// Start a job of `kind` for `reference`: `work`, given what logs a line of it, run until it
-/// ends or is cancelled, and kept [`IMAGE_JOB_KEPT`] after.
+/// ends or is cancelled, the image it makes then tagged `tags` where it names one, and kept
+/// [`IMAGE_JOB_KEPT`] after. Its tag's change and its end run to their end once begun, a cancel
+/// waiting for them ([`cancel`]); a job cancelled first leaves its tag be.
 fn image_job<Fut>(
     home: &Arc<Home>,
     kind: ImageJobKind,
     reference: String,
+    tags: Option<Reference>,
     work: impl FnOnce(Box<dyn FnMut(String) + Send>) -> Fut,
 ) -> Answer
 where
@@ -860,30 +874,55 @@ where
     let logged = Arc::clone(&job);
     let work = work(Box::new(move |line| logged.write(ImageJobEntry::Log(line))));
     let (ended, kept, removed) = (Arc::clone(&job), Arc::clone(home), id.clone());
+    let gate = Arc::new(tokio::sync::Mutex::new(false));
+    let (closed, backing, images) = (Arc::clone(&gate), home.backing.clone(), home.images.clone());
     let task = tokio::spawn(async move {
-        let end = match work.await {
-            Ok(digest) => ImageJobEnd {
-                digest: Some(digest.to_string()),
-                error: None,
-            },
-            Err(e) => ImageJobEnd {
-                digest: None,
-                error: Some(e.to_string()),
-            },
-        };
-        ended.end(
-            |job| {
-                job.running = false;
-                job.digest.clone_from(&end.digest);
-                job.error.clone_from(&end.error);
-            },
-            ImageJobEntry::End(end.clone()),
-        );
-        tokio::time::sleep(IMAGE_JOB_KEPT).await;
-        kept.image_jobs.lock().unwrap().remove(&removed);
-        ended.remove();
+        let worked = work.await;
+        let ending = Arc::clone(&ended);
+        let ending = tokio::spawn(async move {
+            let cancelled = closed.lock().await;
+            if *cancelled {
+                return false;
+            }
+            let done = match (worked, tags) {
+                (Ok(digest), Some(reference)) => {
+                    (tag(&backing, &images, &reference, &digest).await).map(|()| digest)
+                }
+                (worked, _) => worked,
+            };
+            let end = match done {
+                Ok(digest) => ImageJobEnd {
+                    digest: Some(digest.to_string()),
+                    error: None,
+                },
+                Err(e) => ImageJobEnd {
+                    digest: None,
+                    error: Some(e.to_string()),
+                },
+            };
+            ending.end(
+                |job| {
+                    job.running = false;
+                    job.digest.clone_from(&end.digest);
+                    job.error.clone_from(&end.error);
+                },
+                ImageJobEntry::End(end.clone()),
+            );
+            true
+        });
+        let ended_here =
+            (ending.await).unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+        if ended_here {
+            tokio::time::sleep(IMAGE_JOB_KEPT).await;
+            kept.image_jobs.lock().unwrap().remove(&removed);
+            ended.remove();
+        }
     });
-    jobs.insert(id.clone(), (Arc::clone(&job), task.abort_handle()));
+    let stop = Stop {
+        task: task.abort_handle(),
+        gate,
+    };
+    jobs.insert(id.clone(), (Arc::clone(&job), stop));
     Ok(created(
         format!("/images/jobs/{id}"),
         &*job.job.lock().unwrap(),
@@ -899,14 +938,13 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         &home,
         ImageJobKind::Pull,
         args.reference,
+        Some(reference.clone()),
         move |report| async move {
             let registry = RegistryClient::new(images.clone(), args.auth)
                 .with_mirror(mirror.as_deref())
                 .with_public(public)
                 .through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
-            let (store, tagged) = (images.clone(), image.clone());
-            tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
             Ok(image)
         },
     )
@@ -920,6 +958,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         &home,
         ImageJobKind::Push,
         args.reference,
+        None,
         move |report| async move {
             let registry = RegistryClient::new(images, args.auth).through(Some(&*registries))?;
             Ok(registry.push(&reference, report).await?)
@@ -959,6 +998,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         &home,
         ImageJobKind::Build,
         args.reference,
+        Some(reference),
         move |mut report| async move {
             // Held until the build ends, or is cancelled: its future dropped.
             let _room = room;
@@ -985,15 +1025,30 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                 )
                 .await?;
             }
-            let digest = tokio::task::spawn_blocking(move || {
-                let digest = images.insert_image(&image, &layers)?;
-                images.insert_tag(&reference, &digest)?;
-                Ok::<_, ImageStoreError>(digest)
-            })
-            .await??;
+            let store = images.clone();
+            let digest =
+                tokio::task::spawn_blocking(move || store.insert_image(&image, &layers)).await??;
             Ok(digest)
         },
     )
+}
+
+/// `reference` made to name `image` in `images`, and kept so beyond this machine where the
+/// home is backed ([`Backing::tag`]): an image job's last step.
+async fn tag(
+    backing: &Backing,
+    images: &ImageStore,
+    reference: &Reference,
+    image: &Digest,
+) -> Result<(), Failure> {
+    match backing.tag(images, reference, image).await {
+        Ok(()) => Ok(()),
+        Err(TagError::Store(e)) => Err(e.into()),
+        Err(TagError::Kept(e)) => {
+            eprintln!("keeping {reference} beyond this machine: {e:#}");
+            Err("the tag could not be kept beyond this machine".into())
+        }
+    }
 }
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
@@ -1051,15 +1106,38 @@ async fn image_job_remove(
     Segments(id): Segments<String>,
 ) -> Answer {
     let removed = home.image_jobs.lock().unwrap().remove(&id);
-    let (job, task) =
+    let (job, stop) =
         removed.ok_or_else(|| not_found(format!("no image job here has the id {id}")))?;
-    cancel(&job, &task);
+    cancel(&job, &stop).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Stop `job`'s `task`, leaving no tag changed, end it as cancelled, and remove its log.
-fn cancel(job: &ImageJobOf, task: &AbortHandle) {
-    task.abort();
+/// What stops an image job: its task, and the gate its tag's change and its end pass, closed
+/// (`true`) once it is cancelled.
+struct Stop {
+    task: AbortHandle,
+    gate: Arc<tokio::sync::Mutex<bool>>,
+}
+
+/// Stop `job`, leaving no tag changed, end it as cancelled, and remove its log. One whose tag's
+/// change is under way is waited for and ends as that does, the cancel coming after it.
+async fn cancel(job: &ImageJobOf, stop: &Stop) {
+    stop.task.abort();
+    *stop.gate.lock().await = true;
+    end_cancelled(job);
+}
+
+/// [`cancel`], as its home closes: a tag's change under way goes on, not waited for.
+fn cancel_now(job: &ImageJobOf, stop: &Stop) {
+    stop.task.abort();
+    if let Ok(mut gate) = stop.gate.try_lock() {
+        *gate = true;
+    }
+    end_cancelled(job);
+}
+
+/// End `job` as cancelled, if it has not ended, and remove its log.
+fn end_cancelled(job: &ImageJobOf) {
     job.end(
         |job| (job.running, job.error) = (false, Some("cancelled".into())),
         ImageJobEntry::End(ImageJobEnd {

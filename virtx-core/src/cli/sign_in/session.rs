@@ -1,19 +1,18 @@
 //! What signing in keeps between runs, under `~/.config/virtx/`: which provider was signed in
 //! to (`oidc.json`), and for each client of a provider signed in as, the session's refresh
-//! token -- in the OS's keychain, or where the OS has none in `<client_id>@<issuer>.token` --
-//! and the ID token last issued (`<client_id>@<issuer>.id`). The directory is its owner's
+//! token (`<client_id>@<issuer>.token`) and the ID token last issued (`<client_id>@<issuer>.id`). The directory is its owner's
 //! alone, each of those files is written readable by its owner alone, and one the directory's
 //! owner does not own is not read: another user who could write the directory could put a
 //! file of their own in place of one kept there, or leave one there before the directory was
-//! made its owner's alone, and `virtx token` would then act with that user's session.
+//! made its owner's alone, and `virtx token` would then act with that user's session. Files and
+//! not the OS's keychain, which would put `keyring` and its D-Bus in every package that ships the
+//! command.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
-
-const KEYCHAIN: &str = "virtx";
 
 /// The provider signed in to, and the client signed in as.
 #[derive(Clone, Deserialize, Serialize)]
@@ -36,7 +35,6 @@ pub struct Session {
     dir: PathBuf,
     /// The client and its provider, as a file's name: `<client_id>@<issuer>`.
     key: String,
-    keychain: bool,
 }
 
 /// `~/.config/virtx`, made its owner's alone before anything in it is read.
@@ -57,9 +55,8 @@ pub fn keep_sign_in(dir: &Path, sign_in: &SignIn) -> anyhow::Result<()> {
 }
 
 impl Session {
-    /// The session with `sign_in`'s provider as its client, kept in `dir`: its refresh token
-    /// in the keychain if `keychain`, and the OS has one.
-    pub fn new(dir: &Path, sign_in: &SignIn, keychain: bool) -> Session {
+    /// The session with `sign_in`'s provider as its client, kept in `dir`.
+    pub fn new(dir: &Path, sign_in: &SignIn) -> Session {
         let named = |text: &str| -> String {
             text.chars()
                 .map(|c| match c {
@@ -75,7 +72,6 @@ impl Session {
         Session {
             dir: dir.to_owned(),
             key,
-            keychain,
         }
     }
 
@@ -110,28 +106,11 @@ impl Session {
         remove(&self.file("id"))
     }
 
-    fn entry(&self) -> Option<keyring::Entry> {
-        match self.keychain {
-            true => keyring::Entry::new(KEYCHAIN, &self.key).ok(),
-            false => None,
-        }
-    }
-
     pub fn keep(&self, refresh: &str) -> anyhow::Result<()> {
-        if let Some(entry) = self.entry()
-            && entry.set_password(refresh).is_ok()
-        {
-            return Ok(());
-        }
         write_private(&self.file("token"), refresh.as_bytes())
     }
 
     pub fn kept(&self) -> anyhow::Result<Option<String>> {
-        if let Some(entry) = self.entry()
-            && let Ok(refresh) = entry.get_password()
-        {
-            return Ok(Some(refresh));
-        }
         match read_ours(&self.file("token"))? {
             Some(refresh) => Ok(Some(String::from_utf8(refresh)?.trim().to_owned())),
             None => Ok(None),
@@ -139,9 +118,6 @@ impl Session {
     }
 
     pub fn forget(&self) -> anyhow::Result<()> {
-        if let Some(entry) = self.entry() {
-            let _ = entry.delete_credential();
-        }
         remove(&self.file("token"))
     }
 }
@@ -260,7 +236,7 @@ mod tests {
     #[test]
     fn the_directory_a_session_is_kept_in_is_its_owner_s_alone_however_it_was_left() {
         let dir = scratch("dir-mode");
-        let session = Session::new(&dir, &sign_in(), false);
+        let session = Session::new(&dir, &sign_in());
         drop(session.lock().unwrap());
         assert_eq!(mode(&dir), 0o700);
 
@@ -277,7 +253,7 @@ mod tests {
     #[test]
     fn a_file_kept_is_its_owner_s_alone_however_it_was_left() {
         let dir = scratch("file-mode");
-        let session = Session::new(&dir, &sign_in(), false);
+        let session = Session::new(&dir, &sign_in());
         let id = dir.join("virtx@idp.example.id");
         let token = dir.join("virtx@idp.example.token");
         let old = Kept {
@@ -318,7 +294,7 @@ mod tests {
             client_id: format!("virtx-cli-test-{}", std::process::id()),
             ..sign_in()
         };
-        let session = Session::new(tmp, &sign_in, false);
+        let session = Session::new(tmp, &sign_in);
         let id = session.file("id");
         let token = session.file("token");
         let left = Kept {

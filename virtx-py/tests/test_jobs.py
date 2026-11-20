@@ -257,9 +257,9 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
 
 async def test_a_sandbox_is_resized_and_its_disk_never_shrunk(client: Client) -> None:
     await alpine(client)
-    sandbox = await client.create_sandbox(ALPINE, memory_mib=512, disk_gib=1)
-    resized = await sandbox.resize(vcpus=2, disk_gib=2)
-    assert resized == SandboxResources(vcpus=2, memory_mib=512, disk_gib=2, up=False)
+    sandbox = await client.create_sandbox(ALPINE, memory_mib=512, disk_gib=2)
+    resized = await sandbox.resize(vcpus=2, disk_gib=3)
+    assert resized == SandboxResources(vcpus=2, memory_mib=512, disk_gib=3, up=False)
     with pytest.raises(VirtxError) as refused:
         await sandbox.resize(disk_gib=1)
     assert refused.value.status == 400

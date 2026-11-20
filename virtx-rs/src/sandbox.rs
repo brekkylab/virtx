@@ -75,8 +75,9 @@ impl Sandbox {
 
     /// Resize it as `args` says: its vCPUs and memory from its VM's next boot on, and its disk
     /// grown, never shrunk, to as large as its VM next boots with. A VM up and unused is
-    /// stopped for its size to change, and one in use is refused `409`. Answers its
-    /// size as it is to be, and whether its VM is up now, the size it booted with until then.
+    /// stopped for its vCPUs or memory to change, and one in use is refused `409`; its disk alone
+    /// stops nothing. Answers its size as it is to be, and whether its VM is up now, the size it
+    /// booted with until then.
     pub fn resize(&self, args: &SandboxResizeArgs) -> Call<SandboxResources> {
         self.client.resize_sandbox(&self.info.id, args)
     }

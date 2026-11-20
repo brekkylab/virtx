@@ -70,7 +70,7 @@ pub struct Home {
     vm: Vec<OsString>,
     sandboxes: Sandboxes,
     /// The image jobs, by id, and what cancels each, until each is removed.
-    image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
+    image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, Stop)>>,
     /// Set once its project is to be removed: no sandbox or image job is added after.
     closed: AtomicBool,
 }
@@ -404,11 +404,14 @@ async fn image_job_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 }
 
 /// Start a job of `kind` for `reference`: `work`, given what logs a line of it, run until it
-/// ends or is cancelled.
+/// ends or is cancelled, the image it makes then tagged `tags` where it names one. Its tag's
+/// change and its end run to their end once begun, a cancel waiting for them ([`cancel`]); a
+/// job cancelled first leaves its tag be.
 fn image_job<Fut>(
     home: &Home,
     kind: ImageJobKind,
     reference: String,
+    tags: Option<Reference>,
     work: impl FnOnce(Box<dyn FnMut(String) + Send>) -> Fut,
 ) -> Answer
 where
@@ -434,27 +437,53 @@ where
     let logged = Arc::clone(&job);
     let work = work(Box::new(move |line| logged.write(ImageJobEntry::Log(line))));
     let ended = Arc::clone(&job);
+    let gate = Arc::new(tokio::sync::Mutex::new(false));
+    let (closed, images) = (Arc::clone(&gate), home.images.clone());
     let task = tokio::spawn(async move {
-        let end = match work.await {
-            Ok(digest) => ImageJobEnd {
-                digest: Some(digest.to_string()),
-                error: None,
-            },
-            Err(e) => ImageJobEnd {
-                digest: None,
-                error: Some(e.to_string()),
-            },
-        };
-        ended.end(
-            |job| {
-                job.running = false;
-                job.digest.clone_from(&end.digest);
-                job.error.clone_from(&end.error);
-            },
-            ImageJobEntry::End(end.clone()),
-        );
+        let worked = work.await;
+        let ending = tokio::spawn(async move {
+            let cancelled = closed.lock().await;
+            if *cancelled {
+                return;
+            }
+            let done = match (worked, tags) {
+                (Ok(digest), Some(reference)) => {
+                    let tagged = digest.clone();
+                    let tagging = move || images.insert_tag(&reference, &tagged);
+                    match tokio::task::spawn_blocking(tagging).await {
+                        Ok(Ok(())) => Ok(digest),
+                        Ok(Err(e)) => Err(e.into()),
+                        Err(e) => Err(e.into()),
+                    }
+                }
+                (worked, _) => worked,
+            };
+            let end = match done {
+                Ok(digest) => ImageJobEnd {
+                    digest: Some(digest.to_string()),
+                    error: None,
+                },
+                Err(e) => ImageJobEnd {
+                    digest: None,
+                    error: Some(e.to_string()),
+                },
+            };
+            ended.end(
+                |job| {
+                    job.running = false;
+                    job.digest.clone_from(&end.digest);
+                    job.error.clone_from(&end.error);
+                },
+                ImageJobEntry::End(end.clone()),
+            );
+        });
+        (ending.await).unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
     });
-    jobs.insert(id.clone(), (Arc::clone(&job), task.abort_handle()));
+    let stop = Stop {
+        task: task.abort_handle(),
+        gate,
+    };
+    jobs.insert(id.clone(), (Arc::clone(&job), stop));
     Ok(created(
         format!("/images/jobs/{id}"),
         &*job.job.lock().unwrap(),
@@ -469,11 +498,10 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         &home,
         ImageJobKind::Pull,
         args.reference,
+        Some(reference.clone()),
         move |report| async move {
             let registry = RegistryClient::new(images.clone(), args.auth);
             let (_, image) = registry.pull(&reference, report).await?;
-            let (store, tagged) = (images.clone(), image.clone());
-            tokio::task::spawn_blocking(move || store.insert_tag(&reference, &tagged)).await??;
             Ok(image)
         },
     )
@@ -487,6 +515,7 @@ async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         &home,
         ImageJobKind::Push,
         args.reference,
+        None,
         move |report| async move {
             let registry = RegistryClient::new(images, args.auth);
             Ok(registry.push(&reference, report).await?)
@@ -506,6 +535,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
         &home,
         ImageJobKind::Build,
         args.reference,
+        Some(reference),
         move |mut report| async move {
             let (mut image, mut layers, _base) = base(&images, &recipe.base, &mut report).await?;
             let steps = recipe.steps.len();
@@ -532,12 +562,8 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                 virtx_uvm::history_kept(&mut image, step.to_string(), layered, layers.len());
             }
             virtx_uvm::recipe_kept(&mut image, &recipe);
-            let digest = tokio::task::spawn_blocking(move || {
-                let digest = images.insert_image(&image, &layers)?;
-                images.insert_tag(&reference, &digest)?;
-                Ok::<_, ImageStoreError>(digest)
-            })
-            .await??;
+            let digest =
+                tokio::task::spawn_blocking(move || images.insert_image(&image, &layers)).await??;
             Ok(digest)
         },
     )
@@ -590,15 +616,29 @@ async fn image_job_remove(
     Segments(id): Segments<String>,
 ) -> Answer {
     let removed = home.image_jobs.lock().unwrap().remove(&id);
-    let (job, task) =
+    let (job, stop) =
         removed.ok_or_else(|| not_found(format!("no image job here has the id {id}")))?;
-    cancel(&job, &task);
+    cancel(&job, &stop).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// Stop `job`'s `task`, leaving no tag changed, end it as cancelled, and remove its log.
-fn cancel(job: &ImageJobOf, task: &AbortHandle) {
-    task.abort();
+/// What stops an image job: its task, and the gate its tag's change and its end pass, closed
+/// (`true`) once it is cancelled.
+struct Stop {
+    task: AbortHandle,
+    gate: Arc<tokio::sync::Mutex<bool>>,
+}
+
+/// Stop `job`, leaving no tag changed, end it as cancelled, and remove its log. One whose tag's
+/// change is under way is waited for and ends as that does, the cancel coming after it.
+async fn cancel(job: &ImageJobOf, stop: &Stop) {
+    stop.task.abort();
+    *stop.gate.lock().await = true;
+    end_cancelled(job);
+}
+
+/// End `job` as cancelled, if it has not ended, and remove its log.
+fn end_cancelled(job: &ImageJobOf) {
     job.end(
         |job| (job.running, job.error) = (false, Some("cancelled".into())),
         ImageJobEntry::End(ImageJobEnd {
@@ -803,7 +843,7 @@ async fn sandbox_get(
 
 /// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
 /// if it is up and nothing uses it, and refused `409`, `in_use`, if something does; its disk
-/// grown, never shrunk, as its VM next boots.
+/// grown, never shrunk, as its VM next boots, without parking it.
 async fn sandbox_resize(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,

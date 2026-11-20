@@ -455,15 +455,19 @@ impl Sandbox {
         let mut lock =
             tokio::task::spawn_blocking(move || locking.lock_within(DISK_WAIT)).await??;
         // Grown since it last booted: made whole, which holds it itself, and its filesystem
-        // written again as large.
+        // written again as large. A grow that fails leaves the disk as it was, which it boots
+        // on, to be grown at a later boot.
         let wanted = self.record.disk_size();
         if disk.capacity()? < wanted {
             drop(lock);
             shared.hooks.materialize(&id, &disk.path).await?;
-            let growing = disk.clone();
+            let (growing, named) = (disk.clone(), id.clone());
             lock = tokio::task::spawn_blocking(move || {
                 let lock = growing.lock_within(DISK_WAIT)?;
-                growing.grow(wanted, &lock).map(|()| lock)
+                if let Err(e) = growing.grow(wanted, &lock) {
+                    eprintln!("sandbox {named}'s disk not grown to {wanted} bytes: {e}");
+                }
+                Ok::<_, Error>(lock)
             })
             .await??;
         }
@@ -948,11 +952,12 @@ impl Sandbox {
         self.run().map(|run| run.writes.clone()).unwrap_or_default()
     }
 
-    /// Its disk to grow to `gib` GiB as it next boots -- never shrunk: smaller than it is,
-    /// refused. Whether its machine is up, its disk to be grown once it boots again.
+    /// Its disk to grow to `gib` GiB as it next boots -- never shrunk: smaller than it is on the
+    /// host, refused, and down to it taken, so a grow not yet done can be taken back. Whether
+    /// its machine is up, its disk to be grown once it boots again.
     pub fn grow_disk(&self, gib: u32) -> Result<bool, Error> {
         let wanted = u64::from(gib) << 30;
-        let now = self.disk_now();
+        let now = self.disk_on_host();
         if wanted < now {
             return Err(Error::Invalid(format!(
                 "disk_gib: a disk is grown, never shrunk -- it is {} GiB",
@@ -964,29 +969,27 @@ impl Sandbox {
         Ok(self.is_up())
     }
 
-    /// The bytes its disk is, or is to be as it next boots.
-    fn disk_now(&self) -> u64 {
-        let length = self
-            .shared
-            .snapshots
-            .open(&self.record.id)
-            .ok()
+    /// The bytes its disk is on the host: what it was made or last grown to, or, where it is
+    /// not here to read, what it is to be.
+    fn disk_on_host(&self) -> u64 {
+        (self.shared.snapshots.open(&self.record.id).ok())
             .and_then(|disk| disk.capacity().ok())
-            .unwrap_or(0);
-        self.record.disk_size().max(length)
+            .unwrap_or_else(|| self.record.disk_size())
     }
 
     /// Resize it as `args` says, answered as it is to be: its vCPUs and memory those its
-    /// machine boots with from its next boot on, and its disk grown, never shrunk, as its
-    /// machine next boots. A machine is the size it booted with: one up whose size changes, its
-    /// disk's included, is parked now if nothing uses it, and refused [`InUse`](Error::InUse) if
-    /// something does.
+    /// machine boots with from its next boot on, and its disk grown as its machine next boots.
+    /// A disk is never shrunk: a size under what it is on the host is refused, and one down to
+    /// it taken, so a grow asked for and not yet done can be taken back. A machine is the size
+    /// it booted with: one up whose vCPUs or memory change is parked now if nothing uses it,
+    /// and refused [`InUse`](Error::InUse) if something does; one whose disk alone grows is
+    /// left up, and boots with it after its next park.
     pub async fn resize(
         self: &Arc<Self>,
         args: &SandboxResizeArgs,
     ) -> Result<SandboxResources, Error> {
         let resized = self
-            .resized(args.vcpus, args.memory_mib, args.disk_gib, true)
+            .resized(args.vcpus, args.memory_mib, args.disk_gib)
             .await?;
         Ok(SandboxResources {
             vcpus: resized.vcpus,
@@ -996,27 +999,24 @@ impl Sandbox {
         })
     }
 
-    /// Cloud only: resized as [`resize`](Sandbox::resize) is, but for its disk, which grows as
-    /// its machine next boots without parking one that is up -- what the cloud's
-    /// `PUT /sandboxes/{id}/resources` and `/disk` answer.
+    /// Cloud only: resized as [`resize`](Sandbox::resize) is, answered as its
+    /// [`Resources`] -- what the cloud's `PUT /sandboxes/{id}/resources` answers.
     pub async fn resize_resources(
         self: &Arc<Self>,
         vcpus: Option<u8>,
         memory_mib: Option<u32>,
         disk_gib: Option<u32>,
     ) -> Result<Resources, Error> {
-        self.resized(vcpus, memory_mib, disk_gib, false).await
+        self.resized(vcpus, memory_mib, disk_gib).await
     }
 
-    /// Its machine resized, and its disk grown, as it next boots; its disk never shrunk. One
-    /// up whose vCPUs or memory change, or its disk where `disk_parks`, is parked now if nothing
-    /// uses it, and refused [`InUse`](Error::InUse) if something does.
+    /// Its machine resized, and its disk grown, as it next boots, as [`resize`](Sandbox::resize)
+    /// says.
     async fn resized(
         self: &Arc<Self>,
         vcpus: Option<u8>,
         memory_mib: Option<u32>,
         disk_gib: Option<u32>,
-        disk_parks: bool,
     ) -> Result<Resources, Error> {
         check_size(vcpus, memory_mib, disk_gib)?;
         // Not booted meanwhile, nor parked.
@@ -1037,17 +1037,17 @@ impl Sandbox {
             memory_mib: resized.memory_mib,
             ..now.clone()
         })?;
+        let on_host = self.disk_on_host();
         if let Some(gib) = disk_gib
-            && (u64::from(gib) << 30) < self.disk_now()
+            && (u64::from(gib) << 30) < on_host
         {
             return Err(Error::Invalid(format!(
                 "disk_gib: a disk is grown, never shrunk -- it is {} GiB",
-                self.disk_now().div_ceil(1 << 30)
+                on_host.div_ceil(1 << 30)
             )));
         }
-        let disk_changes =
-            disk_parks && disk_gib.is_some_and(|gib| (u64::from(gib) << 30) > self.disk_now());
-        if (machine_changes || disk_changes) && self.is_up() {
+        // A disk alone is grown at its next boot, whenever that is, and so parks nothing.
+        if machine_changes && self.is_up() {
             if self.busy() {
                 return Err(Error::InUse(format!(
                     "sandbox {} is in use: its size changes once nothing uses it",

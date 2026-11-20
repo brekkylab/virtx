@@ -19,7 +19,8 @@ use std::{
 use futures_util::{StreamExt as _, future::join_all};
 use http::HeaderMap;
 use virtx_core::{
-    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
+    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxResizeArgs,
+    SandboxVolume,
 };
 use virtx_uvm::disks::{Disks, DynStorage, Held, MachineDisk};
 use virtx_uvm::runs::{self, Ran};
@@ -1445,6 +1446,50 @@ async fn a_job_given_no_input_reads_its_end(home: Home) {
     home.sandboxes.delete(sandbox.id()).await.unwrap();
 }
 
+async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
+    let mut args = small();
+    args.disk_gib = Some(1);
+    let sandbox = home.sandbox(&args).await;
+    let said = async |sandbox: &Arc<Sandbox>, cmd: &str| -> String {
+        let (lines, _) = run(sandbox, &["sh", "-c", cmd], None).await.unwrap();
+        lines.join("\n")
+    };
+    let disk = async |sandbox: &Arc<Sandbox>| -> u64 {
+        let kib: u64 = said(sandbox, "df -k / | awk 'NR==2 {print $2}'")
+            .await
+            .parse()
+            .unwrap();
+        (kib + (1 << 19)) >> 20
+    };
+    let resize = |disk_gib| SandboxResizeArgs {
+        disk_gib: Some(disk_gib),
+        ..SandboxResizeArgs::default()
+    };
+    // A file with holes larger than the disk, which a grow reads whole and refuses.
+    said(&sandbox, "truncate -s 2G /root/f && echo kept > /root/kept").await;
+    let grown = sandbox.resize(&resize(3)).await.unwrap();
+    assert_eq!((grown.disk_gib, grown.up), (3, true));
+
+    // Its grow fails, and it boots on its disk as it was.
+    sandbox.park().await.unwrap();
+    assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
+    assert_eq!(disk(&sandbox).await, 1);
+
+    // Taken down to the size it has, not under it; and grown at a later boot once it can be.
+    let back = sandbox.resize(&resize(2)).await.unwrap();
+    assert_eq!(back.disk_gib, 2);
+    said(&sandbox, "rm /root/f").await;
+    sandbox.park().await.unwrap();
+    assert_eq!(disk(&sandbox).await, 2);
+    let refused = sandbox.resize(&resize(1)).await;
+    assert!(
+        matches!(refused, Err(SandboxError::Invalid(_))),
+        "{refused:?}"
+    );
+    assert_eq!(sandbox.resize(&resize(2)).await.unwrap().disk_gib, 2);
+    home.sandboxes.delete(sandbox.id()).await.unwrap();
+}
+
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
     let args = small();
     let made = join_all((0..3).map(|_| home.sandbox(&args))).await;
@@ -1948,6 +1993,7 @@ fn main() -> ExitCode {
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
+        a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
     ]);
     #[cfg(unix)]
     tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);

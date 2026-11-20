@@ -247,6 +247,8 @@ Cancelling one stops it:
 - A pull leaves no tag changed. Blobs already fetched MAY be kept for reuse.
 - A push puts no manifest to the other registry. Blobs already pushed there stay.
 
+A cancel that comes once a build or a pull has begun to write its tag waits for that to finish: the job has then ended, as it would have, and the `DELETE` removes it.
+
 The server MAY remove an image job that has ended, once a time it chooses has passed.
 
 `POST /images/prune` deletes each image no reference points at and no [sandbox](#sandboxes) stands on, and what only such images held, such as their layers.
@@ -328,7 +330,7 @@ A server MAY resize a sandbox with its `PATCH`, and one that does not answers it
 Each member is held to what `POST` holds it to, and one left out stays as it is.
 
 - `vcpus` and `memory_mib` are what its VM boots with from its next boot on. A VM is the size it booted with: the server stops one that is up and in which nothing runs, as below, to boot it again so for what next needs it, and refuses one in use with `409`, `in_use`, changing nothing.
-- `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there; a VM that is up is stopped for it, or the change refused, as for `vcpus` and `memory_mib`. One smaller than it is now is refused with `400`, `invalid`: a disk is grown, never shrunk.
+- `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there. A VM that is up is neither stopped for it nor refused, in use or not: a request that changes `disk_gib` alone is answered at once with `up` `true`, and its VM keeps the disk it booted with until it next boots, after it is next stopped. A request that also changes `vcpus` or `memory_mib` is stopped or refused for those, and the disk grows at that same boot. A disk is grown, never shrunk: one smaller than the disk the VM last booted with is refused with `400`, `invalid`, and one down to that size is taken, so a grow not yet made can be taken back. A grow the server cannot make as the VM boots leaves the disk as it was, and the VM boots on it; the size asked for stays, and the grow is tried again at each boot.
 - The answer is its size as it is to be, each member as the server gives it, and `up`, whether its VM is up now: one that is, the size it booted with until it boots again.
 
 #### Use

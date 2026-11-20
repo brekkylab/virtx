@@ -556,17 +556,18 @@ impl Store {
         if let Some((reference, _)) = self.tags()?.into_iter().find(|(_, named)| named == image) {
             return Err(Error::InUse(image.clone(), reference.to_string()));
         }
-        self.remove_image_untagged(image, || Ok(()))
+        self.remove_image_untagged(image)
     }
 
-    /// Take away each tag naming `image` that `picked` picks, and `image` too once no tag names
-    /// it. Refused [`Error::InUse`], with nothing taken away, where that would leave `image` named
-    /// by no tag while something holds it. `false` if `image` was not here.
-    pub fn remove_image_tagged(
+    /// Take away each tag naming `image` that `picked` picks, and say which; `image` stays,
+    /// for [`remove_image`](Store::remove_image) once nothing names it. Refused
+    /// [`Error::InUse`], with nothing taken away, where that would leave `image` named by no tag
+    /// while something holds it.
+    pub fn remove_tags_of(
         &self,
         image: &Digest,
         picked: impl Fn(&Reference) -> bool,
-    ) -> Result<bool> {
+    ) -> Result<Vec<Reference>> {
         let _change = self.change()?;
         let (picked, kept): (Vec<_>, Vec<_>) = self
             .tags()?
@@ -574,27 +575,18 @@ impl Store {
             .filter(|(_, named)| named == image)
             .map(|(tag, _)| tag)
             .partition(|tag| picked(tag));
-        if kept.is_empty() {
-            return self.remove_image_untagged(image, || {
-                picked
-                    .iter()
-                    .try_for_each(|tag| self.remove_tag_file(tag).map(drop))
-            });
+        if kept.is_empty() && !picked.is_empty() && self.image_held(image)? {
+            return Err(Error::InUse(image.clone(), "a machine".into()));
         }
         for tag in &picked {
             self.remove_tag_file(tag)?;
         }
-        Ok(self.shelf("image", image, "json").is_file())
+        Ok(picked)
     }
 
     /// [`remove_image`](Store::remove_image) by a caller that holds the store's [`Change`] and
-    /// has found no tag but those `first` takes away names `image`. `first` runs once nothing
-    /// holds `image`, and no hold starts until it is gone.
-    fn remove_image_untagged(
-        &self,
-        image: &Digest,
-        first: impl FnOnce() -> Result<()>,
-    ) -> Result<bool> {
+    /// has found no tag names `image`. No hold starts until it is gone.
+    fn remove_image_untagged(&self, image: &Digest) -> Result<bool> {
         let path = self.shelf("image", image, "json");
         if !path.is_file() {
             return Ok(false);
@@ -611,7 +603,6 @@ impl Store {
                 return Err(Error::io(format!("locking {}", lock.display()), e));
             }
         }
-        first()?;
         let removed = match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -681,7 +672,7 @@ impl Store {
                 continue;
             }
             let len = fs::metadata(&path).map_or(0, |metadata| metadata.len());
-            match self.remove_image_untagged(&image, || Ok(())) {
+            match self.remove_image_untagged(&image) {
                 Ok(true) => {
                     pruned.reclaimed += len;
                     pruned.images.push(image);
@@ -804,6 +795,21 @@ impl Store {
             return Err(Error::InUse(image, "a machine".into()));
         }
         Ok(self.remove_tag_file(reference)?.then_some(image))
+    }
+
+    /// Put `reference` back as it was before a change being undone: naming `image`, or no image
+    /// where it named none or `image` is no longer here. Unlike [`remove_tag`](Store::remove_tag)
+    /// it takes away the last tag of an image something holds: what it puts back is a state the
+    /// store was in, the hold taken since on an image no tag named.
+    pub fn restore_tag(&self, reference: &Reference, image: Option<&Digest>) -> Result<()> {
+        if let Some(image) = image {
+            match self.insert_tag(reference, image) {
+                Err(Error::Missing(_)) => {}
+                done => return done,
+            }
+        }
+        let _change = self.change()?;
+        self.remove_tag_file(reference).map(drop)
     }
 
     /// Take `reference`'s file away, by a caller that holds the store's [`Change`]. `false` if
@@ -1455,8 +1461,8 @@ mod tests {
         assert!(!store.renew_image(&image).unwrap());
     }
 
-    /// An image something holds is not left named by no tag, whichever tag goes last, and taking
-    /// it away with its tags is refused with every tag kept.
+    /// An image something holds is not left named by no tag, whichever tag goes last, and
+    /// taking away all its tags at once is refused with every tag kept.
     #[test]
     fn an_image_held_keeps_its_last_tag() {
         let scratch = Scratch::new("held-tag");
@@ -1468,10 +1474,13 @@ mod tests {
         let hold = store.hold_image(&image).unwrap();
 
         let in_a = |tag: &Reference| tag.repository() == "library/a";
-        assert!(store.remove_image_tagged(&image, in_a).unwrap());
+        assert_eq!(
+            store.remove_tags_of(&image, in_a).unwrap(),
+            [reference("a:one"), reference("a:two")]
+        );
         assert_eq!(store.tags().unwrap().len(), 1, "b's tag kept");
         assert!(matches!(
-            store.remove_image_tagged(&image, |_| true),
+            store.remove_tags_of(&image, |_| true),
             Err(Error::InUse(..))
         ));
         assert!(matches!(
@@ -1481,9 +1490,13 @@ mod tests {
         assert_eq!(store.tags().unwrap().len(), 1, "its last tag kept");
 
         drop(hold);
-        assert!(store.remove_image_tagged(&image, |_| true).unwrap());
+        assert_eq!(store.remove_tags_of(&image, |_| true).unwrap().len(), 1);
         assert!(store.tags().unwrap().is_empty());
-        assert!(store.get_image(&image).unwrap().is_none());
+        assert!(
+            store.get_image(&image).unwrap().is_some(),
+            "the image stays"
+        );
+        assert!(store.remove_image(&image).unwrap());
     }
 
     #[cfg(unix)]

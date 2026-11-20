@@ -81,11 +81,11 @@ describe('against virtx-stdio', () => {
 
   test('a sandbox is resized and its disk never shrunk', async () => {
     await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, { memoryMib: 512, diskGib: 1 })
-    assert.deepEqual(await sandbox.resize({ vcpus: 2, diskGib: 2 }), {
+    const sandbox = await client.createSandbox(ALPINE, { memoryMib: 512, diskGib: 2 })
+    assert.deepEqual(await sandbox.resize({ vcpus: 2, diskGib: 3 }), {
       vcpus: 2,
       memoryMib: 512,
-      diskGib: 2,
+      diskGib: 3,
       up: false,
     })
     await assert.rejects(sandbox.resize({ diskGib: 1 }), { status: 400 })

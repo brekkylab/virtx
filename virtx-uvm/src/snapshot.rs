@@ -92,9 +92,10 @@ impl Snapshot {
     /// Made able to grow to `size` bytes, larger than it is, with what is on it kept. Its
     /// filesystem -- laid out by [`FsTree::to_ext4`] with no room to grow in place, which a
     /// kernel will not grow either -- is read whole and written again at `size`: a new image
-    /// beside it, moved over it once whole, so a failure leaves it as it was. What it costs is
-    /// what is written to it, not `size`. `_held` is its [lock](Snapshot::lock), which the
-    /// caller holds throughout.
+    /// beside it, moved over it once whole, so a failure leaves it as it was. Each file is read
+    /// whole, its holes too, so a file larger than the disk could hold is refused, and the new
+    /// image takes on the host what its files are long, not `size`. `_held` is its
+    /// [lock](Snapshot::lock), which the caller holds throughout.
     pub fn grow(&self, size: u64, _held: &Lock) -> Result<()> {
         if self.capacity()? >= size {
             return Ok(());

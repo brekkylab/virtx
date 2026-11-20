@@ -416,7 +416,8 @@ mod tests {
     use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
-        FsTree, ImageStore, ProjectId, PublicRegistries, RegistryProxy, StorageBackend, VolumeStore,
+        FsTree, ImageStore, ProjectId, PublicRegistries, Reference, RegistryProxy, StorageBackend,
+        VolumeStore,
     };
 
     use futures_util::StreamExt as _;
@@ -1910,13 +1911,19 @@ mod tests {
     /// kept there again once a write lets go of it. It refuses what `held` names as held
     /// elsewhere, says what it removed, and keeps nothing of a sandbox's disk but files the empty
     /// image here as it is wanted. A volume it is removing fails where a sandbox could mount it
-    /// here meanwhile.
+    /// here meanwhile. A tag told to it is said in `tagged`, and fails while `down`; while
+    /// `paused`, it is said once a permit of `resumed` is given, `tagging` set as it waits.
     struct Beyond {
         kept: VolumeStore,
         here: VolumeStore,
         images: ImageStore,
         held: Mutex<HashSet<String>>,
         removed: Mutex<Vec<String>>,
+        tagged: Mutex<Vec<String>>,
+        down: std::sync::atomic::AtomicBool,
+        paused: std::sync::atomic::AtomicBool,
+        tagging: std::sync::atomic::AtomicBool,
+        resumed: tokio::sync::Semaphore,
     }
 
     impl Beyond {
@@ -2030,6 +2037,24 @@ mod tests {
                 Ok(())
             })
         }
+
+        fn tagged<'a>(
+            &'a self,
+            tag: &'a Reference,
+            image: &'a virtx_uvm::Digest,
+        ) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                if self.paused.load(std::sync::atomic::Ordering::SeqCst) {
+                    self.tagging
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.resumed.acquire().await?.forget();
+                }
+                let down = self.down.load(std::sync::atomic::Ordering::SeqCst);
+                anyhow::ensure!(!down, "the backend is down");
+                self.tagged.lock().unwrap().push(format!("{tag} {image}"));
+                Ok(())
+            })
+        }
     }
 
     /// File an empty image in `images`: the same digest in every store.
@@ -2063,6 +2088,11 @@ mod tests {
                     images: home.images().clone(),
                     held: Mutex::default(),
                     removed: Mutex::default(),
+                    tagged: Mutex::default(),
+                    down: Default::default(),
+                    paused: Default::default(),
+                    tagging: Default::default(),
+                    resumed: tokio::sync::Semaphore::new(0),
                 });
                 let root = home.root.clone();
                 self.made.lock().unwrap().push((Arc::clone(&beyond), root));
@@ -2163,6 +2193,97 @@ mod tests {
         assert!(beyond.here.open("away").is_err());
         assert_eq!(*beyond.removed.lock().unwrap(), ["away"]);
         assert_eq!(self::status(client.remove_volume("away").await), 404);
+    }
+
+    /// A build in a backed home keeps the tag it writes beyond this machine before it ends; one
+    /// whose tag the backend cannot keep fails, and leaves the tag here as it was.
+    #[tokio::test]
+    async fn a_backed_home_s_build_keeps_its_tag_beyond_it() {
+        let homes = Arc::new(BackedHomes::default());
+        let made = Arc::clone(&homes);
+        let served = Served::spawn_over("backed-build", async move |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            made.store.set(store.clone()).unwrap();
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store,
+                made,
+            );
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
+        let client = served.connect();
+        let ended = async |reference: &str| {
+            let job = client
+                .build_image(Recipe::new("scratch"), reference)
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let job = client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the job went on")
+        };
+
+        let built = ended("built:1").await;
+        let digest = built.digest.expect("the build did not fail");
+        let beyond = Arc::clone(&homes.made.lock().unwrap()[0].0);
+        assert_eq!(
+            *beyond.tagged.lock().unwrap(),
+            [format!("docker.io/library/built:1 {digest}")]
+        );
+
+        beyond.down.store(true, std::sync::atomic::Ordering::SeqCst);
+        let refused = ended("built:2").await;
+        assert!(refused.error.is_some(), "{refused:?}");
+        let built_2: Reference = "built:2".parse().unwrap();
+        assert_eq!(beyond.images.get_tag(&built_2).unwrap(), None);
+
+        // Cancelled as its tag is being kept, it is answered once that is done: it ended first.
+        beyond
+            .down
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        beyond
+            .paused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let job = client
+            .build_image(Recipe::new("scratch"), "built:3")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while !beyond.tagging.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the build never tagged");
+        let cancelled = async {
+            client.remove_image_job(&job.id).await.unwrap();
+            beyond.tagged.lock().unwrap().len()
+        };
+        let resumed = async {
+            // Time for a cancel not ordered after the tag to be answered first.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            beyond.resumed.add_permits(1);
+        };
+        let (kept_by_then, ()) = tokio::join!(cancelled, resumed);
+        assert_eq!(kept_by_then, 2, "answered before the tag was kept");
+        let built_3: Reference = "built:3".parse().unwrap();
+        let tagged = beyond.images.get_tag(&built_3).unwrap();
+        assert_eq!(tagged.map(|image| image.to_string()), Some(digest));
     }
 
     /// A sandbox whose record and disk are put in a home is taken in, its image wanted from the

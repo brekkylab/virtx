@@ -424,12 +424,20 @@ async fn stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else(home: 
         !writing.is_finished(),
         "written to a process that does not read"
     );
-    // Once it ends, so does the write, as ended.
+    // Once it ends, so does the write: refused as ended, or as cut with what its pipe took in,
+    // whichever the guest says first.
     sandbox.remove_job(&id).unwrap();
     let written = tokio::time::timeout(HANG, writing)
         .await
-        .expect("the write ends");
-    assert!(matches!(written.unwrap(), Err(SandboxError::JobEnded(_))));
+        .expect("the write ends")
+        .unwrap();
+    assert!(
+        matches!(
+            written,
+            Err(SandboxError::JobEnded(_) | SandboxError::StdinCut { .. })
+        ),
+        "{written:?}"
+    );
     close(sandbox).await;
 }
 

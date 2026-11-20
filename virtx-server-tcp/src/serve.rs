@@ -1013,6 +1013,105 @@ mod tests {
         );
     }
 
+    /// Needs a network: `cargo test -p virtx-server-tcp -- --ignored`. Homes made sharing their
+    /// anonymous pulls: a pull in one, and a build's base in another, ask where they are shared
+    /// for the image before pulling it, and tell it of the image pulled.
+    #[tokio::test]
+    #[ignore]
+    async fn a_home_s_anonymous_pulls_are_shared_where_it_was_made_to_share_them() {
+        use virtx_uvm::{Digest, PublicImages};
+
+        #[derive(Default)]
+        struct Told {
+            asked: std::sync::Mutex<Vec<Digest>>,
+            pulled: std::sync::Mutex<Vec<Digest>>,
+        }
+        impl PublicImages for Told {
+            fn fetch<'a>(
+                &'a self,
+                _: &'a ImageStore,
+                origin: &'a Digest,
+            ) -> BoxFuture<'a, anyhow::Result<Option<Digest>>> {
+                self.asked.lock().unwrap().push(origin.clone());
+                Box::pin(async { Ok(None) })
+            }
+            fn pulled(&self, origin: &Digest, _: &[u8], _: &[u8], _: &Digest) {
+                self.pulled.lock().unwrap().push(origin.clone());
+            }
+        }
+        struct Sharing(ProjectStore, Arc<Told>);
+        impl crate::access::Homes for Sharing {
+            fn make<'a>(
+                &'a self,
+                id: &'a virtx_uvm::ProjectId,
+            ) -> BoxFuture<'a, anyhow::Result<Option<crate::endpoints::Home>>> {
+                Box::pin(async move {
+                    let home = self.0.make(id).await?;
+                    let public: Arc<dyn PublicImages> = self.1.clone();
+                    Ok(home.map(|home| home.sharing(Some(public))))
+                })
+            }
+        }
+
+        let told = Arc::new(Told::default());
+        let shared = Arc::clone(&told);
+        let served = Served::spawn_over("sharing", async |home| {
+            let projects = TcpMembership::new(home);
+            for project in ["demo", "other"] {
+                projects
+                    .create(&Principal::new("tester"), project)
+                    .await
+                    .unwrap();
+            }
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(Sharing(store, shared)),
+            );
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
+        let ended = async |client: &Client, job: ImageJob| {
+            // A guard against a hang, not a measure of anything.
+            tokio::time::timeout(std::time::Duration::from_secs(300), async {
+                loop {
+                    let job = client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job.error;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("the job went on")
+        };
+        let alpine = "mirror.gcr.io/library/alpine:3.21";
+
+        let client = served.connect();
+        let job = client.pull_image(alpine, None).await.unwrap();
+        assert_eq!(ended(&client, job).await, None);
+        let pulled = told.pulled.lock().unwrap().clone();
+        assert_eq!(pulled.len(), 1);
+        assert_eq!(*told.asked.lock().unwrap(), pulled);
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert("virtx-project", "other".parse().unwrap());
+        let other = Client::connect(&served.url, Auth::None, headers).unwrap();
+        let job = other
+            .build_image(Recipe::new(alpine), "built:1")
+            .await
+            .unwrap();
+        assert_eq!(ended(&other, job).await, None);
+        assert_eq!(
+            *told.asked.lock().unwrap(),
+            [pulled[0].clone(), pulled[0].clone()]
+        );
+        assert_eq!(told.pulled.lock().unwrap().len(), 2);
+    }
+
     /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
     /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
     /// and a path whose segment does not read as one is `400` `invalid`.

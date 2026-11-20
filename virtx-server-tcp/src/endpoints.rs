@@ -40,9 +40,9 @@ use virtx_uvm::backend::{Backing, Refusal, Stored};
 use virtx_uvm::{
     Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
-    MachineSpec, Network, NoRoom, Os, PublicRegistries, Reference, RegistryClient, RegistryProxy,
-    RegistryServer, Sandbox, SandboxError, StorageBackend, UnknownSandbox, VolumeError,
-    VolumeStore, build_step, park_after, signal_number,
+    MachineSpec, Network, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
+    RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend, UnknownSandbox,
+    VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -70,6 +70,8 @@ pub struct Home {
     registries: Arc<dyn RegistryProxy>,
     /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first.
     mirror: Option<Arc<str>>,
+    /// Where its anonymous pulls are shared with other homes', if anywhere ([`Home::sharing`]).
+    public: Option<Arc<dyn PublicImages>>,
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     pub root: PathBuf,
     volumes: VolumeStore,
@@ -136,6 +138,7 @@ impl Home {
             registry,
             registries: Arc::new(PublicRegistries::default()),
             mirror: None,
+            public: None,
             files: Files::new(volumes.clone()).backed_by(backing.clone()),
             root: root.to_owned(),
             volumes,
@@ -256,6 +259,16 @@ impl Home {
     ) -> Home {
         self.registries = registries;
         self.mirror = mirror;
+        self
+    }
+
+    /// This, its anonymous pulls -- a pull, a build's base -- shared through `public`: an image
+    /// it has is fetched from there and not pulled, and one pulled is told it. None is nothing
+    /// shared, as a home has by default. A [`Homes`](crate::access::Homes) that makes homes for
+    /// many projects shares public images between them so. See
+    /// [`RegistryClient::with_public`].
+    pub fn sharing(mut self, public: Option<Arc<dyn PublicImages>>) -> Home {
+        self.public = public;
         self
     }
 
@@ -787,7 +800,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
     let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
-    let mirror = home.mirror.clone();
+    let (mirror, public) = (home.mirror.clone(), home.public.clone());
     image_job(
         &home,
         ImageJobKind::Pull,
@@ -795,6 +808,7 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
         move |report| async move {
             let registry = RegistryClient::new(images.clone(), args.auth)
                 .with_mirror(mirror.as_deref())
+                .with_public(public)
                 .through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
             let (store, tagged) = (images.clone(), image.clone());
@@ -836,6 +850,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     }
     let (images, vm) = (home.images.clone(), home.vm.clone());
     let (registries, mirror) = (Arc::clone(&home.registries), home.mirror.clone());
+    let public = home.public.clone();
     let recipe = args.recipe;
     // Room for one machine as the build is asked for, if a step of it boots one -- its steps
     // boot one at a time -- so a build there is none for is refused `503` as a sandbox is,
@@ -857,6 +872,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                 &images,
                 &*registries,
                 mirror.as_deref(),
+                public,
                 &recipe.base,
                 &mut report,
             )
@@ -888,12 +904,14 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
-/// pulled into the store now, anonymously, through `registries` and from `mirror` first if it
-/// is Docker Hub's, and left untagged: a build tags only what it builds.
+/// pulled into the store now, anonymously, through `registries`, from `mirror` first if it is
+/// Docker Hub's and shared through `public`, and left untagged: a build tags only what it
+/// builds.
 async fn base(
     images: &ImageStore,
     registries: &dyn RegistryProxy,
     mirror: Option<&str>,
+    public: Option<Arc<dyn PublicImages>>,
     base: &str,
     report: &mut (impl FnMut(String) + Send),
 ) -> Result<(ImageConfiguration, Vec<Digest>, Option<ImageHold>), Failure> {
@@ -908,6 +926,7 @@ async fn base(
         _ => {
             RegistryClient::new(images.clone(), None)
                 .with_mirror(mirror)
+                .with_public(public)
                 .through(Some(registries))?
                 .pull(&reference, report)
                 .await?

@@ -22,7 +22,8 @@ pub use fstree::*;
 pub use image::{
     image_build::{Error as BuildError, build_step},
     registry_client::{
-        Error as RegistryError, ProxyPass, ProxyRefusal, Reference, RegistryClient, RegistryProxy,
+        Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
+        RegistryProxy,
     },
     registry_proxy::PublicRegistries,
     registry_server::{Body as RegistryBody, RegistryServer},

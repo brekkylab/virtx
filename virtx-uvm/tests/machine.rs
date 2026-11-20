@@ -24,11 +24,14 @@ use futures_util::{
     future::{BoxFuture, join_all},
 };
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
+use virtx_core::{
+    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
+};
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
+use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
-    DEFAULT_DISK_GIB, Files, ImageStore, Reference, RegistryClient, Sandbox, SandboxError,
-    StorageBackend, VolumeError, VolumeStore,
+    Admission, DEFAULT_DISK_GIB, Files, ImageStore, MachineSpec, NoRoom, Reference, RegistryClient,
+    Room, Sandbox, SandboxError, SandboxJob, StorageBackend, VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -48,6 +51,10 @@ const DEBIAN: &str = "debian:bookworm-slim";
 /// guest driver (`mesa-vulkan-virtio`); no stable branch does yet. Pulled only for the GPU's
 /// test.
 const GPU_IMAGE: &str = "alpine:edge";
+
+/// How long a test waits on what should come before it fails, rather than holding the suite:
+/// a guard against a hang, not a time anything is held to.
+const HANG: Duration = Duration::from_secs(60);
 
 /// A sandbox of [`ALPINE`] with 1 GiB of memory: enough for what these tests run in it, and little
 /// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
@@ -173,6 +180,52 @@ fn entry(event: &[u8]) -> SandboxJobEntry {
     serde_json::from_str(data.expect("an event carries its entry")).unwrap()
 }
 
+/// Room for as many machines as a test says ([`Limit::to`]), and for every one otherwise: this
+/// process's [`Admission`].
+struct Limit;
+
+/// How many machines may be up at once, if a test holds them to some; and how many are.
+static LIMIT: std::sync::Mutex<(Option<usize>, usize)> = std::sync::Mutex::new((None, 0));
+
+/// A machine's room, given back as it drops.
+struct Taken;
+
+impl Drop for Taken {
+    fn drop(&mut self) {
+        LIMIT.lock().unwrap().1 -= 1;
+    }
+}
+
+impl Admission for Limit {
+    fn admit(&self, _spec: &MachineSpec) -> Result<Room, NoRoom> {
+        let mut limit = LIMIT.lock().unwrap();
+        if limit.0.is_some_and(|most| limit.1 >= most) {
+            return Err(NoRoom(format!("{} machines are up", limit.1)));
+        }
+        limit.1 += 1;
+        Ok(Box::new(Taken))
+    }
+}
+
+impl Limit {
+    /// Machines held to `most` at once, until what this answers drops.
+    fn to(most: usize) -> impl Drop {
+        struct Lifted;
+        impl Drop for Lifted {
+            fn drop(&mut self) {
+                LIMIT.lock().unwrap().0 = None;
+            }
+        }
+        LIMIT.lock().unwrap().0 = Some(most);
+        Lifted
+    }
+
+    /// How many machines are up, each holding its room.
+    fn taken() -> usize {
+        LIMIT.lock().unwrap().1
+    }
+}
+
 /// Close `sandbox` as a server removes one: it blocks while the guest syncs.
 async fn close(sandbox: Arc<Sandbox>) {
     tokio::task::spawn_blocking(move || sandbox.close())
@@ -194,8 +247,11 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     let gone = home.sandbox(&small(), None).await;
     let write = ["sh", "-c", "echo kept > /root/kept"];
     assert_eq!(run(&kept, &write, None).await.unwrap().1, 0);
-    let sleeping = kept.exec(vec!["sleep".into(), "600".into()], None).await;
-    let sleeping = sleeping.unwrap().get().id;
+    let running = kept.exec(vec!["sleep".into(), "600".into()], None).await;
+    let running = running.unwrap();
+    let sleeping = running.get().id;
+    let deleted = gone.exec(vec!["sleep".into(), "600".into()], None).await;
+    let deleted = deleted.unwrap();
     assert!(
         home.kept().is_empty(),
         "one this process knows is no other's"
@@ -203,6 +259,12 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
 
     let id = kept.id().to_owned();
     tokio::join!(leave(kept), leave(gone));
+    // This server ends each job as the next one knows it: restarted where its sandbox is kept,
+    // its sandbox deleted where it is deleted.
+    let restarted = Some(SandboxJobEndReason::Restarted);
+    assert_eq!(running.get().reason, restarted);
+    let sandbox_deleted = Some(SandboxJobEndReason::SandboxDeleted);
+    assert_eq!(deleted.get().reason, sandbox_deleted);
     let known = home.kept();
     assert_eq!(known.len(), 1, "the one made without keys goes");
     let again = &known[0];
@@ -215,7 +277,6 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
         .into_iter()
         .map(|job| (job.id == sleeping, job.running, job.code, job.reason))
         .collect();
-    let restarted = Some(SandboxJobEndReason::Restarted);
     assert!(ended.contains(&(false, false, Some(0), None)), "{ended:?}");
     assert!(
         ended.contains(&(true, false, Some(137), restarted)),
@@ -531,6 +592,118 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     close(sandbox).await;
 }
 
+async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let start = async |cmd: &[&str], timeout: Option<Duration>| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        sandbox.exec(cmd, timeout).await.unwrap()
+    };
+    // The last entry of `job`'s log, read to its end.
+    let end = async |job: &SandboxJob| {
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => end,
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Its own exit, 137 too: no reason.
+    for code in [0, 137] {
+        let job = start(&["sh", "-c", &format!("exit {code}")], None).await;
+        assert_eq!(end(&job).await, SandboxJobEnd::exited(code));
+        assert_eq!(job.get().reason, None);
+    }
+    // `SIGKILL` sent it: its own end, as the signal made it.
+    let job = start(&["sleep", "300"], None).await;
+    sandbox.signal(&job.get().id, 9).unwrap();
+    assert_eq!(end(&job).await, SandboxJobEnd::exited(137));
+    // Past its timeout: killed, for its timeout.
+    let job = start(&["sleep", "300"], Some(Duration::from_millis(200))).await;
+    let timed_out = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(end(&job).await, timed_out);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::Timeout));
+    // Removed while it runs: its log, read from before, reads on to its end, cancelled.
+    let job = start(&["sleep", "300"], None).await;
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    sandbox.remove_job(&job.get().id).unwrap();
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let cancelled = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Cancelled),
+    };
+    assert_eq!(read.unwrap(), cancelled);
+    // Its machine ended under it -- reset, which every arch takes: killed with it.
+    let job = start(&["sh", "-c", "sleep 1; sync; reboot -f"], None).await;
+    let ended = tokio::time::timeout(HANG, end(&job))
+        .await
+        .expect("the machine ends");
+    let exited = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::VmExited),
+    };
+    assert_eq!(ended, exited);
+    assert!(!sandbox.answer().running);
+    close(sandbox).await;
+    // Its sandbox deleted under it: its log, read from before, reads on to its end, which says
+    // so, apart from its own removal.
+    let deleting = home.sandbox(&small(), None).await;
+    let cmd = ["sleep", "300"].map(String::from).to_vec();
+    let job = deleting.exec(cmd, None).await.unwrap();
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    close(deleting).await;
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(read.unwrap(), deleted);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::SandboxDeleted));
+}
+
+/// A machine's process leads a process group of its own, so what is sent its starter's group --
+/// a terminal's ctrl-c -- reaches its starter alone, which stops it.
+#[cfg(unix)]
+async fn a_machine_s_process_leads_a_process_group_of_its_own(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,args="])
+        .output()
+        .unwrap();
+    let ps = String::from_utf8(ps.stdout).unwrap();
+    let ours = std::process::id().to_string();
+    // Each machine this process started: its pid and its process group.
+    let machines: Vec<_> = ps
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| fields.get(1) == Some(&ours.as_str()) && fields.get(4) == Some(&MACHINE))
+        .map(|fields| (fields[0].to_owned(), fields[2].to_owned()))
+        .collect();
+    assert_eq!(machines.len(), 1, "{ps}");
+    let (pid, group) = &machines[0];
+    assert_eq!(group, pid);
+    close(sandbox).await;
+}
+
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&small(), park).await;
@@ -571,6 +744,116 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         .unwrap()
         .count();
     assert_eq!(left, 0);
+}
+
+async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home: Home) {
+    let _woken = runs::subscribe();
+    let before = runs::since(0, usize::MAX).last;
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let first = sandbox.up_since().expect("up as it is made");
+    run(&sandbox, &["true"], None).await.unwrap();
+    // Idle, it is parked; a job boots it again; closed, it is down for good.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(sandbox.up_since(), None, "parked");
+    run(&sandbox, &["true"], None).await.unwrap();
+    let second = sandbox.up_since().expect("up again");
+    assert!(second > first);
+    let id = sandbox.id().to_owned();
+    close(Arc::clone(&sandbox)).await;
+    assert_eq!(sandbox.up_since(), None, "closed");
+
+    let told = runs::since(before, usize::MAX);
+    assert!(told.all);
+    assert_eq!(told.runs.last().map(|run| run.seq), Some(told.last));
+    let ours: Vec<_> = (told.runs.into_iter())
+        .filter(|run| run.root == home.root)
+        .collect();
+    assert!(ours.iter().all(|run| run.sandbox == id));
+    assert!(ours.windows(2).all(|two| two[0].seq < two[1].seq));
+    let ran: Vec<_> = ours.into_iter().map(|run| run.ran).collect();
+    let [
+        Ran::Up { at: up },
+        Ran::Down {
+            started,
+            ended,
+            took,
+        },
+        Ran::Up { at: again },
+        Ran::Down {
+            started: started_again,
+            ended: ended_again,
+            took: took_again,
+        },
+    ] = ran[..]
+    else {
+        panic!("up, down, up and down, not {ran:?}");
+    };
+    assert_eq!((up, started), (first, first));
+    assert_eq!((again, started_again), (second, second));
+    assert!(started < ended && ended <= again && again < ended_again);
+    // How long each was up, by the clock no one sets, is about what the wall clock says.
+    for (took, started, ended) in [(took, started, ended), (took_again, again, ended_again)] {
+        let wall = ended.duration_since(started).unwrap();
+        assert!(
+            took.abs_diff(wall) < Duration::from_millis(100),
+            "{took:?} by {wall:?}"
+        );
+    }
+}
+
+async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
+    let _limit = Limit::to(1);
+    let disks = || {
+        let dir = std::fs::read_dir(home.root.join("sandbox")).unwrap();
+        let names = dir.map(|entry| entry.unwrap().file_name().into_string().unwrap());
+        names.filter(|name| name.ends_with(".ext4")).count()
+    };
+    let first = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    assert_eq!(Limit::taken(), 1);
+
+    // No room for a second's machine: it is refused, and leaves no disk.
+    let vm = vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)];
+    let args = small();
+    let second = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm,
+        None,
+        None,
+        &Backing::default(),
+    )
+    .await;
+    match second {
+        Err(SandboxError::NoRoom(NoRoom(why))) => assert_eq!(why, "1 machines are up"),
+        other => panic!("expected no room, got {:?}", other.map(|_| ())),
+    }
+    assert_eq!(disks(), 1);
+
+    // Parked, the first gives its room back, which a second boots in.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(Limit::taken(), 0);
+    let second = home.sandbox(&small(), None).await;
+    assert_eq!(Limit::taken(), 1);
+
+    // The first's next job finds no room to boot it again in, until the second is closed.
+    let refused = run(&first, &["true"], None).await;
+    assert!(
+        matches!(refused, Err(SandboxError::NoRoom(_))),
+        "{refused:?}"
+    );
+    close(second).await;
+    assert_eq!(Limit::taken(), 0);
+    let (lines, _) = run(&first, &["echo", "up"], None).await.unwrap();
+    assert_eq!(lines, ["up"]);
+    assert_eq!(Limit::taken(), 1);
+    close(first).await;
+    assert_eq!(Limit::taken(), 0);
 }
 
 async fn a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway(home: Home) {
@@ -719,7 +1002,7 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
     close(with).await;
     // A published port gives the machine its network device, and still no way out.
-    for ports in [vec![], vec![8080]] {
+    for ports in [vec![], vec![8080.into()]] {
         let args = SandboxCreateArgs {
             network: false,
             ports: ports.clone(),
@@ -1571,6 +1854,7 @@ fn main() -> ExitCode {
     let scratch = env::temp_dir().join(format!("virtx-uvm-machine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(virtx_uvm::set_admission(Arc::new(Limit)));
     let images = ImageStore::new(scratch.join("images")).unwrap();
     // Only where `VIRTX_TEST_GPU=1` says the host has a GPU with a Vulkan driver: a `gpu` build
     // runs on hosts without one too, and there a guest finds no device. Said on a build without
@@ -1606,7 +1890,10 @@ fn main() -> ExitCode {
     let mut tests = Vec::from(tests![
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
+        a_job_s_end_says_why_the_server_ended_it_and_only_then,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
+        each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
+        a_machine_boots_only_with_room_given_back_as_it_goes_down,
         a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
@@ -1631,6 +1918,8 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
+    #[cfg(unix)]
+    tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {

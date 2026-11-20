@@ -289,8 +289,8 @@ mod tests {
     };
 
     use virtx_core::{
-        Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, Recipe,
-        SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
+        Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
+        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -485,8 +485,29 @@ mod tests {
 
         for ports in [vec![0], vec![8080, 8080]] {
             let mut args = here();
-            args.ports = ports;
+            args.ports = ports.into_iter().map(PortSpec::new).collect();
             assert_eq!(refused(args).await, 400);
+        }
+        // Inbound rules are kept by no server here, and a label is at most 128 characters.
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        assert_eq!(refused(here().port(ssh)).await, 400);
+        assert_eq!(
+            refused(here().port(PortSpec::new(22).inbound([]))).await,
+            400
+        );
+        let long = PortSpec::new(80).label("x".repeat(129));
+        assert_eq!(refused(here().port(long)).await, 400);
+        let long = "x".repeat(129);
+        for name in [
+            "",
+            ".dot",
+            "-dash",
+            "a b",
+            "caf\u{e9}",
+            "a/b",
+            long.as_str(),
+        ] {
+            assert_eq!(refused(here().name(name)).await, 400, "name {name:?}");
         }
         let mut args = here();
         args.vcpus = Some(0);
@@ -1447,7 +1468,7 @@ mod tests {
                 "POST",
                 "/sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
             ),
             (
                 "GET",

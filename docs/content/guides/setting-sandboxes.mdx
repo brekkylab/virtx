@@ -13,11 +13,12 @@ The image has to be on the server already, pulled or built as [Images](/docs/gui
 
 | Option | Default | What it does |
 | --- | --- | --- |
+| `name` | none | A name to find it again by, with `find_sandbox`, rather than keeping its id: letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128. One another sandbox has is refused with `409`, `exists`, until that one is removed. |
 | `vcpus` | 4 | Its CPUs. |
 | `memory_mib` | 4096 | Its memory, in MiB. |
 | `disk_gib` | 2 | How much it may write over its image, in GiB, at most 1024. What it writes there goes when it is removed. |
 | `network` | `True` | `False` blocks its outbound connections and name lookups. With it on, it reaches public addresses, not this host's loopback or private ones. |
-| `ports` | none | TCP ports in it to reach from outside, even with `network` off; see [Networks and ports](/docs/guides/networks-ports/). |
+| `ports` | none | Ports in it to reach from outside, even with `network` off: numbers for TCP, or specs with a `label`, an `http` `protocol` and `inbound` rules; see [Networks and ports](/docs/guides/networks-ports/). |
 | `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/guides/mounting-volumes/). |
 | `gpu`, `gpu_memory_mib` | none | A GPU and the memory it may hold; see [Using GPUs](/docs/guides/using-gpus/). |
 | `abins` | none | virtx's own programs, by name, such as `index`, `docread` and `display`, at `/abin` and first on its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. The sandbox answers them as `abins`. |
@@ -60,7 +61,7 @@ let sandbox = client.create_sandbox(&args).await?;
 
 ## Find sandboxes
 
-`list_sandbox` lists every sandbox on the server, and `get_sandbox` finds one by its id. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `image`, and whether it is `running`. This is how to find one a program left behind.
+`list_sandbox` lists every sandbox on the server, `get_sandbox` finds one by its id, and `find_sandbox` one by the `name` it was made with, answering none when no sandbox has it. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `name`, its `image`, and whether it is `running`. This is how to find one a program left behind.
 
 A [server you run](/docs/guides/self-hosting/) keeps its sandboxes when it is stopped: started again, it lists each with what it wrote, and boots it again for its next command. Their jobs are kept, each that ran then ended with code `137` and `reason` `restarted`, its log only that end. One it cannot start again, such as one whose image was deleted meanwhile, is listed with `running` false and an `error` saying why, and takes nothing but `remove`. The server `Client.spawn()` starts removes its sandboxes as your program ends.
 
@@ -72,6 +73,7 @@ for sandbox in await client.list_sandbox():
     print(sandbox.id, sandbox.image, sandbox.running)
 
 sandbox = await client.get_sandbox("<sandbox id>")
+sandbox = await client.find_sandbox("task-42")  # None if no sandbox has the name
 ```
 
 </TabItem>
@@ -83,6 +85,7 @@ for (const sandbox of await client.listSandbox()) {
 }
 
 const sandbox = await client.getSandbox('<sandbox id>')
+const named = await client.findSandbox('task-42') // undefined if no sandbox has the name
 ```
 
 </TabItem>
@@ -94,10 +97,66 @@ for sandbox in client.list_sandbox().await? {
 }
 
 let sandbox = client.get_sandbox("<sandbox id>").await?;
+let named = client.find_sandbox("task-42").await?; // None if no sandbox has the name
 ```
 
 </TabItem>
 </Tabs>
+
+### Find it or make it
+
+A program that names its sandboxes, such as one per task, looks for the name first and makes the sandbox only when none has it. Two programs doing that at once can both find none: one makes it, and the other is refused with `409` and finds the one just made.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.find_sandbox("task-42")
+if sandbox is None:
+    try:
+        sandbox = await client.create_sandbox("alpine:latest", name="task-42")
+    except VirtxError as error:
+        if error.status != 409:
+            raise
+        sandbox = await client.find_sandbox("task-42")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+let sandbox = await client.findSandbox('task-42')
+if (sandbox === undefined) {
+  try {
+    sandbox = await client.createSandbox('alpine:latest', { name: 'task-42' })
+  } catch (error) {
+    if (!(error instanceof VirtxError) || error.status !== 409) throw error
+    sandbox = await client.findSandbox('task-42')
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let sandbox = match client.find_sandbox("task-42").await? {
+    Some(sandbox) => Some(sandbox),
+    None => match client
+        .create_sandbox(&SandboxCreateArgs::new("alpine:latest").name("task-42"))
+        .await
+    {
+        Ok(sandbox) => Some(sandbox),
+        Err(error) if error.status() == Some(409) => client.find_sandbox("task-42").await?,
+        Err(error) => return Err(error),
+    },
+};
+```
+
+</TabItem>
+</Tabs>
+
+A sandbox found so has each port without its `url`, which only `create_sandbox` answers; see [Networks and ports](/docs/guides/networks-ports/).
 
 ## Remove a sandbox
 

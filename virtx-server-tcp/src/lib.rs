@@ -9,6 +9,12 @@
 //! - [`access::Homes`]: what makes a project's home as it is first reached. The binary's is
 //!   [`virtx_uvm::ProjectStore`], each home in the project's directory.
 //! - [`serve::router`]'s `own`: routes beside the server's. The binary's say where to sign in.
+//! - [`endpoints::Home::backed_by`]: where a project's data is kept beyond this machine, a
+//!   [`virtx_uvm::StorageBackend`] given to each home its [`access::Homes`] makes, the home's own
+//!   stores its cache. The binary's homes have none, and keep nothing beyond their stores.
+//! - [`endpoints::Home::take_in`] and [`let_go`](endpoints::Home::let_go): a sandbox taken into a
+//!   home whose record and disk were put there, and let go of with them left there, for moving a
+//!   sandbox between servers, or backing it up and restoring it.
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.

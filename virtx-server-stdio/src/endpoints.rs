@@ -34,9 +34,10 @@ use tokio::task::AbortHandle;
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
-    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs,
-    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
-    described_type, from_body,
+    Role, SANDBOX_JOB_HEADER, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxResizeArgs,
+    SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
+    VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
+    from_body,
 };
 use virtx_uvm::sandbox::{Held, Hooks};
 use virtx_uvm::{
@@ -820,8 +821,8 @@ async fn sandbox_job_list(
 }
 
 /// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
-/// `text/event-stream`, `201` with the job's log as the body, the job in [`JOB_HEADER`] and its
-/// path in `Location`: its output and end with no second request.
+/// `text/event-stream`, `201` with the job's log as the body, the job in
+/// [`SANDBOX_JOB_HEADER`] and its path in `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
@@ -837,44 +838,17 @@ async fn sandbox_exec(
     let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
     let answered = job.get();
     let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
-    let streamed = headers
-        .get(header::ACCEPT)
-        .and_then(|accept| accept.to_str().ok())
-        .is_some_and(|accept| accept.contains("text/event-stream"));
-    let said = ascii(&serde_json::to_string(&answered).map_err(internal)?);
     // A job too long for a header is answered alone, and its log read with a request of its own.
-    if !streamed || said.len() > JOB_HEADER_MOST {
+    let said = answered.header_value();
+    let Some(said) = said.filter(|_| accepts_event_stream(&headers)) else {
         return Ok(created(location, &answered));
-    }
+    };
     let mut log = events(job.log(), &HeaderMap::new());
     *log.status_mut() = StatusCode::CREATED;
-    let value = |value: &str| header::HeaderValue::from_str(value).map_err(internal);
-    log.headers_mut()
-        .insert(header::LOCATION, value(&location)?);
-    log.headers_mut().insert(JOB_HEADER, value(&said)?);
+    let location = header::HeaderValue::from_str(&location).map_err(internal)?;
+    log.headers_mut().insert(header::LOCATION, location);
+    log.headers_mut().insert(SANDBOX_JOB_HEADER, said);
     Ok(log)
-}
-
-/// Where an exec answered with its log says its job.
-const JOB_HEADER: &str = "virtx-job";
-
-/// The longest job, as JSON, [`JOB_HEADER`] carries.
-const JOB_HEADER_MOST: usize = 8 << 10;
-
-/// `json` with every character past ASCII, and `DEL`, escaped, `\uXXXX` as JSON writes one:
-/// the same JSON, and a header's value.
-fn ascii(json: &str) -> String {
-    let mut escaped = String::with_capacity(json.len());
-    for c in json.chars() {
-        if c.is_ascii() && c != '\u{7f}' {
-            escaped.push(c);
-        } else {
-            for unit in c.encode_utf16(&mut [0; 2]) {
-                escaped.push_str(&format!("\\u{unit:04x}"));
-            }
-        }
-    }
-    escaped
 }
 
 async fn sandbox_job_get(
@@ -1225,17 +1199,6 @@ impl From<tokio::task::JoinError> for Refused {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn json_escaped_to_ascii_reads_as_it_was() {
-        let job = serde_json::json!({"cmd": ["echo", "héllo 世界 🎉"]});
-        let escaped = ascii(&job.to_string());
-        assert!(escaped.is_ascii(), "{escaped}");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&escaped).unwrap(),
-            job
-        );
-    }
 
     #[test]
     fn a_name_asked_for_is_decoded() {

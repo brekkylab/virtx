@@ -110,7 +110,8 @@ async fn running(client: &TransportClient, path: &str) -> Result<bool, Error> {
 }
 
 /// The entries of `response`, a log answered from `path`, each read as an `E`, and whether it
-/// is the log's `end`. A connection broken on the way is an [`Error::Transport`].
+/// is the log's `end`, until its body ends. A connection broken on the way is an
+/// [`Error::Transport`].
 pub(crate) fn entries<'a, E: DeserializeOwned + Send + 'a>(
     response: http::Response<Body>,
     path: &'a str,

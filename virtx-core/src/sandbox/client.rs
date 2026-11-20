@@ -4,16 +4,13 @@ use ::http::header;
 use futures_util::{Stream, StreamExt as _};
 
 use super::{
-    Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
-    SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
+    SANDBOX_JOB_HEADER, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
+    SandboxJobEntry, SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
     Error,
     transport::{LogEntry, TransportClient, full, http, segment, sse},
 };
-
-/// Where a server that answers an exec with its log says its job.
-const JOB_HEADER: &str = "virtx-job";
 
 /// The path of the sandbox `id`.
 fn sandbox(id: &str) -> String {
@@ -120,21 +117,22 @@ pub(crate) fn exec_log<'a>(
         }
         let job: SandboxJob = response
             .headers()
-            .get(JOB_HEADER)
+            .get(SANDBOX_JOB_HEADER)
             .and_then(|job| job.to_str().ok())
             .ok_or_else(|| Error::Transport(format!("{path} answered its log without its job")))
             .and_then(|job| serde_json::from_str(job).map_err(|e| Error::Client(e.to_string())))?;
         let at = format!("{}/events", self::job(&id, &job.id));
         let job_id = job.id.clone();
         yield SandboxExecItem::Job(job);
-        // Its log, from this answer, until its end, or until the body ends or breaks before it.
-        let mut after = None;
+        // Its log, from this answer, until its `end`, or until the body breaks or ends before it.
+        let (mut after, mut ended) = (None, false);
         let mut entries = std::pin::pin!(sse::client::entries(response, &at));
         loop {
             match entries.next().await {
+                None if ended => return,
                 None => break,
                 Some(Ok((entry, end))) => {
-                    after = Some(entry.id);
+                    (after, ended) = (Some(entry.id), end);
                     yield SandboxExecItem::Log(entry);
                     if end {
                         return;
@@ -144,8 +142,8 @@ pub(crate) fn exec_log<'a>(
                 Some(Err(e)) => Err(e)?,
             }
         }
-        // The answer ended before its end: the job's log, after the last entry read, read on as
-        // a log is.
+        // The answer broke, or ended before the job's end: the job's log, after the last entry
+        // read, as a log is read on.
         let mut log = std::pin::pin!(job_log(client, &id, &job_id, after));
         while let Some(entry) = log.next().await {
             yield SandboxExecItem::Log(entry?);

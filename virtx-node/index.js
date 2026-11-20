@@ -1051,8 +1051,9 @@ class Sandbox extends Files {
   }
 
   // Starts `cmd` in it, its stdin open for `writeStdin` if `stdin`, killed after `timeoutMs` if
-  // given: the job, and its output as its `log`. Iterated at once, the job is started and its
-  // log read as one request, where the server answers so.
+  // given: the job, and its output as its `log`. Iterated before the code awaits anything else,
+  // the job is started and its log read as one request, where the server answers so; the job is
+  // started on its own at the next microtask otherwise, and its log is a second request.
   exec(cmd, options = {}) {
     const { client, id } = this
     const args = { ...options, sandbox: id, cmd }

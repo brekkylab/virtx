@@ -30,6 +30,39 @@ pub struct SandboxJob {
     pub reason: Option<SandboxJobEndReason>,
 }
 
+/// Where an exec answered with its log says its job, as `PROTOCOL.md`'s "An exec answered with
+/// its log" names it.
+pub const SANDBOX_JOB_HEADER: &str = "virtx-job";
+
+/// The longest job, as the JSON [`SANDBOX_JOB_HEADER`] carries, a server sends there: one past it
+/// is answered alone.
+#[cfg(feature = "server")]
+const SANDBOX_JOB_HEADER_MOST: usize = 8 << 10;
+
+#[cfg(feature = "server")]
+impl SandboxJob {
+    /// This job as [`SANDBOX_JOB_HEADER`] carries it: its JSON written in ASCII, every other
+    /// character and `DEL` escaped `\uXXXX` as JSON writes one, so the same JSON and a header's
+    /// value. `None` where that is past 8 KiB, too long for a header: the job is answered alone.
+    pub fn header_value(&self) -> Option<http::HeaderValue> {
+        let json = serde_json::to_string(self).expect("a job serializes");
+        let mut said = String::with_capacity(json.len());
+        for c in json.chars() {
+            if c.is_ascii() && c != '\u{7f}' {
+                said.push(c);
+            } else {
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    said.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+        if said.len() > SANDBOX_JOB_HEADER_MOST {
+            return None;
+        }
+        http::HeaderValue::from_str(&said).ok()
+    }
+}
+
 /// What a sandbox job does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -304,6 +337,33 @@ mod tests {
             value,
             json!({"cmd": ["cat"], "stdin": true, "timeout_ms": 5})
         );
+    }
+
+    /// A job with a command past ASCII, and `DEL`, is said in its header as the same JSON; one
+    /// past 8 KiB is not said there at all.
+    #[cfg(feature = "server")]
+    #[test]
+    fn a_job_past_ascii_is_said_in_its_header_as_the_same_json() {
+        let job = |arg: &str| SandboxJob {
+            id: "j".into(),
+            kind: SandboxJobKind::Exec,
+            pid: 1,
+            cmd: vec!["echo".into(), arg.into()],
+            running: true,
+            code: None,
+            reason: None,
+        };
+        let job = job("héllo 😀 a\u{7f}b");
+        let said = job.header_value().unwrap();
+        let said = said.to_str().unwrap();
+        assert!(said.contains(r"h\u00e9llo \ud83d\ude00 a\u007fb"), "{said}");
+        assert_eq!(serde_json::from_str::<SandboxJob>(said).unwrap(), job);
+
+        let long = SandboxJob {
+            cmd: vec!["x".repeat(8 << 10)],
+            ..job
+        };
+        assert_eq!(long.header_value(), None);
     }
 
     #[test]

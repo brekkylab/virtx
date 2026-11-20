@@ -226,8 +226,9 @@ class Sandbox(Files):
         """Run ``cmd`` in it, its stdin open for ``SandboxJob.write_stdin`` if ``stdin``, killed
         after ``timeout_ms`` if one is given. Awaited, the job; iterated, its output and how it
         ended, as ``SandboxJob.log``'s; ``complete``, its exit code, as
-        ``SandboxJob.complete``'s. Sent when first awaited, iterated or completed: iterated first,
-        the job is started and its log read as one request, where the server answers so."""
+        ``SandboxJob.complete``'s. Sent when first awaited, iterated or completed, whatever else
+        is awaited before: iterated first, the job is started and its log read as one request,
+        where the server answers so; awaited first, its log is a second request."""
         request = args(sandbox=self.id, cmd=list(cmd), stdin=stdin or None, timeout_ms=timeout_ms)
 
         async def start() -> SandboxJob:

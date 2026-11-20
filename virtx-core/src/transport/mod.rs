@@ -30,7 +30,7 @@ pub(crate) use http::{resolved, segment, segments};
 pub use server::serve_stdio;
 pub use sse::LogEntry;
 #[cfg(feature = "server")]
-pub use sse::server::Log;
+pub use sse::server::{Log, accepts_event_stream};
 pub use webdav::{
     DirEntry, FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileRoot, FileWriteArgs,
     Metadata,

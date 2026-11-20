@@ -404,9 +404,9 @@ A command that cannot be started, such as one not found, is refused with `422`, 
 
 #### An exec answered with its log
 
-An exec whose request accepts `text/event-stream` MAY be answered with the job's log as well, saving the client a second request:
+An exec whose request's `Accept` names `text/event-stream`, with a `q` above `0`, MAY be answered with the job's log as well, saving the client a second request. A range such as `*/*` does not ask for it.
 
-- `201`, with `Content-Type: text/event-stream`, and the job's log as the body, from its first entry, as `GET {job}/events` would answer it.
+- `201`, with `Content-Type: text/event-stream`, and the job's log as the body, from its first entry: the same events that `GET {job}/events` answers with its `200`, under the exec's own status.
 - The job, as JSON, in the `virtx-job` header, written in ASCII with any other character escaped as `\uXXXX`, and its path in `Location`, as any `201` has.
 
 A server MAY answer such a request with the job alone, as JSON, as it answers any other: so a client that asks for the log this way MUST accept `application/json` too, and read the job's log with its `GET {job}/events` where the answer is the job alone.

@@ -41,7 +41,8 @@ pub use stream::*;
 pub const VIRTX_OK: c_int = 0;
 
 /// Failed: the error is written, as `{"message": "...", "source": "server", "status": 404}`,
-/// `source` where it failed, `status` only for a request the server refused with it.
+/// `source` where it failed, `status` only for a request the server refused with it, and `code`
+/// beside it where the server answered the protocol's code, such as `"code": "not_found"`.
 pub const VIRTX_ERROR: c_int = -1;
 
 /// Not answered yet: the waker given is kept, and woken once it is.

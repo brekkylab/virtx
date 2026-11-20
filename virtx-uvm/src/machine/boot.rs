@@ -311,9 +311,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .map_err(Error::Init)?;
     // Under nested virtualization -- a cloud instance -- each check the guest kernel makes of
     // its clock, and each PCI slot it probes, is a trip to the outer hypervisor: some 70 ms of
-    // a boot there. Its TSC is the host's, invariant; and a machine without a GPU has no PCI
-    // device, its devices being virtio-mmio's. x86_64's own: elsewhere the kernel would not
-    // know them, and would pass them to the init as its environment.
+    // a boot there. Its clock is its hypervisor's, which libkrun has it prefer by not saying the
+    // TSC is invariant, so a check of the TSC guards nothing; and a machine without a GPU has
+    // no PCI device, its devices being virtio-mmio's. x86_64's own: elsewhere the kernel would
+    // not know them, and would pass them to the init as its environment.
     #[cfg(target_arch = "x86_64")]
     {
         payload.append_cmdline("tsc=reliable no_timer_check");

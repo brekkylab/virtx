@@ -150,6 +150,21 @@ Nothing here is a sandbox of the host's filesystem by itself. libkrun's own READ
 that a virtio-fs share offers no protection against a guest reaching other directories on the
 same host filesystem, and read-only bounds what a guest may write, not what it may read.
 
+### libkrun commit `virtiofs-external`
+
+A remote store mounted in a volume is not a directory on the host, so there is none to share.
+The commit adds a virtio-fs device served from an `ExternalFs` the embedder implements, a read-only tree answered inode by inode: lookup, getattr, readdir and read.
+[`Served`](src/volume/served.rs) is virtx's, over a store's `Remote`, and `FsDevice::new_external` attaches it under a tag as any other share.
+
+### libkrun commit `macos-path-shares`
+
+On macOS libkrun's virtio-fs server names an inode by its volfs path, `/.vol/{dev}/{ino}`, which APFS and HFS+ answer and exFAT, NFS, SMB and FSKit volumes do not.
+A volume's files are under the virtx home, which `$VIRTX_HOME` or a server's configuration can put on any of those, and a share there would be mounted with nothing in it.
+
+The commit asks the share's root for its volfs path when the device starts.
+Where there is none, an inode is named by the path from the share's root instead, along the parent and name each lookup found it under, which a rename looks up again.
+An inode the guest still holds whose name there is gone answers `ENOENT`.
+
 ## The network — libkrun commit `tsi`
 
 A machine's network is libkrun's Transparent Socket Impersonation: the guest kernel hands every
@@ -627,6 +642,9 @@ never boots a guest. The first two are on the path every `execve` takes.
   no-follow path with it, because the mode bits of a link belong on the link
   and nothing on the host can resolve an LX reparse tag — a plain `fs::write`
   to the stream fails with `ERROR_CANT_ACCESS_FILE`.
+  Upstream's `check_symlink_target`, which refuses a link whose target leaves the share, is
+  taken out with it: that guards a native symlink, which Windows follows, and an LX one the
+  host follows nowhere, whatever it names.
 
 - **`rename` moved the file and left every cached inode pointing at the old
   path.** An inode's stored path is how `getattr`, `open` and `setattr` reach

@@ -506,8 +506,9 @@ class Client {
   // it wants as `{ type: 'bearer', token }` or null for none, `project`, the project every
   // request is in (the user's own without one), and `headers`, a name to a value,
   // whatever else it asks of each request, with every request. `Authorization` is `auth`'s, and
-  // `virtx-project` names `project`, over one given as a header. Refused when a token would go
-  // in the clear: over `http` to any host but this machine.
+  // `virtx-project` names `project`, over one given as a header. Refused when a token, `auth`'s
+  // or an `Authorization` header, would go in the clear: over `http` to any host but this
+  // machine.
   static connect(url, auth = null, project = null, headers = {}) {
     const lib = library()
     const bytes = authBytes(auth)
@@ -546,8 +547,8 @@ class Client {
 
   // Send `headers`, a name to a value, with every request from now on, in place of those given
   // at `connect`. A forwarder already open sends them with its next connection. Over stdio,
-  // where none are sent, nothing changes. A header that cannot be sent throws, the headers
-  // unchanged.
+  // where none are sent, nothing changes. A header that cannot be sent, or a token refused as
+  // at `connect`, throws, the headers unchanged.
   setHeaders(headers) {
     const strings = Object.entries(headers).flat()
     const error = {}

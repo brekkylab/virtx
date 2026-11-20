@@ -148,9 +148,9 @@ mod tests {
             "alice"
         );
 
-        client.set_headers(bob);
+        client.set_headers(bob).unwrap();
         assert_eq!(http::get::<String>(&client, "/user").await.unwrap(), "bob");
-        client.set_headers(HeaderMap::new());
+        client.set_headers(HeaderMap::new()).unwrap();
         let error = http::get::<String>(&client, "/user").await.unwrap_err();
         assert!(matches!(error, Error::Status(401, _, _)), "{error:?}");
     }

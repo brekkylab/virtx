@@ -146,8 +146,9 @@ impl Client {
     /// credentials it wants, `project`, the project every request is in (the user's own without
     /// one), and `headers`, each a name and a value, whatever else it asks of each
     /// request, with every request. `Authorization` is `auth`'s, and `virtx-project` names
-    /// `project`, over one given as a header. Refused when a token would go in the clear: over
-    /// `http` to any host but this machine. Blocks until the client is made.
+    /// `project`, over one given as a header. Refused when a token, `auth`'s or an
+    /// `Authorization` header, would go in the clear: over `http` to any host but this machine.
+    /// Blocks until the client is made.
     pub fn connect(
         url: impl AsRef<str>,
         auth: Auth,
@@ -196,7 +197,7 @@ impl Client {
     /// Send `headers` with every request from now on, in place of those given at
     /// [`connect`](Self::connect). A forwarder already open sends them with its next
     /// connection. Over stdio, where none are sent, nothing changes. A header that cannot be
-    /// sent is refused, the headers unchanged.
+    /// sent, or a token as at `connect`, is refused, the headers unchanged.
     pub fn set_headers(
         &self,
         headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,

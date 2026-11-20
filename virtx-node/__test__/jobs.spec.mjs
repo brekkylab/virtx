@@ -159,8 +159,32 @@ describe('against virtx-stdio', () => {
     const end = (await Array.fromAsync(sleep.log())).at(-1)
     assert.deepEqual(end.end, { code: 128 + 15 })
     assert.equal(await sleep.complete(), 128 + 15)
-    assert.equal((await (await client.getSandbox(sandbox.id)).job(sleep.id)).running, false)
+    const ended = await (await client.getSandbox(sandbox.id)).job(sleep.id)
+    assert.deepEqual([ended.running, ended.reason], [false, undefined])
     await sandbox.remove()
+  })
+
+  test('a process past its timeout ends with the reason', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const sleep = await sandbox.exec(['sleep', '60'], { timeoutMs: 200 })
+    const end = (await Array.fromAsync(sleep.log())).at(-1)
+    assert.deepEqual(end.end, { code: 137, reason: 'timeout' })
+    const ended = await sleep.get()
+    assert.deepEqual([ended.code, ended.reason], [137, 'timeout'])
+    await sandbox.remove()
+  })
+
+  test('a process whose sandbox is removed ends with the reason', async () => {
+    await alpine(client)
+    const sandbox = await client.createSandbox(ALPINE)
+    const up = await sandbox.exec(['sh', '-c', 'echo up; sleep 60'])
+    const log = up.log()[Symbol.asyncIterator]()
+    assert.equal((await log.next()).value.stdout, 'up')
+    await sandbox.remove()
+    const rest = []
+    for (let next = await log.next(); !next.done; next = await log.next()) rest.push(next.value)
+    assert.deepEqual(rest.at(-1).end, { code: 137, reason: 'sandbox_deleted' })
   })
 
   test('an image build is a job whose log ends with its digest', async () => {

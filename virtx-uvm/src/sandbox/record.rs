@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use virtx_core::{SandboxCreateArgs, SandboxJob};
 
+use super::Error;
+
 /// A sandbox as it is kept on disk.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Record {
@@ -45,18 +47,26 @@ impl Record {
     }
 
     /// The image it boots, by the digest its making resolved.
-    pub(super) fn image(&self) -> Result<crate::Digest, String> {
+    pub(super) fn image(&self) -> Result<crate::Digest, Error> {
         let virtx_core::ImageName::Digest { digest } = &self.args.image else {
-            return Err("its record names its image by no digest".into());
+            return Err(Error::Invalid(
+                "its record names its image by no digest".into(),
+            ));
         };
-        digest.parse().map_err(|e| format!("{digest}: {e}"))
+        digest
+            .parse()
+            .map_err(|e| Error::Invalid(format!("{digest}: {e}")))
     }
 
     /// Sandbox `id`'s record under `dir`.
-    pub(super) fn read(dir: &Path, id: &str) -> Result<Record, String> {
+    pub(super) fn read(dir: &Path, id: &str) -> Result<Record, Error> {
         let path = Record::path(dir, id);
-        let json = fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-        serde_json::from_slice(&json).map_err(|e| format!("reading {}: {e}", path.display()))
+        let failed = |source| Error::Io {
+            context: format!("reading {}", path.display()),
+            source,
+        };
+        let json = fs::read(&path).map_err(failed)?;
+        serde_json::from_slice(&json).map_err(|e| failed(e.into()))
     }
 
     /// Write it as sandbox `id`'s record under `dir`, whole or not at all.

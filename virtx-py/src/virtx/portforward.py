@@ -35,10 +35,11 @@ class PortForwarder:
         answered for it, over ``client``'s session. Given the port, what a connection that
         fails says names its number. Returns as soon as its address on this machine's loopback
         is open, which takes no request of the server: each connection to it is carried as it
-        comes, so it holds up no event loop it is called on."""
+        comes, so it holds up no event loop it is called on. A port without its ``url``, as
+        ``get_sandbox`` answers one, is refused with a ``VirtxError`` naming it."""
         lib = client._lib
         if isinstance(port, SandboxPort):
-            args = json.dumps({"url": port.url or "", "port": port.port}).encode()
+            args = json.dumps({"url": port.url, "port": port.port}).encode()
         else:
             args = json.dumps({"url": port}).encode()
         raw = ctypes.c_void_p()

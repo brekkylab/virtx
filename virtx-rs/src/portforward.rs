@@ -30,8 +30,9 @@ unsafe impl Sync for PortForwarder {}
 /// What a forwarder is opened for: a port as a sandbox answered it, whose number then names it
 /// in what a connection that fails says, or the `url` answered for it alone.
 pub trait ForwardedPort {
-    /// Where the server reaches it, as [`SandboxPort::url`].
-    fn url(&self) -> &str;
+    /// Where the server reaches it, as [`SandboxPort::url`]: `None` for a port asked for again,
+    /// which a forwarder refuses.
+    fn url(&self) -> Option<&str>;
 
     /// Its number in the sandbox, where it is known.
     fn port(&self) -> Option<u16> {
@@ -40,22 +41,20 @@ pub trait ForwardedPort {
 }
 
 impl ForwardedPort for str {
-    fn url(&self) -> &str {
-        self
+    fn url(&self) -> Option<&str> {
+        Some(self)
     }
 }
 
 impl ForwardedPort for String {
-    fn url(&self) -> &str {
-        self
+    fn url(&self) -> Option<&str> {
+        Some(self)
     }
 }
 
 impl ForwardedPort for SandboxPort {
-    /// Empty for one asked for again, which a forwarder is refused for: only making its sandbox
-    /// answers its `url`.
-    fn url(&self) -> &str {
-        self.url.as_deref().unwrap_or_default()
+    fn url(&self) -> Option<&str> {
+        self.url.as_deref()
     }
 
     fn port(&self) -> Option<u16> {
@@ -64,7 +63,7 @@ impl ForwardedPort for SandboxPort {
 }
 
 impl<T: ForwardedPort + ?Sized> ForwardedPort for &T {
-    fn url(&self) -> &str {
+    fn url(&self) -> Option<&str> {
         (**self).url()
     }
 
@@ -75,7 +74,8 @@ impl<T: ForwardedPort + ?Sized> ForwardedPort for &T {
 
 #[derive(Serialize)]
 struct Args<'a> {
-    url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
 }
@@ -88,7 +88,8 @@ struct Output {
 impl PortForwarder {
     /// Forward `port`, as [`SandboxInfo::ports`](crate::SandboxInfo) answers one, or the
     /// [`url`](SandboxPort::url) answered for it, over `client`'s session. Blocks until it is
-    /// open, which takes no request of the server.
+    /// open, which takes no request of the server. A port without its `url`, as asking for a
+    /// sandbox again answers one, is refused: the port making it answered is the one to forward.
     pub fn open(client: &Client, port: impl ForwardedPort) -> Result<PortForwarder, Error> {
         let api = client.api;
         let args = serde_json::to_vec(&Args {

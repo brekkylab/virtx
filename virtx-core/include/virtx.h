@@ -858,7 +858,8 @@ void virtx_stream_free(struct VirtxStream *stream);
 // `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
 // forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
 // the error's message. Returns once its local address is open, which takes no request of
-// the server.
+// the server. A port without its `url`, as asking for a sandbox again answers one, is
+// refused.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with
 // `virtx_port_forwarder_free`.

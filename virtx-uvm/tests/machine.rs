@@ -334,7 +334,12 @@ async fn answered_beside_a_bomb(home: &Home, memory_mib: u32, bomb: &str) {
     // Answered while the bomb goes on: how soon is not what is tried, and the timeout only
     // keeps a sandbox that never answers from holding the suite. The processes are counted by a
     // pipeline, which forks: the bomb holds all but a share of them, which another command has.
-    let counted = ["sh", "-c", "echo alive; ls -d /proc/[0-9]* | wc -l"];
+    // A process gone between the glob and `ls` is no error of the count's.
+    let counted = [
+        "sh",
+        "-c",
+        "echo alive; ls -d /proc/[0-9]* 2>/dev/null | wc -l",
+    ];
     let answered = tokio::time::timeout(Duration::from_secs(120), run(&sandbox, &counted, None));
     let (lines, _) = answered
         .await

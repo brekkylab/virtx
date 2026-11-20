@@ -1,9 +1,6 @@
 //! A client of `virtx-stdio` closed takes its sandboxes' machines with it.
-//!
-//! A file of its own, so its binary runs alone: it looks for machines by the fixture's home, and
-//! another test's machines running beside it would be found too.
 
-use std::{env, process::Command, process::Stdio, thread, time::Duration};
+use std::{process::Command, process::Stdio, thread, time::Duration};
 
 use virtx::SandboxCreateArgs;
 
@@ -19,12 +16,12 @@ fn a_client_closed_takes_its_sandboxes_machines_with_it() {
         .create_sandbox(&SandboxCreateArgs::new(ALPINE))
         .wait()
         .unwrap();
-    // A machine's process names the home on its command line, in its rootfs's path.
-    let home = env::var("VIRTX_HOME").expect("the fixture names its home");
+    // A machine's process names its sandbox's upper disk, `<id>.ext4`, on its command line.
+    let upper = format!("{}.ext4", sandbox.id());
     let running = || {
         Command::new("pgrep")
             .arg("-f")
-            .arg(&home)
+            .arg(&upper)
             .stdout(Stdio::null())
             .status()
             .unwrap()

@@ -50,6 +50,7 @@ test('a port forwarder listens on the loopback until it is closed', async () => 
       const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
       assert.equal(typeof forwarder.port, 'number')
       assert.equal(forwarder.address, `${forwarder.host}:${forwarder.port}`)
+      assert.equal(forwarder.host, '127.0.0.1')
       // What connecting comes to: `connected`, or the error's code.
       const connect = () =>
         new Promise((resolve) => {

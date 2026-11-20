@@ -104,15 +104,20 @@ async fn run(
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let mut lines = Vec::new();
     while let Some(Ok(event)) = events.next().await {
-        let event = String::from_utf8(event.to_vec()).unwrap();
-        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
-        match serde_json::from_str(data.expect("an event carries its entry")).unwrap() {
+        match entry(&event) {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => lines.push(line),
             SandboxJobEntry::End(end) => return Ok((lines, end.code)),
             SandboxJobEntry::Truncated {} => {}
         }
     }
     panic!("a job's log ends with its end")
+}
+
+/// The entry an event of a job's log carries.
+fn entry(event: &[u8]) -> SandboxJobEntry {
+    let event = std::str::from_utf8(event).unwrap();
+    let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+    serde_json::from_str(data.expect("an event carries its entry")).unwrap()
 }
 
 /// Close `sandbox` as a server removes one: it blocks while the guest syncs.
@@ -162,10 +167,7 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     let job = sandbox.exec(cmd, None).await.unwrap();
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let first = events.next().await.unwrap().unwrap();
-    let first = String::from_utf8(first.to_vec()).unwrap();
-    let data = first.lines().find_map(|line| line.strip_prefix("data: "));
-    let first: SandboxJobEntry = serde_json::from_str(data.unwrap()).unwrap();
-    assert_eq!(first, SandboxJobEntry::Stdout("started".into()));
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
     assert!(job.get().running);
     sandbox.remove_job(&job.get().id).unwrap();
     assert!(sandbox.job(&job.get().id).is_err());
@@ -306,10 +308,11 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
         assert_eq!((lines.len(), code), (2, 0), "{lines:?}");
         assert_eq!(lines[0], vcpus.to_string());
         let kib: u64 = lines[1].parse().unwrap();
-        // Less what the kernel keeps for itself.
+        // Less what the kernel keeps for itself; on x86_64 a little more, as libkrun gives the
+        // machine the memory below where its kernel loads besides what is asked.
         let asked = u64::from(mib) << 10;
         assert!(
-            kib <= asked && kib > asked * 8 / 10,
+            kib > asked * 8 / 10 && kib < asked * 11 / 10,
             "{kib} KiB for {mib} MiB"
         );
         close(sandbox).await;
@@ -326,10 +329,7 @@ async fn a_signal_ends_a_job_with_every_process_it_started(home: Home) {
     // Once it has started its child.
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let first = events.next().await.unwrap().unwrap();
-    let first = String::from_utf8(first.to_vec()).unwrap();
-    let data = first.lines().find_map(|line| line.strip_prefix("data: "));
-    let first: SandboxJobEntry = serde_json::from_str(data.unwrap()).unwrap();
-    assert_eq!(first, SandboxJobEntry::Stdout("started".into()));
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("started".into()));
     let term = virtx_uvm::signal_number("SIGTERM").unwrap();
     sandbox.signal(&job.get().id, term).unwrap();
     let read = tokio::time::timeout(Duration::from_secs(10), async {
@@ -355,11 +355,6 @@ async fn a_job_s_log_ends_when_its_sandbox_is_closed(home: Home) {
         .map(String::from)
         .to_vec();
     let job = sandbox.exec(cmd, None).await.unwrap();
-    let entry = |event: &[u8]| {
-        let event = std::str::from_utf8(event).unwrap();
-        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
-        serde_json::from_str::<SandboxJobEntry>(data.unwrap()).unwrap()
-    };
     // Read while it runs.
     let mut events = Box::pin(Arc::clone(job.log()).events(&HeaderMap::new()));
     let first = events.next().await.unwrap().unwrap();

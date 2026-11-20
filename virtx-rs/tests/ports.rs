@@ -14,8 +14,7 @@ mod common;
 
 use common::ALPINE;
 
-/// What the sandbox's server on 8000 answers `ping` sent to `at`, once it listens, for 30
-/// seconds.
+/// What the sandbox's server on 8000 answers `ping` sent to `at`, once it listens, for 30 seconds.
 fn answer(at: impl std::net::ToSocketAddrs + Copy) -> String {
     let until = Instant::now() + Duration::from_secs(30);
     let mut line = String::new();
@@ -37,8 +36,8 @@ fn answer(at: impl std::net::ToSocketAddrs + Copy) -> String {
     panic!("nothing answered on the port in 30 seconds");
 }
 
-/// Serve on 8000 in a sandbox of `client`'s that opens it, answering a line with `hello` and
-/// the line, and answer the sandbox.
+/// Serve on 8000 in a sandbox of `client`'s that opens it, answering a line with `hello` and the
+/// line, and answer the sandbox.
 fn serving(client: &virtx::Client) -> virtx::Sandbox {
     common::alpine(client);
     let args = SandboxCreateArgs {

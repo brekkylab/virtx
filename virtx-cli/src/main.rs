@@ -389,8 +389,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         login(&dir, &sign_in, "openid", false, |_| {}).unwrap();
 
-        // The one signing in issued has a minute left, so each would refresh it; the provider
-        // takes a refresh token once.
+        // The one signing in issued has a minute left, so each would refresh it; the provider takes
+        // a refresh token once.
         let tokens: Vec<_> = std::thread::scope(|scope| {
             let runs: Vec<_> = (0..4)
                 .map(|_| scope.spawn(|| token(&dir, &sign_in, false, false)))

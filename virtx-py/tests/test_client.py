@@ -68,6 +68,7 @@ async def test_a_port_forwarder_listens_on_the_loopback_until_closed(tcp_client:
         forwarder = PortForwarder.open(tcp_client, sandbox.ports[0].url)
         assert isinstance(forwarder.port, int)
         assert forwarder.address == f"{forwarder.host}:{forwarder.port}"
+        assert forwarder.host == "127.0.0.1"
         # A connection is taken, whatever the sandbox does with it.
         socket.create_connection((forwarder.host, forwarder.port), timeout=5).close()
 

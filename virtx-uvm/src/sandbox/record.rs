@@ -45,6 +45,18 @@ impl Record {
         dir.join(format!("{id}.json.part"))
     }
 
+    /// The image it boots, by the digest its making resolved.
+    pub(super) fn image(&self) -> Result<crate::Digest, Error> {
+        let virtx_core::ImageName::Digest { digest } = &self.args.image else {
+            return Err(Error::Invalid(
+                "its record names its image by no digest".into(),
+            ));
+        };
+        digest
+            .parse()
+            .map_err(|e| Error::Invalid(format!("{digest}: {e}")))
+    }
+
     /// Sandbox `id`'s record under `dir`.
     pub(super) fn read(dir: &Path, id: &str) -> Result<Record, Error> {
         let path = Record::path(dir, id);

@@ -32,6 +32,7 @@ use virtx_core::{
     VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem, described_type,
     from_body,
 };
+use virtx_uvm::backend::Backing;
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
     ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project,
@@ -715,6 +716,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         home.vm.clone(),
         park_after(),
         None,
+        &Backing::default(),
     )
     .await?;
     let mut listening = JoinSet::new();
@@ -1099,8 +1101,12 @@ impl From<SandboxError> for Refused {
             SandboxError::Image(e) => e.into(),
             SandboxError::Io { .. } => internal(e),
             SandboxError::Volume(e) => e.into(),
+            SandboxError::Backend(e) => internal(e),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
+            // Where whatever embeds this sets an admission: the protocol's refusal.
+            SandboxError::NoRoom(_) => refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e),
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
         }
     }
 }

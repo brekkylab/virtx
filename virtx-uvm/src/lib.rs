@@ -1,8 +1,12 @@
 //! Images, the machines provisioned from them, and the registries around them, and the
 //! volumes mounted into them; the sandboxes a server makes of those, and the jobs run in each
 //! -- and the files of a volume or a sandbox, served to a client; and the projects all of it
-//! belongs to.
+//! belongs to; and where a project's data is kept beyond this machine, if anywhere
+//! ([`StorageBackend`]). How many machines may run at once is the embedder's to say
+//! ([`Admission`]).
 
+mod admission;
+pub mod backend;
 mod files;
 mod fstree;
 mod image;
@@ -11,12 +15,15 @@ mod project;
 mod sandbox;
 mod volume;
 
+pub use admission::{Admission, NoRoom, Room, admit, set_admission};
+pub use backend::StorageBackend;
 pub use files::Files;
 pub use fstree::*;
 pub use image::{
     image_build::{Error as BuildError, build_step},
     registry_client::{
-        Error as RegistryError, ProxyPass, ProxyRefusal, Reference, RegistryClient, RegistryProxy,
+        Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
+        RegistryProxy,
     },
     registry_proxy::PublicRegistries,
     registry_server::{Body as RegistryBody, RegistryServer},
@@ -34,6 +41,7 @@ pub use project::{
     Error as ProjectError, Owner as ProjectOwner, Project, ProjectId, Store as ProjectStore,
     is_name as is_project_name,
 };
+pub use sandbox::runs;
 pub use sandbox::{
     Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
     Job as SandboxJob, KEEP_ENDED, Kept as KeptSandboxes, LOG_LIMIT, Sandbox,

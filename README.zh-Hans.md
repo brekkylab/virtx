@@ -149,12 +149,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 按照[自行运行服务器](https://virtx.sh/docs/guides/self-hosting/)，在你自己的机器上部署 `virtx-server-tcp`。
 
-用从 `virtx-cli/` 构建的 `virtx` 登录一次，然后不再调用 `Client.spawn()`，而是带上它打印的令牌去连接。
+用 `virtx` 命令登录一次（可通过 `uvx` 或 `npx` 免安装运行），然后不再调用 `Client.spawn()`，而是带上它打印的令牌去连接。
 其余部分和本地示例完全一样。
 
 ```sh
-virtx login https://virtx.example
+uvx virtx login https://virtx.example                 # 没有 uv 时用 pipx run virtx
+
+# 或者
+
+npx -y @brekkylab/virtx login https://virtx.example
 ```
+
+如需安装 `virtx`，请参阅 [CLI](https://virtx.sh/docs/reference/cli/#installing)。
 
 <details open>
 <summary><b>Python</b></summary>
@@ -164,7 +170,7 @@ from virtx import Client, CommandAuth
 
 client = Client.connect(
     "https://virtx.example",
-    CommandAuth("virtx", ("token", "--json")),
+    CommandAuth("uvx", ("virtx", "token", "--json")),
 )
 ```
 
@@ -176,7 +182,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] }
+  { type: 'command', program: 'npx', args: ['-y', '@brekkylab/virtx', 'token', '--json'] }
 )
 ```
 
@@ -186,9 +192,11 @@ const client = Client.connect(
 <summary><b>Rust</b></summary>
 
 ```rust
+use virtx::Auth;
+
 let client = Client::connect(
     "https://virtx.example",
-    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;

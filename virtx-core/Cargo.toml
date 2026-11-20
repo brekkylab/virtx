@@ -56,6 +56,8 @@ sha2 = { version = "0.10", optional = true }
 flate2 = { version = "1", optional = true }
 # The `virtx` command's arguments.
 clap = { version = "4", features = ["derive", "env"], optional = true }
+# Signing in from the `virtx` command: an ID token's claims, read for when it runs out.
+base64 = { version = "0.22", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # `signal(SIGPIPE, SIG_DFL)`, so `virtx images | head` ends quietly.
@@ -125,4 +127,15 @@ ffi = ["client"]
 # served in the test's own process. Taken only as a dev-dependency's feature, it is in no build
 # but a test's.
 test-util = ["client"]
-cli = ["client", "dep:clap", "dep:libc", "tokio/signal"]
+cli = [
+    "client",
+    "dep:clap",
+    "dep:libc",
+    "tokio/signal",
+    # Signing in: the provider's discovery document, device flow and tokens, asked before the
+    # command's runtime starts.
+    "reqwest/json",
+    "reqwest/form",
+    "reqwest/blocking",
+    "dep:base64",
+]

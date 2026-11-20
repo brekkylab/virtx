@@ -99,6 +99,7 @@ The client's `role` in each is `owner`, and the server serves no `/projects/{pro
 
 Projects and their members are made, read and removed with the requests below, as [Resources](#resources) says.
 They name the project in their path, and take no `virtx-project`.
+A server whose projects are kept and managed elsewhere, as one built for a service that has its own, may serve none of them: each is then answered `404`, `not_found`, and a request that names a project in `virtx-project` reaches it as above.
 
 | Request | Body | Answer |
 | --- | --- | --- |
@@ -193,7 +194,7 @@ virtx's client does so by itself over TCP: a stream that breaks, or a `502` to `
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.
 A job that has ended answers its whole log at once, and ends there.
-A job removed while a client reads its log ends that stream where it is.
+A job removed while a client reads its log ends that stream at its `end`, or where it is if it has none.
 
 A log is kept whole up to the server's limit, and no further: an entry past it is neither kept nor sent, and the first one past it is replaced by `{"truncated": {}}`, once.
 The `end` entry is kept and sent anyway.
@@ -294,12 +295,14 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of `{id, image, running, abins?, error?}` |
-| `POST /sandboxes/` | `{image, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, image, running, ports?, abins?}` |
-| `GET /sandboxes/{id}` | | `200`, `{id, image, running, abins?, error?}` |
+| `GET /sandboxes/` | | `200`, array of `{id, name?, image, running, ports?, abins?, error?}` |
+| `GET /sandboxes/?name={name}` | | `200`, array of the one named so, or of none |
+| `POST /sandboxes/` | `{image, name?, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, name?, image, running, ports?, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, name?, image, running, ports?, abins?, error?}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
+- `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. It is letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 characters, as a volume's, compared as written, so case counts; any other is refused with `400`, `invalid`. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
@@ -309,7 +312,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
-Either stops its VM, ends every job in it as a cancellation does, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
+Either stops its VM, kills every job in it that runs, as its [reason](#sandbox-jobs) `sandbox_deleted` says, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
 
 A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
@@ -322,16 +325,24 @@ One it kept and cannot know again, such as one whose image is gone, it MAY still
 
 #### Ports
 
-`ports` in the body are TCP ports in the sandbox to open, as numbers: `[3000, 5900]`.
+`ports` in the body are ports in the sandbox to open, each a number, or `{port, label?, protocol?, inbound?}` to say what it is for, how it is reached and whom it lets in: `[5900, {"port": 5173, "label": "dev server", "protocol": "http"}]`.
+
+- `label` is what it is for, free text of up to 128 characters, answered with it.
+- `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP MUST refuse `http` with `400`, `invalid`.
+- `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: whom it lets in. A server MAY keep them; one that keeps none MUST refuse `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out. Whom a port given none lets in is the server's to say; `[]` lets in no one.
+
 They are reserved when the sandbox is made, and kept until its `DELETE`. `0` and a port given twice are refused.
 
-The `POST` answers each with where it is reached from, as `{port, url}`, in the order given, and only there: a `GET` does not, since the URLs carry credentials.
+The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given.
+A `GET` of the sandbox, and of them all, answers each as `{port, label?, protocol?, address?}`, in the same order, until the sandbox's `DELETE`, across a restart of the server that keeps it too: with no `url`, which the `POST` alone answers, since the URLs carry credentials. One with an `error` answers none, since none of its ports is open.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
-- A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.
+- A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.
+- A server reachable from other machines MAY answer a `tcp` port with an `address` too, `host:port`, such as `tcp.example.com:20001`, where any TCP client reaches it directly, with no WebSocket and no credentials. It is not secret, as the URL is: what listens on the port answers whoever connects there, and authenticates them itself. An `http` port has none, and nor does any on a server on the client's machine. A server that keeps no inbound rules MUST NOT answer one, since the client could not narrow whom it lets in.
 - The URL is the server's to form: a client MUST NOT build one or take it apart.
-- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`.
+- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; a server that could not reach the port at all, such as while no VM runs, SHOULD close it with a reason saying why, for a person. An `http` port's URL is an `https` one that a browser opens.
 - Ports are the way in, and do not need `network`, which is the way out.
+- A server that keeps inbound rules MAY open a port whose rules it could not set, such as past a quota, with `inbound_error`, `{code, message, reason?}` in a refusal's shape, beside its `url`: it lets no one in, and is reached at no `address`, until they are. The sandbox is answered `201` as any is, since a refusal would read as nothing made.
 
 ### Sandbox jobs
 
@@ -340,7 +351,7 @@ A sandbox job is a process in a [sandbox](#sandboxes), run beside whatever else 
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /sandboxes/{id}/jobs/` | | `200`, array of sandbox jobs |
-| `POST /sandboxes/{id}/jobs/exec/` | `{cmd, stdin?, timeout_ms?}` | `201`, the job |
+| `POST /sandboxes/{id}/jobs/exec/` | `{cmd, stdin?, timeout_ms?}` | `201`, the job, or [with its log](#an-exec-answered-with-its-log) |
 | `GET /sandboxes/{id}/jobs/{job}` | | `200`, the job |
 | `DELETE /sandboxes/{id}/jobs/{job}` | | `204` |
 | `POST /sandboxes/{id}/jobs/{job}/signal` | `{signal}` | `204` |
@@ -357,6 +368,29 @@ A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
 
+#### An exec answered with its log
+
+An exec whose request's `Accept` names `text/event-stream`, with a `q` above `0`, MAY be answered with the job's log as well, saving the client a second request. A range such as `*/*` does not ask for it.
+
+- `201`, with `Content-Type: text/event-stream`, and the job's path in `Location`, as any `201` has.
+- As the body, first the job itself, as an event whose `data` is `{"job": {...}}` and which has no `id`; then the job's log, from its first entry: the same events that `GET {job}/events` answers with its `200`, numbered as there, under the exec's own status.
+
+```text
+data: {"job": {"id": "...", "kind": "exec", "pid": 7, "cmd": ["echo", "hi"], "running": true}}
+
+id: 1
+data: {"stdout": "hi"}
+
+id: 2
+data: {"end": {"code": 0}}
+```
+
+The job's event is this answer's alone: it is no entry of the job's log, `GET {job}/events` never sends it, and it moves no entry's number, so an entry's `id` here is its number in the log as [Events](#events) has it.
+A client reads the job from that first event; where the answer breaks off or ends before it, the client reads the job with `GET` at the path in `Location`, and its log from the first entry.
+A client whose answer breaks off after the job, before the log's end, reads the rest with `GET {job}/events`, sending `Last-Event-ID` with the `id` of the last entry it read, or none where it read none, as [Events](#events) says.
+
+A server MAY answer such a request with the job alone, as JSON, as it answers any other: so a client that asks for the log this way MUST accept `application/json` too, and read the job's log with its `GET {job}/events` where the answer is the job alone.
+
 Its log's entries are each an object with one member:
 
 - `{"stdout": "..."}` or `{"stderr": "..."}`: a line the process wrote there, without its line ending, decoded as UTF-8 with each invalid sequence replaced by U+FFFD. A line longer than the server's limit is sent in parts, an entry each.
@@ -365,13 +399,20 @@ Its log's entries are each an object with one member:
 
 Lines of one stream are in the order the process wrote them; lines of the two, in the order the server read them.
 
-The process ends when it exits, when its `timeout_ms` runs out, or when its job is cancelled: each of the last two kills it and every process it started, as `SIGKILL` does.
+The process ends when it exits, when its `timeout_ms` runs out, when its job is cancelled, when its sandbox is deleted, with its sandbox's VM, or with its server, which keeps its sandbox.
+In each of the last five, it and every process it started are killed, as `SIGKILL` does, and its `code` is `137`.
+A server MAY say which, in its end and in its job, with `reason`:
+
+- `"timeout"`: its `timeout_ms` ran out.
+- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed. Its sandbox is still there.
+- `"sandbox_deleted"`: its sandbox was deleted while it ran, by the sandbox's `DELETE` or by the server, which then ends its log with this end before the job goes with the sandbox.
+- `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
+- `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
+
+A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
 The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
 A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
 A sandbox [kept](#sandboxes) across its server's end keeps its jobs, as many as the server keeps: started again, the server knows each that had ended as it ended, and each that ran as killed then, its `code` `137` and its `reason` `"restarted"`. A job so kept has its `end` alone for its log.
-A server MAY say why it killed a process with `reason`, in its end and in its job:
-
-- `"restarted"`: its server ended, keeping its sandbox, while it ran.
 
 `signal` sends `signal` to the process and every process it started, and answers once it is sent: what the process does with it, its log says.
 `signal` is a name as Linux gives it, such as `"SIGTERM"` or `"SIGKILL"`, and a name the server does not know is refused.

@@ -1,4 +1,4 @@
-use crate::{ImageStoreError, MachineError, VolumeError};
+use crate::{ImageStoreError, MachineError, NoRoom, VolumeError};
 
 /// What making a sandbox, or asking something of one, fails with.
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +19,10 @@ pub enum Error {
     #[error("{0}")]
     NotStarted(String),
 
+    /// No room for its machine now, as the embedder's [`Admission`](crate::Admission) says:
+    /// nothing was booted.
+    #[error(transparent)]
+    NoRoom(#[from] NoRoom),
     /// What was asked cannot be done while the sandbox is in use: a job runs in it, or
     /// something reaches it.
     #[error("{0}")]
@@ -46,6 +50,10 @@ pub enum Error {
 
     #[error(transparent)]
     Volume(#[from] VolumeError),
+
+    /// What the storage backend refused, or failed with.
+    #[error(transparent)]
+    Backend(#[from] crate::backend::Refusal),
 
     #[error(transparent)]
     Machine(#[from] MachineError),

@@ -71,12 +71,13 @@ pub enum CtrlResp {
     Exited { id: u32, code: i32 },
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
     /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`, under the
-    /// `target` it was logged under. Among it are the guest's console, which libkrun logs under
-    /// `init_or_kernel`, and why the machine could not be built or broke, logged as an error as
-    /// the process's last words -- so a process that ends before [`Ready`](CtrlResp::Ready) has
-    /// said why here.
+    /// `target` it was logged under, empty in a record that carries none. Among it are the
+    /// guest's console, which libkrun logs under `init_or_kernel`, and why the machine could not
+    /// be built or broke, logged as an error as the process's last words -- so a process that
+    /// ends before [`Ready`](CtrlResp::Ready) has said why here.
     Log {
         level: String,
+        #[serde(default)]
         target: String,
         message: String,
     },
@@ -237,6 +238,17 @@ mod tests {
             );
         }
         assert_eq!(recv::<CtrlResp>(&mut input).unwrap(), None);
+    }
+
+    #[test]
+    fn a_log_record_without_a_target_is_read_under_none() {
+        let record = br#"{"Log":{"level":"ERROR","message":"no"}}"#;
+        let expected = CtrlResp::Log {
+            level: "ERROR".into(),
+            target: String::new(),
+            message: "no".into(),
+        };
+        assert_eq!(decode::<CtrlResp>(record).unwrap(), expected);
     }
 
     #[test]

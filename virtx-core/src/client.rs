@@ -431,13 +431,13 @@ impl Client {
         webdav::client::copy(&self.inner, root, from, to, overwrite).await
     }
 
-    /// Every sandbox the server holds.
+    /// Every sandbox the server holds, each port without its `url`.
     pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
         sandbox::client::list(&self.inner).await
     }
 
-    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
-    /// here only.
+    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports' `url`s are
+    /// answered here only.
     ///
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
     /// tag the server has no image by is refused with `404`.
@@ -445,12 +445,12 @@ impl Client {
         sandbox::client::create(&self.inner, args).await
     }
 
-    /// The sandbox `id`, without its ports.
+    /// The sandbox `id`, each port without its `url`.
     pub async fn get_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
-    /// The sandbox named `name`, without its ports, if one is.
+    /// The sandbox named `name`, each port without its `url`, if one is.
     pub async fn find_sandbox(&self, name: impl AsRef<str>) -> Result<Option<Sandbox>, Error> {
         sandbox::client::find(&self.inner, name.as_ref()).await
     }
@@ -1779,8 +1779,9 @@ pub(crate) mod ffi {
     }
 
     /// Answers with the sandboxes, as
-    /// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool}, ...]`, `name`
-    /// only for one that has one, and `running` `false` once its VM has exited on its own.
+    /// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool,
+    /// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`, `name` only for one that
+    /// has one, and `running` `false` once its VM has exited on its own.
     ///
     /// # Safety
     ///
@@ -1800,9 +1801,9 @@ pub(crate) mod ffi {
     /// the image as
     /// `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
-    /// sandbox as `virtx_client_list_sandbox` answers each, and
+    /// sandbox as `virtx_client_list_sandbox` answers each, its
     /// `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
-    /// if it was given some: here only.
+    /// with their `url`s here only.
     ///
     /// # Safety
     ///

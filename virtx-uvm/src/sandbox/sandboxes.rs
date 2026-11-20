@@ -267,7 +267,7 @@ impl Sandboxes {
             let (key, url) = shared.hooks.port(spec, had);
             opened.push(SandboxPort {
                 port: spec.port,
-                url,
+                url: Some(url),
                 label: spec.label.clone(),
                 protocol: spec.protocol,
                 // A public address is the cloud's to give (its gateway), not a server's, and
@@ -954,6 +954,13 @@ mod tests {
         };
         assert_eq!(at(kept.last_used()), at(used));
         assert_eq!(kept.answer(true).ports, made.ports);
+        // Asked for again, its ports say what they are, without the url its making answered.
+        let asked = SandboxPort {
+            url: None,
+            ..made.ports[0].clone()
+        };
+        assert_eq!(next.answer(&made.id).unwrap().ports, [asked.clone()]);
+        assert_eq!(listed[0].ports, [asked]);
 
         next.delete(&made.id).await.unwrap();
         assert!(matches!(next.get(&made.id), Err(Error::NotFound(_))));

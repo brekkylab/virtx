@@ -303,7 +303,7 @@ Its disk lasts until the sandbox is deleted: the server MAY [park](#parking) its
 | `PATCH /sandboxes/{id}` | `{vcpus?, memory_mib?, disk_gib?}` | `200`, `{vcpus, memory_mib, disk_gib, up}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
-A sandbox is `{id, name?, image, running, abins?, error?}`, and in the answer to its `POST`, `ports` too:
+A sandbox is `{id, name?, image, running, ports?, abins?, error?}`, its `ports` with their `url`s in the answer to its `POST` alone:
 
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. It is letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 characters, as a volume's, compared as written, so case counts; any other is refused with `400`, `invalid`. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
@@ -367,7 +367,8 @@ One it kept and cannot know again, such as one whose image is gone, it MAY still
 
 They are reserved when the sandbox is made, and kept through every park until it is deleted. `0` and a port given twice are refused.
 
-The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given, and only there: a `GET` does not, since the URLs carry credentials.
+The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given.
+A `GET` of the sandbox, and of them all, answers each as `{port, label?, protocol?, address?}`, in the same order, until the sandbox's `DELETE`, across a restart of the server that keeps it too: with no `url`, which the `POST` alone answers, since the URLs carry credentials. One with an `error` answers none, since none of its ports is open.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.

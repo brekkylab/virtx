@@ -633,8 +633,9 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            size_t args_len);
 
 // Answers with the sandboxes, as
-// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool}, ...]`, `name`
-// only for one that has one, and `running` `false` once its VM has exited on its own.
+// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool,
+// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`, `name` only for one that
+// has one, and `running` `false` once its VM has exited on its own.
 //
 // # Safety
 //
@@ -649,9 +650,9 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 // the image as
 // `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
-// sandbox as `virtx_client_list_sandbox` answers each, and
+// sandbox as `virtx_client_list_sandbox` answers each, its
 // `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
-// if it was given some: here only.
+// with their `url`s here only.
 //
 // # Safety
 //

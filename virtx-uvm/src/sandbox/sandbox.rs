@@ -320,9 +320,10 @@ impl Sandbox {
         self.run().map(|run| run.started)
     }
 
-    /// It, as the protocol answers a sandbox, with its ports or not.
-    pub fn answer(&self, ports: bool) -> virtx_core::Sandbox {
-        self.record.answer(ports)
+    /// It, as the protocol answers a sandbox: its ports' `url`s only given `urls`, as its
+    /// making answers them.
+    pub fn answer(&self, urls: bool) -> virtx_core::Sandbox {
+        self.record.answer(urls)
     }
 
     /// Its run, while its machine runs.
@@ -572,7 +573,7 @@ impl Sandbox {
                     self.listening.lock().unwrap().insert(port.port, held);
                     let mut opened = self.record.opened.lock().unwrap();
                     if let Some(open) = opened.iter_mut().find(|open| open.port == port.port) {
-                        open.url = url;
+                        open.url = Some(url);
                         changed = true;
                     }
                 }

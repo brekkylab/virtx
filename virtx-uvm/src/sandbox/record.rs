@@ -188,18 +188,23 @@ impl Record {
         }
     }
 
-    /// It, as the protocol answers a sandbox, with its ports or not: running unless its
-    /// machine ended on its own.
-    pub(super) fn answer(&self, ports: bool) -> virtx_core::Sandbox {
+    /// It, as the protocol answers a sandbox, running unless its machine ended on its own: its
+    /// ports with their `url`s and any `inbound_error` as its making answers them, given
+    /// `urls`, and otherwise as asking for it again answers them, without either.
+    pub(super) fn answer(&self, urls: bool) -> virtx_core::Sandbox {
+        let mut ports = self.opened.lock().unwrap().clone();
+        if !urls {
+            for port in &mut ports {
+                port.url = None;
+                port.inbound_error = None;
+            }
+        }
         virtx_core::Sandbox {
             id: self.id.clone(),
             name: self.name.clone(),
             image: self.image.to_string(),
             running: !*self.exited.lock().unwrap(),
-            ports: match ports {
-                true => self.opened.lock().unwrap().clone(),
-                false => Vec::new(),
-            },
+            ports,
             abins: self.args.abins.clone(),
             error: None,
         }

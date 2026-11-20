@@ -799,7 +799,7 @@ class PortForwarder {
   static open(client, port) {
     const lib = client._lib
     const bytes = encode(
-      typeof port === 'string' ? { url: port } : { url: port.url, port: port.port },
+      typeof port === 'string' ? { url: port } : { url: port.url ?? '', port: port.port },
     )
     const raw = [0]
     const out = {}

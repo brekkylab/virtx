@@ -38,7 +38,7 @@ class PortForwarder:
         comes, so it holds up no event loop it is called on."""
         lib = client._lib
         if isinstance(port, SandboxPort):
-            args = json.dumps({"url": port.url, "port": port.port}).encode()
+            args = json.dumps({"url": port.url or "", "port": port.port}).encode()
         else:
             args = json.dumps({"url": port}).encode()
         raw = ctypes.c_void_p()

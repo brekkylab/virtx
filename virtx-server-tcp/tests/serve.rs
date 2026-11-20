@@ -343,10 +343,21 @@ async fn a_port_s_websocket_reaches_what_listens_on_it_until_the_sandbox_goes() 
     args.ports = vec![8000.into()];
     let created = client.create_sandbox(&args).await.unwrap();
     assert_eq!(created.ports[0].port, 8000);
-    let url = served.port_url(&created.ports[0].url);
+    let url = served.port_url(created.ports[0].url.as_deref().unwrap());
     assert_eq!(url.path().strip_prefix("/ports/").unwrap().len(), 64);
-    // Answered only on its making: the URLs carry the capability.
-    assert_eq!(client.list_sandbox().await.unwrap()[0].ports, []);
+    // Its URL answered only on its making: the URLs carry the capability.
+    let asked = virtx_core::SandboxPort {
+        url: None,
+        ..created.ports[0].clone()
+    };
+    assert_eq!(
+        client.list_sandbox().await.unwrap()[0].ports,
+        [asked.clone()]
+    );
+    assert_eq!(
+        client.get_sandbox(&created.id).await.unwrap().ports,
+        [asked]
+    );
 
     let mut serve = SandboxExecArgs::new([
         "sh",
@@ -390,7 +401,7 @@ async fn a_port_s_websocket_reaches_a_program_that_listens_twice() {
     let mut args = small("nginx:1.27-alpine");
     args.ports = vec![80.into()];
     let created = client.create_sandbox(&args).await.unwrap();
-    let url = served.port_url(&created.ports[0].url);
+    let url = served.port_url(created.ports[0].url.as_deref().unwrap());
 
     let mut serve = SandboxExecArgs::new(["nginx", "-g", "daemon off;"]);
     serve.timeout_ms = Some(30_000);
@@ -933,7 +944,7 @@ async fn an_unused_sandbox_is_parked_and_booted_again_as_it_was_left() {
     // Unused: parked, running still; a connection to its port refused, and booting nothing.
     served.parked(&id).await;
     assert!(client.get_sandbox(&id).await.unwrap().running);
-    let url = served.port_url(&made.ports[0].url);
+    let url = served.port_url(made.ports[0].url.as_deref().unwrap());
     let mut socket = Served::open(&url, Some("virtx.tcp")).await.unwrap();
     assert!(
         !matches!(socket.next().await, Some(Ok(Message::Binary(_)))),
@@ -996,7 +1007,7 @@ async fn a_sandbox_is_kept_across_a_server_started_again() {
         .await
         .unwrap();
     assert_eq!(log[0].entry, SandboxJobEntry::Stdout("kept".into()));
-    let url = served.port_url(&made.ports[0].url);
+    let url = served.port_url(made.ports[0].url.as_deref().unwrap());
     assert!(Served::open(&url, Some("virtx.tcp")).await.is_ok());
     client.remove_sandbox(&made.id).await.unwrap();
     assert_eq!(Served::open(&url, Some("virtx.tcp")).await.err(), Some(404));

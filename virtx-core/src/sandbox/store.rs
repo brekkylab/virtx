@@ -28,8 +28,8 @@ pub struct Sandbox {
     /// is `false` is still held until it is deleted.
     pub running: bool,
 
-    /// Where each port it opened is reached from, in the order asked for: in what making it
-    /// answers only, since the URLs carry credentials.
+    /// Each port it opened, in the order asked for: with its `url` in what making it answers
+    /// only, since the URLs carry credentials, and without it in what asking for it answers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,
 
@@ -280,8 +280,9 @@ pub struct SandboxPort {
     /// Where it is reached from: a loopback address from a server on the client's machine, or
     /// a URL carrying the credentials it needs from one reachable from other machines. As secret
     /// as those credentials, and the server's to form: a client does not build one or take it
-    /// apart.
-    pub url: String,
+    /// apart. Answered by the sandbox's making alone, and `None` in what asking for it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 
     /// What it is for, as it was opened with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -516,7 +517,7 @@ mod tests {
             sandbox.ports,
             [SandboxPort {
                 port: 80,
-                url: "http://127.0.0.1:1/".into(),
+                url: Some("http://127.0.0.1:1/".into()),
                 label: None,
                 protocol: PortProtocol::Tcp,
                 address: None,
@@ -667,6 +668,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(web.protocol, PortProtocol::Http);
+    }
+
+    #[test]
+    fn a_port_asked_for_again_is_read_without_its_url() {
+        let asked = json!({"port": 5173, "label": "dev server", "protocol": "http"});
+        let port: SandboxPort = serde_json::from_value(asked.clone()).unwrap();
+        assert_eq!(port.url, None);
+        assert_eq!(port.label.as_deref(), Some("dev server"));
+        assert_eq!(serde_json::to_value(&port).unwrap(), asked);
     }
 
     #[test]

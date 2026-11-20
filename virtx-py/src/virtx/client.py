@@ -473,7 +473,7 @@ class Client:
         return Volume.from_dict(self, output)
 
     async def list_sandbox(self) -> list[Sandbox]:
-        """Every sandbox the server holds, without its ports."""
+        """Every sandbox the server holds, each port without its ``url``."""
         items = await self._call("virtx_client_list_sandbox")
         return [Sandbox.from_dict(self, item) for item in items]
 
@@ -521,11 +521,11 @@ class Client:
         return Sandbox.from_dict(self, await self._call("virtx_client_create_sandbox", args))
 
     async def get_sandbox(self, id: str) -> Sandbox:
-        """The sandbox ``id``, without its ports."""
+        """The sandbox ``id``, each port without its ``url``."""
         return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))
 
     async def find_sandbox(self, name: str) -> Sandbox | None:
-        """The sandbox named ``name``, without its ports, if one is."""
+        """The sandbox named ``name``, each port without its ``url``, if one is."""
         found = await self._call("virtx_client_find_sandbox", _args(name=name))
         return None if found is None else Sandbox.from_dict(self, found)
 

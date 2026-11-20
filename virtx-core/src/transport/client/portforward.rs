@@ -140,6 +140,14 @@ impl PortForwarder {
         url: &str,
         port: Option<u16>,
     ) -> Result<PortForwarder, Error> {
+        // A port asked for again is answered without its URL, which only its sandbox's making
+        // answers.
+        if url.is_empty() {
+            return Err(Error::Client(match port {
+                Some(port) => format!("port {port} has no URL: only making its sandbox answers it"),
+                None => "a port's URL that is empty".into(),
+            }));
+        }
         match &client.connection {
             Connection::Stdio(_) => PortForwarder::direct(url),
             Connection::Tcp(tcp) => match tcp.base.join(url) {
@@ -524,6 +532,20 @@ mod tests {
         let base = format!("http://{}/virtx/", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
         base
+    }
+
+    /// A port asked for again comes without its URL, which only its sandbox's making answers.
+    #[tokio::test]
+    async fn a_port_without_its_url_is_refused_naming_it() {
+        let client =
+            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let Err(Error::Client(why)) = PortForwarder::open(&client, "", Some(7000)) else {
+            panic!("a forwarder was opened for no URL");
+        };
+        assert_eq!(
+            why,
+            "port 7000 has no URL: only making its sandbox answers it"
+        );
     }
 
     #[tokio::test]

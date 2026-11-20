@@ -39,7 +39,8 @@ impl Sandbox {
     }
 
     /// What the server answered about it, as it was then: its image, whether it takes
-    /// processes, and its ports, which only making it answers.
+    /// processes, and its ports, each with the `url` it is reached at only where making it
+    /// answered.
     pub fn info(&self) -> &SandboxInfo {
         &self.info
     }

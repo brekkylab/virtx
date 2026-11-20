@@ -52,8 +52,10 @@ impl ForwardedPort for String {
 }
 
 impl ForwardedPort for SandboxPort {
+    /// Empty for one asked for again, which a forwarder is refused for: only making its sandbox
+    /// answers its `url`.
     fn url(&self) -> &str {
-        &self.url
+        self.url.as_deref().unwrap_or_default()
     }
 
     fn port(&self) -> Option<u16> {

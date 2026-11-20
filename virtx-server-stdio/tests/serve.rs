@@ -713,12 +713,16 @@ async fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let mut args = small("alpine:3.20");
     args.ports = vec![8000.into()];
     let created = server.client.create_sandbox(&args).await.unwrap();
-    let at = address(&created.ports[0].url).to_owned();
+    let at = address(created.ports[0].url.as_deref().unwrap()).to_owned();
     assert!(at.starts_with("127.0.0.1:"), "{at}");
-    // Answered only on its making: the URLs are as secret as what reaches them.
+    // Its URL answered only on its making: the URLs are as secret as what reaches them.
+    let asked = virtx_core::SandboxPort {
+        url: None,
+        ..created.ports[0].clone()
+    };
     assert_eq!(
         server.client.get_sandbox(&created.id).await.unwrap().ports,
-        []
+        [asked]
     );
 
     let mut serve = SandboxExecArgs::new([

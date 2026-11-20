@@ -11,7 +11,7 @@ use std::{
 
 use virtx::{
     Error, InboundRule, PortForwarder, PortProtocol, PortSpec, SandboxCreateArgs, SandboxExecArgs,
-    Source,
+    SandboxPort, Source,
 };
 
 mod common;
@@ -79,12 +79,20 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
         (opened.label.as_deref(), opened.protocol, &opened.address),
         (Some("greeting"), PortProtocol::Http, &None)
     );
-    let url = &opened.url;
+    let url = opened.url.as_deref().unwrap();
     let at = url.strip_prefix("http://").unwrap_or(url).to_owned();
     assert!(at.starts_with("127.0.0.1:"), "{at}");
-    // Answered only on its making: the URLs are as secret as what reaches them.
+    // Asked for again, it says what it is for, without the URL: that is as secret as what
+    // reaches it, and answered only on its making.
+    let asked = SandboxPort {
+        url: None,
+        ..opened.clone()
+    };
     let got = client.get_sandbox(sandbox.id()).wait().unwrap();
-    assert!(got.info().ports.is_empty());
+    assert_eq!(got.info().ports, std::slice::from_ref(&asked));
+    let listed = client.list_sandbox().wait().unwrap();
+    let listed = listed.iter().find(|listed| listed.id() == sandbox.id());
+    assert_eq!(listed.unwrap().info().ports, [asked]);
 
     assert_eq!(said(at.as_str()), b"hello\n");
     sandbox.remove().wait().unwrap();
@@ -98,7 +106,17 @@ fn a_port_over_http_is_forwarded_to_what_listens_on_it_until_the_sandbox_goes() 
     let client = common::tcp_client();
     let sandbox = serving(&client, PortSpec::new(8000).label("greeting"));
     assert_eq!(sandbox.info().ports[0].label.as_deref(), Some("greeting"));
-    let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0].url).unwrap();
+    // Asked for again, without the URL, which carries the capability that reaches it.
+    let got = client.get_sandbox(sandbox.id()).wait().unwrap();
+    assert_eq!(
+        got.info().ports,
+        [SandboxPort {
+            url: None,
+            ..sandbox.info().ports[0].clone()
+        }]
+    );
+    let url = sandbox.info().ports[0].url.as_deref().unwrap();
+    let forwarder = PortForwarder::open(&client, url).unwrap();
     let at = forwarder.address();
     assert!(at.ip().is_loopback());
 
@@ -164,7 +182,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
     let named = format!("port 7000, forwarded at {}: ", forwarder.address());
     assert!(failed.starts_with(&named), "{failed}");
     assert!(failed.contains("before the port sent a byte"), "{failed}");
-    assert!(!failed.contains(&port.url), "{failed}");
+    assert!(!failed.contains(port.url.as_deref().unwrap()), "{failed}");
     let warned = until(|| WARNED.lock().unwrap().contains(&failed));
     assert!(warned, "not warned of: {:?}", WARNED.lock().unwrap());
 

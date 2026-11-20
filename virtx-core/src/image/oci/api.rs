@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::manifest::{MANIFEST_TYPES, Manifest};
 use crate::{
-    Error,
+    Error, Members,
     transport::{Body, TransportClient, full},
 };
 
@@ -349,7 +349,7 @@ async fn refused(request: &str, response: Response<Body>) -> Error {
         }
         _ => request.to_owned(),
     };
-    Error::Status(status, why)
+    Error::Status(status, why, Members::default())
 }
 
 #[cfg(test)]
@@ -401,7 +401,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(&refusal, Error::Status(404, why) if why == "GET app/blobs/x: BLOB_UNKNOWN no such blob; DENIED"),
+            matches!(&refusal, Error::Status(404, why, _) if why == "GET app/blobs/x: BLOB_UNKNOWN no such blob; DENIED"),
             "{refusal:?}"
         );
         for body in [r#"{"errors": []}"#, "not json", ""] {
@@ -411,7 +411,7 @@ mod tests {
             )
             .await;
             assert!(
-                matches!(&refusal, Error::Status(502, why) if why == "GET app/blobs/x"),
+                matches!(&refusal, Error::Status(502, why, _) if why == "GET app/blobs/x"),
                 "{body:?}: {refusal:?}"
             );
         }

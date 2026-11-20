@@ -30,10 +30,10 @@ pub enum Error {
     Transport(String),
     /// The server refused the request with an HTTP status: the status, and why, for a person,
     /// as `code: message` where the server answered its error as `PROTOCOL.md`'s Resources do,
-    /// and as the codes and messages of its `errors` where its registry refused. A `401` or a
-    /// `403` from any endpoint says the headers are not what it wants: a client may set new ones
-    /// and send the request again.
-    Status(u16, String),
+    /// and as the codes and messages of its `errors` where its registry refused; and the
+    /// members its error had beside those. A `401` or a `403` from any endpoint says the headers
+    /// are not what it wants: a client may set new ones and send the request again.
+    Status(u16, String, Members),
     /// An HTTP response that is not the protocol's error: its status, what it was rather than
     /// its body for a person, and its raw body if it had one.
     Refusal {
@@ -49,6 +49,16 @@ pub enum Error {
     Client(String),
 }
 
+/// What a refusal answered as `PROTOCOL.md`'s Resources do says beside its `code` and
+/// `message`, of the members this client knows.
+#[cfg(feature = "client")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Members {
+    /// How many bytes of a write to a job's stdin went in before its process closed it: the
+    /// `409`, `ended`, of a write cut part-way.
+    pub written: Option<u64>,
+}
+
 #[cfg(feature = "client")]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -56,7 +66,7 @@ impl fmt::Display for Error {
             Error::Transport(reason) | Error::Job(reason) | Error::Client(reason) => {
                 f.write_str(reason)
             }
-            Error::Status(status, body) => {
+            Error::Status(status, body, _) => {
                 let reason = http::StatusCode::from_u16(*status)
                     .ok()
                     .and_then(|status| status.canonical_reason())
@@ -104,7 +114,16 @@ impl Error {
     /// The HTTP status the server refused the request with, if it did.
     pub fn status(&self) -> Option<u16> {
         match self {
-            Error::Status(status, _) | Error::Refusal { status, .. } => Some(*status),
+            Error::Status(status, _, _) | Error::Refusal { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// How many bytes of a write to a job's stdin went in, where its process closed it under
+    /// the write part-way: the `written` of that `409`, `ended`.
+    pub fn written(&self) -> Option<u64> {
+        match self {
+            Error::Status(_, _, members) => members.written,
             _ => None,
         }
     }
@@ -113,7 +132,7 @@ impl Error {
     /// (`{"error": {"code", "message"}}`): `not_found`, `in_use`, `quota` and the like. What a
     /// client branches on, rather than the message.
     pub fn code(&self) -> Option<&str> {
-        let Error::Status(_, said) = self else {
+        let Error::Status(_, said, _) = self else {
             return None;
         };
         let (code, _) = said.split_once(": ")?;
@@ -131,18 +150,18 @@ mod tests {
 
     #[test]
     fn a_refusal_reads_as_its_status_and_why() {
-        let refused = Error::Status(409, "in_use: held".into());
+        let refused = Error::Status(409, "in_use: held".into(), Members::default());
         assert_eq!(
             refused.to_string(),
             "the server answered 409 Conflict: in_use: held"
         );
         assert_eq!(
-            Error::Status(404, String::new()).to_string(),
+            Error::Status(404, String::new(), Members::default()).to_string(),
             "the server answered 404 Not Found"
         );
         // A status HTTP gives no reason has none.
         assert_eq!(
-            Error::Status(599, "odd".into()).to_string(),
+            Error::Status(599, "odd".into(), Members::default()).to_string(),
             "the server answered 599 : odd"
         );
         assert_eq!(Error::Transport("gone".into()).to_string(), "gone");
@@ -150,7 +169,10 @@ mod tests {
 
     #[test]
     fn a_refusal_gives_its_status() {
-        assert_eq!(Error::Status(404, "not found".into()).status(), Some(404));
+        assert_eq!(
+            Error::Status(404, "not found".into(), Members::default()).status(),
+            Some(404)
+        );
         assert_eq!(
             Error::Refusal {
                 status: 503,
@@ -167,35 +189,59 @@ mod tests {
     #[test]
     fn a_refusal_in_the_protocol_s_shape_gives_its_code() {
         assert_eq!(
-            Error::Status(409, "in_use: volume `dev` is mounted".into()).code(),
+            Error::Status(
+                409,
+                "in_use: volume `dev` is mounted".into(),
+                Members::default()
+            )
+            .code(),
             Some("in_use")
         );
         assert_eq!(
-            Error::Status(404, "not_found: no sandbox s1".into()).code(),
+            Error::Status(404, "not_found: no sandbox s1".into(), Members::default()).code(),
             Some("not_found")
         );
         // A refusal not in the protocol's shape, or none: no code.
         assert_eq!(
-            Error::Status(500, "Internal Server Error".into()).code(),
+            Error::Status(500, "Internal Server Error".into(), Members::default()).code(),
             None
         );
         assert_eq!(
-            Error::Status(503, "no room for it yet: try again".into()).code(),
+            Error::Status(
+                503,
+                "no room for it yet: try again".into(),
+                Members::default()
+            )
+            .code(),
             None
         );
         assert_eq!(
-            Error::Status(404, "MANIFEST_UNKNOWN: no such tag".into()).code(),
+            Error::Status(
+                404,
+                "MANIFEST_UNKNOWN: no such tag".into(),
+                Members::default()
+            )
+            .code(),
             None
         );
-        assert_eq!(Error::Status(404, String::new()).code(), None);
-        assert_eq!(Error::Status(404, "/work/a.txt".into()).code(), None);
+        assert_eq!(
+            Error::Status(404, String::new(), Members::default()).code(),
+            None
+        );
+        assert_eq!(
+            Error::Status(404, "/work/a.txt".into(), Members::default()).code(),
+            None
+        );
         assert_eq!(Error::Transport("refused: x".into()).code(), None);
     }
 
     #[test]
     fn an_error_names_where_it_failed() {
         let cases = [
-            (Error::Status(409, "in_use: held".into()), Source::Server),
+            (
+                Error::Status(409, "in_use: held".into(), Members::default()),
+                Source::Server,
+            ),
             (Error::Job("step 1 exited 3".into()), Source::Job),
             (
                 Error::Transport("connection reset".into()),

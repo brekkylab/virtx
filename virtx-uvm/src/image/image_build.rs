@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oci_spec::image::{Digest, ImageConfiguration};
-use virtx_core::Step;
+use virtx_core::{Recipe, Step};
 
 use super::store::{self, Store};
 use crate::fstree::{self, FsTree};
@@ -53,6 +53,21 @@ impl From<tokio::task::JoinError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The label a built image keeps the recipe it was built from under, as its JSON.
+pub const RECIPE_LABEL: &str = "sh.virtx.recipe";
+
+/// `recipe` kept in the config of `image`, built from it: under [`RECIPE_LABEL`].
+pub fn recipe_kept(image: &mut ImageConfiguration, recipe: &Recipe) {
+    let mut config = image.config().clone().unwrap_or_default();
+    let mut labels = config.labels().clone().unwrap_or_default();
+    labels.insert(
+        RECIPE_LABEL.into(),
+        serde_json::to_string(recipe).expect("a recipe serializes"),
+    );
+    config.set_labels(Some(labels));
+    image.set_config(Some(config));
+}
 
 /// Take the image of `layers` and `image`'s config one `step` further: an `ENV` or a
 /// `WORKDIR` into the config, and what a `RUN` wrote onto `layers`, filed in `store` --

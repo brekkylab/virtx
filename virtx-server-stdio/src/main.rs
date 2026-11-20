@@ -291,6 +291,7 @@ mod tests {
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
         PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume,
+        Step,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -397,6 +398,40 @@ mod tests {
             .await;
         assert_eq!(status(built), 400);
         assert_eq!(server.client.list_image_job().await.unwrap(), []);
+    }
+
+    /// A built image keeps the recipe it was built from in its config, under `RECIPE_LABEL`.
+    /// Steps that boot no machine, so the build runs here.
+    #[tokio::test]
+    async fn a_built_image_keeps_its_recipe() {
+        let server = Server::spawn("build-recipe").await;
+        let recipe = Recipe::new("scratch")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let job = server
+            .client
+            .build_image(recipe.clone(), "built:latest")
+            .await
+            .unwrap();
+        // A guard against a hang, not a measure of anything.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let job = server.client.get_image_job(&job.id).await.unwrap();
+                if !job.running {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the build went on");
+        let digest = ended.digest.expect("the build failed");
+
+        let store = ImageStore::new(server.home.join("images")).unwrap();
+        let (config, _) = store.get_image(&digest.parse().unwrap()).unwrap().unwrap();
+        let kept =
+            &config.config().as_ref().unwrap().labels().as_ref().unwrap()[virtx_uvm::RECIPE_LABEL];
+        assert_eq!(serde_json::from_str::<Recipe>(kept).unwrap(), recipe);
     }
 
     #[tokio::test]

@@ -372,7 +372,7 @@ mod tests {
     use virtx_core::VolumeListOutputItem;
     use virtx_core::{
         Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
-        SandboxCreateArgs,
+        SandboxCreateArgs, Step,
     };
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
@@ -916,6 +916,40 @@ mod tests {
         })
         .await
         .expect("the job went on")
+    }
+
+    /// A built image keeps the recipe it was built from in its config, under `RECIPE_LABEL`.
+    /// Steps that boot no machine, so the build runs here.
+    #[tokio::test]
+    async fn a_built_image_keeps_its_recipe() {
+        let served = Served::spawn("build-recipe").await;
+        let client = served.connect();
+        let recipe = Recipe::new("scratch")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let job = client
+            .build_image(recipe.clone(), "built:latest")
+            .await
+            .unwrap();
+        // A guard against a hang, not a measure of anything.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let job = client.get_image_job(&job.id).await.unwrap();
+                if !job.running {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the build went on");
+        let digest = ended.digest.expect("the build failed");
+
+        let store = ImageStore::new(served.project("demo").await.join("images")).unwrap();
+        let (config, _) = store.get_image(&digest.parse().unwrap()).unwrap().unwrap();
+        let kept =
+            &config.config().as_ref().unwrap().labels().as_ref().unwrap()[virtx_uvm::RECIPE_LABEL];
+        assert_eq!(serde_json::from_str::<Recipe>(kept).unwrap(), recipe);
     }
 
     /// A server's image jobs are held to registries on public addresses: a pull, a push and a

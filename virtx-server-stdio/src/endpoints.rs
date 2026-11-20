@@ -38,7 +38,7 @@ use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
     Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
-    build_step, park_after, signal_number,
+    build_step, park_after, recipe_kept, signal_number,
 };
 
 use crate::Host;
@@ -545,6 +545,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                 )
                 .await?;
             }
+            recipe_kept(&mut image, &recipe);
             let digest =
                 tokio::task::spawn_blocking(move || images.insert_image(&image, &layers)).await??;
             Ok(digest)

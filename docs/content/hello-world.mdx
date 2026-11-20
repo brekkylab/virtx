@@ -136,33 +136,50 @@ The console shows the key once. Put it in the environment:
 export VIRTX_API_KEY=vx_sk_...
 ```
 
-Then, in the program, make the client from the environment in place of `Client.spawn()`:
+Then, in the program, connect to virtx cloud with the key in place of `Client.spawn()`:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-async with Client.from_env() as client:
+import os
+
+from virtx import BearerAuth
+
+async with Client.connect(
+    "https://run.virtx.sh",
+    BearerAuth(os.environ["VIRTX_API_KEY"]),
+) as client:
 ```
 
 </TabItem>
 <TabItem label="Node.js">
 
 ```js
-const client = Client.fromEnv()
+const client = Client.connect(
+  'https://run.virtx.sh',
+  { type: 'bearer', token: process.env.VIRTX_API_KEY }
+)
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
-let client = Client::from_env()?;
+use virtx::Auth;
+
+let client = Client::connect(
+    "https://run.virtx.sh",
+    Auth::Bearer { token: std::env::var("VIRTX_API_KEY")? },
+    None,
+    [] as [(&str, &str); 0],
+)?;
 ```
 
 </TabItem>
 </Tabs>
 
-The key is its project's, so the program names no project, and the client reaches the region of virtx cloud nearest the machine it runs on.
+The key is its project's, so the program names no project, and `run.virtx.sh` answers from the region of virtx cloud nearest the machine it runs on.
 
 ### On your machine (stdio)
 

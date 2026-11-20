@@ -24,8 +24,9 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde = { workspace = true }
 serde_json = "1"
-# A project store's answer, which one over a database awaits.
-futures-util = { version = "0.3", default-features = false }
+# A project store's answer, which one over a database awaits; and a home's sandboxes parked
+# side by side.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 thiserror = "2"
 # A member's user, as a segment of the path its `Location` names.
 percent-encoding = "2"

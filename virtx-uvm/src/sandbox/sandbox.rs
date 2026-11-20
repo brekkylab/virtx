@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest as _, Sha256};
 
@@ -773,24 +773,63 @@ impl Sandbox {
         Ok(machine)
     }
 
-    /// Stop its machine if it has been in use by nothing for `after`, to boot again when it
-    /// is next needed.
-    async fn park(&self, after: Duration) {
+    /// Its machine parked now, unless it is in use: refused [`InUse`](Error::InUse) then, and
+    /// [`Ended`](Error::Ended) once it is closed. Its machine stopped with what the guest wrote
+    /// on its upper disk, to boot again for what next needs it. Nothing is done to one whose
+    /// machine is not up.
+    pub async fn park(&self) -> Result<(), Error> {
+        self.park_if(Some(Duration::ZERO)).await
+    }
+
+    /// Its machine parked now, whatever uses it: what runs in it ends, as cancelling each job
+    /// does, and what reaches it is cut off -- for a server whose sandbox may run no more.
+    pub async fn park_anyway(&self) {
+        let _ = self.park_if(None).await;
+    }
+
+    /// Whether its machine is up now.
+    pub fn is_up(&self) -> bool {
+        self.up().is_some()
+    }
+
+    /// When it was made, or a job in it or an [`Activity`] on it last ended.
+    pub fn last_used(&self) -> SystemTime {
+        SystemTime::now() - self.used.lock().unwrap().elapsed()
+    }
+
+    /// Stop its machine if it has been in use by nothing for `unused_for`, or at once,
+    /// whatever uses it, for `None`: to boot again when it is next needed. Answered under its
+    /// turn, from what was done: [`InUse`](Error::InUse) where it was in use and left up,
+    /// [`Ended`](Error::Ended) where it is closed, and `Ok` where it was parked, is not up, or
+    /// has been unused for less than `unused_for`.
+    async fn park_if(&self, unused_for: Option<Duration>) -> Result<(), Error> {
         let _turn = self.turn.lock().await;
-        if self.idle().is_none_or(|idle| idle < after) {
-            return;
-        }
+        let idle = self.idle();
         let machine = {
             let mut state = self.state.lock().unwrap();
-            let State::Up(machine) = &*state else {
-                return;
+            let machine = match &*state {
+                State::Up(machine) => Arc::clone(machine),
+                State::Parked => return Ok(()),
+                State::Exited => return Err(Error::Ended),
             };
-            let machine = Arc::clone(machine);
+            if let Some(after) = unused_for {
+                match idle {
+                    None => {
+                        return Err(Error::InUse(format!(
+                            "sandbox {} is in use: a job runs in it, or it is reached",
+                            self.id
+                        )));
+                    }
+                    Some(idle) if idle < after => return Ok(()),
+                    Some(_) => {}
+                }
+            }
             *state = State::Parked;
             machine
         };
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
         self.holding.lock().unwrap().clear();
+        Ok(())
     }
 
     /// Its machine while one runs.
@@ -911,7 +950,7 @@ async fn park_when_idle(sandbox: std::sync::Weak<Sandbox>, after: Duration) {
         }
         wait = match sandbox.idle() {
             Some(idle) if idle >= after => {
-                sandbox.park(after).await;
+                let _ = sandbox.park_if(Some(after)).await;
                 after
             }
             Some(idle) => after - idle,

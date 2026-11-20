@@ -315,7 +315,7 @@ A server MAY resize a sandbox with its `PATCH`, and one that does not answers it
 Each member is held to what `POST` holds it to, and one left out stays as it is.
 
 - `vcpus` and `memory_mib` are what its VM boots with from its next boot on. A VM is the size it booted with: the server stops one that is up and in which nothing runs, as below, to boot it again so for what next needs it, and refuses one in use with `409`, `in_use`, changing nothing.
-- `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there. One smaller than it is now is refused with `400`, `invalid`: a disk is grown, never shrunk.
+- `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there; a VM that is up is stopped for it, or the change refused, as for `vcpus` and `memory_mib`. One smaller than it is now is refused with `400`, `invalid`: a disk is grown, never shrunk.
 - The answer is its size as it is to be, each member as the server gives it, and `up`, whether its VM is up now: one that is, the size it booted with until it boots again.
 
 A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.

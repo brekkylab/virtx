@@ -186,6 +186,7 @@ fn cors(origins: &[String]) -> CorsLayer {
             Method::HEAD,
             Method::POST,
             Method::PUT,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
             method(b"PROPFIND"),
@@ -692,7 +693,7 @@ mod tests {
         );
         let methods = header("access-control-allow-methods").unwrap();
         assert!(
-            methods.contains("PROPFIND") && methods.contains("MKCOL"),
+            methods.contains("PROPFIND") && methods.contains("MKCOL") && methods.contains("PATCH"),
             "{methods}"
         );
         let headers = header("access-control-allow-headers")

@@ -81,7 +81,7 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
-| `resize(vcpus, memory_mib, disk_gib)` | `SandboxResources` | Its vCPUs and memory from its VM's next boot on, its VM stopped now if nothing uses it and refused `409` if something does; its disk grown, never shrunk, as its VM next boots. Answers `vcpus`, `memory_mib`, `disk_gib` and `up`, whether its VM is up now. See [Resize a sandbox](/docs/guides/setting-sandboxes/#resize-a-sandbox). |
+| `resize(vcpus, memory_mib, disk_gib)` | `SandboxResources` | Its vCPUs, memory and disk from its VM's next boot on, its VM stopped now if nothing uses it and refused `409` if something does; its disk grown, never shrunk. Answers `vcpus`, `memory_mib`, `disk_gib` and `up`, whether its VM is up now. See [Resize a sandbox](/docs/guides/setting-sandboxes/#resize-a-sandbox). |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.

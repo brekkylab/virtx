@@ -365,8 +365,8 @@ export class Sandbox extends Files implements SandboxInfo {
   job(id: string): Promise<SandboxJob>
   /**
    * Resize it: its vCPUs and memory from its VM's next boot on, and its disk grown, never shrunk,
-   * as its VM next boots. A VM up and unused is stopped for its vCPUs or memory to change, and
-   * one in use is refused `409`. What is left out stays as it is.
+   * as its VM next boots. A VM up and unused is stopped for its size to change, and one in use
+   * is refused `409`. What is left out stays as it is.
    */
   resize(options?: SandboxResizeOptions): Promise<SandboxResources>
   /** Stop it, end its jobs and forget it, with everything it wrote outside its volumes. */

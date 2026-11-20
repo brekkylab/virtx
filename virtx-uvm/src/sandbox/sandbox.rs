@@ -622,9 +622,9 @@ impl Sandbox {
 
     /// Resize it as `args` says, answered as it is to be: its vCPUs and memory those its
     /// machine boots with from its next boot on, and its upper disk grown, never shrunk, as its
-    /// machine next boots. A machine is the size it booted with: one up whose vCPUs or memory
-    /// change is parked now if nothing uses it, and refused [`InUse`](Error::InUse) if something
-    /// does. One kept past its process keeps its size in its record.
+    /// machine next boots. A machine is the size it booted with: one up whose size changes, its
+    /// disk's included, is parked now if nothing uses it, and refused [`InUse`](Error::InUse) if
+    /// something does. One kept past its process keeps its size in its record.
     pub async fn resize(
         self: &Arc<Self>,
         args: &SandboxResizeArgs,
@@ -645,10 +645,15 @@ impl Sandbox {
         let vcpus = args.vcpus.unwrap_or(spec.vcpus);
         let memory_mib = args.memory_mib.unwrap_or(spec.ram_mib);
         let disk_gib = args.disk_gib.unwrap_or(disk_gib);
-        if (vcpus, memory_mib) != (spec.vcpus, spec.ram_mib) && self.up().is_some() {
+        let now = (
+            spec.vcpus,
+            spec.ram_mib,
+            self.disk_gib.load(Ordering::Relaxed),
+        );
+        if (vcpus, memory_mib, disk_gib) != now && self.up().is_some() {
             if self.idle().is_none() {
                 return Err(Error::InUse(format!(
-                    "sandbox {} is in use: its vCPUs and memory change once nothing uses it",
+                    "sandbox {} is in use: its size changes once nothing uses it",
                     self.id
                 )));
             }

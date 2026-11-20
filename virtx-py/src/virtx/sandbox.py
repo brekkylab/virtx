@@ -139,8 +139,8 @@ class Sandbox(Files):
     ) -> SandboxResources:
         """Resize it: its ``vcpus`` and ``memory_mib`` from its VM's next boot on, and its disk
         grown, never shrunk, to ``disk_gib`` as its VM next boots. A VM up and unused is stopped
-        for its vCPUs or memory to change, and one in use is refused ``409``. What is left out
-        stays as it is."""
+        for its size to change, and one in use is refused ``409``. What is left out stays as it
+        is."""
         request = args(id=self.id, vcpus=vcpus, memory_mib=memory_mib, disk_gib=disk_gib)
         output = await self.client._call("virtx_client_resize_sandbox", request)
         return SandboxResources.from_dict(output)

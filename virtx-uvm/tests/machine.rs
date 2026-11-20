@@ -454,27 +454,32 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     let write = "echo kept > /root/kept && chmod 700 /root/kept && rm /etc/alpine-release";
     said(&sandbox, write).await;
 
-    // In use: its vCPUs and memory refused, and its disk grown as it next boots.
+    // In use: its vCPUs and memory refused, and its disk too, each left as it is.
     let sleeping = sandbox.exec(vec!["sleep".into(), "600".into()], None);
     let sleeping = sleeping.await.unwrap().get().id;
-    let refused = sandbox.resize(&resize(Some(3), None, None)).await;
-    assert!(
-        matches!(refused, Err(SandboxError::InUse(_))),
-        "{refused:?}"
-    );
-    let grown = sandbox.resize(&resize(None, None, Some(3))).await.unwrap();
+    for refused in [resize(Some(3), None, None), resize(None, None, Some(3))] {
+        let answered = sandbox.resize(&refused).await;
+        assert!(
+            matches!(answered, Err(SandboxError::InUse(_))),
+            "{refused:?}: {answered:?}"
+        );
+    }
+    assert_eq!(disk(&sandbox).await, 1, "the size it booted with");
+    let same = sandbox
+        .resize(&resize(Some(2), None, Some(1)))
+        .await
+        .unwrap();
     let up = SandboxResources {
         vcpus: 2,
         memory_mib: 1024,
-        disk_gib: 3,
+        disk_gib: 1,
         up: true,
     };
-    assert_eq!(grown, up);
-    assert_eq!(disk(&sandbox).await, 1, "the size it booted with");
+    assert_eq!(same, up, "its own size, asked again, is no change");
 
     // Unused: parked, and booted so.
     sandbox.remove_job(&sleeping).unwrap();
-    let resized = sandbox.resize(&resize(Some(3), Some(1536), None)).await;
+    let resized = sandbox.resize(&resize(Some(3), Some(1536), Some(3))).await;
     let parked = SandboxResources {
         vcpus: 3,
         memory_mib: 1536,
@@ -512,7 +517,11 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     let again = &known[0];
     assert_eq!(said(again, "nproc").await, "3");
     let grown = again.resize(&resize(None, None, Some(4))).await.unwrap();
-    assert_eq!((grown.disk_gib, grown.up), (4, true));
+    assert_eq!(
+        (grown.disk_gib, grown.up),
+        (4, false),
+        "parked for its disk alone"
+    );
     leave(Arc::clone(again)).await;
     let known = home.kept();
     let again = &known[0];

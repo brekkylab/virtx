@@ -834,9 +834,9 @@ int virtx_port_forwarder_open(struct VirtxClient *client,
                               struct VirtxPortForwarder **forwarder,
                               struct VirtxBytes *out);
 
-// Why the last connection to `forwarder` that reached nothing in the sandbox failed: its
-// WebSocket refused, or closed before the port sent a byte, as it is when nothing listens
-// there. `VIRTX_OK` with `null` written to `out` while none has, or `VIRTX_ERROR` with
+// Why the last connection to `forwarder` that failed did, since one last reached the port:
+// its WebSocket refused, or closed before the port sent a byte, with the server's reason if
+// it gave one. `VIRTX_OK` with `null` written to `out` while none has, or `VIRTX_ERROR` with
 // the failure written as a call's error is, its message naming the port: `{"message",
 // "status"?, "code"?}`, `status` and `code` the server's refusal of the WebSocket. Each
 // such failure is also handed to the function `virtx_set_warn` set.

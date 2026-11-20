@@ -716,9 +716,9 @@ const forwarders = new FinalizationRegistry(({ lib, raw }) => {
 //
 // It runs on its client's session, so the client's last close stops it. Over stdio the server is
 // on this machine and its own address is the forwarder's; over HTTP each connection to the
-// forwarder is carried to the port in a WebSocket. A connection that reaches nothing in the
-// sandbox -- its WebSocket refused, or closed before the port sent a byte, as it is when nothing
-// listens there -- is closed, and why is `lastError`, and emitted as a `VirtxWarning`.
+// forwarder is carried to the port in a WebSocket. A connection whose WebSocket is refused, or
+// closed before the port sent a byte, is closed, and what was seen is `lastError`, and emitted as
+// a `VirtxWarning`.
 class PortForwarder {
   constructor(raw, lib, address) {
     this._raw = raw
@@ -744,9 +744,9 @@ class PortForwarder {
     return new PortForwarder(raw[0], lib, address)
   }
 
-  // Why the last connection to the forwarder that reached nothing in the sandbox failed, its
-  // message naming the port, as a `VirtxError`; `null` while none has. Its `status` is the
-  // server's, where it refused the connection's WebSocket.
+  // Why the last connection to the forwarder that failed did, its message naming the port, as a
+  // `VirtxError`; `null` while none has, and again once a later connection's port sends a byte.
+  // Its `status` is the server's, where it refused the connection's WebSocket.
   get lastError() {
     if (this._raw === null) throw new VirtxError('the forwarder is closed')
     const out = {}

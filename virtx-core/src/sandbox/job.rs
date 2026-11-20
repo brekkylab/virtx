@@ -150,7 +150,7 @@ pub enum SandboxJobEndReason {
     /// Its sandbox's VM exited on its own under it.
     VmExited,
 
-    /// Its memory ran out: the kernel killed it, or a process it started, for want of memory,
+    /// Its memory ran out: it, or a process it started, was killed for want of memory,
     /// at the most its command may take or the machine's.
     Oom,
 

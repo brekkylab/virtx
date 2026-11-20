@@ -143,7 +143,7 @@ class SandboxJobEndReason(str, Enum):
     """Its sandbox's VM exited on its own under it."""
 
     OOM = "oom"
-    """Its memory ran out: the kernel killed it, or a process it started, for want of memory."""
+    """Its memory ran out: it, or a process it started, was killed for want of memory."""
 
     RESTARTED = "restarted"
     """Its server restarted while it ran, keeping its sandbox."""

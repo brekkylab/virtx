@@ -647,18 +647,16 @@ async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does
         }
     };
 
-    // Holding more than one command may, 64 KiB at a time: the kernel kills it for its memory.
+    // Holding more than one command may, 64 KiB at a time: killed for its memory, by the kernel,
+    // or by the agent where its program's pages are read back again and again instead.
     let hungry = [
         "awk",
         r#"BEGIN { while (1) held[i++] = sprintf("%65536s", "") }"#,
     ];
     let Ok((end, reason)) = tokio::time::timeout(HANG, ended(&hungry)).await else {
         // What its cgroup held, said with the failure.
-        let held = "cd /sys/fs/cgroup/jobs; cat cgroup.subtree_control memory.max; \
-            for c in */; do echo $c; cat $c/memory.max $c/memory.current $c/memory.events \
-            $c/memory.stat $c/cgroup.procs; done; free -m; \
-            for p in $(pidof awk); do grep -E 'State|VmRSS|Threads' /proc/$p/status; \
-            cat /proc/$p/wchan; echo; cat /proc/$p/stack; done";
+        let held = "cd /sys/fs/cgroup/jobs; for c in */; do echo $c; \
+            cat $c/memory.max $c/memory.current $c/memory.events; done; free -m";
         let held = run(&sandbox, &["sh", "-c", held], None).await;
         panic!("its memory never ran out: {held:?}");
     };

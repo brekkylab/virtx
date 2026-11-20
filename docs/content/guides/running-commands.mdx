@@ -46,9 +46,9 @@ Each command runs as a **job**. The server runs it apart from the request that s
 
 The value `exec` returns is three things at once.
 Completed, it answers how the job ended; iterated, it is the job's log.
-Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`.
+Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`, and its `reason` if it did not end by itself.
 `get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
-A log read from a server over HTTP whose connection breaks, the server restarted or a proxy in front of it replaced, is read on after the last entry by itself, up to five times in a row, before its error is yours. A log that stops before the job's end is read on too, and one whose job is deleted while you read it fails with `404` rather than stopping short.
+A log read from a server over HTTP whose connection breaks, the server restarted or a proxy in front of it replaced, is read on after the last entry by itself, up to five times in a row, before its error is yours. A log that stops before the job's end is read on too, and one whose job is deleted while you read it ends with the job's `end`, or, where the server sends none, fails with `404` rather than stopping short.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -278,9 +278,19 @@ let code = sandbox.exec(&args).complete(false).await?; // 137
 </TabItem>
 </Tabs>
 
+The job says why it ended where the process did not end by itself: its `reason`, and its log's `end`'s, is `timeout` here. A process that exits with `137` itself, or that is sent `SIGKILL`, has no `reason`, so `137` alone does not say a timeout ended it.
+
+| `reason` | Why the process ended, killed with its code `137` |
+| --- | --- |
+| `timeout` | Its `timeout_ms` ran out. |
+| `cancelled` | Its job was removed while it ran. Its sandbox is still there, and the command can be run again. |
+| `sandbox_deleted` | Its sandbox was removed under it, and everything it had with it. |
+| `vm_exited` | Its sandbox's machine exited on its own under it. |
+| `restarted` | Its server restarted while it ran, keeping its sandbox. |
+
 ## Signal or cancel a job
 
-A job's `signal` sends a signal such as `SIGTERM` to its process and every process it started, and `remove` kills them and forgets the job.
+A job's `signal` sends a signal such as `SIGTERM` to its process and every process it started, and `remove` kills them and forgets the job: a log being read then ends with the job's `end`, its `reason` `cancelled`. Removing the sandbox ends each job that runs in it so too, its `reason` `sandbox_deleted`.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">

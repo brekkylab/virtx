@@ -138,6 +138,18 @@ impl SandboxJobEnd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxJobEndReason {
+    /// Its `timeout_ms` ran out.
+    Timeout,
+
+    /// Its job was cancelled: removed while it ran, by its own `DELETE`.
+    Cancelled,
+
+    /// Its sandbox was deleted under it, and everything it had with it.
+    SandboxDeleted,
+
+    /// Its sandbox's VM exited on its own under it.
+    VmExited,
+
     /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
     /// each that ran then is ended so.
     Restarted,
@@ -201,6 +213,34 @@ mod tests {
             (
                 SandboxJobEntry::End(SandboxJobEnd {
                     code: 137,
+                    reason: Some(SandboxJobEndReason::Timeout),
+                }),
+                json!({"end": {"code": 137, "reason": "timeout"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Cancelled),
+                }),
+                json!({"end": {"code": 137, "reason": "cancelled"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::SandboxDeleted),
+                }),
+                json!({"end": {"code": 137, "reason": "sandbox_deleted"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::VmExited),
+                }),
+                json!({"end": {"code": 137, "reason": "vm_exited"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
                     reason: Some(SandboxJobEndReason::Restarted),
                 }),
                 json!({"end": {"code": 137, "reason": "restarted"}}),
@@ -234,6 +274,34 @@ mod tests {
             serde_json::from_value::<SandboxJobEntry>(value).unwrap(),
             SandboxJobEntry::End(SandboxJobEnd::exited(137))
         );
+    }
+
+    #[test]
+    fn a_job_says_why_the_server_ended_it_and_only_then() {
+        let mut job = SandboxJob {
+            id: "j".into(),
+            kind: SandboxJobKind::Exec,
+            pid: 7,
+            cmd: vec!["sleep".into(), "9".into()],
+            running: false,
+            code: Some(137),
+            reason: None,
+        };
+        let value = json!({
+            "id": "j",
+            "kind": "exec",
+            "pid": 7,
+            "cmd": ["sleep", "9"],
+            "running": false,
+            "code": 137,
+        });
+        assert_eq!(serde_json::to_value(&job).unwrap(), value);
+        assert_eq!(serde_json::from_value::<SandboxJob>(value).unwrap(), job);
+
+        job.reason = Some(SandboxJobEndReason::Timeout);
+        let value = serde_json::to_value(&job).unwrap();
+        assert_eq!(value["reason"], "timeout");
+        assert_eq!(serde_json::from_value::<SandboxJob>(value).unwrap(), job);
     }
 
     #[test]

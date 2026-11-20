@@ -214,6 +214,7 @@ api! {
     virtx_client_signal_sandbox_job: WithArgs,
     virtx_client_write_sandbox_job_stdin: WithArgs,
     virtx_client_sandbox_job_log: WithArgs,
+    virtx_client_exec_sandbox_log: WithArgs,
     virtx_port_forwarder_open: fn(
         client: *mut Opaque,
         args: *const u8,

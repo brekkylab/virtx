@@ -33,8 +33,9 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPort, SandboxSignalArgs, Step, VolumeCreateArgs, VolumeListOutputItem,
-    VolumeMountCreateArgs, VolumeMountListOutputItem, described_type, from_body,
+    SandboxExecItem, SandboxPort, SandboxSignalArgs, Step, VolumeCreateArgs, VolumeListOutputItem,
+    VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
+    from_body,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored};
 use virtx_uvm::{
@@ -1282,9 +1283,13 @@ async fn sandbox_job_list(
     Ok(json(&home.sandbox(&id)?.jobs()))
 }
 
+/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
+/// `text/event-stream`, `201` with the job as the first event and then its log, and its path in
+/// `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
+    headers: HeaderMap,
     Whole(request): Whole,
 ) -> Answer {
     let args: SandboxExecArgs = body(&request)?;
@@ -1300,8 +1305,22 @@ async fn sandbox_exec(
     }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?.get();
-    Ok(created(format!("/sandboxes/{id}/jobs/{}", job.id), &job))
+    let job = sandbox.exec(args.cmd, timeout).await?;
+    let answered = job.get();
+    let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
+    if !accepts_event_stream(&headers) {
+        return Ok(created(location, &answered));
+    }
+    let log = Arc::clone(job.log()).events_led_by(&SandboxExecItem::Job(answered));
+    Ok((
+        StatusCode::CREATED,
+        [
+            (header::LOCATION, location),
+            (header::CONTENT_TYPE, "text/event-stream".to_owned()),
+        ],
+        Body::from_stream(log),
+    )
+        .into_response())
 }
 
 async fn sandbox_job_get(

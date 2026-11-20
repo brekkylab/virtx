@@ -341,7 +341,7 @@ A sandbox job is a process in a [sandbox](#sandboxes), run beside whatever else 
 | Request | Body | Answer |
 | --- | --- | --- |
 | `GET /sandboxes/{id}/jobs/` | | `200`, array of sandbox jobs |
-| `POST /sandboxes/{id}/jobs/exec/` | `{cmd, stdin?, timeout_ms?}` | `201`, the job |
+| `POST /sandboxes/{id}/jobs/exec/` | `{cmd, stdin?, timeout_ms?}` | `201`, the job, or [with its log](#an-exec-answered-with-its-log) |
 | `GET /sandboxes/{id}/jobs/{job}` | | `200`, the job |
 | `DELETE /sandboxes/{id}/jobs/{job}` | | `204` |
 | `POST /sandboxes/{id}/jobs/{job}/signal` | `{signal}` | `204` |
@@ -357,6 +357,29 @@ A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 - `reason`, once it has ended, is why, where the process did not end by itself and the server says, as below.
 
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
+
+#### An exec answered with its log
+
+An exec whose request's `Accept` names `text/event-stream`, with a `q` above `0`, MAY be answered with the job's log as well, saving the client a second request. A range such as `*/*` does not ask for it.
+
+- `201`, with `Content-Type: text/event-stream`, and the job's path in `Location`, as any `201` has.
+- As the body, first the job itself, as an event whose `data` is `{"job": {...}}` and which has no `id`; then the job's log, from its first entry: the same events that `GET {job}/events` answers with its `200`, numbered as there, under the exec's own status.
+
+```text
+data: {"job": {"id": "...", "kind": "exec", "pid": 7, "cmd": ["echo", "hi"], "running": true}}
+
+id: 1
+data: {"stdout": "hi"}
+
+id: 2
+data: {"end": {"code": 0}}
+```
+
+The job's event is this answer's alone: it is no entry of the job's log, `GET {job}/events` never sends it, and it moves no entry's number, so an entry's `id` here is its number in the log as [Events](#events) has it.
+A client reads the job from that first event; where the answer breaks off or ends before it, the client reads the job with `GET` at the path in `Location`, and its log from the first entry.
+A client whose answer breaks off after the job, before the log's end, reads the rest with `GET {job}/events`, sending `Last-Event-ID` with the `id` of the last entry it read, or none where it read none, as [Events](#events) says.
+
+A server MAY answer such a request with the job alone, as JSON, as it answers any other: so a client that asks for the log this way MUST accept `application/json` too, and read the job's log with its `GET {job}/events` where the answer is the job alone.
 
 Its log's entries are each an object with one member:
 

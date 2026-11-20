@@ -27,15 +27,17 @@ mod project;
 mod sandbox;
 mod transport;
 mod volume;
+#[cfg(feature = "client")]
+mod warning;
 
 pub use auth::Auth;
 #[cfg(feature = "client")]
 pub use client::Client;
 #[cfg(feature = "client")]
 pub use ensure::{cache_root, ensure_virtx};
-#[cfg(feature = "client")]
-pub use error::Error;
 pub use error::Source;
+#[cfg(feature = "client")]
+pub use error::{Error, Members};
 pub use image::*;
 pub use project::*;
 pub use sandbox::*;

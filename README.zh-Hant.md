@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-Hans.md">简体中文</a> · <b>繁體中文</b> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
+  <a href="https://github.com/brekkylab/virtx/blob/main/README.md">English</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.zh-Hans.md">简体中文</a> · <b>繁體中文</b> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ja.md">日本語</a> · <a href="https://github.com/brekkylab/virtx/blob/main/README.ko.md">한국어</a>
 </p>
 
 <br>
@@ -37,7 +37,7 @@ virtx 讓你直接在自己的程式碼裡，用拋棄式的 Linux 虛擬機器�
 ## 快速入門
 
 > [!TIP]
-> 有在用程式開發代理（coding agent）嗎？安裝 [virtx skill](skills/virtx/SKILL.md)，接下來的程式碼就能交給它來寫：
+> 有在用程式開發代理（coding agent）嗎？安裝 [virtx skill](https://github.com/brekkylab/virtx/blob/main/skills/virtx/SKILL.md)，接下來的程式碼就能交給它來寫：
 >
 > ```bash
 > claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
@@ -64,7 +64,7 @@ from virtx import Client, Recipe
 
 
 async def main() -> None:
-    with Client.spawn() as client:
+    async with Client.spawn() as client:
         recipe = Recipe("alpine:latest").run("apk add --no-cache jq")
         await client.build_image(recipe, "jq:latest").complete(print=True)
 
@@ -151,12 +151,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 依照[自行架設伺服器](https://virtx.sh/docs/guides/self-hosting/)，在你自己的機器上架設 `virtx-server-tcp`。
 
-用從 `virtx-cli/` 建置的 `virtx` 登入一次，再改為帶上它印出的權杖連線，取代 `Client.spawn()`。
+用 `virtx` 指令登入一次（可透過 `uvx` 或 `npx` 免安裝執行），再改為帶上它印出的權杖連線，取代 `Client.spawn()`。
 其餘部分和本機範例完全相同。
 
 ```sh
-virtx login https://virtx.example
+uvx virtx login https://virtx.example                 # 沒有 uv 時用 pipx run virtx
+
+# 或者
+
+npx -y @brekkylab/virtx login https://virtx.example
 ```
+
+若要安裝 `virtx`，請參閱 [CLI](https://virtx.sh/docs/reference/cli/#installing)。
 
 <details open>
 <summary><b>Python</b></summary>
@@ -166,7 +172,7 @@ from virtx import Client, CommandAuth
 
 client = Client.connect(
     "https://virtx.example",
-    CommandAuth("virtx", ("token", "--json")),
+    CommandAuth("uvx", ("virtx", "token", "--json")),
 )
 ```
 
@@ -178,7 +184,7 @@ client = Client.connect(
 ```js
 const client = Client.connect(
   'https://virtx.example',
-  { type: 'command', program: 'virtx', args: ['token', '--json'] }
+  { type: 'command', program: 'npx', args: ['-y', '@brekkylab/virtx', 'token', '--json'] }
 )
 ```
 
@@ -188,9 +194,11 @@ const client = Client.connect(
 <summary><b>Rust</b></summary>
 
 ```rust
+use virtx::Auth;
+
 let client = Client::connect(
     "https://virtx.example",
-    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
+    Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;
@@ -245,7 +253,7 @@ let client = Client::connect(
 
 只有使用 GPU 的沙箱才需要：主機上要裝有 Vulkan 載入器。
 客體端的 Vulkan 會隨每個沙箱一起提供，映像檔裡不需要另外安裝。
-詳見[使用 GPU](docs/content/guides/using-gpus.mdx)。
+詳見[使用 GPU](https://virtx.sh/docs/guides/using-gpus/)。
 
 ## 運作原理
 
@@ -255,7 +263,7 @@ virtx 採用用戶端－伺服器架構。
 你的程式碼作為用戶端，告訴 virtx 伺服器要執行什麼；伺服器在虛擬機器裡執行之後，再把結果傳回來。
 
 <p align="center">
-  <img alt="virtx 用戶端可以連到三種伺服器：用戶端機器上的本機伺服器、另一台機器上的遠端伺服器，或由 virtx 代管的雲端。" src="docs/images/client-server.svg" width="640">
+  <img alt="virtx 用戶端可以連到三種伺服器：用戶端機器上的本機伺服器、另一台機器上的遠端伺服器，或由 virtx 代管的雲端。" src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/client-server.svg" width="640">
 </p>
 
 伺服器可以由你自己執行，放在跟程式碼同一台機器上或另一台機器上；也可以使用由我們代管的 virtx cloud。
@@ -277,7 +285,7 @@ virtx 採用用戶端－伺服器架構。
 最主要的資源是**沙箱**：一台讓你執行指令的虛擬機器。
 
 <p align="center">
-  <img alt="使用者向沙箱傳送指令並讀取輸出；沙箱由唯讀的映像檔加上一層可寫入層組成，並掛載了一個磁碟區。" src="docs/images/core-concepts.svg" width="640">
+  <img alt="使用者向沙箱傳送指令並讀取輸出；沙箱由唯讀的映像檔加上一層可寫入層組成，並掛載了一個磁碟區。" src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/core-concepts.svg" width="640">
 </p>
 
 沙箱的根檔案系統由兩層疊加而成：下層是唯讀的**映像檔**，上層是接收寫入的**可寫入層**。
@@ -296,19 +304,19 @@ Notion、Google Drive、OneDrive 等遠端儲存空間也能以唯讀方式掛�
 ## 文件
 
 指南和 API 參考請見[文件](https://virtx.sh/docs)。
-其餘 API 記載在各套件的文件中：[Python](virtx-py/README.md)、[Node](virtx-node/README.md)、[Rust](https://docs.rs/virtx)。
+Rust 的 API 也可以在 [docs.rs](https://docs.rs/virtx) 查看。
 
 ## 從原始碼建置
 
-請參閱 AGENTS.md 中的 [Building from source](AGENTS.md#building-from-source)。
+請參閱 AGENTS.md 中的 [Building from source](https://github.com/brekkylab/virtx/blob/main/AGENTS.md#building-from-source)。
 
 ## 參與貢獻
 
 歡迎回報錯誤、提出想法或發送 Pull Request。
-如何開 PR，請參閱 [CONTRIBUTING.md](CONTRIBUTING.md)。
-若發現疑似安全漏洞，請依照 [SECURITY.md](SECURITY.md) 回報，不要公開開 issue。
+如何開 PR，請參閱 [CONTRIBUTING.md](https://github.com/brekkylab/virtx/blob/main/CONTRIBUTING.md)。
+若發現疑似安全漏洞，請依照 [SECURITY.md](https://github.com/brekkylab/virtx/blob/main/SECURITY.md) 回報，不要公開開 issue。
 有問題想問或想分享作品，歡迎到 [Discord](https://discord.gg/27rx3EJy3P)。
 
 ## 授權條款
 
-Apache-2.0，詳見 [LICENSE](LICENSE)。
+Apache-2.0，詳見 [LICENSE](https://github.com/brekkylab/virtx/blob/main/LICENSE)。

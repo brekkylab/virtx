@@ -127,6 +127,10 @@ enum OriginFile {
         image: Digest,
         manifest: String,
         config: String,
+        /// Whether a pull with no credentials filed it: what alone may be shared
+        /// ([`Store::share_from`]). One filed before this was recorded is not.
+        #[serde(default)]
+        anonymous: bool,
     },
 }
 
@@ -163,6 +167,16 @@ impl Store {
                 .map_err(|e| Error::io(format!("making {}", dir.display()), e))?;
         }
         Ok(Store { root })
+    }
+
+    /// The store at `root`, where one is, making nothing: none where none is. For reading one
+    /// that may be on its way out, such as another project's, without making it again.
+    pub fn open(root: impl Into<PathBuf>) -> Option<Store> {
+        let root = root.into();
+        root.join("image")
+            .join("sha256")
+            .is_dir()
+            .then_some(Store { root })
     }
 
     pub fn root(&self) -> &Path {
@@ -221,6 +235,76 @@ impl Store {
             let _ = fs::remove_file(&part);
         }
         named
+    }
+
+    /// File the EROFS image at `from` as layer `layer`: a hard link to it, where `from` is on
+    /// the same filesystem, and a copy where it is not. Linked, one file serves every store
+    /// that links it, and a store's removal of the layer removes its own link alone. `from` must
+    /// be the EROFS image `layer` names -- one another store filed -- which is not read again
+    /// here: what that store filed is taken on its word, as a registry's would be.
+    ///
+    /// A layer already here is renewed; on Unix, one here as a file of its own -- written here
+    /// rather than linked -- is replaced by the link, as the same bytes, so one file serves both
+    /// after all. What has it open reads on from the file it opened.
+    pub fn link_layer(&self, from: &Path, layer: &Digest) -> Result<()> {
+        static LINKS: AtomicU64 = AtomicU64::new(0);
+        let path = self.layer_path(layer);
+        let _change = self.change()?;
+        let here =
+            renew(&path).map_err(|e| Error::io(format!("renewing {}", path.display()), e))?;
+        if here && !other_file(&path, from) {
+            return Ok(());
+        }
+        let part = path.with_extension(format!(
+            "erofs.{}.{}.link",
+            std::process::id(),
+            LINKS.fetch_add(1, Ordering::Relaxed)
+        ));
+        if fs::hard_link(from, &part).is_err() {
+            // A copy in place of what is here already gains nothing.
+            if here {
+                return Ok(());
+            }
+            // Named by the layer, not by `from`: the other store's path is not the asker's.
+            fs::copy(from, &part).map_err(|e| Error::io(format!("copying layer {layer}"), e))?;
+        }
+        fs::rename(&part, &path).map_err(|e| {
+            let _ = fs::remove_file(&part);
+            Error::io(format!("moving {} into place", path.display()), e)
+        })
+    }
+
+    /// The image registry manifest `origin` became in `from`, filed here too, with its origin:
+    /// its layers [linked](Store::link_layer), and its manifest and config and the registry's as
+    /// `from` keeps them. None where `from` has no image of `origin` that a pull with no
+    /// credentials filed ([`insert_anonymous_image_origin`](Store::insert_anonymous_image_origin)):
+    /// one pulled with credentials, or pushed, is not shared. An image `from` removes meanwhile
+    /// fails it, and may leave a layer here for a prune.
+    ///
+    /// What `from` filed is taken on its word, its layers linked by the digests it recorded, so
+    /// every store shared from is as trusted as the least trusted of them.
+    pub fn share_from(&self, from: &Store, origin: &Digest) -> Result<Option<Digest>> {
+        let Some(OriginFile::Image {
+            image,
+            manifest: served,
+            config: served_config,
+            anonymous: true,
+        }) = read_filed::<OriginFile>(&from.shelf("origin", origin, "json"))?
+        else {
+            return Ok(None);
+        };
+        let (Some((_, layers)), Some((manifest, config))) =
+            (from.get_image(&image)?, from.get_image_manifest(&image)?)
+        else {
+            return Ok(None);
+        };
+        for layer in &layers {
+            self.link_layer(&from.layer_path(layer), layer)?;
+        }
+        let filed = self.insert_image_manifest(&manifest, &config)?;
+        let (served, served_config) = (served.as_bytes(), served_config.as_bytes());
+        self.insert_anonymous_image_origin(origin, served, served_config, &filed)?;
+        Ok(Some(filed))
     }
 
     /// Make `layer` young again, if it is here: a prune's grace spares it for the image being
@@ -827,13 +911,36 @@ impl Store {
     /// layers.
     ///
     /// Named by `digest`, which a pull has checked: `manifest`'s own, or that of the index
-    /// it was chosen from.
+    /// it was chosen from. Not to be shared: as a pull with credentials, or a push, files it.
     pub fn insert_image_origin(
         &self,
         digest: &Digest,
         manifest: &[u8],
         config: &[u8],
         image: &Digest,
+    ) -> Result<()> {
+        self.file_image_origin(digest, manifest, config, image, false)
+    }
+
+    /// As [`insert_image_origin`](Store::insert_image_origin), for a pull with no credentials:
+    /// what [`share_from`](Store::share_from) may share.
+    pub fn insert_anonymous_image_origin(
+        &self,
+        digest: &Digest,
+        manifest: &[u8],
+        config: &[u8],
+        image: &Digest,
+    ) -> Result<()> {
+        self.file_image_origin(digest, manifest, config, image, true)
+    }
+
+    fn file_image_origin(
+        &self,
+        digest: &Digest,
+        manifest: &[u8],
+        config: &[u8],
+        image: &Digest,
+        anonymous: bool,
     ) -> Result<()> {
         if !self.shelf("image", image, "json").is_file() {
             return Err(Error::Missing(image.clone()));
@@ -851,6 +958,7 @@ impl Store {
             image: image.clone(),
             manifest: text(manifest)?,
             config: text(config)?,
+            anonymous,
         })
         .map_err(|e| Error::io("serializing an origin", e.into()))?;
         write_atomically(&path, |file| {
@@ -894,6 +1002,7 @@ impl Store {
                 image: of,
                 manifest,
                 config,
+                ..
             } = read
                 && of == *image
             {
@@ -979,6 +1088,24 @@ fn write_part(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resul
     Ok(part)
 }
 
+/// Whether `path` and `from` are two files, not two links to one: never said so where links
+/// cannot be told apart.
+fn other_file(path: &Path, from: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (fs::metadata(path), fs::metadata(from)) {
+            (Ok(here), Ok(there)) => (here.dev(), here.ino()) != (there.dev(), there.ino()),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, from);
+        false
+    }
+}
+
 /// Make what is filed at `path` young again, or answer `false` when nothing is.
 fn renew(path: &Path) -> io::Result<bool> {
     match File::options().write(true).open(path) {
@@ -1023,6 +1150,52 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(self.0.root());
         }
+    }
+
+    #[test]
+    fn a_layer_linked_from_another_store_is_one_file_and_outlives_its_removal_there() {
+        let (one, two) = (Scratch::new("link-one"), Scratch::new("link-two"));
+        let layer = one.0.insert_layer(&tree(b"shared")).unwrap();
+        two.0.link_layer(&one.0.layer_path(&layer), &layer).unwrap();
+        assert_eq!(
+            two.0.get_layer(&layer).unwrap().unwrap().digest(),
+            tree(b"shared").digest()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let inode = |store: &Store| fs::metadata(store.layer_path(&layer)).unwrap().ino();
+            assert_eq!(inode(&one.0), inode(&two.0));
+        }
+        // Linked again: renewed, and still one file.
+        two.0.link_layer(&one.0.layer_path(&layer), &layer).unwrap();
+        // A store that wrote the layer itself: its file replaced by the link, one file after all.
+        let three = Scratch::new("link-three");
+        assert_eq!(three.0.insert_layer(&tree(b"shared")).unwrap(), layer);
+        three
+            .0
+            .link_layer(&one.0.layer_path(&layer), &layer)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let inode = |store: &Store| fs::metadata(store.layer_path(&layer)).unwrap().ino();
+            assert_eq!(inode(&one.0), inode(&three.0));
+        }
+        assert!(one.0.remove_layer(&layer).unwrap());
+        assert!(two.0.contains_layer(&layer));
+        // From nowhere: refused, and nothing left half done.
+        let other: Digest = format!("sha256:{}", "b".repeat(64)).parse().unwrap();
+        assert!(two.0.link_layer(&one.0.layer_path(&other), &other).is_err());
+        assert!(!two.0.contains_layer(&other));
+        let dir = two.0.root().join("layer").join("sha256");
+        assert!(
+            fs::read_dir(dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".link")),
+        );
     }
 
     fn tree(content: &[u8]) -> FsTree {

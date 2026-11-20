@@ -24,11 +24,14 @@ use futures_util::{
     future::{BoxFuture, join_all},
 };
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use virtx_core::{SandboxCreateArgs, SandboxJobEndReason, SandboxJobEntry, SandboxVolume};
+use virtx_core::{
+    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxVolume,
+};
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
+use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
-    DEFAULT_DISK_GIB, Files, ImageStore, Reference, RegistryClient, Sandbox, SandboxError,
-    StorageBackend, VolumeError, VolumeStore,
+    Admission, DEFAULT_DISK_GIB, Files, ImageStore, MachineSpec, NoRoom, Reference, RegistryClient,
+    Room, Sandbox, SandboxError, SandboxJob, StorageBackend, VolumeError, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -45,6 +48,10 @@ const ALPINE: &str = "alpine:3.20";
 /// guest driver (`mesa-vulkan-virtio`); no stable branch does yet. Pulled only for the GPU's
 /// test.
 const GPU_IMAGE: &str = "alpine:edge";
+
+/// How long a test waits on what should come before it fails, rather than holding the suite:
+/// a guard against a hang, not a time anything is held to.
+const HANG: Duration = Duration::from_secs(60);
 
 /// A sandbox of [`ALPINE`] with 1 GiB of memory: enough for what these tests run in it, and little
 /// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
@@ -150,7 +157,7 @@ async fn run(
     timeout: Option<Duration>,
 ) -> Result<(Vec<String>, i32), SandboxError> {
     let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
-    let job = sandbox.exec(cmd, timeout).await?;
+    let job = sandbox.exec(cmd, false, timeout).await?;
     let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
     let mut lines = Vec::new();
     while let Some(Ok(event)) = events.next().await {
@@ -163,6 +170,52 @@ async fn run(
         }
     }
     panic!("a job's log ends with its end")
+}
+
+/// Room for as many machines as a test says ([`Limit::to`]), and for every one otherwise: this
+/// process's [`Admission`].
+struct Limit;
+
+/// How many machines may be up at once, if a test holds them to some; and how many are.
+static LIMIT: std::sync::Mutex<(Option<usize>, usize)> = std::sync::Mutex::new((None, 0));
+
+/// A machine's room, given back as it drops.
+struct Taken;
+
+impl Drop for Taken {
+    fn drop(&mut self) {
+        LIMIT.lock().unwrap().1 -= 1;
+    }
+}
+
+impl Admission for Limit {
+    fn admit(&self, _spec: &MachineSpec) -> Result<Room, NoRoom> {
+        let mut limit = LIMIT.lock().unwrap();
+        if limit.0.is_some_and(|most| limit.1 >= most) {
+            return Err(NoRoom(format!("{} machines are up", limit.1)));
+        }
+        limit.1 += 1;
+        Ok(Box::new(Taken))
+    }
+}
+
+impl Limit {
+    /// Machines held to `most` at once, until what this answers drops.
+    fn to(most: usize) -> impl Drop {
+        struct Lifted;
+        impl Drop for Lifted {
+            fn drop(&mut self) {
+                LIMIT.lock().unwrap().0 = None;
+            }
+        }
+        LIMIT.lock().unwrap().0 = Some(most);
+        Lifted
+    }
+
+    /// How many machines are up, each holding its room.
+    fn taken() -> usize {
+        LIMIT.lock().unwrap().1
+    }
 }
 
 /// Close `sandbox` as a server removes one: it blocks while the guest syncs.
@@ -186,8 +239,15 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     let gone = home.sandbox(&small(), None).await;
     let write = ["sh", "-c", "echo kept > /root/kept"];
     assert_eq!(run(&kept, &write, None).await.unwrap().1, 0);
-    let sleeping = kept.exec(vec!["sleep".into(), "600".into()], None).await;
-    let sleeping = sleeping.unwrap().get().id;
+    let running = kept
+        .exec(vec!["sleep".into(), "600".into()], false, None)
+        .await;
+    let running = running.unwrap();
+    let sleeping = running.get().id;
+    let deleted = gone
+        .exec(vec!["sleep".into(), "600".into()], false, None)
+        .await;
+    let deleted = deleted.unwrap();
     assert!(
         home.kept().is_empty(),
         "one this process knows is no other's"
@@ -195,6 +255,12 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
 
     let id = kept.id().to_owned();
     tokio::join!(leave(kept), leave(gone));
+    // This server ends each job as the next one knows it: restarted where its sandbox is kept,
+    // its sandbox deleted where it is deleted.
+    let restarted = Some(SandboxJobEndReason::Restarted);
+    assert_eq!(running.get().reason, restarted);
+    let sandbox_deleted = Some(SandboxJobEndReason::SandboxDeleted);
+    assert_eq!(deleted.get().reason, sandbox_deleted);
     let known = home.kept();
     assert_eq!(known.len(), 1, "the one made without keys goes");
     let again = &known[0];
@@ -207,7 +273,6 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
         .into_iter()
         .map(|job| (job.id == sleeping, job.running, job.code, job.reason))
         .collect();
-    let restarted = Some(SandboxJobEndReason::Restarted);
     assert!(ended.contains(&(false, false, Some(0), None)), "{ended:?}");
     assert!(
         ended.contains(&(true, false, Some(137), restarted)),
@@ -499,7 +564,7 @@ async fn a_job_writes_its_output_and_ends_with_its_code_or_its_timeout(home: Hom
 async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let cmd = ["sleep", "30"].map(String::from).to_vec();
-    let job = sandbox.exec(cmd, None).await.unwrap();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
     assert!(job.get().running);
     sandbox.remove_job(&job.get().id).unwrap();
     assert!(sandbox.job(&job.get().id).is_err());
@@ -509,6 +574,475 @@ async fn a_removed_job_is_killed_and_its_sandbox_kept(home: Home) {
         .await
         .unwrap();
     assert_eq!(lines, ["0"]);
+    close(sandbox).await;
+}
+
+async fn a_fork_bomb_leaves_the_sandbox_answering(home: Home) {
+    // Large enough for more threads than the kernel's pids, as most are.
+    answered_beside_a_bomb(&home, 2048, "f(){ f & f & wait; }; f").await;
+}
+
+async fn a_fork_bomb_out_of_memory_leaves_the_sandbox_answering(home: Home) {
+    // Each of its processes holding 600 KB of its own: the memory runs out long before the
+    // pids do, in a machine of any size.
+    let bomb = r#"s=$(head -c 300000 /dev/zero | tr "\0" x); f(){ y="$s$s"; f & f & wait; }; f"#;
+    answered_beside_a_bomb(&home, 1024, bomb).await;
+}
+
+/// A command run in a sandbox of `memory_mib` answered beside `bomb`, a script forking without
+/// end, as it goes on.
+async fn answered_beside_a_bomb(home: &Home, memory_mib: u32, bomb: &str) {
+    let mut args = small();
+    args.memory_mib = Some(memory_mib);
+    let sandbox = home.sandbox(&args, None).await;
+    let started = format!("sh -c '{bomb}' >/dev/null 2>&1 </dev/null & echo started");
+    let (lines, _) = run(&sandbox, &["sh", "-c", &started], None).await.unwrap();
+    assert_eq!(lines, ["started"]);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Answered while the bomb goes on: how soon is not what is tried, and the timeout only
+    // keeps a sandbox that never answers from holding the suite. The processes are counted by a
+    // pipeline, which forks: the bomb holds all but a share of them, which another command has.
+    // A process gone between the glob and `ls` is no error of the count's.
+    let counted = [
+        "sh",
+        "-c",
+        "echo alive; ls -d /proc/[0-9]* 2>/dev/null | wc -l",
+    ];
+    let answered = tokio::time::timeout(Duration::from_secs(120), run(&sandbox, &counted, None));
+    let (lines, _) = answered
+        .await
+        .expect("a command answered beside the bomb")
+        .unwrap();
+    assert_eq!(lines[0], "alive", "{lines:?}");
+    let processes: u32 = lines[1].trim().parse().unwrap_or(0);
+    assert!(processes > 100, "the bomb went on beside it: {lines:?}");
+    close(sandbox).await;
+}
+
+async fn a_job_ends_with_its_process_not_with_what_it_left_running(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // A program left running with the job's own output: the job ends with its shell, and the
+    // program runs on.
+    let left = ["sh", "-c", "sleep 300 & echo started; printf 'no newline'"];
+    let ended = tokio::time::timeout(HANG, run(&sandbox, &left, None));
+    let (lines, code) = ended.await.expect("the job ends with its shell").unwrap();
+    assert_eq!(
+        (lines, code),
+        (vec!["started".into(), "no newline".into()], 0)
+    );
+    // By the program's name, which the shell asking is not.
+    let still = ["sh", "-c", "pgrep -x sleep >/dev/null && echo running"];
+    assert_eq!(run(&sandbox, &still, None).await.unwrap().0, ["running"]);
+
+    // One that writes on: what the job wrote is its log, whole, and what is left running is
+    // never held up by a pipe nothing reads any more. It writes to stderr in lines of x.
+    let writer = "(while true; do head -c 8000 /dev/zero | tr '\\0' x; echo; date >> /tmp/w; \
+                  sleep 0.01; done) >&2 & seq 1 20000; echo done";
+    let writes = ["sh", "-c", writer];
+    let ended = tokio::time::timeout(HANG, run(&sandbox, &writes, None));
+    let (lines, code) = ended.await.expect("the job ends with its shell").unwrap();
+    // Its own lines are seq's and `done`; the rest are the writer's, of x alone.
+    let own: Vec<&str> = lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.is_empty() || line.bytes().any(|b| b != b'x'))
+        .collect();
+    let seq: Vec<String> = (1..=20_000).map(|n| n.to_string()).collect();
+    assert!(
+        own.len() == 20_001 && own[..20_000] == seq && own[20_000] == "done",
+        "{} lines, not seq's: {:?}",
+        own.len(),
+        own.iter()
+            .filter(|l| l.parse::<u32>().is_err())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(code, 0);
+    let moving = "sleep 1; a=$(wc -l < /tmp/w); sleep 2; b=$(wc -l < /tmp/w); \
+                  [ $b -gt $((a + 20)) ] && echo moving";
+    let (lines, _) = run(&sandbox, &["sh", "-c", moving], None).await.unwrap();
+    assert_eq!(lines, ["moving"], "what the job left running was held up");
+    close(sandbox).await;
+}
+
+async fn a_job_s_stdin_is_written_until_it_is_closed(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let cmd = ["sh", "-c", "tr a-z A-Z; echo done"]
+        .map(String::from)
+        .to_vec();
+    let job = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = job.get().id;
+    sandbox
+        .write_stdin(&id, "hello\n".into(), false)
+        .await
+        .unwrap();
+    sandbox
+        .write_stdin(&id, "world\n".into(), true)
+        .await
+        .unwrap();
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let mut lines = Vec::new();
+    while let Some(Ok(event)) = events.next().await {
+        let event = String::from_utf8(event.to_vec()).unwrap();
+        let data = event
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        if let SandboxJobEntry::Stdout(line) = serde_json::from_str(data).unwrap() {
+            lines.push(line);
+        }
+    }
+    assert_eq!(lines, ["HELLO", "WORLD", "done"]);
+    // Closed, and ended: refused.
+    let refused = sandbox.write_stdin(&id, "x".into(), false).await;
+    assert!(
+        matches!(refused, Err(SandboxError::JobEnded(_))),
+        "{refused:?}"
+    );
+
+    // Started without one: its stdin is empty, and a write is refused.
+    let cmd = ["sh", "-c", "sleep 1; cat; echo eof"]
+        .map(String::from)
+        .to_vec();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
+    let refused = sandbox.write_stdin(&job.get().id, "x".into(), false).await;
+    assert!(
+        matches!(refused, Err(SandboxError::JobEnded(_))),
+        "{refused:?}"
+    );
+    let (lines, code) = run(&sandbox, &["sh", "-c", "cat; echo eof"], None)
+        .await
+        .unwrap();
+    assert_eq!((lines, code), (vec!["eof".into()], 0));
+    close(sandbox).await;
+}
+
+async fn stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let cmd = ["sleep", "600"].map(String::from).to_vec();
+    let sleeper = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = sleeper.get().id;
+    // Far past what its pipe holds: not written while nothing reads it.
+    let writing = {
+        let (sandbox, id) = (Arc::clone(&sandbox), id.clone());
+        tokio::spawn(async move { sandbox.write_stdin(&id, "x".repeat(1 << 20), false).await })
+    };
+    // A command beside it is answered meanwhile.
+    let beside = tokio::time::timeout(HANG, run(&sandbox, &["echo", "beside"], None));
+    let (lines, _) = beside.await.expect("answered beside").unwrap();
+    assert_eq!(lines, ["beside"]);
+    assert!(
+        !writing.is_finished(),
+        "written to a process that does not read"
+    );
+    // Once it ends, so does the write: refused as ended, or as cut with what its pipe took in,
+    // whichever the guest says first.
+    sandbox.remove_job(&id).unwrap();
+    let written = tokio::time::timeout(HANG, writing)
+        .await
+        .expect("the write ends")
+        .unwrap();
+    assert!(
+        matches!(
+            written,
+            Err(SandboxError::JobEnded(_) | SandboxError::StdinCut { .. })
+        ),
+        "{written:?}"
+    );
+    close(sandbox).await;
+}
+
+async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let ended = |r: &Result<(), SandboxError>| matches!(r, Err(SandboxError::JobEnded(_)));
+
+    // An empty write asks whether the stdin still has a reader.
+    let cmd = ["sh", "-c", "cat >/dev/null"].map(String::from).to_vec();
+    let reading = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = reading.get().id;
+    sandbox
+        .write_stdin(&id, String::new(), false)
+        .await
+        .unwrap();
+    sandbox.remove_job(&id).unwrap();
+
+    // Closed by its process, which runs on: an empty write and a write both refused.
+    let cmd = ["sh", "-c", "exec 0<&-; sleep 300"]
+        .map(String::from)
+        .to_vec();
+    let closed = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = closed.get().id;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let refused = sandbox.write_stdin(&id, String::new(), false).await;
+    assert!(ended(&refused), "{refused:?}");
+    assert!(closed.get().running);
+    sandbox.remove_job(&id).unwrap();
+
+    // Closed under a write: refused saying how much of it went in, and refused after.
+    let cmd = ["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"]
+        .map(String::from)
+        .to_vec();
+    let cut = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = cut.get().id;
+    let of = 1u64 << 20;
+    let refused = sandbox
+        .write_stdin(&id, "x".repeat(of as usize), false)
+        .await;
+    let Err(SandboxError::StdinCut { bytes, of: asked }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(bytes > 0 && bytes < of && asked == of, "{bytes} of {asked}");
+    let refused = sandbox.write_stdin(&id, "x".into(), false).await;
+    assert!(ended(&refused), "{refused:?}");
+    assert!(cut.get().running);
+    close(sandbox).await;
+}
+
+async fn writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // Reads nothing until it is told to, then counts what it reads to its stdin's end.
+    let cmd = [
+        "sh",
+        "-c",
+        "until [ -e /tmp/go ]; do sleep 0.1; done; exec wc -c",
+    ]
+    .map(String::from)
+    .to_vec();
+    let counter = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = counter.get().id;
+    // Writes given up on unanswered: the first past what its pipe holds, the rest held in the
+    // guest behind it, until one finds no room.
+    let mut given_up = Vec::new();
+    let refused = loop {
+        let size = if given_up.is_empty() { 1 << 20 } else { 1 };
+        let write = sandbox.write_stdin(&id, "x".repeat(size), false);
+        match tokio::time::timeout(Duration::from_millis(500), write).await {
+            Err(_) => given_up.push(size),
+            Ok(answered) => break answered,
+        }
+        assert!(given_up.len() <= 16, "never turned away");
+    };
+    assert!(
+        matches!(refused, Err(SandboxError::StdinFull)),
+        "{refused:?}"
+    );
+    // Its eof, with no room either, is turned away too, and closes nothing.
+    let eof = sandbox.write_stdin(&id, String::new(), true).await;
+    assert!(matches!(eof, Err(SandboxError::StdinFull)), "{eof:?}");
+    assert!(counter.get().running);
+
+    // Once it reads, what was given up on goes in, and its eof, sent again until there is room
+    // for it, ends it, having read those and none that was turned away.
+    assert_eq!(
+        run(&sandbox, &["touch", "/tmp/go"], None).await.unwrap().1,
+        0
+    );
+    let mut eof = sandbox.write_stdin(&id, String::new(), true).await;
+    let since = std::time::Instant::now();
+    while matches!(eof, Err(SandboxError::StdinFull)) && since.elapsed() < HANG {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        eof = sandbox.write_stdin(&id, String::new(), true).await;
+    }
+    eof.unwrap();
+    let mut events = std::pin::pin!(Arc::clone(counter.log()).events(&HeaderMap::new()));
+    let mut said = Vec::new();
+    while let Some(Ok(event)) = tokio::time::timeout(HANG, events.next()).await.unwrap() {
+        let event = String::from_utf8(event.to_vec()).unwrap();
+        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+        said.push(serde_json::from_str(data.unwrap()).unwrap());
+    }
+    let read = given_up.iter().sum::<usize>().to_string();
+    assert!(
+        matches!(&said[..], [SandboxJobEntry::Stdout(count), SandboxJobEntry::End(end)]
+            if count.trim() == read && end.code == 0),
+        "{said:?}, {} given up",
+        given_up.len()
+    );
+    close(sandbox).await;
+}
+
+async fn a_job_s_end_says_why_the_server_ended_it_and_only_then(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let start = async |cmd: &[&str], timeout: Option<Duration>| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        sandbox.exec(cmd, false, timeout).await.unwrap()
+    };
+    // The last entry of `job`'s log, read to its end.
+    let end = async |job: &SandboxJob| {
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => end,
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Its own exit, 137 too: no reason.
+    for code in [0, 137] {
+        let job = start(&["sh", "-c", &format!("exit {code}")], None).await;
+        assert_eq!(end(&job).await, SandboxJobEnd::exited(code));
+        assert_eq!(job.get().reason, None);
+    }
+    // `SIGKILL` sent it: its own end, as the signal made it.
+    let job = start(&["sleep", "300"], None).await;
+    sandbox.signal(&job.get().id, 9).unwrap();
+    assert_eq!(end(&job).await, SandboxJobEnd::exited(137));
+    // Past its timeout: killed, for its timeout.
+    let job = start(&["sleep", "300"], Some(Duration::from_millis(200))).await;
+    let timed_out = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(end(&job).await, timed_out);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::Timeout));
+    // Removed while it runs: its log, read from before, reads on to its end, cancelled.
+    let job = start(&["sleep", "300"], None).await;
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    sandbox.remove_job(&job.get().id).unwrap();
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let cancelled = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Cancelled),
+    };
+    assert_eq!(read.unwrap(), cancelled);
+    // Its machine ended under it -- reset, which every arch takes: killed with it.
+    let job = start(&["sh", "-c", "sleep 1; sync; reboot -f"], None).await;
+    let ended = tokio::time::timeout(HANG, end(&job))
+        .await
+        .expect("the machine ends");
+    let exited = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::VmExited),
+    };
+    assert_eq!(ended, exited);
+    assert!(!sandbox.answer().running);
+    close(sandbox).await;
+    // Its sandbox deleted under it: its log, read from before, reads on to its end, which says
+    // so, apart from its own removal.
+    let deleting = home.sandbox(&small(), None).await;
+    let cmd = ["sleep", "300"].map(String::from).to_vec();
+    let job = deleting.exec(cmd, false, None).await.unwrap();
+    let reading = tokio::spawn({
+        let job = Arc::clone(&job);
+        async move { end(&job).await }
+    });
+    close(deleting).await;
+    let read = tokio::time::timeout(HANG, reading)
+        .await
+        .expect("its log ends");
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(read.unwrap(), deleted);
+    assert_eq!(job.get().reason, Some(SandboxJobEndReason::SandboxDeleted));
+}
+
+async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // How `cmd` ended, read from its log to its end.
+    let ended = async |cmd: &[&str]| {
+        let cmd = cmd.iter().map(|arg| arg.to_string()).collect();
+        let job = sandbox.exec(cmd, false, None).await.unwrap();
+        let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+        let mut last = None;
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            let data = event.lines().find_map(|line| line.strip_prefix("data: "));
+            last = Some(serde_json::from_str(data.unwrap()).unwrap());
+        }
+        match last {
+            Some(SandboxJobEntry::End(end)) => (end, job.get().reason),
+            other => panic!("a log ends with its end, not {other:?}"),
+        }
+    };
+
+    // Holding more than one command may, 64 KiB at a time: killed for its memory, by the kernel,
+    // or by the agent where its program's pages are read back again and again instead.
+    let hungry = [
+        "awk",
+        r#"BEGIN { while (1) held[i++] = sprintf("%65536s", "") }"#,
+    ];
+    let Ok((end, reason)) = tokio::time::timeout(HANG, ended(&hungry)).await else {
+        // What its cgroup held, said with the failure.
+        let held = "cd /sys/fs/cgroup/jobs; for c in */; do echo $c; \
+            cat $c/memory.max $c/memory.current $c/memory.events; done; free -m";
+        let held = run(&sandbox, &["sh", "-c", held], None).await;
+        panic!("its memory never ran out: {held:?}");
+    };
+    let oom = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Oom),
+    };
+    assert_eq!((end, reason), (oom, Some(SandboxJobEndReason::Oom)));
+    // `SIGKILL` from itself, within its memory: its own end, as before.
+    let (end, reason) = ended(&["sh", "-c", "kill -9 $$"]).await;
+    assert_eq!((end, reason), (SandboxJobEnd::exited(137), None));
+    // The sandbox answers on.
+    assert_eq!(
+        run(&sandbox, &["echo", "on"], None).await.unwrap().0,
+        ["on"]
+    );
+    close(sandbox).await;
+}
+
+async fn a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // A file half as large again as one command's memory, out of the page cache.
+    let write = "own=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); \
+        mib=$(( $(cat $own/memory.max) * 3 / 2 >> 20 )); \
+        dd if=/dev/zero of=/root/big bs=1M count=$mib 2>/dev/null && \
+        [ $(( $(stat -c %s /root/big) >> 20 )) -eq $mib ] && \
+        sync && echo 3 > /proc/sys/vm/drop_caches";
+    assert_eq!(
+        run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
+        0
+    );
+    // Read whole four times: each pass hits its limit and reads back what the last let go of,
+    // holding next to nothing of its own.
+    let read = [
+        "sh",
+        "-c",
+        "for i in 1 2 3 4; do sha256sum /root/big >/dev/null || exit; done",
+    ];
+    // A guard against a hang: four passes over a GiB and more take a while on a slow disk.
+    let ended = tokio::time::timeout(HANG * 5, run(&sandbox, &read, None));
+    let (lines, code) = ended.await.expect("the reads end").unwrap();
+    assert_eq!((lines, code), (vec![], 0));
+    close(sandbox).await;
+}
+
+/// A machine's process leads a process group of its own, so what is sent its starter's group --
+/// a terminal's ctrl-c -- reaches its starter alone, which stops it.
+#[cfg(unix)]
+async fn a_machine_s_process_leads_a_process_group_of_its_own(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,args="])
+        .output()
+        .unwrap();
+    let ps = String::from_utf8(ps.stdout).unwrap();
+    let ours = std::process::id().to_string();
+    // Each machine this process started: its pid and its process group.
+    let machines: Vec<_> = ps
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| fields.get(1) == Some(&ours.as_str()) && fields.get(4) == Some(&MACHINE))
+        .map(|fields| (fields[0].to_owned(), fields[2].to_owned()))
+        .collect();
+    assert_eq!(machines.len(), 1, "{ps}");
+    let (pid, group) = &machines[0];
+    assert_eq!(group, pid);
     close(sandbox).await;
 }
 
@@ -541,6 +1075,165 @@ async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home
         .unwrap()
         .count();
     assert_eq!(left, 0);
+}
+
+async fn each_machine_s_coming_up_and_going_down_is_told_in_order_with_when(home: Home) {
+    let _woken = runs::subscribe();
+    let before = runs::since(0, usize::MAX).last;
+    let sandbox = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    let first = sandbox.up_since().expect("up as it is made");
+    run(&sandbox, &["true"], None).await.unwrap();
+    // Idle, it is parked; a job boots it again; closed, it is down for good.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(sandbox.up_since(), None, "parked");
+    run(&sandbox, &["true"], None).await.unwrap();
+    let second = sandbox.up_since().expect("up again");
+    assert!(second > first);
+    let id = sandbox.id().to_owned();
+    close(Arc::clone(&sandbox)).await;
+    assert_eq!(sandbox.up_since(), None, "closed");
+
+    let told = runs::since(before, usize::MAX);
+    assert!(told.all);
+    assert_eq!(told.runs.last().map(|run| run.seq), Some(told.last));
+    let ours: Vec<_> = (told.runs.into_iter())
+        .filter(|run| run.root == home.root)
+        .collect();
+    assert!(ours.iter().all(|run| run.sandbox == id));
+    assert!(ours.windows(2).all(|two| two[0].seq < two[1].seq));
+    let ran: Vec<_> = ours.into_iter().map(|run| run.ran).collect();
+    let [
+        Ran::Up { at: up },
+        Ran::Down {
+            started,
+            ended,
+            took,
+        },
+        Ran::Up { at: again },
+        Ran::Down {
+            started: started_again,
+            ended: ended_again,
+            took: took_again,
+        },
+    ] = ran[..]
+    else {
+        panic!("up, down, up and down, not {ran:?}");
+    };
+    assert_eq!((up, started), (first, first));
+    assert_eq!((again, started_again), (second, second));
+    assert!(started < ended && ended <= again && again < ended_again);
+    // How long each was up, by the clock no one sets, is about what the wall clock says.
+    for (took, started, ended) in [(took, started, ended), (took_again, again, ended_again)] {
+        let wall = ended.duration_since(started).unwrap();
+        assert!(
+            took.abs_diff(wall) < Duration::from_millis(100),
+            "{took:?} by {wall:?}"
+        );
+    }
+}
+
+async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
+    let _limit = Limit::to(1);
+    let disks = || {
+        let dir = std::fs::read_dir(home.root.join("sandbox")).unwrap();
+        let names = dir.map(|entry| entry.unwrap().file_name().into_string().unwrap());
+        names.filter(|name| name.ends_with(".ext4")).count()
+    };
+    let first = home
+        .sandbox(&small(), Some(Duration::from_millis(500)))
+        .await;
+    assert_eq!(Limit::taken(), 1);
+
+    // No room for a second's machine: it is refused, and leaves no disk.
+    let vm = vec![env::current_exe().unwrap().into(), OsString::from(MACHINE)];
+    let args = small();
+    let second = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm,
+        None,
+        None,
+        &Backing::default(),
+    )
+    .await;
+    match second {
+        Err(SandboxError::NoRoom(NoRoom(why))) => assert_eq!(why, "1 machines are up"),
+        other => panic!("expected no room, got {:?}", other.map(|_| ())),
+    }
+    assert_eq!(disks(), 1);
+
+    // Parked, the first gives its room back, which a second boots in.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(Limit::taken(), 0);
+    let second = home.sandbox(&small(), None).await;
+    assert_eq!(Limit::taken(), 1);
+
+    // The first's next job finds no room to boot it again in, until the second is closed.
+    let refused = run(&first, &["true"], None).await;
+    assert!(
+        matches!(refused, Err(SandboxError::NoRoom(_))),
+        "{refused:?}"
+    );
+    close(second).await;
+    assert_eq!(Limit::taken(), 0);
+    let (lines, _) = run(&first, &["echo", "up"], None).await.unwrap();
+    assert_eq!(lines, ["up"]);
+    assert_eq!(Limit::taken(), 1);
+    close(first).await;
+    assert_eq!(Limit::taken(), 0);
+}
+
+async fn a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway(home: Home) {
+    // Never parked by itself: only as it is asked.
+    let sandbox = home.sandbox(&small(), None).await;
+    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await
+        .unwrap();
+    let used = sandbox.last_used();
+    assert!(used <= std::time::SystemTime::now());
+
+    // Unused, it is parked; parked, asked again, nothing is done.
+    assert!(sandbox.is_up());
+    sandbox.park().await.unwrap();
+    assert!(!sandbox.is_up());
+    sandbox.park().await.unwrap();
+
+    // A job boots it again, over what it wrote; while one runs, it is refused.
+    let cmd = ["sleep", "30"].map(String::from).to_vec();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
+    assert!(sandbox.is_up());
+    assert!(matches!(sandbox.park().await, Err(SandboxError::InUse(_))));
+    assert!(sandbox.is_up());
+    assert!(job.get().running);
+
+    // Parked anyway, what ran in it ends, killed.
+    sandbox.park_anyway().await;
+    assert!(!sandbox.is_up());
+    // Its end is read off its log, which the machine's going down ends.
+    let mut events = std::pin::pin!(Arc::clone(job.log()).events(&HeaderMap::new()));
+    let ended = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(Ok(event)) = events.next().await {
+            let event = String::from_utf8(event.to_vec()).unwrap();
+            if let Some(data) = event.lines().find_map(|line| line.strip_prefix("data: "))
+                && let Ok(SandboxJobEntry::End(end)) = serde_json::from_str(data)
+            {
+                return end.code;
+            }
+        }
+        panic!("a job's log ends with its end")
+    });
+    assert_eq!(ended.await.expect("the job went on"), 128 + 9);
+    assert!(!job.get().running);
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert!(sandbox.last_used() >= used);
+    close(Arc::clone(&sandbox)).await;
+    // Closed, it is ended.
+    assert!(matches!(sandbox.park().await, Err(SandboxError::Ended)));
 }
 
 async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home) {
@@ -578,8 +1271,8 @@ async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
         None,
         &Backing::default(),
     )
-    .await;
-    let sandbox = sandbox.unwrap();
+    .await
+    .unwrap();
     let busy = [
         "sh",
         "-c",
@@ -663,7 +1356,7 @@ async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
 async fn a_sandbox_closed_twice_at_once_ends_once(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let cmd = ["sleep", "30"].map(String::from).to_vec();
-    let job = sandbox.exec(cmd, None).await.unwrap();
+    let job = sandbox.exec(cmd, false, None).await.unwrap();
     tokio::join!(close(Arc::clone(&sandbox)), close(Arc::clone(&sandbox)));
     assert!(!sandbox.answer().running);
     assert!(!job.get().running);
@@ -1374,6 +2067,7 @@ fn main() -> ExitCode {
     let scratch = env::temp_dir().join(format!("virtx-uvm-machine-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(virtx_uvm::set_admission(Arc::new(Limit)));
     let images = ImageStore::new(scratch.join("images")).unwrap();
     // Only where `VIRTX_TEST_GPU=1` says the host has a GPU with a Vulkan driver: a `gpu` build
     // runs on hosts without one too, and there a guest finds no device. Said on a build without
@@ -1405,7 +2099,20 @@ fn main() -> ExitCode {
     let mut tests = Vec::from(tests![
         a_job_writes_its_output_and_ends_with_its_code_or_its_timeout,
         a_removed_job_is_killed_and_its_sandbox_kept,
+        a_job_ends_with_its_process_not_with_what_it_left_running,
+        a_fork_bomb_leaves_the_sandbox_answering,
+        a_fork_bomb_out_of_memory_leaves_the_sandbox_answering,
+        a_job_s_stdin_is_written_until_it_is_closed,
+        stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
+        a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,
+        writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open,
+        a_job_s_end_says_why_the_server_ended_it_and_only_then,
+        a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not,
+        a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
+        each_machine_s_coming_up_and_going_down_is_told_in_order_with_when,
+        a_machine_boots_only_with_room_given_back_as_it_goes_down,
+        a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
@@ -1423,6 +2130,8 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
+    #[cfg(unix)]
+    tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {

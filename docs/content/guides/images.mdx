@@ -184,7 +184,7 @@ client.push_image("ghcr.io/me/jq:1", Some(auth)).complete(true).await?;
 
 A server run over TCP (`virtx-server-tcp`) connects only to registries on public addresses, for a pull, a push and a build's base alike. A job that names a registry on the server's own machine or its private network fails with `is not reachable from this server`. To use such a registry, list it in the server's `server.json` as the reference names it, `host` or `host:port`: `"private_registries": ["registry.internal:5000"]`. A listed registry that sends the job on to another host on a private address, for its token or for a layer, needs that host listed as well. These connections do not go through an `HTTPS_PROXY` set in the server's environment, so a server whose only way to the internet is such a proxy reaches no registry. The local server reaches whatever your machine does.
 
-Docker Hub limits how often one address may pull without credentials, which a server pulling for many users reaches quickly. Such a server can be given a mirror of Docker Hub in its `server.json`, `"registry_mirror": "mirror.gcr.io"`: a pull of a Docker Hub image without credentials, a build's base included, tries the mirror first and goes to Docker Hub for what the mirror lacks, and the image is tagged with the name the job asked for either way. A tag on the mirror can lag Docker Hub's for a while; a digest names the same image on both. A pull with credentials goes to Docker Hub. A mirror on a private address is listed in `private_registries` too.
+Docker Hub limits how often one address may pull without credentials, which a server pulling for many users reaches quickly. Such a server can be given a mirror of Docker Hub in its `server.json`, `"registry_mirror": "mirror.gcr.io"`: a pull of a Docker Hub image without credentials, a build's base included, tries the mirror first and goes to Docker Hub for what the mirror lacks, and the image is tagged with the name the job asked for either way. A tag on the mirror can lag Docker Hub's for a while; a digest names the same image on both. A pull with credentials goes to Docker Hub. A mirror on a private address is listed in `private_registries` too. A server can also share such pulls between its projects, `"share_public_images": true`; see [Share public images](/docs/guides/self-hosting/#share-public-images) for what that tells one project of another.
 
 ## Copy a local image to a remote server
 
@@ -196,11 +196,11 @@ An image built on your machine can go to a server without a registry in between.
 ```python
 from virtx import BearerAuth, Client
 
-with Client.spawn() as local:
+async with Client.spawn() as local:
     async for _ in local.download_image("jq:latest", "jq.tar"):
         pass
 
-with Client.connect(
+async with Client.connect(
     "https://virtx.example.com", BearerAuth("<token>")
 ) as remote:
     async for _ in remote.upload_image("jq.tar", "jq:latest"):

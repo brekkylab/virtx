@@ -1,6 +1,6 @@
 # Each submodule is a fork under brekkylab, pinned to a commit on its `virtx` branch: the
 # upstream commit it tracks, then one commit per change of ours. `git log upstream..virtx` in
-# a submodule lists them; virtx-uvm/README.md says what each is for.
+# a submodule lists them; 3rdparty/FORKS.md says what each is for.
 [submodule "virglrenderer"]
 	path = 3rdparty/virglrenderer
 	url = https://github.com/brekkylab/virglrenderer.git

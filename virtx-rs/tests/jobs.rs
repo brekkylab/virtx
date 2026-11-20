@@ -5,7 +5,8 @@ use std::{env, future, pin::Pin};
 use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
-    SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Source, Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, Source, Step,
 };
 
 mod common;
@@ -75,18 +76,43 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     assert_eq!(ended, SandboxJobEntry::End(SandboxJobEnd::exited(128 + 15)));
     let again = sandbox.job(sleep.id()).wait().unwrap();
     assert!(!again.info().running, "{again:?}");
+    assert_eq!(again.info().reason, None);
     again.remove().wait().unwrap();
     let gone = sleep.get().wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
     assert_eq!(gone.source_kind(), Source::Server);
 
+    // Past its `timeout_ms`, the server kills it, and its end and its job say so.
+    let timed = SandboxExecArgs::new(["sleep", "60"]).timeout_ms(200);
+    let timed = sandbox.exec(&timed).wait().unwrap();
+    assert_eq!(timed.complete(false).wait().unwrap(), 137);
+    let ended = common::entries(timed.log(None)).pop().unwrap().entry;
+    let killed = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(ended, SandboxJobEntry::End(killed));
+    let timed = timed.get().wait().unwrap();
+    assert_eq!(timed.info().reason, Some(SandboxJobEndReason::Timeout));
+
+    // Its sandbox removed under it: a log being read ends with an end that says so.
+    let up = SandboxExecArgs::new(["sh", "-c", "echo up; sleep 60"]);
+    let up = sandbox.exec(&up).wait().unwrap();
+    let mut log = up.log(None);
+    let first = log.wait_next().unwrap().unwrap().entry;
+    assert_eq!(first, SandboxJobEntry::Stdout("up".into()));
     sandbox.remove().wait().unwrap();
+    let ended = common::entries(log).pop().unwrap().entry;
+    let deleted = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::SandboxDeleted),
+    };
+    assert_eq!(ended, SandboxJobEntry::End(deleted));
     let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
 }
 
 #[test]
-#[ignore = "no server starts a process with a stdin to write to yet: `exec` with `stdin` is refused"]
 fn stdin_written_comes_back_until_it_is_closed() {
     let client = common::client();
     common::alpine(&client);
@@ -110,6 +136,25 @@ fn stdin_written_comes_back_until_it_is_closed() {
             SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
+
+    // Its process closes its stdin under a write: refused, saying how much of it went in.
+    let cut = ["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"];
+    let cut = sandbox
+        .exec(&SandboxExecArgs::new(cut).stdin(true))
+        .wait()
+        .unwrap();
+    let of = 1 << 20;
+    let refused = cut.write_stdin(Some(&"x".repeat(of)), false).wait();
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        (refused.status(), refused.code()),
+        (Some(409), Some("ended"))
+    );
+    let written = refused.written().unwrap();
+    assert!(written > 0 && written < of as u64, "{written} of {of}");
+    // Any other refusal has none.
+    let after = cut.write_stdin(Some("x"), false).wait().unwrap_err();
+    assert_eq!((after.code(), after.written()), (Some("ended"), None));
     sandbox.remove().wait().unwrap();
 }
 
@@ -403,4 +448,144 @@ fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
         assert_eq!(completed.to_string(), failed.to_string());
     }
     assert_eq!(common::tagged(&client, &built), None);
+}
+
+#[test]
+fn a_sandbox_is_found_by_its_name_which_no_other_has_until_it_is_removed() {
+    for client in [common::client(), common::tcp_client()] {
+        common::alpine(&client);
+        let name = common::unique("named");
+        let args = SandboxCreateArgs::new(ALPINE).name(&name);
+        let made = client.create_sandbox(&args).wait().unwrap();
+        assert_eq!(made.name(), Some(name.as_str()));
+        let found = client.find_sandbox(&name).wait().unwrap().unwrap();
+        assert_eq!((found.id(), found.name()), (made.id(), Some(name.as_str())));
+        let nobody = client
+            .find_sandbox(common::unique("nobody"))
+            .wait()
+            .unwrap();
+        assert!(nobody.is_none());
+
+        let taken = client.create_sandbox(&args).wait().unwrap_err();
+        assert_eq!(
+            (taken.source_kind(), taken.status()),
+            (Source::Server, Some(409)),
+            "{taken}"
+        );
+
+        made.remove().wait().unwrap();
+        assert!(client.find_sandbox(&name).wait().unwrap().is_none());
+        let again = client.create_sandbox(&args).wait().unwrap();
+        assert_ne!(again.id(), made.id());
+        again.remove().wait().unwrap();
+    }
+}
+
+#[test]
+fn a_process_is_read_with_its_log_its_job_first() {
+    for client in [common::client(), common::tcp_client()] {
+        common::alpine(&client);
+        let sandbox = client
+            .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+            .wait()
+            .unwrap();
+        let mut items =
+            sandbox.exec_with_log(&SandboxExecArgs::new(["sh", "-c", "echo hi; exit 3"]));
+        let mut read = Vec::new();
+        while let Some(item) = items.wait_next() {
+            read.push(item.unwrap());
+        }
+        let SandboxExecItem::Job(job) = &read[0] else {
+            panic!("its job first: {read:?}");
+        };
+        assert_eq!(job.cmd, ["sh", "-c", "echo hi; exit 3"]);
+        let entries: Vec<_> = read[1..]
+            .iter()
+            .map(|item| match item {
+                SandboxExecItem::Log(entry) => entry.entry.clone(),
+                SandboxExecItem::Job(_) => panic!("one job: {read:?}"),
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                SandboxJobEntry::Stdout("hi".into()),
+                SandboxJobEntry::End(SandboxJobEnd::exited(3)),
+            ]
+        );
+        let got = sandbox.job(&job.id).wait().unwrap();
+        assert_eq!(got.info().code, Some(3));
+        sandbox.remove().wait().unwrap();
+    }
+}
+
+/// `virtx-server-tcp` answers an exec that accepts `text/event-stream` with its job as the first
+/// event, with no `id`, then its log numbered as the job's own log is, and the job's path in
+/// `Location`; and one that does not with the job alone.
+#[test]
+fn an_exec_that_accepts_an_event_stream_is_answered_with_its_job_then_its_log() {
+    let client = common::tcp_client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    let common::Fixture {
+        url,
+        token,
+        project,
+        ..
+    } = common::fixture();
+    let url = url.trim_end_matches('/');
+    let request = |method: reqwest::Method, path: &str| {
+        reqwest::blocking::Client::new()
+            .request(method, format!("{url}{path}"))
+            .bearer_auth(token)
+            .header("virtx-project", project)
+    };
+    let exec = |accept: &str| {
+        request(
+            reqwest::Method::POST,
+            &format!("/sandboxes/{}/jobs/exec/", sandbox.id()),
+        )
+        .header("content-type", "application/json")
+        .header("accept", accept)
+        .body(r#"{"cmd": ["echo", "hi"]}"#)
+        .send()
+        .unwrap()
+    };
+
+    let answered = exec("text/event-stream");
+    assert_eq!(answered.status(), 201);
+    let headers = answered.headers().clone();
+    assert_eq!(headers["content-type"], "text/event-stream");
+    assert!(headers.get("virtx-job").is_none());
+    let body = answered.text().unwrap();
+    let (first, log) = body.split_once("\n\n").unwrap();
+    let job = first.strip_prefix("data: ").unwrap();
+    let job: serde_json::Value = serde_json::from_str(job).unwrap();
+    let job: virtx::SandboxJobInfo = serde_json::from_value(job["job"].clone()).unwrap();
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    let location = format!("/sandboxes/{}/jobs/{}", sandbox.id(), job.id);
+    assert_eq!(headers["location"], location.as_str());
+    assert_eq!(
+        log,
+        "id: 1\ndata: {\"stdout\":\"hi\"}\n\nid: 2\ndata: {\"end\":{\"code\":0}}\n\n"
+    );
+    // Cut off after its first entry, the job's log is read on after that entry's id.
+    let rest = request(reqwest::Method::GET, &format!("{location}/events"))
+        .header("accept", "text/event-stream")
+        .header("last-event-id", "1")
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert_eq!(rest, "id: 2\ndata: {\"end\":{\"code\":0}}\n\n");
+
+    let answered = exec("application/json");
+    assert_eq!(answered.status(), 201);
+    assert_eq!(answered.headers()["content-type"], "application/json");
+    let job: virtx::SandboxJobInfo = serde_json::from_str(&answered.text().unwrap()).unwrap();
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    sandbox.remove().wait().unwrap();
 }

@@ -23,6 +23,10 @@
   },
   {
     "label": "Reference",
-    "items": [{ "slug": "reference/api" }, { "slug": "reference/cli" }]
+    "items": [
+      { "slug": "reference/api" },
+      { "slug": "reference/cli" },
+      { "slug": "reference/protocol" }
+    ]
   }
 ]

@@ -1,8 +1,8 @@
-//! The server's routes, for an [`Access`]: the endpoints of `virtx-core`'s `PROTOCOL.md`
-//! ([`crate::endpoints`]), each answered from the home its request reaches, the images as an
-//! OCI registry, and each sandbox's ports. A server built on this one gives [`router`] an
-//! authenticator of its own in the access, and routes of its own beside these; the server a
-//! config alone makes is [`configured`], which does both.
+//! The server's routes, for an [`Access`]: the endpoints of the protocol ([`crate::endpoints`]),
+//! each answered from the home its request reaches, the images as an OCI registry, and each
+//! sandbox's ports. A server built on this one gives [`router`] an authenticator of its own in the
+//! access, and routes of its own beside these; the server a config alone makes is [`configured`],
+//! which does both.
 //!
 //! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
@@ -18,7 +18,7 @@ use anyhow::Context as _;
 use axum::Extension;
 use axum::extract::Path;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::any;
@@ -54,7 +54,7 @@ pub fn become_machine_if_spawned() {
 
 /// The server `config` alone makes: its [`Access::configured`] behind [`router`], and beside it
 /// where a client signs in for its tokens, answered without any -- the provider and the client
-/// to sign in as.
+/// to sign in as -- and the projects themselves ([`projects`]).
 pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::Router)> {
     let access = Arc::new(Access::configured(config).await?);
     let oidc = &config.oidc;
@@ -65,18 +65,27 @@ pub async fn configured(config: &Config) -> anyhow::Result<(Arc<Access>, axum::R
         [(header::CONTENT_TYPE, "application/json")],
         advertised.to_string(),
     );
-    let own = axum::Router::new().route(
-        "/auth",
-        axum::routing::get(move || async move { advertised }),
-    );
+    let own = axum::Router::new()
+        .route(
+            "/auth",
+            axum::routing::get(move || async move { advertised }),
+        )
+        .merge(projects(&access));
     let router = router(Arc::clone(&access), own);
     Ok((access, router))
 }
 
-/// Everything served, each request checked against `access`: the endpoints, in the home a
-/// request reaches, the projects themselves, the images' registry at `/images/oci/v2/`, the
-/// ports, and the CORS a browser at one of its origins has -- with `own` beside them, routes
-/// that take no home and check for themselves.
+/// The projects themselves, and their members, as `access`'s membership answers them: for a
+/// server to merge into the routes it gives [`router`], where it serves them. One that keeps its
+/// projects elsewhere, and serves them there, merges none.
+pub fn projects(access: &Arc<Access>) -> axum::Router {
+    endpoints::projects().layer(Extension(Arc::clone(access)))
+}
+
+/// Everything served in a project, each request checked against `access`: the endpoints, in the
+/// home a request reaches, the images' registry at `/images/oci/v2/`, the ports, and the CORS a
+/// browser at one of its origins has -- with `own` beside them, routes that take no home and
+/// check for themselves, such as the projects themselves ([`projects`]).
 pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
     let registry = format!("{}/v2", access::REGISTRY_PATH);
     let cors = cors(access.origins());
@@ -112,7 +121,6 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
                 }
             },
         ))
-        .merge(endpoints::projects().layer(Extension(Arc::clone(&access))))
         .merge(own)
         .route(&registry, any(images.clone()))
         .route(&format!("{registry}/"), any(images.clone()))
@@ -159,14 +167,49 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
     Ok(listener)
 }
 
-/// `router` served on `listener` until this process is interrupted.
+/// `router` served on `listener` until this process is asked to stop.
 pub async fn run(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(interrupted())
         .await?;
     Ok(())
+}
+
+/// Once this process is asked to stop: by ctrl-c; on Unix by `SIGTERM` too, as a service
+/// manager, `docker stop` or a plain `kill` asks; on Windows by ctrl-break, the one console
+/// event a process group of its own can be sent, and by its console's closing, a logoff or a
+/// shutdown, each of which Windows gives a few seconds before it ends the process.
+async fn interrupted() {
+    #[cfg(unix)]
+    if let Ok(mut terminate) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        if let (Ok(mut ctrl_break), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+            windows::ctrl_break(),
+            windows::ctrl_close(),
+            windows::ctrl_logoff(),
+            windows::ctrl_shutdown(),
+        ) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = ctrl_break.recv() => {}
+                _ = close.recv() => {}
+                _ = logoff.recv() => {}
+                _ = shutdown.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// What a browser at one of the config's `origins` may do here: every method the endpoints
@@ -257,37 +300,55 @@ fn port(
 
 /// Carry bytes between `socket` and the port `tunnel` reaches until either ends: what is
 /// read from the port as binary messages, and the binary messages to the port. Closed at once
-/// when no machine runs, as a port nothing listens on is.
+/// when the port is not reached, such as when no machine runs, saying why as the close's reason.
 async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
-    if let Ok(mut reached) = tunnel.connect().await {
-        let (mut from, mut to) = reached.split();
-        let mut buffer = vec![0u8; CHUNK];
-        loop {
-            tokio::select! {
-                read = from.read(&mut buffer) => match read {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let message = Message::Binary(buffer[..n].to_vec().into());
-                        if socket.send(message).await.is_err() {
-                            break;
-                        }
+    let mut reached = match tunnel.connect().await {
+        Ok(reached) => reached,
+        Err(e) => {
+            let frame = CloseFrame {
+                code: close_code::ERROR,
+                reason: close_reason(&e.to_string()).into(),
+            };
+            let _ = socket.send(Message::Close(Some(frame))).await;
+            return;
+        }
+    };
+    let (mut from, mut to) = reached.split();
+    let mut buffer = vec![0u8; CHUNK];
+    loop {
+        tokio::select! {
+            read = from.read(&mut buffer) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let message = Message::Binary(buffer[..n].to_vec().into());
+                    if socket.send(message).await.is_err() {
+                        break;
                     }
-                },
-                received = socket.recv() => match received {
-                    Some(Ok(Message::Binary(bytes))) => {
-                        if to.write_all(&bytes).await.is_err() {
-                            break;
-                        }
+                }
+            },
+            received = socket.recv() => match received {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if to.write_all(&bytes).await.is_err() {
+                        break;
                     }
-                    // Answered by the socket itself.
-                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                    // Text is no TCP's, and anything else is the end.
-                    Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
-                },
-            }
+                }
+                // Answered by the socket itself.
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                // Text is no TCP's, and anything else is the end.
+                Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
+            },
         }
     }
     let _ = socket.send(Message::Close(None)).await;
+}
+
+/// `said` as a close's reason, which a WebSocket holds 123 bytes of: cut at a character's end.
+fn close_reason(said: &str) -> String {
+    let mut end = said.len().min(123);
+    while !said.is_char_boundary(end) {
+        end -= 1;
+    }
+    said[..end].to_owned()
 }
 
 #[cfg(test)]
@@ -308,7 +369,10 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::VolumeListOutputItem;
-    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
+    use virtx_core::{
+        Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
+        SandboxCreateArgs,
+    };
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
         FsTree, ImageStore, ProjectId, PublicRegistries, Reference, RegistryProxy, StorageBackend,
@@ -317,6 +381,7 @@ mod tests {
 
     use std::sync::Arc;
 
+    use futures_util::StreamExt as _;
     use futures_util::future::BoxFuture;
 
     use virtx_uvm::ProjectStore;
@@ -348,7 +413,7 @@ mod tests {
 
     impl Served {
         /// With every request the tester's, the owner of `demo` and `other`, from
-        /// `https://allowed.example`.
+        /// `https://allowed.example`, and the projects served as the binary serves them.
         async fn spawn(name: &str) -> Served {
             Served::spawn_through(name, None).await
         }
@@ -373,7 +438,8 @@ mod tests {
                 if let Some(registries) = registries {
                     access = access.through(registries);
                 }
-                super::router(Arc::new(access), axum::Router::new())
+                let access = Arc::new(access);
+                super::router(Arc::clone(&access), super::projects(&access))
             })
             .await
         }
@@ -475,7 +541,7 @@ mod tests {
     /// The HTTP status a request was refused with.
     fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
         match answered {
-            Err(virtx_core::Error::Status(status, _)) => status,
+            Err(virtx_core::Error::Status(status, _, _)) => status,
             other => panic!("expected a status, got {other:?}"),
         }
     }
@@ -517,7 +583,8 @@ mod tests {
                 store.clone(),
                 Arc::new(store),
             );
-            super::router(Arc::new(access), axum::Router::new())
+            let access = Arc::new(access);
+            super::router(Arc::clone(&access), super::projects(&access))
         })
         .await;
         let send = async |method: &str, path: &str, token: &str, body: Value| {
@@ -651,6 +718,62 @@ mod tests {
         assert!(!dir.exists());
         assert_eq!(status("GET", &project, "alice", none).await, 403);
         assert_eq!(listed("alice").await, [(json!("default"), json!("alice"))]);
+    }
+
+    /// A server built on this one serves the projects only where it merges them: one that keeps
+    /// them elsewhere answers none of its own.
+    #[tokio::test]
+    async fn the_projects_are_served_only_where_a_server_merges_them() {
+        let served = Served::spawn_over("unmerged", async |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
+        let (status, body) = served.send("GET", "projects/", None, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let (status, _) = served.send("GET", "projects/demo", None, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Its endpoints in a project answer as before.
+        let (status, _) = served.send("GET", "volumes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let served = Served::spawn_over("merged", async |home| {
+            let projects = TcpMembership::new(home);
+            projects
+                .create(&Principal::new("tester"), "demo")
+                .await
+                .unwrap();
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            let access = Arc::new(access);
+            super::router(Arc::clone(&access), super::projects(&access))
+        })
+        .await;
+        let (status, body) = served.send("GET", "projects/", None, "").await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: Vec<Value> = serde_json::from_str(&body).unwrap();
+        assert!(
+            listed.iter().any(|project| project["name"] == "demo"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
@@ -948,9 +1071,108 @@ mod tests {
         );
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
-    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
-    /// and a path whose segment does not read as one is `400` `invalid`.
+    /// Needs a network: `cargo test -p virtx-server-tcp -- --ignored`. Homes made sharing their
+    /// anonymous pulls: a pull in one, and a build's base in another, ask where they are shared
+    /// for the image before pulling it, and tell it of the image pulled.
+    #[tokio::test]
+    #[ignore]
+    async fn a_home_s_anonymous_pulls_are_shared_where_it_was_made_to_share_them() {
+        use virtx_uvm::{Digest, PublicImages};
+
+        #[derive(Default)]
+        struct Told {
+            asked: std::sync::Mutex<Vec<Digest>>,
+            pulled: std::sync::Mutex<Vec<Digest>>,
+        }
+        impl PublicImages for Told {
+            fn fetch<'a>(
+                &'a self,
+                _: &'a ImageStore,
+                origin: &'a Digest,
+            ) -> BoxFuture<'a, anyhow::Result<Option<Digest>>> {
+                self.asked.lock().unwrap().push(origin.clone());
+                Box::pin(async { Ok(None) })
+            }
+            fn pulled(&self, origin: &Digest, _: &[u8], _: &[u8], _: &Digest) {
+                self.pulled.lock().unwrap().push(origin.clone());
+            }
+        }
+        struct Sharing(ProjectStore, Arc<Told>);
+        impl crate::access::Homes for Sharing {
+            fn make<'a>(
+                &'a self,
+                id: &'a virtx_uvm::ProjectId,
+            ) -> BoxFuture<'a, anyhow::Result<Option<crate::endpoints::Home>>> {
+                Box::pin(async move {
+                    let home = self.0.make(id).await?;
+                    let public: Arc<dyn PublicImages> = self.1.clone();
+                    Ok(home.map(|home| home.sharing(Some(public))))
+                })
+            }
+        }
+
+        let told = Arc::new(Told::default());
+        let shared = Arc::clone(&told);
+        let served = Served::spawn_over("sharing", async |home| {
+            let projects = TcpMembership::new(home);
+            for project in ["demo", "other"] {
+                projects
+                    .create(&Principal::new("tester"), project)
+                    .await
+                    .unwrap();
+            }
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(Sharing(store, shared)),
+            );
+            super::router(Arc::new(access), axum::Router::new())
+        })
+        .await;
+        let ended = async |client: &Client, job: ImageJob| {
+            // A guard against a hang, not a measure of anything.
+            tokio::time::timeout(std::time::Duration::from_secs(300), async {
+                loop {
+                    let job = client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job.error;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("the job went on")
+        };
+        let alpine = "mirror.gcr.io/library/alpine:3.21";
+
+        let client = served.connect();
+        let job = client.pull_image(alpine, None).await.unwrap();
+        assert_eq!(ended(&client, job).await, None);
+        let pulled = told.pulled.lock().unwrap().clone();
+        assert_eq!(pulled.len(), 1);
+        assert_eq!(*told.asked.lock().unwrap(), pulled);
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert("virtx-project", "other".parse().unwrap());
+        let other = Client::connect(&served.url, Auth::None, headers).unwrap();
+        let job = other
+            .build_image(Recipe::new(alpine), "built:1")
+            .await
+            .unwrap();
+        assert_eq!(ended(&other, job).await, None);
+        assert_eq!(
+            *told.asked.lock().unwrap(),
+            [pulled[0].clone(), pulled[0].clone()]
+        );
+        assert_eq!(told.pulled.lock().unwrap().len(), 2);
+    }
+
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client reads
+    /// its code: a body over the server's limit is `413` `too_large`, naming the limit, and a path
+    /// whose segment does not read as one is `400` `invalid`.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
         let served = Served::spawn("envelope").await;
@@ -1035,7 +1257,7 @@ mod tests {
                 "POST",
                 "sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
             ),
             (
                 "GET",
@@ -1224,8 +1446,17 @@ mod tests {
 
         // A port that is none, and a sandbox of an image nobody filed, are refused before it
         // boots.
-        let mut args = SandboxCreateArgs::new("a:b");
-        args.ports = vec![0];
+        let args = SandboxCreateArgs::new("a:b").port(0);
+        assert_eq!(status(client.create_sandbox(&args).await), 400);
+        // So are a port asked for over HTTP, which a port's tunnel here does not serve, and one
+        // with inbound rules, which this server keeps none of.
+        let web = PortSpec::new(5173).protocol(PortProtocol::Http);
+        let args = SandboxCreateArgs::new("a:b").port(web);
+        let refused = client.create_sandbox(&args).await.unwrap_err();
+        assert_eq!(refused.status(), Some(400), "{refused}");
+        assert!(refused.to_string().contains("HTTP"), "{refused}");
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        let args = SandboxCreateArgs::new("a:b").port(ssh);
         assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);
@@ -1233,8 +1464,8 @@ mod tests {
 
     /// What a server before this one kept of a project's sandboxes is known again as the project
     /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
-    /// was made with, with its jobs, one that ran then ended `restarted`; what no sandbox keeps
-    /// is deleted. No machine boots for it.
+    /// was made with and answering its ports without them, with its jobs, one that ran then
+    /// ended `restarted`; what no sandbox keeps is deleted. No machine boots for it.
     #[tokio::test]
     async fn a_project_s_sandboxes_are_kept_across_a_restart() {
         let served = Served::spawn("kept").await;
@@ -1250,14 +1481,21 @@ mod tests {
             { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
             { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
         ]);
+        let web = json!({ "port": 8080, "label": "web" });
         let kept = [
-            ("kept", json!({ capability.clone(): 8080 }), false, jobs),
-            ("ended", json!({}), true, json!([])),
+            (
+                "kept",
+                json!({ capability.clone(): 8080 }),
+                false,
+                jobs,
+                web.clone(),
+            ),
+            ("ended", json!({}), true, json!([]), json!(8080)),
         ];
-        for (id, keys, exited, jobs) in kept {
+        for (id, keys, exited, jobs, port) in kept {
             std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
             let image = json!({ "type": "digest", "digest": digest });
-            let args = json!({ "image": image, "ports": [8080] });
+            let args = json!({ "image": image, "ports": [port] });
             let record = json!({ "args": args, "keys": keys, "exited": exited, "jobs": jobs });
             std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
         }
@@ -1272,10 +1510,14 @@ mod tests {
         assert_eq!(
             listed,
             [
-                json!({ "id": "ended", "image": digest, "running": false }),
-                json!({ "id": "kept", "image": digest, "running": true }),
+                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080 }] }),
+                json!({ "id": "kept", "image": digest, "running": true, "ports": [web] }),
             ]
         );
+        let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let got: Value = serde_json::from_str(&got).unwrap();
+        assert_eq!(got, listed[1]);
         let mut left: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -1309,9 +1551,14 @@ mod tests {
             "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
         );
 
-        // Its port's URL reaches it as it did: parked, nothing listens there.
+        // Its port's URL reaches it as it did: parked, no machine runs to reach the port in,
+        // which the close says.
         let port = served.port_url(&format!("ports/{capability}"));
-        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
+        let mut socket = Served::open(&port, Some("virtx.tcp")).await.unwrap();
+        let Some(Ok(tungstenite::Message::Close(Some(frame)))) = socket.next().await else {
+            panic!("the WebSocket was not closed with a reason");
+        };
+        assert!(frame.reason.contains("no machine runs"), "{}", frame.reason);
 
         let (status, _) = served
             .send("DELETE", "sandboxes/kept", Some("demo"), "")
@@ -1451,8 +1698,8 @@ mod tests {
                 b.write_file(&root, "read", from_b.clone(), Some(&etag)),
             );
             let landed = match (by_a, by_b) {
-                (Ok(()), Err(virtx_core::Error::Status(412, _))) => &from_a,
-                (Err(virtx_core::Error::Status(412, _)), Ok(())) => &from_b,
+                (Ok(()), Err(virtx_core::Error::Status(412, _, _))) => &from_a,
+                (Err(virtx_core::Error::Status(412, _, _)), Ok(())) => &from_b,
                 (by_a, by_b) => panic!("round {round}, over one etag: {by_a:?} and {by_b:?}"),
             };
             let read = a.read_file(&root, "read", 0, None).await.unwrap();
@@ -1908,5 +2155,68 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert_eq!(*beyond.removed.lock().unwrap(), ["moved"]);
         assert!(!dir.join("moved.ext4").exists() && !dir.join("moved.json").exists());
+    }
+
+    /// A home's sandboxes, as a server built on this one reads them for routes of its own: each
+    /// found by its id, and counted with how many have their machine up, none while each is
+    /// parked; one not known again is none of them, and counted apart.
+    #[tokio::test]
+    async fn a_home_s_sandboxes_are_found_and_counted() {
+        let access = Arc::new(OnceLock::new());
+        let kept = Arc::clone(&access);
+        let served = Served::spawn_over("counted", async move |home| {
+            let projects = TcpMembership::new(home);
+            let tester = Principal::new("tester");
+            projects.create(&tester, "demo").await.unwrap();
+            let store = ProjectStore::new(home);
+            let made = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            let made = Arc::new(made);
+            let _ = kept.set(Arc::clone(&made));
+            super::router(made, axum::Router::new())
+        })
+        .await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = format!("sha256:{}", "0".repeat(64));
+        for (id, image) in [("a", &digest), ("b", &digest), ("lost", &gone)] {
+            let image = json!({ "type": "digest", "digest": image });
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let record = json!({ "args": { "image": image } });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        let (status, _) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let home = access.get().unwrap().homes().pop().unwrap();
+
+        let sandboxes = home.sandboxes();
+        let counts = |known, up, unknown| crate::endpoints::Counts { known, up, unknown };
+        assert_eq!(sandboxes.counts(), counts(2, 0, 1));
+        let mut listed: Vec<_> = sandboxes
+            .list()
+            .iter()
+            .map(|sandbox| sandbox.id().to_owned())
+            .collect();
+        listed.sort();
+        assert_eq!(listed, ["a", "b"]);
+        assert_eq!(sandboxes.get("a").unwrap().id(), "a");
+        assert!(sandboxes.get("lost").is_none(), "not known again");
+        assert!(sandboxes.get("none").is_none());
+        assert!(sandboxes.running_on("a").is_none(), "parked");
+
+        let (status, _) = served.send("DELETE", "sandboxes/b", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(home.sandboxes().counts(), counts(1, 0, 1));
+        assert!(home.sandboxes().get("b").is_none());
     }
 }

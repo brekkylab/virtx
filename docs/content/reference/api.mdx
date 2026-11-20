@@ -29,7 +29,7 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 ## Projects
 
 Everything on a server belongs to a project, which a client names at `connect`, or with `set_project`: a project of the user's by its name, or any by its id.
-See [Managing projects](/docs/guides/projects/), and [Projects](https://github.com/brekkylab/virtx/blob/main/virtx-core/PROTOCOL.md#projects) in the protocol.
+See [Managing projects](/docs/guides/projects/), and [Projects](/docs/reference/protocol/#projects) in the protocol.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -73,19 +73,25 @@ See [Setting up sandboxes](/docs/guides/setting-sandboxes/) for the options `cre
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `create_sandbox(image, ...)` | `Sandbox` | Makes a sandbox of `image`, with the options given. `image` has to be on the server already, pulled or built: this does not pull it. |
-| `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes, without their ports. |
+| `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes, each port without its `url`. |
+| `find_sandbox(name)` | `Sandbox` or none | The sandbox made with `name`, each port without its `url`; none if no sandbox has it. |
 
 A `Sandbox` carries its client, and acts on itself:
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. |
+| `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. Iterated before it is awaited, the job is started and its log read as one request where the server answers so. In Rust, `exec_with_log(args)` yields the job, then its log. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.
 
-In Rust, `Sandbox` answers `id()` and `info()`, which holds its `image`, `running` and `ports`.
+In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image`, `running` and `ports`.
+
+A port in `create_sandbox`'s `ports` is a number, for TCP, or a `PortSpec(port, label, protocol, inbound)`; in Node.js, `{ port, label?, protocol?, inbound? }`.
+Each comes back as a `SandboxPort`: its `port` and `url`, its `label` and `protocol` as given, an `address` where the server gives a TCP port one, and an `inbound_error` where it opened one whose rules it could not set.
+`list_sandbox` and `get_sandbox` answer each port with its `port`, `label`, `protocol` and `address`, and no `url`: `create_sandbox` alone answers that, since it carries the port's credentials.
+An `InboundRule(source, description)` lets in `source`, an IPv4 or IPv6 CIDR or one address; a server that keeps no rules, as `virtx-stdio` and `virtx-server-tcp` do not, refuses `inbound` with `400`.
 
 A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.
 
@@ -95,7 +101,7 @@ A job is a sandbox's process, from `exec`, or an image's build, pull or push.
 
 ### Sandbox jobs
 
-A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `restarted`, for one that ran when its server restarted, keeping its sandbox.
+A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Running commands](/docs/guides/running-commands/#set-a-timeout) says, or `restarted`, for one that ran when its server restarted, keeping its sandbox.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -103,7 +109,7 @@ A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cm
 | `complete(print)` | `int` | Follows it to its end, printing its output if `print`, and answers its exit code. |
 | `log(after)` | a `LogEntry` at a time | Its output, from its start or after entry `after`, until its end. |
 | `signal(signal)` | `None` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
-| `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. |
+| `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. A write its process closed its stdin under part-way raises `409`, `ended`, its `written` how many bytes went in. One the server has no room for yet, after writes given up on while the process did not read, is turned away for now as `503` `capacity`, nothing of it taken, and, if its request is at most 1 MiB, sent again as below. |
 | `remove()` | `None` | Kills its process if it runs, and forgets the job. |
 
 Code that holds only ids gets the job back with `get_sandbox(id)`, then its `job(id)`.
@@ -141,9 +147,10 @@ Its `source` says where it failed, and `status` the HTTP status when the server 
 
 Where the server answered its refusal as the protocol does, `code` is the protocol's code for it, such as `not_found` or `in_use`, and otherwise none.
 Tell errors apart by `source`, `status` and `code`, not by the message.
-In Rust, `source_kind()` answers the `Source`, `status()` the status and `code()` the code.
+A write to a job's stdin that its process closed the stdin under part-way also has `written`, how many bytes of it went in; every other error has none.
+In Rust, `source_kind()` answers the `Source`, `status()` the status, `code()` the code and `written()` that count.
 
-A request the server turns away for now, such as `503` `capacity` while it has no room for a sandbox, is sent again after the wait the server asks for, for up to 30 seconds, before the call fails with it.
+A request the server turns away for now, such as `503` `capacity` while it has no room for a sandbox, is sent again after the wait the server asks for, for up to 30 seconds, before the call fails with it. Only a request whose body is at most 1 MiB is sent again; a larger one fails with the first refusal.
 A `429` `quota` for a limit that frees up only as you close or delete something, such as the sandboxes you have, fails at once.
 
 ## Volumes
@@ -188,7 +195,8 @@ See [Networks and ports](/docs/guides/networks-ports/).
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `PortForwarder.open(client, url)` | `PortForwarder` | Forwards the sandbox port `url` names to an address on this machine's loopback. |
+| `PortForwarder.open(client, port)` | `PortForwarder` | Forwards a sandbox's port, as `ports` answers it, or the `url` answered for it, to an address on this machine's loopback. Given the port, a failed connection's error names its number. |
+| `last_error` | `VirtxError` or `None` | Why the last connection that failed did -- its WebSocket refused, or closed before the port sent a byte, with the server's reason if it gave one -- naming the port; `None` again once a later connection's port sends a byte. Each failure is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
 | `address`, `host`, `port` | `str`, `str`, `int` | Where it is reached. In Rust, `address()`. |
 | `close()` | `None` | Stops forwarding; the port in the sandbox stays open. In Rust, dropping it does the same. |
 

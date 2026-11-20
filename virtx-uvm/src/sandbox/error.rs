@@ -1,4 +1,4 @@
-use crate::{ImageStoreError, MachineError, VolumeError};
+use crate::{ImageStoreError, MachineError, NoRoom, VolumeError};
 
 /// What making a sandbox, or asking something of one, fails with.
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +19,15 @@ pub enum Error {
     #[error("{0}")]
     NotStarted(String),
 
+    /// No room for its machine now, as the embedder's [`Admission`](crate::Admission) says:
+    /// nothing was booted.
+    #[error(transparent)]
+    NoRoom(#[from] NoRoom),
+    /// What was asked cannot be done while the sandbox is in use: a job runs in it, or
+    /// something reaches it.
+    #[error("{0}")]
+    InUse(String),
+
     /// The sandbox's machine has exited, and takes nothing more.
     #[error("the sandbox's machine has exited")]
     Ended,
@@ -26,6 +35,18 @@ pub enum Error {
     /// The job has ended, or never took what was asked of it.
     #[error("{0}")]
     JobEnded(&'static str),
+
+    /// A write to a job's stdin that its process closed the stdin under: `bytes` of its `of`
+    /// went in, and nothing more will.
+    #[error("the job's stdin closed after {bytes} of the {of} bytes written to it")]
+    StdinCut { bytes: u64, of: u64 },
+
+    /// A write to a job's stdin not taken, `eof` and all: as many writes to it as the guest
+    /// holds wait for its process to read. The stdin is as it was.
+    #[error(
+        "the job's stdin holds as many writes as it takes until its process reads: none of this one was taken"
+    )]
+    StdinFull,
 
     #[error(transparent)]
     Image(#[from] ImageStoreError),

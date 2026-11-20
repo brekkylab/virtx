@@ -116,10 +116,7 @@ fn a_running_process_s_log_is_read_as_it_writes_it() {
         rest,
         [
             SandboxJobEntry::Stdout("b".into()),
-            SandboxJobEntry::End(SandboxJobEnd {
-                code: 0,
-                reason: None
-            }),
+            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
         ]
     );
     sandbox.remove().wait().unwrap();

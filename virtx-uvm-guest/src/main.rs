@@ -387,7 +387,7 @@ impl Piped {
                 count,
             };
         };
-        let (woken, wake) = wake_pipe().map_or((None, None), |(r, w)| (Some(r), Some(w)));
+        let (mut woken, wake) = wake_pipe().map_or((None, None), |(r, w)| (Some(r), Some(w)));
         let pipe = Arc::new(File::from(pipe));
         let (out, counted, reading) = (Arc::clone(out), Arc::clone(&count), Arc::clone(&pipe));
         thread::spawn(move || {
@@ -419,6 +419,8 @@ impl Piped {
                     }
                     say(&mut said);
                     let _ = told.send(());
+                    // Nothing waits on the wake past this: its descriptor given back.
+                    woken = None;
                 }
                 // Until its process has ended, the pipe or the wake, whichever comes first; after,
                 // the pipe alone, read only to be dropped.

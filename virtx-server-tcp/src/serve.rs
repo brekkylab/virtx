@@ -167,14 +167,49 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
     Ok(listener)
 }
 
-/// `router` served on `listener` until this process is interrupted.
+/// `router` served on `listener` until this process is asked to stop.
 pub async fn run(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
     axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(interrupted())
         .await?;
     Ok(())
+}
+
+/// Once this process is asked to stop: by ctrl-c; on Unix by `SIGTERM` too, as a service
+/// manager, `docker stop` or a plain `kill` asks; on Windows by ctrl-break, the one console
+/// event a process group of its own can be sent, and by its console's closing, a logoff or a
+/// shutdown, each of which Windows gives a few seconds before it ends the process.
+async fn interrupted() {
+    #[cfg(unix)]
+    if let Ok(mut terminate) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        if let (Ok(mut ctrl_break), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+            windows::ctrl_break(),
+            windows::ctrl_close(),
+            windows::ctrl_logoff(),
+            windows::ctrl_shutdown(),
+        ) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = ctrl_break.recv() => {}
+                _ = close.recv() => {}
+                _ = logoff.recv() => {}
+                _ = shutdown.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// What a browser at one of the config's `origins` may do here: every method the endpoints

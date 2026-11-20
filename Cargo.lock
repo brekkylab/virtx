@@ -3971,6 +3971,7 @@ dependencies = [
  "uuid",
  "virtx-core",
  "virtx-uvm",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

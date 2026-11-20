@@ -99,6 +99,7 @@ The client's `role` in each is `owner`, and the server serves no `/projects/{pro
 
 Projects and their members are made, read and removed with the requests below, as [Resources](#resources) says.
 They name the project in their path, and take no `virtx-project`.
+A server whose projects are kept and managed elsewhere, as one built for a service that has its own, may serve none of them: each is then answered `404`, `not_found`, and a request that names a project in `virtx-project` reaches it as above.
 
 | Request | Body | Answer |
 | --- | --- | --- |
@@ -330,7 +331,7 @@ The `POST` answers each with where it is reached from, as `{port, url}`, in the 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them. The URL is as secret as those credentials, and the client MUST keep it so.
 - The URL is the server's to form: a client MUST NOT build one or take it apart.
-- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`.
+- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; a server that could not reach the port at all, such as while no VM runs, SHOULD close it with a reason saying why, for a person.
 - Ports are the way in, and do not need `network`, which is the way out.
 
 ### Sandbox jobs

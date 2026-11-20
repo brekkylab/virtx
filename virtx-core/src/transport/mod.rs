@@ -23,7 +23,7 @@ pub use args::{described_type, from_body};
 #[cfg(feature = "client")]
 pub(crate) use client::{Body, full};
 #[cfg(feature = "client")]
-pub use client::{PortForwarder, TransportClient};
+pub use client::{ForwardError, PortForwarder, TransportClient};
 #[cfg(feature = "client")]
 pub(crate) use http::{resolved, segment, segments};
 #[cfg(feature = "server")]

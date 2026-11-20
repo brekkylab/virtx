@@ -104,8 +104,8 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     assert_eq!(answer(at.as_str()), "hello ping\n");
     sandbox.remove().wait().unwrap();
     // Its listener goes with it, a moment after.
-    thread::sleep(Duration::from_millis(500));
-    assert!(TcpStream::connect(at.as_str()).is_err());
+    let gone = until(|| TcpStream::connect(at.as_str()).is_err());
+    assert!(gone, "its listener outlived it");
 }
 
 #[test]

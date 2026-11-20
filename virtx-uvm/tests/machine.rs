@@ -794,13 +794,16 @@ async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(hom
         .unwrap();
     sandbox.remove_job(&id).unwrap();
 
-    // Closed by its process, which runs on: an empty write and a write both refused.
-    let cmd = ["sh", "-c", "exec 0<&-; sleep 300"]
+    // Closed by its process, which runs on: an empty write and a write both refused. It says
+    // `closed` once it has.
+    let cmd = ["sh", "-c", "exec 0<&-; echo closed; sleep 300"]
         .map(String::from)
         .to_vec();
     let closed = sandbox.exec(cmd, true, None).await.unwrap();
     let id = closed.get().id;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut events = std::pin::pin!(Arc::clone(closed.log()).events(&HeaderMap::new()));
+    let first = events.next().await.unwrap().unwrap();
+    assert_eq!(entry(&first), SandboxJobEntry::Stdout("closed".into()));
     let refused = sandbox.write_stdin(&id, String::new(), false).await;
     assert!(ended(&refused), "{refused:?}");
     assert!(closed.get().running);

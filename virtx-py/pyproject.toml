@@ -1,18 +1,44 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.25", "hatch-fancy-pypi-readme>=24"]
 build-backend = "hatchling.build"
 
 [project]
 name = "virtx"
 version = "0.2.0"
+# The repository's README, which lies outside this directory: hatchling reads it only as a hook's.
+dynamic = ["readme"]
 description = "A virtx client for Python, over libvirtx_core's C ABI."
-readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+keywords = ["vm", "microvm", "sandbox", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Emulators",
+    "Typing :: Typed",
+]
 # What crosses the C ABI is JSON, and the C ABI itself is reached with ctypes, so the package
 # depends on nothing and has no extension module of its own: a wheel is the Python files and
 # `libvirtx_core` for its platform, which the release copies into `src/virtx/` beside them.
 dependencies = []
+
+[project.urls]
+Homepage = "https://virtx.sh"
+Documentation = "https://virtx.sh/docs"
+Repository = "https://github.com/brekkylab/virtx"
+Issues = "https://github.com/brekkylab/virtx/issues"
+Changelog = "https://github.com/brekkylab/virtx/releases"
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+fragments = [{ path = "../README.md" }]
 
 [project.scripts]
 # `libvirtx_core`'s `virtx` command, as the `virtx-cli` binary is.

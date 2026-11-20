@@ -60,7 +60,7 @@ pub use virtx_core::{
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, InboundError, InboundRule,
     LogEntry, Metadata, MountSource, MountType, PortProtocol, PortSpec, Progress, Recipe,
     RegistryAuth, Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd,
-    SandboxJobEndReason, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxResizeArgs, SandboxResources, SandboxVolume, Source, Step,
-    VolumeMountListOutputItem,
+    SandboxJobEndReason, SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxResizeArgs,
+    SandboxResources, SandboxVolume, Source, Step, VolumeMountListOutputItem,
 };
 pub use volume::Volume;

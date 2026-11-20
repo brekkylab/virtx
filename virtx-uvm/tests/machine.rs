@@ -1585,7 +1585,10 @@ fn filter(mut args: impl Iterator<Item = String>) -> Option<String> {
 
 fn main() -> ExitCode {
     // In this process and each machine's, before either does anything with a disk.
-    assert!(virtx_uvm::disks::set_disks(Arc::new(Embedded)), "said first");
+    assert!(
+        virtx_uvm::disks::set_disks(Arc::new(Embedded)),
+        "said first"
+    );
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
         let Err(_) = virtx_uvm::enter_machine();

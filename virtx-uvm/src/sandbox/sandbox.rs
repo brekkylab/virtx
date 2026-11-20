@@ -883,7 +883,9 @@ impl Sandbox {
         let send = |seq| Ok(run.machine.write_stdin(pid, seq, data, eof)?);
         match job.write_stdin(eof, send).await? {
             Some(super::job::Written { whole: true, .. }) => Ok(()),
-            Some(super::job::Written { bytes, .. }) if bytes > 0 => Err(Error::StdinCut { bytes, of }),
+            Some(super::job::Written { bytes, .. }) if bytes > 0 => {
+                Err(Error::StdinCut { bytes, of })
+            }
             _ => Err(ended()),
         }
     }
@@ -968,7 +970,10 @@ impl Sandbox {
     /// machine next boots. A machine is the size it booted with: one up whose size changes, its
     /// disk's included, is parked now if nothing uses it, and refused [`InUse`](Error::InUse) if
     /// something does.
-    pub async fn resize(self: &Arc<Self>, args: &SandboxResizeArgs) -> Result<SandboxResources, Error> {
+    pub async fn resize(
+        self: &Arc<Self>,
+        args: &SandboxResizeArgs,
+    ) -> Result<SandboxResources, Error> {
         let resized = self
             .resized(args.vcpus, args.memory_mib, args.disk_gib, true)
             .await?;
@@ -1029,8 +1034,8 @@ impl Sandbox {
                 self.disk_now().div_ceil(1 << 30)
             )));
         }
-        let disk_changes = disk_parks
-            && disk_gib.is_some_and(|gib| (u64::from(gib) << 30) > self.disk_now());
+        let disk_changes =
+            disk_parks && disk_gib.is_some_and(|gib| (u64::from(gib) << 30) > self.disk_now());
         if (machine_changes || disk_changes) && self.is_up() {
             if self.busy() {
                 return Err(Error::InUse(format!(

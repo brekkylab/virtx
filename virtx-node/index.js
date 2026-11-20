@@ -533,26 +533,6 @@ class Client {
     return client
   }
 
-  // Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its project:
-  // with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose token
-  // `virtx token --json` prints, again as it runs out. `VIRTX_PROJECT`, a project's id, names the
-  // project of every request.
-  // Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell
-  // `VIRTX_REGION` names (`apne2`), or else `cloud.<domain>`, every cell's name, which DNS answers
-  // with the cell nearest this machine. A sandbox of another cell is reached through it as well.
-  static fromEnv() {
-    const key = process.env.VIRTX_API_KEY || null
-    const project = process.env.VIRTX_PROJECT || null
-    const domain = process.env.VIRTX_DOMAIN || null
-    const region = process.env.VIRTX_REGION || null
-    let url = process.env.VIRTX_URL || null
-    if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
-    if (!url && (key || project)) url = `https://cloud.${domain || DOMAIN}`
-    if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
-    const auth = key ? { type: 'bearer', token: key } : project ? SIGNED_IN : null
-    return Client.connect(url, auth, project, {})
-  }
-
   // Send `auth` with every request from now on, in place of what was given at `connect`: a
   // new token, when the server's are short-lived. A forwarder already open sends it with its
   // next connection. Over stdio, where none is sent, nothing changes. Refused as at `connect`,
@@ -1189,17 +1169,8 @@ class SandboxJob {
 // `using`, where the runtime has it.
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
-// Where virtx cloud is, by default: `cloud.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
-// for one.
-const DOMAIN = 'virtx.sh'
-
-// The token of the person signed in with `virtx login`, as `virtx token --json` prints it; for
-// an organization, `--org` and its id added.
-const SIGNED_IN = { type: 'command', program: 'virtx', args: ['token', '--json'] }
-
 module.exports = {
   Client,
-  DOMAIN,
   Files,
   ImageJob,
   LIBRARY_ENV,

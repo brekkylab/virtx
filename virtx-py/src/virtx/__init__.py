@@ -34,7 +34,7 @@ forwarded connection that reached nothing, the ``virtx`` logger logs.
 """
 
 from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load
-from .client import DOMAIN, Auth, Client, CommandAuth, Event, Output, Progress, ensure_virtx
+from .client import Auth, Client, CommandAuth, Event, Output, Progress, ensure_virtx
 from .files import DirEntry, Files, Metadata
 from .image import (
     BasicAuth,
@@ -86,7 +86,6 @@ from .volume import (
 )
 
 __all__ = [
-    "DOMAIN",
     "LIBRARY_ENV",
     "Auth",
     "BasicAuth",

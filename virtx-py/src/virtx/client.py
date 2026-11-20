@@ -227,36 +227,6 @@ class Client:
             self._lib.take(status, error)
 
     @classmethod
-    def from_env(cls) -> Client:
-        """Reach the server ``VIRTX_URL`` names, with ``VIRTX_API_KEY`` if set, which names its
-        project: with ``VIRTX_PROJECT`` and no key, as the person signed in with ``virtx login``,
-        whose token ``virtx token --json`` prints, again as it runs out. ``VIRTX_PROJECT``, a
-        project's id, names the project of every request.
-
-        Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
-        cell ``VIRTX_REGION`` names (``apne2``), or else ``cloud.<domain>``, every cell's name,
-        which DNS answers with the cell nearest this machine. A sandbox of another cell is
-        reached through it as well."""
-        key = os.environ.get("VIRTX_API_KEY") or None
-        project = os.environ.get("VIRTX_PROJECT") or None
-        domain = os.environ.get("VIRTX_DOMAIN") or None
-        region = os.environ.get("VIRTX_REGION") or None
-        url = os.environ.get("VIRTX_URL") or None
-        if not url and region:
-            url = f"https://{region}.api.{domain or DOMAIN}"
-        if not url and (key or project):
-            url = f"https://cloud.{domain or DOMAIN}"
-        if not url:
-            raise VirtxError("VIRTX_URL is not set, and no cell of virtx cloud was found")
-        auth: Auth | None = None
-        if key:
-            auth = BearerAuth(key)
-        elif project:
-            program, args = SIGNED_IN
-            auth = CommandAuth(program, args)
-        return cls.connect(url, auth, project)
-
-    @classmethod
     def _opened(cls, lib: Library, status: int, raw: ctypes.c_void_p, error: _Bytes) -> Client:
         if status == OK and raw.value:
             return cls(raw.value, lib)
@@ -528,12 +498,3 @@ class Client:
         """The sandbox named ``name``, each port without its ``url``, if one is."""
         found = await self._call("virtx_client_find_sandbox", _args(name=name))
         return None if found is None else Sandbox.from_dict(self, found)
-
-
-DOMAIN = "virtx.sh"
-"""Where virtx cloud is, by default: ``cloud.<DOMAIN>``, every cell's name, and
-``<cell>.api.<DOMAIN>`` for one."""
-
-SIGNED_IN = ("virtx", ("token", "--json"))
-"""The command that prints the token of the person signed in with ``virtx login``, and its
-arguments, to which ``--org`` and the organization are added."""

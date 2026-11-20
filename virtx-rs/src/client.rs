@@ -21,7 +21,7 @@ use virtx_core::{
     ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
     RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
     SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs,
-    SandboxResources, Source, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
+    SandboxResources, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
     VolumeMountListOutputItem,
 };
 
@@ -175,58 +175,6 @@ impl Client {
         let client = unsafe { opened(api, status, raw, error) }?;
         client.set_project(project)?;
         Ok(client)
-    }
-
-    /// Reach the server `VIRTX_URL` names, with `VIRTX_API_KEY` if set, which names its
-    /// project: with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose
-    /// token `virtx token --json` prints, again as it runs out ([`Auth::Command`]).
-    /// `VIRTX_PROJECT`, a project's id, names the project of every request.
-    ///
-    /// Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default): the cell
-    /// `VIRTX_REGION` names (`apne2`), or else `cloud.<domain>`, every cell's name, which DNS
-    /// answers with the cell nearest this machine. A sandbox of another cell is reached
-    /// through it as well.
-    pub fn from_env() -> Result<Client, Error> {
-        let var = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
-        let (key, project, domain) = (
-            var("VIRTX_API_KEY"),
-            var("VIRTX_PROJECT"),
-            var("VIRTX_DOMAIN"),
-        );
-        let mut url = var("VIRTX_URL").or_else(|| {
-            var("VIRTX_REGION").map(|region| {
-                format!(
-                    "https://{region}.api.{}",
-                    domain.as_deref().unwrap_or(DOMAIN)
-                )
-            })
-        });
-        if url.is_none() && (key.is_some() || project.is_some()) {
-            url = Some(format!(
-                "https://cloud.{}",
-                domain.as_deref().unwrap_or(DOMAIN)
-            ));
-        }
-        let url = url.ok_or_else(|| {
-            Error::Call(
-                Source::Client,
-                "VIRTX_URL is not set, and no cell of virtx cloud was found".to_owned(),
-            )
-        })?;
-        let auth = match (key, &project) {
-            (Some(token), _) => Auth::Bearer { token },
-            (None, Some(_)) => Auth::Command {
-                program: "virtx".into(),
-                args: vec!["token".into(), "--json".into()],
-            },
-            (None, None) => Auth::None,
-        };
-        Client::connect(
-            url,
-            auth,
-            project.as_deref(),
-            std::iter::empty::<(&str, &str)>(),
-        )
     }
 
     /// Send `auth` with every request from now on, in place of what was given at
@@ -1048,7 +996,3 @@ unsafe fn opened(
         Ok(()) => Err(Error::Library(format!("unknown status {status}"))),
     }
 }
-
-/// Where virtx cloud is, by default: `cloud.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
-/// for one.
-pub const DOMAIN: &str = "virtx.sh";

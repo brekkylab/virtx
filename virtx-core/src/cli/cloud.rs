@@ -15,9 +15,9 @@
 //! is the ID token, the session's access token. The session is kept in files, each its owner's
 //! alone: the refresh token in `~/.config/virtx/<domain>.token`, the last token in
 //! `<domain>.access`. Files, not the OS's keychain, so that the `virtx` the Python and Node
-//! packages ship signs in as the one built from this repository does, and an SDK's
-//! `Client.from_env()` -- `VIRTX_PROJECT` and no `VIRTX_API_KEY` -- finds a token wherever it runs
-//! (issue #158). A token lasts 15 minutes.
+//! packages ship signs in as the one built from this repository does, and an SDK given the
+//! command `virtx token --json` as its auth finds a token wherever it runs. A token lasts 15
+//! minutes.
 //!
 //! Many processes may ask for a token at once -- an SDK runs `virtx token --json` in each, as
 //! an agent's workers start together -- and each refresh replaces the refresh token: two at
@@ -28,8 +28,8 @@
 //! set, as an SDK runs it once a server refused the token it had, it refreshes whatever it has.
 //!
 //! A person's token names no project: a cell takes it with the project each request names by its
-//! id (`virtx-project`), as `from_env` names `VIRTX_PROJECT`. Nor does it name a cell: its
-//! endpoint is `VIRTX_URL`, or the nearest.
+//! id (`virtx-project`), as a client's `project` names it. Nor does it name a cell: a client
+//! reaches the one it connects to.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};

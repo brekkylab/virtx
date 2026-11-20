@@ -2,7 +2,11 @@
 //! run in it as [jobs](Job), each with its log.
 //!
 //! A sandbox made with keys is kept past its process, its record beside its upper disk, for the
-//! next server over its root to know it again ([`Sandbox::kept`]).
+//! next server over its root to know it again ([`Sandbox::kept`]), or for a server it is moved
+//! to to take in ([`Sandbox::take_in`]).
+//!
+//! Where its disk and volumes are kept beyond this machine, its server says with a
+//! [`Backing`](crate::backend::Backing): each is taken from there as its machine boots.
 //!
 //! What a sandbox is to a server beyond this -- how its ports are reached from outside the
 //! host -- is the server's.

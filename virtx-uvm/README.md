@@ -101,7 +101,8 @@ An upper disk is what makes one of those machines writable: an ext4 of its own, 
 Each sandbox makes an upper disk of its own, named by the sandbox's id and gone with it. A sandbox's machine is
 stopped once nothing has used the sandbox for a while (`VIRTX_PARK_AFTER_MS`, five minutes
 unless it says otherwise, `0` for never) and booted again over the same upper disk when something
-does: see [`sandbox`](src/sandbox/sandbox.rs). Each machine's coming up and going down, with when and for how long, is told in order
+does: see [`sandbox`](src/sandbox/sandbox.rs). Each boot asks whoever embeds the crate for room first, if it set
+an [`Admission`](src/admission.rs), and holds it until the machine is down. Each machine's coming up and going down, with when and for how long, is told in order
 to whoever embeds the crate and subscribes ([`runs`](src/sandbox/runs.rs)). A sandbox made with keys, as `virtx-server-tcp`
 makes each, is kept past its process too: a record beside its upper disk, `<id>.json`, says what
 it boots as, and the next server over the same root knows it again, parked

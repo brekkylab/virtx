@@ -434,7 +434,7 @@ impl<'de> Deserialize<'de> for PortSpec {
         #[derive(Deserialize)]
         #[serde(
             untagged,
-            expecting = r#"a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}"#
+            expecting = r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
         )]
         enum Either {
             Port(u16),
@@ -623,7 +623,7 @@ mod tests {
         let refused = serde_json::from_value::<PortSpec>(json!({"port": "5900"})).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            r#"a port: a number, or {"port", "label"?, "protocol"?, "inbound"?}"#
+            r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
         );
     }
 

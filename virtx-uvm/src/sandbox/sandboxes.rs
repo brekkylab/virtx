@@ -195,12 +195,6 @@ impl Sandboxes {
                 super::LABEL_MOST
             )));
         }
-        if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
-            return Err(Error::Invalid(format!(
-                "ports: {}'s inbound rules are virtx cloud's; this server keeps none",
-                spec.port
-            )));
-        }
         if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
             return Err(Error::Invalid(format!(
                 "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \

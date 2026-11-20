@@ -1000,8 +1000,9 @@ async fn a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed(
     // A file half as large again as one command's memory, out of the page cache.
     let write = "own=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); \
         mib=$(( $(cat $own/memory.max) * 3 / 2 >> 20 )); \
-        dd if=/dev/zero of=/root/big bs=1M count=$mib 2>/dev/null; \
-        sync; echo 3 > /proc/sys/vm/drop_caches";
+        dd if=/dev/zero of=/root/big bs=1M count=$mib 2>/dev/null && \
+        [ $(( $(stat -c %s /root/big) >> 20 )) -eq $mib ] && \
+        sync && echo 3 > /proc/sys/vm/drop_caches";
     assert_eq!(
         run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
         0

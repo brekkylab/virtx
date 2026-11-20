@@ -652,9 +652,14 @@ async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does
         "awk",
         r#"BEGIN { while (1) held[i++] = sprintf("%65536s", "") }"#,
     ];
-    let (end, reason) = tokio::time::timeout(HANG, ended(&hungry))
-        .await
-        .expect("its memory runs out");
+    let Ok((end, reason)) = tokio::time::timeout(HANG, ended(&hungry)).await else {
+        // What its cgroup held, said with the failure.
+        let held = "cd /sys/fs/cgroup/jobs; cat cgroup.subtree_control memory.max; \
+            for c in */; do echo $c; cat $c/memory.max $c/memory.current $c/memory.events; done; \
+            free -m; ps -o pid,rss,args";
+        let held = run(&sandbox, &["sh", "-c", held], None).await;
+        panic!("its memory never ran out: {held:?}");
+    };
     let oom = SandboxJobEnd {
         code: 137,
         reason: Some(SandboxJobEndReason::Oom),

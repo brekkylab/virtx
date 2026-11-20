@@ -4,16 +4,13 @@ use ::http::header;
 use futures_util::{Stream, StreamExt as _};
 
 use super::{
-    Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob, SandboxJobEntry,
-    SandboxSignalArgs, SandboxStdinArgs,
+    SANDBOX_JOB_HEADER, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
+    SandboxJobEntry, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
     Error,
     transport::{LogEntry, TransportClient, full, http, segment, sse},
 };
-
-/// Where a server that answers an exec with its log says its job.
-const JOB_HEADER: &str = "virtx-job";
 
 /// The path of the sandbox `id`.
 fn sandbox(id: &str) -> String {
@@ -102,7 +99,7 @@ pub(crate) fn exec_log<'a>(
         }
         let job: SandboxJob = response
             .headers()
-            .get(JOB_HEADER)
+            .get(SANDBOX_JOB_HEADER)
             .and_then(|job| job.to_str().ok())
             .ok_or_else(|| Error::Transport(format!("{path} answered its log without its job")))
             .and_then(|job| serde_json::from_str(job).map_err(|e| Error::Client(e.to_string())))?;

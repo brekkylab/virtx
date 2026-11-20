@@ -120,6 +120,27 @@ impl<E: Clone + Serialize + Send + Sync + 'static> Log<E> {
     }
 }
 
+/// Whether a request's `Accept` in `headers` names `text/event-stream` with a `q` above `0`:
+/// asks for an event stream, which a range like `*/*` does not.
+pub fn accepts_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(http::header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|range| {
+            let mut parts = range.split(';').map(str::trim);
+            let named = parts
+                .next()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("text/event-stream"));
+            let q = parts
+                .filter_map(|param| param.split_once('='))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("q"))
+                .map_or(1.0, |(_, q)| q.trim().parse::<f32>().unwrap_or(0.0));
+            named && q > 0.0
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;
@@ -132,6 +153,22 @@ mod tests {
         Stdout(String),
         Truncated {},
         End {},
+    }
+
+    #[test]
+    fn an_event_stream_is_accepted_only_where_named_with_a_q_above_0() {
+        let accepting = |accept: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::ACCEPT, accept.parse().unwrap());
+            accepts_event_stream(&headers)
+        };
+        assert!(accepting("text/event-stream"));
+        assert!(accepting("application/json, Text/Event-Stream;q=0.5"));
+        assert!(!accepting("text/event-stream;q=0"));
+        assert!(!accepting("text/event-stream; q=0.0, application/json"));
+        assert!(!accepting("*/*"));
+        assert!(!accepting("application/json"));
+        assert!(!accepts_event_stream(&HeaderMap::new()));
     }
 
     fn after(id: &str) -> HeaderMap {

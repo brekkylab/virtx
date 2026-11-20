@@ -165,7 +165,9 @@ fn prefault_memory() -> bool {
 const PING_EVERY: Duration = Duration::from_secs(5);
 
 /// How long past its second the silence check may wake before this process is taken to have
-/// been paused meanwhile ([`Machine::pause`](super::Machine::pause)) rather than slow.
+/// been paused meanwhile ([`Machine::pause`](super::Machine::pause)) rather than slow. It cannot
+/// tell a pause from a stall of the process as long, as on a host loaded enough to leave it
+/// unscheduled: a stall is forgiven as a pause is, the silence started anew.
 const PAUSED_PAST: Duration = Duration::from_secs(3);
 
 /// How long the agent may say nothing, pings unanswered, before its guest is taken to have

@@ -196,15 +196,26 @@ fn delete(path: &Path) -> io::Result<()> {
 
 /// The disk at `from` copied to `to`, replacing what is there: cloned where the filesystem
 /// shares extents between files -- APFS, Btrfs, XFS made with reflink -- at once however much it
-/// holds, and elsewhere read and written, its holes left holes where the host finds them.
+/// holds, and elsewhere read and written, its holes left holes where the host finds them. Made
+/// beside `to` and moved over it once whole, so a copy that fails leaves what was there.
 pub(super) fn copy(from: &Path, to: &Path) -> io::Result<()> {
-    if cloned(from, to)? {
-        return Ok(());
+    let mut part = to.as_os_str().to_owned();
+    part.push(".copying");
+    let part = PathBuf::from(part);
+    let copied = match cloned(from, &part) {
+        Ok(true) => Ok(()),
+        Ok(false) => copy_sparse(from, &part),
+        Err(e) => Err(e),
+    };
+    let moved = copied.and_then(|()| fs::rename(&part, to));
+    if moved.is_err() {
+        let _ = fs::remove_file(&part);
     }
-    copy_sparse(from, to)
+    moved
 }
 
-/// `from` read and written to `to`: on Unix only the extents with data, as `lseek` finds them.
+/// `from` read and written to `to`: on Unix only the extents with data, as `lseek` finds them,
+/// and the whole of it on a filesystem that finds none.
 #[cfg(unix)]
 fn copy_sparse(from: &Path, to: &Path) -> io::Result<()> {
     use std::io::{Read as _, Seek as _, SeekFrom};
@@ -220,11 +231,18 @@ fn copy_sparse(from: &Path, to: &Path) -> io::Result<()> {
         let data = unsafe { libc::lseek(from.as_raw_fd(), at as libc::off_t, libc::SEEK_DATA) };
         if data == -1 {
             let e = io::Error::last_os_error();
-            // No data past `at`: the rest is a hole.
-            if e.raw_os_error() == Some(libc::ENXIO) {
-                break;
+            // What a filesystem that finds no holes answers, as HFS+ does.
+            let unfound = [libc::ENOTTY, libc::ENOTSUP, libc::EOPNOTSUPP, libc::EINVAL];
+            match e.raw_os_error() {
+                // No data past `at`: the rest is a hole.
+                Some(libc::ENXIO) => break,
+                // The whole of it, read and written.
+                Some(code) if at == 0 && unfound.contains(&code) => {
+                    io::copy(&mut from, &mut to)?;
+                    break;
+                }
+                _ => return Err(e),
             }
-            return Err(e);
         }
         // SAFETY: as above.
         let hole = unsafe { libc::lseek(from.as_raw_fd(), data, libc::SEEK_HOLE) };
@@ -351,6 +369,17 @@ mod tests {
 
         copy(&from, &to).unwrap();
         assert_eq!(fs::read(&from).unwrap(), fs::read(&to).unwrap());
+        // One that fails leaves what was there.
+        let none = dir.path().join("none.ext4");
+        let kept = dir.path().join("kept.ext4");
+        fs::write(&kept, "what was there").unwrap();
+        assert!(copy(&none, &kept).is_err());
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "what was there");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 3, "nothing left beside them: {names:?}");
         copy_sparse(&from, &to).unwrap();
         assert_eq!(fs::read(&from).unwrap(), fs::read(&to).unwrap());
         #[cfg(unix)]

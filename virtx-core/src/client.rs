@@ -22,8 +22,8 @@ use crate::{
         ProjectMemberSetArgs, Role,
     },
     sandbox::{
-        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEntry,
-        SandboxSignalArgs, SandboxStdinArgs,
+        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
+        SandboxJobEntry, SandboxSignalArgs, SandboxStdinArgs,
     },
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
@@ -449,6 +449,11 @@ impl Client {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
+    /// The sandbox named `name`, without its ports, if one is.
+    pub async fn find_sandbox(&self, name: impl AsRef<str>) -> Result<Option<Sandbox>, Error> {
+        sandbox::client::find(&self.inner, name.as_ref()).await
+    }
+
     /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
     /// its volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
@@ -468,6 +473,17 @@ impl Client {
         args: &SandboxExecArgs,
     ) -> Result<SandboxJob, Error> {
         sandbox::client::exec(&self.inner, id.as_ref(), args).await
+    }
+
+    /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
+    /// first, then each entry until its `end`. One request where the server answers an exec
+    /// with its log, two elsewhere. Dropping it leaves the job running.
+    pub fn exec_sandbox_with_log(
+        &self,
+        id: &str,
+        args: &SandboxExecArgs,
+    ) -> impl Stream<Item = Result<SandboxExecItem, Error>> + Unpin + Send + use<'_> {
+        Box::pin(sandbox::client::exec_log(&self.inner, id, args))
     }
 
     /// The job `job` in the sandbox `id`.
@@ -1753,7 +1769,7 @@ pub(crate) mod ffi {
     }
 
     /// Makes a sandbox, given
-    /// `{"image": {...}, "network": bool, "ports": [n],
+    /// `{"image": {...}, "name": "...", "network": bool, "ports": [n],
     /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or
@@ -1788,6 +1804,23 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Id>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move { client.get_sandbox(args?.id).await })
+    }
+
+    /// Answers with the sandbox named `name`, given `{"name": "..."}`, as
+    /// `virtx_client_list_sandbox` answers each, or `null` if none is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_find_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Name>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.find_sandbox(args?.name).await })
     }
 
     /// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
@@ -1852,6 +1885,40 @@ pub(crate) mod ffi {
                 timeout_ms,
             };
             client.exec_sandbox(sandbox, &args).await
+        })
+    }
+
+    /// Starts a process as `virtx_client_exec_sandbox` does, given the same, and reads its log:
+    /// its first item is `{"job": {...}}`, the job as that answers it, and the rest are the
+    /// log's entries as `virtx_client_sandbox_job_log` gives them. One request where the server
+    /// answers an exec with its log, two elsewhere. Freeing it leaves the job as it is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_exec_sandbox_log(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<Exec>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let (sandbox, args) = match args {
+                    Ok(Exec { sandbox, cmd, stdin, timeout_ms }) => {
+                        (sandbox, SandboxExecArgs { cmd, stdin, timeout_ms })
+                    }
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut items = client.exec_sandbox_with_log(&sandbox, &args);
+                while let Some(item) = items.next().await {
+                    yield item;
+                }
+            }
         })
     }
 

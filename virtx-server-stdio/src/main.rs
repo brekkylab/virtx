@@ -488,6 +488,18 @@ mod tests {
             args.ports = ports;
             assert_eq!(refused(args).await, 400);
         }
+        let long = "x".repeat(129);
+        for name in [
+            "",
+            ".dot",
+            "-dash",
+            "a b",
+            "caf\u{e9}",
+            "a/b",
+            long.as_str(),
+        ] {
+            assert_eq!(refused(here().name(name)).await, 400, "name {name:?}");
+        }
         let mut args = here();
         args.vcpus = Some(0);
         assert_eq!(refused(args).await, 400);

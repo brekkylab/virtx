@@ -234,7 +234,7 @@ class Client:
         project's id, names the project of every request.
 
         Without ``VIRTX_URL``, virtx cloud under ``VIRTX_DOMAIN`` (``DOMAIN`` by default): the
-        cell ``VIRTX_REGION`` names (``apne2``), or else ``run.<domain>``, every cell's name,
+        cell ``VIRTX_REGION`` names (``apne2``), or else ``cloud.<domain>``, every cell's name,
         which DNS answers with the cell nearest this machine. A sandbox of another cell is
         reached through it as well."""
         key = os.environ.get("VIRTX_API_KEY") or None
@@ -245,7 +245,7 @@ class Client:
         if not url and region:
             url = f"https://{region}.api.{domain or DOMAIN}"
         if not url and (key or project):
-            url = f"https://run.{domain or DOMAIN}"
+            url = f"https://cloud.{domain or DOMAIN}"
         if not url:
             raise VirtxError("VIRTX_URL is not set, and no cell of virtx cloud was found")
         auth: Auth | None = None
@@ -531,7 +531,7 @@ class Client:
 
 
 DOMAIN = "virtx.sh"
-"""Where virtx cloud is, by default: ``run.<DOMAIN>``, every cell's name, and
+"""Where virtx cloud is, by default: ``cloud.<DOMAIN>``, every cell's name, and
 ``<cell>.api.<DOMAIN>`` for one."""
 
 SIGNED_IN = ("virtx", ("token", "--json"))

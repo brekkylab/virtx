@@ -183,7 +183,7 @@ impl Client {
     /// `VIRTX_PROJECT`, a project's id, names the project of every request.
     ///
     /// Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` ([`DOMAIN`] by default): the cell
-    /// `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS
+    /// `VIRTX_REGION` names (`apne2`), or else `cloud.<domain>`, every cell's name, which DNS
     /// answers with the cell nearest this machine. A sandbox of another cell is reached
     /// through it as well.
     pub fn from_env() -> Result<Client, Error> {
@@ -203,7 +203,7 @@ impl Client {
         });
         if url.is_none() && (key.is_some() || project.is_some()) {
             url = Some(format!(
-                "https://run.{}",
+                "https://cloud.{}",
                 domain.as_deref().unwrap_or(DOMAIN)
             ));
         }
@@ -1049,6 +1049,6 @@ unsafe fn opened(
     }
 }
 
-/// Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
+/// Where virtx cloud is, by default: `cloud.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
 /// for one.
 pub const DOMAIN: &str = "virtx.sh";

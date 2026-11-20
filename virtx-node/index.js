@@ -538,7 +538,7 @@ class Client {
   // `virtx token --json` prints, again as it runs out. `VIRTX_PROJECT`, a project's id, names the
   // project of every request.
   // Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell
-  // `VIRTX_REGION` names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers
+  // `VIRTX_REGION` names (`apne2`), or else `cloud.<domain>`, every cell's name, which DNS answers
   // with the cell nearest this machine. A sandbox of another cell is reached through it as well.
   static fromEnv() {
     const key = process.env.VIRTX_API_KEY || null
@@ -547,7 +547,7 @@ class Client {
     const region = process.env.VIRTX_REGION || null
     let url = process.env.VIRTX_URL || null
     if (!url && region) url = `https://${region}.api.${domain || DOMAIN}`
-    if (!url && (key || project)) url = `https://run.${domain || DOMAIN}`
+    if (!url && (key || project)) url = `https://cloud.${domain || DOMAIN}`
     if (!url) throw new VirtxError('VIRTX_URL is not set, and no cell of virtx cloud was found')
     const auth = key ? { type: 'bearer', token: key } : project ? SIGNED_IN : null
     return Client.connect(url, auth, project, {})
@@ -1189,7 +1189,7 @@ class SandboxJob {
 // `using`, where the runtime has it.
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
-// Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
+// Where virtx cloud is, by default: `cloud.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>`
 // for one.
 const DOMAIN = 'virtx.sh'
 

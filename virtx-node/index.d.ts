@@ -30,7 +30,7 @@ export class VirtxError extends Error {
   written: number | null
 }
 
-/** Where virtx cloud is, by default: `run.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>` for one. */
+/** Where virtx cloud is, by default: `cloud.<DOMAIN>`, every cell's name, and `<cell>.api.<DOMAIN>` for one. */
 export const DOMAIN: string
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */
@@ -601,7 +601,7 @@ export class Client {
    * with `VIRTX_PROJECT` and no key, as the person signed in with `virtx login`, whose token
    * `virtx token --json` prints, again as it runs out. `VIRTX_PROJECT`, a project's id, names the
    * project of every request. Without `VIRTX_URL`, virtx cloud under `VIRTX_DOMAIN` (`DOMAIN` by default): the cell `VIRTX_REGION`
-   * names (`apne2`), or else `run.<domain>`, every cell's name, which DNS answers with the cell
+   * names (`apne2`), or else `cloud.<domain>`, every cell's name, which DNS answers with the cell
    * nearest this machine.
    */
   static fromEnv(): Client

@@ -332,16 +332,16 @@ async fn answered_beside_a_bomb(home: &Home, memory_mib: u32, bomb: &str) {
     assert_eq!(lines, ["started"]);
     tokio::time::sleep(Duration::from_secs(5)).await;
     // Answered while the bomb goes on: how soon is not what is tried, and the timeout only
-    // keeps a sandbox that never answers from holding the suite. The processes are counted by
-    // the shell's own glob: no fork, which the bomb may starve.
-    let counted = ["sh", "-c", "echo alive; set -- /proc/[0-9]*; echo $#"];
+    // keeps a sandbox that never answers from holding the suite. The processes are counted by a
+    // pipeline, which forks: the bomb holds all but a share of them, which another command has.
+    let counted = ["sh", "-c", "echo alive; ls -d /proc/[0-9]* | wc -l"];
     let answered = tokio::time::timeout(Duration::from_secs(120), run(&sandbox, &counted, None));
     let (lines, _) = answered
         .await
         .expect("a command answered beside the bomb")
         .unwrap();
     assert_eq!(lines[0], "alive", "{lines:?}");
-    let processes: u32 = lines[1].parse().unwrap_or(0);
+    let processes: u32 = lines[1].trim().parse().unwrap_or(0);
     assert!(processes > 100, "the bomb went on beside it: {lines:?}");
     close(sandbox).await;
 }

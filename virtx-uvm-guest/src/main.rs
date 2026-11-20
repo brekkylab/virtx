@@ -59,13 +59,44 @@ const AGENT_MEMORY: u64 = 128 << 20;
 const JOB_ROOM: u64 = 64 << 20;
 /// The most memory one command may take, where the kernel has the `memory` controller.
 static JOB_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// What of the commands' processes one command may not take, for another to start beside it: an
+/// eighth of them, up to this. Without it, one forking without end leaves every other command
+/// unable to fork.
+const JOB_PIDS_ROOM: u64 = 256;
+/// The most processes one command may have.
+static JOB_PIDS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 /// The next command's cgroup.
 static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The cgroup for commands, made: its `pids.max` the kernel's threads or pids, the fewer, less
-/// [`AGENT_PIDS`]; its `memory.max` the machine's less [`AGENT_MEMORY`], and each command's that
-/// less [`JOB_ROOM`].
+/// [`AGENT_PIDS`], and each command's that less [`JOB_PIDS_ROOM`]; its `memory.max` the
+/// machine's less [`AGENT_MEMORY`], and each command's that less [`JOB_ROOM`]. What it could not
+/// hold them by is said on the console.
 fn jobs_cgroup() -> Option<PathBuf> {
+    let jobs = held_cgroup();
+    let held = |what| jobs.is_some() && held_by(what);
+    let missing: Vec<&str> = ["pids", "cpu", "memory"]
+        .into_iter()
+        .filter(|what| !held(what))
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "{}: commands not held by the cgroup controllers {}",
+            env!("CARGO_BIN_NAME"),
+            missing.join(", ")
+        );
+    }
+    jobs
+}
+
+/// Whether the commands' cgroup holds them by the controller `what`.
+fn held_by(what: &str) -> bool {
+    std::fs::read_to_string("/sys/fs/cgroup/jobs/cgroup.subtree_control")
+        .is_ok_and(|held| held.split_whitespace().any(|c| c == what))
+}
+
+/// [`jobs_cgroup`]'s making.
+fn held_cgroup() -> Option<PathBuf> {
     let root = std::path::Path::new("/sys/fs/cgroup");
     std::fs::write(root.join("cgroup.subtree_control"), "+pids").ok()?;
     // And the CPU: every command together weighs a tenth of one of this agent's threads, which
@@ -84,6 +115,7 @@ fn jobs_cgroup() -> Option<PathBuf> {
     let threads = read("/proc/sys/kernel/threads-max")?.min(read("/proc/sys/kernel/pid_max")?);
     let most = threads.saturating_sub(AGENT_PIDS).max(64);
     std::fs::write(jobs.join("pids.max"), most.to_string()).ok()?;
+    let _ = JOB_PIDS.set(most - (most / 8).min(JOB_PIDS_ROOM));
     if weighed {
         let _ = std::fs::write(jobs.join("cpu.weight"), "10");
         let _ = std::fs::write(jobs.join("cgroup.subtree_control"), "+cpu");
@@ -109,8 +141,9 @@ fn memory_total() -> Option<u64> {
 
 /// `command`'s process put in a cgroup of its own under [`JOBS`] before it starts, if there is
 /// one: what is answered is that cgroup's `cgroup.procs`, to be held open until the process has
-/// started. Those of commands ended, with nothing left in them, are removed first.
-fn in_jobs(command: &mut Command) -> Option<File> {
+/// started, and the cgroup, to remove once it ends. Those of commands ended that something they
+/// left running held then, with nothing left in them now, are removed first.
+fn in_jobs(command: &mut Command) -> Option<(File, PathBuf)> {
     let jobs = JOBS.get()?.as_ref()?;
     if let Ok(entries) = std::fs::read_dir(jobs) {
         for entry in entries.flatten() {
@@ -126,6 +159,9 @@ fn in_jobs(command: &mut Command) -> Option<File> {
     if let Some(most) = JOB_MEMORY.get() {
         let _ = std::fs::write(own.join("memory.max"), most.to_string());
     }
+    if let Some(most) = JOB_PIDS.get() {
+        let _ = std::fs::write(own.join("pids.max"), most.to_string());
+    }
     let procs = File::options()
         .write(true)
         .open(own.join("cgroup.procs"))
@@ -139,7 +175,7 @@ fn in_jobs(command: &mut Command) -> Option<File> {
             Ok(())
         });
     }
-    Some(procs)
+    Some((procs, own))
 }
 
 /// The stdin of each process started with one, by pid.
@@ -334,9 +370,9 @@ fn serve() -> io::Result<()> {
         }
     });
 
+    JOBS.get_or_init(jobs_cgroup);
     send(&out, &CtrlResp::Ready(Vec::new()));
     let stdins = Stdins::default();
-    JOBS.get_or_init(jobs_cgroup);
     while let Some(message) = wire::recv(&mut input)? {
         match message {
             CtrlReq::Exec { cmd, stdin } => exec(&out, &stdins, cmd, stdin),
@@ -396,11 +432,16 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let _cgroup = in_jobs(&mut command);
+    let cgroup = in_jobs(&mut command);
     let started = command.spawn();
+    // Its process is in it, or never will be: the descriptor that put it there is done.
+    let cgroup = cgroup.map(|(_, own)| own);
     let mut child = match started {
         Ok(child) => child,
         Err(e) => {
+            if let Some(own) = &cgroup {
+                let _ = fs::remove_dir(own);
+            }
             send(out, &CtrlResp::Started(Err(format!("{}: {e}", cmd[0]))));
             return;
         }
@@ -435,6 +476,10 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         // wrote before it ended is said first, so its end is the last thing said of it: each
         // pipe read up to what was in it as the process ended, or to its end if sooner.
         let code = code(&mut child);
+        // Its cgroup gone with it, unless a program it left running is in it still.
+        if let Some(own) = &cgroup {
+            let _ = fs::remove_dir(own);
+        }
         // Its stdin, if still open, closed once what is queued is: no process reads it.
         drop(stdins.lock().unwrap().remove(&id));
         stdout.exited();

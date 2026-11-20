@@ -100,8 +100,12 @@ pub struct SandboxStdinArgs {
 }
 
 /// One entry of a sandbox job's log. As JSON, an object of one member, as `{"stdout": "..."}`.
+///
+/// An entry of a kind a later version of the protocol adds is read as
+/// [`Other`](Self::Other), for a reader to pass over, so a log with one still reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SandboxJobEntry {
     /// A line the process wrote to stdout, without its line ending.
     Stdout(String),
@@ -114,6 +118,17 @@ pub enum SandboxJobEntry {
 
     /// How it ended, last.
     End(SandboxJobEnd),
+
+    /// One of a kind this version does not know.
+    #[serde(untagged, deserialize_with = "unknown_entry")]
+    Other(crate::UnknownEntry),
+}
+
+/// [`SandboxJobEntry::Other`]: one named by none of the kinds above.
+fn unknown_entry<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::UnknownEntry, D::Error> {
+    crate::UnknownEntry::not_of(deserializer, &["stdout", "stderr", "truncated", "end"])
 }
 
 /// How a process ended.
@@ -135,8 +150,12 @@ impl SandboxJobEnd {
 }
 
 /// Why a process did not end by itself: it was killed, as `SIGKILL` does, its `code` `137`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// A reason a later version of the protocol adds is read as [`Other`](Self::Other), as it was
+/// sent, so a job and its log still read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SandboxJobEndReason {
     /// Its `timeout_ms` ran out.
     Timeout,
@@ -157,6 +176,10 @@ pub enum SandboxJobEndReason {
     /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
     /// each that ran then is ended so.
     Restarted,
+
+    /// One this version does not know, as the server said it.
+    #[serde(untagged)]
+    Other(String),
 }
 
 /// What an exec read with its log yields
@@ -313,6 +336,57 @@ mod tests {
         let value = serde_json::to_value(&job).unwrap();
         assert_eq!(value["reason"], "timeout");
         assert_eq!(serde_json::from_value::<SandboxJob>(value).unwrap(), job);
+    }
+
+    #[test]
+    fn a_reason_this_version_does_not_know_is_read_as_the_server_said_it() {
+        let value = json!({"end": {"code": 137, "reason": "disk_full"}});
+        let entry = serde_json::from_value::<SandboxJobEntry>(value.clone()).unwrap();
+        assert_eq!(
+            entry,
+            SandboxJobEntry::End(SandboxJobEnd {
+                code: 137,
+                reason: Some(SandboxJobEndReason::Other("disk_full".into())),
+            })
+        );
+        assert_eq!(serde_json::to_value(&entry).unwrap(), value);
+    }
+
+    #[test]
+    fn an_entry_of_a_kind_this_version_does_not_know_is_read_to_be_passed_over() {
+        let other = crate::LogEntry {
+            id: 4,
+            entry: SandboxJobEntry::Other(crate::UnknownEntry {
+                kind: "progress".into(),
+            }),
+        };
+        let read = json!({"id": 4, "progress": {"done": 3}});
+        assert_eq!(
+            serde_json::from_value::<crate::LogEntry<SandboxJobEntry>>(read).unwrap(),
+            other
+        );
+        assert_eq!(
+            serde_json::to_value(&other).unwrap(),
+            json!({"id": 4, "progress": null})
+        );
+        let item: SandboxExecItem =
+            serde_json::from_value(json!({"id": 4, "progress": {"done": 3}})).unwrap();
+        assert_eq!(item, SandboxExecItem::Log(other));
+    }
+
+    #[test]
+    fn an_entry_of_a_kind_this_version_knows_that_does_not_read_is_refused() {
+        for malformed in [
+            json!({"id": 9, "stdout": 5}),
+            json!({"id": 9, "stderr": null}),
+            json!({"id": 9, "truncated": 1}),
+            json!({"id": 9, "end": {}}),
+            json!({"id": 9, "end": {"code": "x"}}),
+        ] {
+            let read =
+                serde_json::from_value::<crate::LogEntry<SandboxJobEntry>>(malformed.clone());
+            assert!(read.is_err(), "{malformed} read as {read:?}");
+        }
     }
 
     #[test]

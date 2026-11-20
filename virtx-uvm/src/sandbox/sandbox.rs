@@ -25,7 +25,7 @@ use crate::backend::{Backing, Held, Stored, Wanted};
 use crate::machine::wire::{CtrlResp, Taken};
 use crate::{
     Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
-    Ports, Reference, Room, VolumeHold, VolumeMount, VolumeStore,
+    Ports, Reference, Room, SandboxDisk, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -480,6 +480,8 @@ impl Sandbox {
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.iter().map(|spec| spec.port).collect(),
+            // Set as each of its machines boots ([`Sandbox::wake`]).
+            sandbox_disk: None,
         };
         let disk_gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
         let exited = record.as_ref().is_some_and(|record| record.exited);
@@ -900,6 +902,17 @@ impl Sandbox {
                 }
             }
         }
+        // What its disk is fetched from while its machine runs, if the embedder's disks say,
+        // held with the machine.
+        let mut config = config;
+        let served = crate::disks::disks()
+            .serve(&config.upper)
+            .map_err(|e| Error::Io {
+                context: format!("serving the disk of sandbox {}", self.id),
+                source: e,
+            })?;
+        let (source, held) = served.unzip();
+        config.sandbox_disk = Some(SandboxDisk { source });
         // Booting is blocking work, until the guest takes commands: its disk grown first to as
         // large as it was last resized to. A grow that fails leaves the disk as it was, which it
         // boots on, to be grown at a later boot.
@@ -914,7 +927,7 @@ impl Sandbox {
             Ok::<_, Error>(Machine::start(config, &vm)?)
         });
         let machine = machine.await??;
-        let machine = Arc::new(machine);
+        let machine = Arc::new(machine.holding(held));
         *self.holding.lock().unwrap() = holding;
         let closed = {
             let mut state = self.state.lock().unwrap();

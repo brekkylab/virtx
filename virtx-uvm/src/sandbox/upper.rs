@@ -206,6 +206,10 @@ fn delete(path: &Path) -> io::Result<()> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
     }
+    // What the embedder keeps beside it goes with it ([`Disks::forget`](crate::disks::Disks)).
+    if let Err(e) = crate::disks::disks().forget(path) {
+        eprintln!("forgetting the disk {}: {e}", path.display());
+    }
     let _ = fs::remove_file(lock_path(path));
     Ok(())
 }

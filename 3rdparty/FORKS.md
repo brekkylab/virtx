@@ -55,6 +55,12 @@ two implementations of the same thing.
 The agent writes `nameserver 10.0.2.3` into `/etc/resolv.conf` once the root is in place, and the policy carries a query sent there to this host's resolver.
 A datagram's reply is stamped by the guest kernel with the address it was sent to, so the guest never sees that its resolver was answered from somewhere else.
 
+**A socket listened on again stays where its first listen put it.** A program that listens on a
+socket twice (nginx does, to set its backlog) had its second listen sent to the policy, which,
+with the port held by the first, put it elsewhere. The host's socket stayed where it was, and the
+guest's port could no longer be reached at either address. The muxer now leaves a socket
+that is already listening where it is.
+
 ### `gpu`
 
 One patch for both hosts, because they share the files. The macOS half:
@@ -303,6 +309,27 @@ for 4 GiB at once. The price is that all of the guest's RAM is resident on the
 host from the start, used or not, so it is off by default; `boot.rs` turns it
 on for `VIRTX_PREFAULT_MEMORY=1`, which is for a runner and nothing else. The
 machine tests on that runner take 59s with it and 182s without.
+
+### `with-storage`: an embedder's disks
+
+A sandbox's upper disk is a file, which libkrun opens and reads and writes itself. A server built
+on `virtx-uvm` can say otherwise ([`disks`](../virtx-uvm/src/disks.rs), `set_disks`, in its own
+process and in each machine's, which is the same binary). Before a sandbox's machine boots, the
+server's process is asked what the machine fetches the disk's data from while it runs, such as a
+socket that answers for data kept elsewhere, and holds what serves it until the machine is down.
+The machine's process opens the disk through a storage of the embedder's, given that source, and
+tells it when the guest is up. Each removed disk is reported to the embedder too. A build's disk,
+made and thrown away within its step, is always a file.
+
+**The patch** is `BlockDevice::with_storage`: a block device that reads and writes its image
+through an `imago` storage the embedder gives, rather than through the file opened plainly. The
+file still names the disk.
+
+### `kernel-pages`: the guest kernel copied whole
+
+On Linux, the guest kernel is copied into the guest's memory whole rather than mapped from its
+file page by page. Mapped, a boot waited on page faults the guest took one at a time: a machine
+booted in 490 ms on an EC2 node, and in 161 ms with the kernel copied.
 
 ## rutabaga_gfx: `virgl-renderer`
 

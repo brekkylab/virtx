@@ -377,8 +377,24 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     lower.set_read_only(true);
 
     let upper_path = utf8(&machine.upper)?;
-    let upper_device = BlockDevice::new("vdb", upper_path, DiskFormat::Raw)
-        .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
+    // A sandbox's disk as the embedder's disks open it ([`crate::disks`]): read and written
+    // through what they make of it, if anything, rather than as the file is.
+    let opened = match &machine.sandbox_disk {
+        Some(disk) => crate::disks::disks()
+            .open(&machine.upper, disk.source.as_deref())
+            .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
+        None => None,
+    };
+    let upper_device = match &opened {
+        Some(disk) => BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, disk.storage()),
+        None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
+    }
+    .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
+    // Told its machine has booted, as its agent says it is ready.
+    let booting = opened.clone();
+    if let Some(disk) = opened {
+        std::thread::spawn(move || disk.background());
+    }
 
     let mut devices = MmioDeviceManager::new();
     devices.add(boot_root);
@@ -462,7 +478,12 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
                 *heard.lock().unwrap() = Some(Instant::now());
                 let _ = match message {
-                    CtrlResp::Ready(_) => send(&CtrlResp::Ready(addresses.clone())),
+                    CtrlResp::Ready(_) => {
+                        if let Some(disk) = &booting {
+                            disk.booted();
+                        }
+                        send(&CtrlResp::Ready(addresses.clone()))
+                    }
                     CtrlResp::Pong => Ok(()),
                     message => send(&message),
                 };

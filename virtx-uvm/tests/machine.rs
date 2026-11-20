@@ -436,6 +436,52 @@ async fn stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else(home: 
     close(sandbox).await;
 }
 
+async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let ended = |r: &Result<(), SandboxError>| matches!(r, Err(SandboxError::JobEnded(_)));
+
+    // An empty write asks whether the stdin still has a reader.
+    let cmd = ["sh", "-c", "cat >/dev/null"].map(String::from).to_vec();
+    let reading = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = reading.get().id;
+    sandbox
+        .write_stdin(&id, String::new(), false)
+        .await
+        .unwrap();
+    sandbox.remove_job(&id).unwrap();
+
+    // Closed by its process, which runs on: an empty write and a write both refused.
+    let cmd = ["sh", "-c", "exec 0<&-; sleep 300"]
+        .map(String::from)
+        .to_vec();
+    let closed = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = closed.get().id;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let refused = sandbox.write_stdin(&id, String::new(), false).await;
+    assert!(ended(&refused), "{refused:?}");
+    assert!(closed.get().running);
+    sandbox.remove_job(&id).unwrap();
+
+    // Closed under a write: refused saying how much of it went in, and refused after.
+    let cmd = ["sh", "-c", "head -c 1 >/dev/null; exec 0<&-; sleep 300"]
+        .map(String::from)
+        .to_vec();
+    let cut = sandbox.exec(cmd, true, None).await.unwrap();
+    let id = cut.get().id;
+    let of = 1u64 << 20;
+    let refused = sandbox
+        .write_stdin(&id, "x".repeat(of as usize), false)
+        .await;
+    let Err(SandboxError::StdinCut { bytes, of: asked }) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(bytes > 0 && bytes < of && asked == of, "{bytes} of {asked}");
+    let refused = sandbox.write_stdin(&id, "x".into(), false).await;
+    assert!(ended(&refused), "{refused:?}");
+    assert!(cut.get().running);
+    close(sandbox).await;
+}
+
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&small(), park).await;
@@ -1330,6 +1376,7 @@ fn main() -> ExitCode {
         a_job_ends_with_its_process_not_with_what_it_left_running,
         a_job_s_stdin_is_written_until_it_is_closed,
         stdin_a_job_does_not_read_holds_back_its_writer_and_nothing_else,
+        a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,

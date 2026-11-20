@@ -15,7 +15,7 @@ use std::{
     process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::body::Body;
@@ -236,7 +236,7 @@ async fn close(sandbox: Arc<Sandbox>) {
 /// Wait until `holds`, failing past [`HANG`]: for what a machine does in its own time, such as
 /// stopping once idle, which a slow host takes longer over.
 async fn until(what: &str, mut holds: impl FnMut() -> bool) {
-    let began = std::time::Instant::now();
+    let began = Instant::now();
     while !holds() {
         assert!(began.elapsed() < HANG, "not {what} in {HANG:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -795,7 +795,7 @@ async fn a_stdin_its_process_closes_refuses_writes_and_says_how_much_went_in(hom
     sandbox.remove_job(&id).unwrap();
 
     // Closed by its process, which runs on: an empty write and a write both refused. It says
-    // `closed` once it has.
+    // `closed` once its stdin is closed.
     let cmd = ["sh", "-c", "exec 0<&-; echo closed; sleep 300"]
         .map(String::from)
         .to_vec();
@@ -869,7 +869,7 @@ async fn writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_op
         0
     );
     let mut eof = sandbox.write_stdin(&id, String::new(), true).await;
-    let since = std::time::Instant::now();
+    let since = Instant::now();
     while matches!(eof, Err(SandboxError::StdinFull)) && since.elapsed() < HANG {
         tokio::time::sleep(Duration::from_millis(100)).await;
         eof = sandbox.write_stdin(&id, String::new(), true).await;

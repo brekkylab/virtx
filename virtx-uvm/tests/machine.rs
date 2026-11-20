@@ -676,6 +676,31 @@ async fn a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does
     close(sandbox).await;
 }
 
+async fn a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    // A file half as large again as one command's memory, out of the page cache.
+    let write = "own=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); \
+        mib=$(( $(cat $own/memory.max) * 3 / 2 >> 20 )); \
+        dd if=/dev/zero of=/root/big bs=1M count=$mib 2>/dev/null; \
+        sync; echo 3 > /proc/sys/vm/drop_caches";
+    assert_eq!(
+        run(&sandbox, &["sh", "-c", write], None).await.unwrap().1,
+        0
+    );
+    // Read whole four times: each pass hits its limit and reads back what the last let go of,
+    // holding next to nothing of its own.
+    let read = [
+        "sh",
+        "-c",
+        "for i in 1 2 3 4; do sha256sum /root/big >/dev/null || exit; done",
+    ];
+    // A guard against a hang: four passes over a GiB and more take a while on a slow disk.
+    let ended = tokio::time::timeout(HANG * 5, run(&sandbox, &read, None));
+    let (lines, code) = ended.await.expect("the reads end").unwrap();
+    assert_eq!((lines, code), (vec![], 0));
+    close(sandbox).await;
+}
+
 async fn writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     // Reads nothing until it is told to, then counts what it reads to its stdin's end.
@@ -1639,6 +1664,7 @@ fn main() -> ExitCode {
         writes_past_what_the_guest_holds_are_turned_away_and_leave_its_stdin_open,
         a_job_s_end_says_why_the_server_ended_it_and_only_then,
         a_command_its_memory_runs_out_of_ends_oom_and_one_killed_otherwise_does_not,
+        a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed,
         an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote,
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,

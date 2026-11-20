@@ -84,8 +84,9 @@ pub enum CtrlResp {
     /// A line the process `id` wrote to its stderr, without its newline.
     Stderr { id: u32, line: String },
     /// The process `id` ended with `code`; `128 + signal` for one a signal ended. `oom` where
-    /// it ended `137` and the kernel's OOM killer killed a process of its command's cgroup:
-    /// its memory ran out. The last thing said of it.
+    /// it ended `137` and its memory ran out: the kernel's OOM killer killed a process of its
+    /// command's cgroup, or the agent killed the cgroup, out of memory and thrashing at its
+    /// limit. The last thing said of it.
     Exited {
         id: u32,
         code: i32,

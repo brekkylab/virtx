@@ -75,6 +75,10 @@ static WATCHED: Mutex<std::collections::BTreeMap<PathBuf, Thrash>> =
 /// memory limit before it is killed.
 const THRASH_LOOK: Duration = Duration::from_secs(1);
 const THRASH_LOOKS: u32 = 3;
+/// What of its memory limit a command out of memory has left for pages reclaim can take, at
+/// most: a thirty-second of it. One whose own memory fills its limit has its program's pages
+/// alone, a few MiB.
+const THRASH_ROOM: u64 = 32;
 
 /// A command's memory as [`watch_thrashing`] last saw it: how often it had hit its limit, how
 /// many pages it had read back after letting them go, how many looks in a row it thrashed, and
@@ -87,12 +91,15 @@ struct Thrash {
     killed: bool,
 }
 
-/// Kill each command that thrashes at its memory limit, as the kernel's OOM killer kills one
-/// whose memory it cannot take back. The kernel kills only where reclaiming gets nowhere, and a
+/// Kill each command whose memory has run out, as the kernel's OOM killer kills one whose
+/// memory it cannot take back. The kernel kills only where reclaiming gets nowhere, and a
 /// command whose own anonymous memory fills its limit still has its program's pages to let go
 /// of and read back, again and again, for minutes, without end. One that, between two looks,
-/// hit its limit and read back more than a sixteenth of it in pages is thrashing; for
-/// [`THRASH_LOOKS`] looks in a row, its cgroup is killed.
+/// hit its limit, read back more than a sixteenth of it in pages, and holds all but a
+/// [`THRASH_ROOM`]th of it in memory that cannot be reclaimed is out of memory; for
+/// [`THRASH_LOOKS`] looks in a row, its cgroup is killed. A command that only reads more files
+/// than its limit holds hits it and reads back as much, but holds what it read as file pages,
+/// which are reclaimed: it is never killed.
 fn watch_thrashing() {
     let Some(&most) = JOB_MEMORY.get() else {
         return;
@@ -100,21 +107,32 @@ fn watch_thrashing() {
     // SAFETY: `sysconf` has no preconditions.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
     let enough = most / page / 16;
-    let counted = |file: PathBuf, name: &str| -> u64 {
-        let read = fs::read_to_string(file).unwrap_or_default();
+    let counted = |read: &str, name: &str| -> u64 {
         read.lines()
             .find_map(|line| line.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
             .unwrap_or(0)
     };
+    let read = |own: &Path, file: &str| fs::read_to_string(own.join(file)).unwrap_or_default();
     loop {
         thread::sleep(THRASH_LOOK);
         for (own, thrash) in WATCHED.lock().unwrap().iter_mut() {
             if thrash.killed {
                 continue;
             }
-            let max = counted(own.join("memory.events"), "max");
-            let refaults = counted(own.join("memory.stat"), "workingset_refault_file");
-            let thrashing = max > thrash.max && refaults.saturating_sub(thrash.refaults) > enough;
+            let max = counted(&read(own, "memory.events"), "max");
+            let stat = read(own, "memory.stat");
+            let refaults = counted(&stat, "workingset_refault_file");
+            // What it holds less what reclaim can take: the file pages on their lists, and the
+            // kernel's reclaimable caches. Anonymous memory, with no swap, and tmpfs stay.
+            let reclaimable = ["active_file", "inactive_file", "slab_reclaimable"]
+                .map(|name| counted(&stat, name))
+                .iter()
+                .sum::<u64>();
+            let current = read(own, "memory.current").trim().parse().unwrap_or(0u64);
+            let held = current.saturating_sub(reclaimable);
+            let thrashing = max > thrash.max
+                && refaults.saturating_sub(thrash.refaults) > enough
+                && held >= most - most / THRASH_ROOM;
             thrash.strikes = if thrashing { thrash.strikes + 1 } else { 0 };
             (thrash.max, thrash.refaults) = (max, refaults);
             if thrash.strikes >= THRASH_LOOKS {

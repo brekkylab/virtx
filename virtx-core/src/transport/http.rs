@@ -1,5 +1,5 @@
-//! What every endpoint's client shares over HTTP: a path segment percent-encoded, a refusal
-//! read as an [`Error`], and a JSON request and its answer, as `PROTOCOL.md`'s Resources says.
+//! What every endpoint's client shares over HTTP: a path segment percent-encoded, a refusal read as
+//! an [`Error`], and a JSON request and its answer, as the protocol's Resources says.
 
 use bytes::Bytes;
 use http::{Method, header};
@@ -49,8 +49,8 @@ pub(crate) fn resolved(path: &str) -> Vec<&str> {
 }
 
 /// `response`, a refusal, as the [`Error::Status`] or [`Error::Refusal`] it is: its body read
-/// for a person, the `{"error": {"code", "message"}}` a resource answers as `code: message`, or
-/// what a non-JSON refusal was rather than its body.
+/// for a person -- the `{"error": {"code", "message"}}` a resource answers as `code: message`,
+/// plain text as it is -- or what any other refusal was rather than its body.
 pub(crate) async fn refused(response: http::Response<Body>) -> Error {
     #[derive(Deserialize)]
     struct Refusal {
@@ -82,6 +82,21 @@ pub(crate) async fn refused(response: http::Response<Body>) -> Error {
         Ok(Refusal { error }) => {
             Error::Status(status, format!("{}: {}", error.code, error.message))
         }
+        // Words, as a server or a proxy in front of it may answer: said as they are. A page,
+        // such as a proxy's HTML, is not words to a person.
+        Err(_) if content_type.eq_ignore_ascii_case("text/plain") => {
+            match std::str::from_utf8(&body) {
+                Ok(said) => Error::Status(status, said.trim().chars().take(TEXT_MOST).collect()),
+                Err(_) => Error::Refusal {
+                    status,
+                    description: format!(
+                        "not a virtx answer ({content_type}, {} bytes)",
+                        body.len()
+                    ),
+                    body: Some(String::from_utf8_lossy(&body).into_owned()),
+                },
+            }
+        }
         Err(_) => {
             let desc = if content_type.is_empty() {
                 format!("{} bytes", body.len())
@@ -101,6 +116,9 @@ pub(crate) async fn refused(response: http::Response<Body>) -> Error {
         }
     }
 }
+
+/// The most of a plain-text refusal said as its message, in characters.
+const TEXT_MOST: usize = 1000;
 
 /// Send `method` to `path` with `body` as JSON, if any, and answer the body of a success. A
 /// status outside `2xx` is an [`Error::Status`].
@@ -137,6 +155,16 @@ async fn send(
 /// `bytes` read as a `T`.
 fn read<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     serde_json::from_slice(bytes).map_err(|e| Error::Client(e.to_string()))
+}
+
+/// The body of `response`, a success, read as a `T`.
+pub(crate) async fn json<T: DeserializeOwned>(response: http::Response<Body>) -> Result<T, Error> {
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| Error::Transport(format!("reading the response: {e}")))?;
+    read(&body.to_bytes())
 }
 
 /// What `GET path` answers.
@@ -247,18 +275,34 @@ mod tests {
         );
     }
 
+    /// Plain text is said as it is, a server's and a proxy's alike, as words to a person -- not
+    /// as "not a virtx answer" of a server that answered.
     #[tokio::test]
-    async fn a_non_json_refusal_without_restarting_suffix() {
-        let response = http::Response::builder()
-            .status(500)
-            .header(header::CONTENT_TYPE, "text/plain")
-            .body(full(Bytes::from("internal crash")))
-            .unwrap();
-        let error = refused(response).await;
-        assert_eq!(
-            error.to_string(),
-            "the server answered 500 Internal Server Error; not a virtx answer (text/plain, 14 bytes)"
-        );
+    async fn a_plain_text_refusal_is_said_as_it_is() {
+        for (status, text, said) in [
+            (
+                500,
+                "internal crash\n",
+                "the server answered 500 Internal Server Error: internal crash",
+            ),
+            (
+                503,
+                "no room for the sandbox yet: try again",
+                "the server answered 503 Service Unavailable: no room for the sandbox yet: try again",
+            ),
+        ] {
+            let response = http::Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full(Bytes::from(text)))
+                .unwrap();
+            let error = refused(response).await;
+            assert_eq!(error.to_string(), said);
+            assert!(
+                matches!(error, Error::Status(s, _) if s == status),
+                "{error:?}"
+            );
+        }
     }
 
     #[tokio::test]

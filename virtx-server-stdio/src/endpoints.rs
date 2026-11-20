@@ -1,9 +1,9 @@
-//! The endpoints `virtx-core`'s `PROTOCOL.md` names, but the images' registry: those in a project
-//! ([`router`]), answered from the [`Home`] of the project a request names, and those of the
-//! projects themselves ([`projects`]), answered from the [`Host`]. One client is on the other end
-//! of stdio, so all of it is its.
+//! The endpoints the protocol names, but the images' registry: those in a project ([`router`]),
+//! answered from the [`Home`] of the project a request names, and those of the projects themselves
+//! ([`projects`]), answered from the [`Host`]. One client is on the other end of stdio, so all of
+//! it is its.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, FromRequest, FromRequestParts, Request};
+use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
@@ -28,9 +28,11 @@ use tokio::task::{AbortHandle, JoinSet};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
-    Role, SandboxCreateArgs, SandboxExecArgs, SandboxPort, SandboxSignalArgs, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort, SandboxSignalArgs,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    accepts_event_stream, described_type, from_body,
 };
+use virtx_uvm::backend::Backing;
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
     ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
@@ -61,6 +63,8 @@ pub struct Home {
     vm: Vec<OsString>,
     /// The sandboxes, by id, until each is removed.
     sandboxes: Mutex<HashMap<String, Held>>,
+    /// The names sandboxes being made have taken, each until it is made or is not.
+    naming: Mutex<HashSet<String>>,
     /// The image jobs, by id, and what cancels each, until each is removed.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, AbortHandle)>>,
     /// Set once its project is to be removed: no sandbox or image job is added after.
@@ -88,6 +92,7 @@ impl Home {
                 crate::MACHINE_SUBCOMMAND.into(),
             ],
             sandboxes: Mutex::default(),
+            naming: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
@@ -131,12 +136,45 @@ impl Home {
         });
     }
 
+    /// Take `name` for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here has it, or one being made has taken it.
+    fn naming(&self, name: Option<&str>) -> Result<Naming<'_>, Refused> {
+        let Some(name) = name else {
+            return Ok(Naming(self, None));
+        };
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut naming = self.naming.lock().unwrap();
+        let held = sandboxes
+            .values()
+            .any(|held| held.sandbox.name() == Some(name));
+        if held || !naming.insert(name.to_owned()) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                format!("a sandbox here is named {name} already"),
+            ));
+        }
+        Ok(Naming(self, Some(name.to_owned())))
+    }
+
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         let sandboxes = self.sandboxes.lock().unwrap();
         sandboxes
             .get(id)
             .map(|held| Arc::clone(&held.sandbox))
             .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))
+    }
+}
+
+/// A name a sandbox being made has taken, given back as this drops: once the sandbox is among
+/// [`Home`]'s, which holds it from there, or once its making failed.
+struct Naming<'a>(&'a Home, Option<String>);
+
+impl Drop for Naming<'_> {
+    fn drop(&mut self) {
+        if let Some(name) = &self.1 {
+            self.0.naming.lock().unwrap().remove(name);
+        }
     }
 }
 
@@ -676,10 +714,17 @@ async fn sandbox_files(
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
-async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+/// Every sandbox; with `?name=`, the one named so, if any.
+async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
+    let name = query.as_deref().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "name")
+            .map(|(_, name)| name.into_owned())
+    });
     let sandboxes = home.sandboxes.lock().unwrap();
     let listed: Vec<_> = sandboxes
         .values()
+        .filter(|held| name.is_none() || held.sandbox.name() == name.as_deref())
         .map(|held| held.sandbox.answer())
         .collect();
     Ok(json(&listed))
@@ -687,12 +732,22 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>) -> Answer {
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // No inbound rules are kept here, so a port given some is refused rather than opened to
+    // whoever they were meant to keep out.
+    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
+        return Err(invalid(format!(
+            "ports: {}'s inbound rules are not kept by this server",
+            spec.port
+        )));
+    }
+    let _naming = home.naming(args.name.as_deref())?;
 
     // Each port on this host's loopback, which only this machine reaches, taken to the
-    // sandbox's machine while it runs.
+    // sandbox's machine while it runs: TCP as it is, so an `http` port is HTTP at its URL too.
     let mut opened = Vec::new();
     let mut listeners = Vec::new();
-    for &port in &args.ports {
+    for spec in &args.ports {
+        let port = spec.port;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
@@ -701,7 +756,11 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
         opened.push(SandboxPort {
             port,
-            url: format!("http://{at}"),
+            url: Some(format!("http://{at}")),
+            label: spec.label.clone(),
+            protocol: spec.protocol,
+            address: None,
+            inbound_error: None,
         });
         listeners.push((port, listener));
     }
@@ -713,6 +772,8 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         &args,
         home.vm.clone(),
         park_after(),
+        None,
+        &Backing::default(),
     )
     .await?;
     let mut listening = JoinSet::new();
@@ -778,9 +839,13 @@ async fn sandbox_job_list(
     Ok(json(&home.sandbox(&id)?.jobs()))
 }
 
+/// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
+/// `text/event-stream`, `201` with the job as the first event and then its log, and its path in
+/// `Location`: its output and end with no second request.
 async fn sandbox_exec(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
+    headers: HeaderMap,
     Whole(request): Whole,
 ) -> Answer {
     let args: SandboxExecArgs = body(&request)?;
@@ -796,8 +861,22 @@ async fn sandbox_exec(
     }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    let job = sandbox.exec(args.cmd, timeout).await?.get();
-    Ok(created(format!("/sandboxes/{id}/jobs/{}", job.id), &job))
+    let job = sandbox.exec(args.cmd, timeout).await?;
+    let answered = job.get();
+    let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
+    if !accepts_event_stream(&headers) {
+        return Ok(created(location, &answered));
+    }
+    let log = Arc::clone(job.log()).events_led_by(&SandboxExecItem::Job(answered));
+    Ok((
+        StatusCode::CREATED,
+        [
+            (header::LOCATION, location),
+            (header::CONTENT_TYPE, "text/event-stream".to_owned()),
+        ],
+        Body::from_stream(log),
+    )
+        .into_response())
 }
 
 async fn sandbox_job_get(
@@ -864,8 +943,8 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
 /// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
 const BODY_LIMIT: usize = 2 << 20;
 
-/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
-/// if it broke off, as any refusal here is, in PROTOCOL.md's envelope rather than as text.
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid` if
+/// it broke off, as any refusal here is, in the protocol's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused, as `virtx-server-tcp` reads one: there a connection closed
@@ -910,8 +989,8 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
     }
 }
 
-/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in PROTOCOL.md's envelope rather than as text.
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when they
+/// do not read as one, in the protocol's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>
@@ -928,14 +1007,43 @@ where
         match axum::extract::Path::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Path(segments)) => Ok(Segments(segments)),
             Err(e) if e.status().is_server_error() => Err(internal(e.body_text())),
-            Err(e) => Err(invalid(format!("the path: {}", e.body_text()))),
+            Err(e) => Err(invalid(unread_path(&e))),
         }
     }
 }
 
-/// `request` read as a `T`.
+/// Why a path's segments did not read, naming the segment and what it takes.
+fn unread_path(rejection: &axum::extract::rejection::PathRejection) -> String {
+    use axum::extract::path::ErrorKind;
+    use axum::extract::rejection::PathRejection;
+    let PathRejection::FailedToDeserializePathParams(failed) = rejection else {
+        return "the path does not read".to_owned();
+    };
+    match failed.kind() {
+        ErrorKind::ParseErrorAtKey {
+            key,
+            value,
+            expected_type,
+        } => format!("{key}: {}, not {value:?}", described_type(expected_type)),
+        ErrorKind::ParseErrorAtIndex {
+            value,
+            expected_type,
+            ..
+        }
+        | ErrorKind::ParseError {
+            value,
+            expected_type,
+        } => format!("the path: {}, not {value:?}", described_type(expected_type)),
+        ErrorKind::InvalidUtf8InPathParam { key } => {
+            format!("{key}: UTF-8 once its escapes are read, and it is not")
+        }
+        _ => "the path does not read".to_owned(),
+    }
+}
+
+/// `request` read as a `T`; refused naming the member that does not read and what it takes.
 fn body<T: DeserializeOwned>(request: &Bytes) -> Result<T, Refused> {
-    serde_json::from_slice(request).map_err(invalid)
+    from_body(request).map_err(invalid)
 }
 
 /// `value` as a JSON body.
@@ -1068,8 +1176,12 @@ impl From<SandboxError> for Refused {
             SandboxError::Image(e) => e.into(),
             SandboxError::Io { .. } => internal(e),
             SandboxError::Volume(e) => e.into(),
+            SandboxError::Backend(e) => internal(e),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
+            // Where whatever embeds this sets an admission: the protocol's refusal.
+            SandboxError::NoRoom(_) => refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e),
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
         }
     }
 }

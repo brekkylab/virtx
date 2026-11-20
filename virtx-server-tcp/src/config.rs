@@ -10,7 +10,9 @@
 //! ```
 //!
 //! A project's volumes, images and its sandboxes' upper disks are under its own root,
-//! `<home>/project/<id>/` (see [`virtx_uvm::ProjectStore`]).
+//! `<home>/project/<id>/` (see [`virtx_uvm::ProjectStore`]). Its sandboxes are kept there across
+//! the server's restart, each with a record beside its disk: parked as the server ends, and
+//! known again, parked, as it starts (see [`virtx_uvm::Sandbox::kept`]).
 //! Without `home`, it is [`virtx_uvm::cache_root`].
 //!
 //! A request's token is a token `oidc`'s issuer signed for `client_id`, and the user is its
@@ -25,13 +27,26 @@
 //! addresses, and to one on this host or a private network only if `private_registries` names
 //! it, as a reference names its registry: `"private_registries": ["registry.internal:5000"]`.
 //! See [`virtx_uvm::PublicRegistries`].
+//!
+//! Its anonymous pulls of Docker Hub's images -- a pull, a build's base -- go to the mirror
+//! `registry_mirror` names first, as a reference names its registry: `"registry_mirror":
+//! "mirror.gcr.io"`. None, unless set. See [`virtx_uvm::RegistryClient::with_mirror`].
+//!
+//! `"share_public_images": true` shares the projects' anonymous pulls between them: a project's
+//! pull of an image another pulled anonymously before links that one's layers, and pulls none
+//! ([`crate::shared::SharedPulls`]). How long a pull takes then says whether another project
+//! pulled the image, so it is off unless set: for a server whose projects' users may know that
+//! of each other, such as one person's or one team's.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow};
 use serde::Deserialize;
-use virtx_uvm::PublicRegistries;
+use virtx_uvm::{ProjectStore, PublicImages, PublicRegistries};
+
+use crate::shared::SharedPulls;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +64,13 @@ pub struct Config {
     /// reached on a private address only if it is listed too.
     #[serde(default)]
     pub private_registries: Vec<String>,
+    /// Docker Hub's mirror, which anonymous pulls of its images go to first: `host` or
+    /// `host:port`. None, unless set.
+    #[serde(default)]
+    pub registry_mirror: Option<String>,
+    /// Whether the projects' anonymous pulls are shared between them. Off unless set.
+    #[serde(default)]
+    pub share_public_images: bool,
 }
 
 impl Config {
@@ -63,7 +85,18 @@ impl Config {
     pub fn parse(value: serde_json::Value) -> anyhow::Result<Config> {
         let config: Config = serde_json::from_value(value)?;
         config.registries()?;
+        if let Some(mirror) = &config.registry_mirror {
+            PublicRegistries::new([mirror]).map_err(|e| anyhow!("registry_mirror: {e}"))?;
+        }
         Ok(config)
+    }
+
+    /// Where the projects' anonymous pulls are shared: between them, where
+    /// `share_public_images` says so, and nowhere otherwise.
+    pub fn public_images(&self) -> Option<Arc<dyn PublicImages>> {
+        self.share_public_images.then(|| {
+            Arc::new(SharedPulls::new(ProjectStore::new(self.home()))) as Arc<dyn PublicImages>
+        })
     }
 
     /// The proxy this server's image jobs connect through.
@@ -98,6 +131,43 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             "private_registries: \"https://registry.internal\": \
+             a registry is named `host` or `host:port`"
+        );
+    }
+
+    #[test]
+    fn public_images_are_shared_between_projects_only_where_it_says_so() {
+        let config = |share: Option<bool>| {
+            let mut config = json!({
+                "listen": "127.0.0.1:0",
+                "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+            });
+            if let Some(share) = share {
+                config["share_public_images"] = json!(share);
+            }
+            Config::parse(config).unwrap()
+        };
+        assert!(config(None).public_images().is_none());
+        assert!(config(Some(false)).public_images().is_none());
+        assert!(config(Some(true)).public_images().is_some());
+    }
+
+    #[test]
+    fn a_registry_mirror_is_named_by_its_host_or_its_host_and_port() {
+        let config = |mirror: &str| {
+            Config::parse(json!({
+                "listen": "127.0.0.1:0",
+                "oidc": { "issuer": "https://idp.example", "client_id": "virtx" },
+                "registry_mirror": mirror,
+            }))
+        };
+        let read = config("mirror.gcr.io").unwrap();
+        assert_eq!(read.registry_mirror.as_deref(), Some("mirror.gcr.io"));
+        assert!(config("registry.internal:5000").is_ok());
+        let refused = config("https://mirror.gcr.io").err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "registry_mirror: \"https://mirror.gcr.io\": \
              a registry is named `host` or `host:port`"
         );
     }

@@ -1,9 +1,9 @@
-//! `virtx-stdio` -- a virtx server over stdio: the endpoints `virtx-core`'s `PROTOCOL.md` names,
-//! with the images as an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]),
-//! answered on stdin and stdout to the client that spawned it, until it closes stdin. That client
-//! is the host's admin, who reaches every project here, each a directory of its own in the cache
-//! (see [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those
-//! a `virtx-server-tcp` over the same cache keeps for its users, by id.
+//! `virtx-stdio` -- a virtx server over stdio: the endpoints the protocol names, with the images as
+//! an OCI registry at `/images/oci/v2/` (see [`virtx_uvm::RegistryServer`]), answered on stdin and
+//! stdout to the client that spawned it, until it closes stdin. That client is the host's admin,
+//! who reaches every project here, each a directory of its own in the cache (see
+//! [`virtx_uvm::ProjectStore`]): its own, `default`, and each one it made, by name, and those a
+//! `virtx-server-tcp` over the same cache keeps for its users, by id.
 //!
 //! `virtx-stdio vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
@@ -289,8 +289,8 @@ mod tests {
     };
 
     use virtx_core::{
-        Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, Recipe,
-        SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
+        Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
+        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxVolume,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -485,8 +485,29 @@ mod tests {
 
         for ports in [vec![0], vec![8080, 8080]] {
             let mut args = here();
-            args.ports = ports;
+            args.ports = ports.into_iter().map(PortSpec::new).collect();
             assert_eq!(refused(args).await, 400);
+        }
+        // Inbound rules are kept by no server here, and a label is at most 128 characters.
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        assert_eq!(refused(here().port(ssh)).await, 400);
+        assert_eq!(
+            refused(here().port(PortSpec::new(22).inbound([]))).await,
+            400
+        );
+        let long = PortSpec::new(80).label("x".repeat(129));
+        assert_eq!(refused(here().port(long)).await, 400);
+        let long = "x".repeat(129);
+        for name in [
+            "",
+            ".dot",
+            "-dash",
+            "a b",
+            "caf\u{e9}",
+            "a/b",
+            long.as_str(),
+        ] {
+            assert_eq!(refused(here().name(name)).await, 400, "name {name:?}");
         }
         let mut args = here();
         args.vcpus = Some(0);
@@ -1350,10 +1371,9 @@ mod tests {
             .collect()
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
-    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
-    /// and a path whose segment does not read as one is `400` `invalid`. A file's body has no
-    /// such limit.
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client reads
+    /// its code: a body over the server's limit is `413` `too_large`, naming the limit, and a path
+    /// whose segment does not read as one is `400` `invalid`. A file's body has no such limit.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
         let server = Server::spawn("envelope").await;
@@ -1396,6 +1416,82 @@ mod tests {
             .unwrap();
         let Ok(response) = app.clone().oneshot(file).await;
         assert_eq!(response.status(), 201);
+    }
+
+    /// A body or a path that does not read is refused `400` `invalid` in the server's words:
+    /// the member or segment, what it takes, and what was sent.
+    #[tokio::test]
+    async fn a_body_or_a_path_that_does_not_read_is_refused_naming_what_it_takes() {
+        let server = Server::spawn("unread").await;
+        let (app, _) = app(&server.root).await.unwrap();
+        let image = r#""image": {"type": "tag", "tag": "alpine"}"#;
+        let ports = format!(r#"{{{image}, "ports": ["5900"]}}"#);
+        for (method, path, body, said) in [
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                "not json",
+                "the body: JSON, which it stops being at line 1, column 2",
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                "[]",
+                "the body: an object, not a list",
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                "",
+                "the body: a JSON object, and none was sent",
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/exec/",
+                r#"{"cmd": "ls"}"#,
+                r#"cmd: a list, not "ls""#,
+            ),
+            (
+                "POST",
+                "/sandboxes/nobody/jobs/j/signal",
+                r#"{"signl": "TERM"}"#,
+                "signl: not a member; the members are `signal`",
+            ),
+            (
+                "POST",
+                "/images/jobs/pull/",
+                "x",
+                "the body: JSON, which it stops being at line 1, column 1",
+            ),
+            (
+                "POST",
+                "/sandboxes/",
+                &ports,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+            ),
+            (
+                "GET",
+                "/sandboxes/%FF",
+                "",
+                "id: UTF-8 once its escapes are read, and it is not",
+            ),
+        ] {
+            let request = http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap();
+            let Ok(response) = app.clone().oneshot(request).await;
+            let how = format!("{method} {path} {body}");
+            assert_eq!(response.status(), 400, "{how}");
+            let answer = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let answer: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+            assert_eq!(answer["error"]["code"], "invalid", "{how}");
+            assert_eq!(answer["error"]["message"], said, "{how}");
+        }
     }
 
     /// Each route that takes a JSON body holds it to the limit: one a byte over is refused `413`

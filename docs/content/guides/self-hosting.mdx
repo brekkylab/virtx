@@ -1,9 +1,9 @@
 ---
 title: "Running your own server"
-description: "Run virtx-server-tcp on your own machine and sign users in through your OpenID Connect provider."
+description: "Connect to a team's virtx-server-tcp, and run one on your own machine, signing users in through your OpenID Connect provider."
 ---
 
-import { Tabs, TabItem } from "@astrojs/starlight/components";
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
 `virtx-server-tcp` is the virtx server for a team.
 It runs on a machine of yours, keeps running, and serves every user your OpenID Connect provider signs in.
@@ -11,13 +11,82 @@ Each user works in projects of their own and those shared with them; see [Managi
 
 To run sandboxes on your own machine for yourself alone, you need none of this: `Client.spawn()` starts a server for your program; see [Hello world](/docs/hello-world/).
 
-## Install
+This page has two parts: [connecting to a server](#connecting-to-a-server), for each user, and [running the server](#running-the-server), for whoever runs it for the team.
+
+## Connecting to a server
+
+Whoever runs the server tells you its URL, here `https://virtx.example`.
+
+<Aside type="note">
+If you cannot sign in or connect, or the server refuses a request, ask whoever runs it.
+They choose who may sign in, and add you to projects.
+</Aside>
+
+Sign in to it once with the `virtx` command, which `uvx` or `npx` runs without installing; to install it instead, see [Installing](/docs/reference/cli/#installing).\
+It asks the server which provider to use, and shows a code to approve in the browser:
+
+```sh
+uvx virtx login https://virtx.example                 # pipx run virtx, without uv
+
+# or
+
+npx -y @brekkylab/virtx login https://virtx.example
+```
+
+Then a program connects with the token `virtx token` prints, which the client asks for again whenever it runs out:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import Client, CommandAuth
+
+client = Client.connect("https://virtx.example", CommandAuth("uvx", ("virtx", "token", "--json")))
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const client = Client.connect('https://virtx.example', {
+  type: 'command',
+  program: 'npx',
+  args: ['-y', '@brekkylab/virtx', 'token', '--json'],
+})
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use virtx::{Auth, Client};
+
+let client = Client::connect(
+    "https://virtx.example",
+    Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
+    None,
+    [] as [(&str, &str); 0],
+)?;
+```
+
+</TabItem>
+</Tabs>
+
+For a provider that gives its public clients a secret, pass it to `virtx login` with `--client-secret`.
+A program that gets its token some other way passes it as it is, with `BearerAuth` in Python, `{ type: 'bearer', token }` in Node.js, or `Auth::Bearer` in Rust.
+
+`uvx virtx whoami` shows who is signed in, and `uvx virtx logout` signs out; see the CLI's [Signing in](/docs/reference/cli/#signing-in).
+Signed in to more than one provider, name the server's to `virtx token`: `uvx virtx token --json --issuer https://idp.example --client-id virtx`.
+
+## Running the server
+
+### Install
 
 Each [release](https://github.com/brekkylab/virtx/releases) carries the server as `virtx-server-tcp-<os>-<arch>.tar.gz`.
 Unpack it into a directory of its own on the machine that should run the VMs, and run `virtx-server-tcp` from there: it finds what it needs beside it.
 The machine must meet the [requirements](https://github.com/brekkylab/virtx#requirements) for running VMs.
 
-## Configure
+### Configure
 
 Write a `server.json`:
 
@@ -38,23 +107,34 @@ virtx-server-tcp serve --config server.json
 | Field | What it sets |
 | --- | --- |
 | `listen` | The address and port the server listens on. |
-| `home` | The directory where the server keeps everything its users create. Without it, the server uses `$VIRTX_HOME`, or a `virtx` directory in its user's cache directory. |
-| `oidc` | The OpenID Connect provider users sign in with; see [Sign users in](#sign-users-in). |
+| `home` | The directory where the server keeps everything its users create, sandboxes included: stopped and started again over it, the server has each sandbox it had, with what it wrote. Without it, the server uses `$VIRTX_HOME`, or a `virtx` directory in its user's cache directory. |
+| `oidc` | The OpenID Connect provider users sign in with; see [Add users](#add-users). |
 | `origins` | The web pages allowed to call the server from a browser, such as `["https://app.example"]`. Without it, browsers are refused; programs are not affected. |
 | `private_registries` | Registries on the server's machine or its private network that image jobs may reach, such as `["registry.internal:5000"]`; see [Pull and push](/docs/guides/images/#pull-and-push). Without it, jobs reach only registries on public addresses. |
+| `registry_mirror` | A mirror of Docker Hub, such as `"mirror.gcr.io"`, that pulls of Docker Hub's images without credentials try first, a build's base among them; see [Pull and push](/docs/guides/images/#pull-and-push). Without it, they go to Docker Hub. |
+| `share_public_images` | `true` to share pulls without credentials between the server's projects; see [Share public images](#share-public-images). `false` unless set. |
 
 `listen` and `oidc` are required, and the server does not start with a field it does not know.
+
+Under `home`, each project's images, sandboxes and volumes are in `project/<id>/`.
+A sandbox reaches its volumes as virtio-fs shares, which libkrun does not claim keep a guest from other directories on the same host filesystem, so give `home` a filesystem with nothing else on it.
+
+### Share public images
+
+Each project keeps its own images, so two projects pulling the same public image each download it. With `"share_public_images": true`, a pull without credentials, a build's base included, first looks in the server's other projects for that image as the registry serves it now: one another project pulled without credentials is filed from there, its layers sharing the same files on disk, and nothing is downloaded. A pull with credentials is never shared, and neither is what a project built or pushed.
+
+It is off unless set, because it tells one project something of another: a pull that finds the image shared ends much sooner than one that downloads it, so anyone who can pull in one project can tell whether some other project on the server pulled that image without credentials. Turn it on where the server's users may know that of each other, such as a server of one person's or one team's, and leave it off where projects belong to people or organizations that should learn nothing of each other.
 
 The server serves HTTP, and TLS is left to whatever you put in front of it, as with any HTTP service.
 Clients send a token over HTTPS to other machines, so serve it there over HTTPS, passing WebSocket connections through: [ports](/docs/guides/networks-ports/) are reached over them.
 With it on the same machine, listen on `127.0.0.1`; listen on another address only for a proxy on another machine.
 Started on an address that is not the machine's loopback, the server warns on its standard error that it speaks plain HTTP there.
 
-## Sign users in
+### Add users
 
-The server lets nobody in by itself: every user signs in through an OpenID Connect provider you already use.
+The server keeps no list of users of its own: a user is whoever your OpenID Connect provider signs in to the client you name, and nobody else gets in.
+So you add a user, or take one away, in the provider, by letting them use that client or not; allow only your team.
 
-The server keeps no list of users: it takes everyone your provider signs in to the client you name, so allow only your team to use that client in the provider.
 In your provider, register a public client that allows the device flow, and put the provider and the client in `oidc`:
 
 | Field | What it sets |
@@ -62,60 +142,8 @@ In your provider, register a public client that allows the device flow, and put 
 | `issuer` | The provider's issuer URL. |
 | `client_id` | The client you registered. |
 | `username_claim` | Which claim of the user's ID token is their user name on the server. `email` by default, taken only once the provider has verified it. |
-| `jwks_uri` | Where the provider's signing keys are, for a provider without a discovery document. Most providers need none. `virtx login` needs the discovery document, so with such a provider users get their token another way and connect with it as a bearer token, as the end of this page shows. |
+| `jwks_uri` | Where the provider's signing keys are, for a provider without a discovery document. Most providers need none. `virtx login` needs the discovery document, so with such a provider users get their token another way and connect with it as a bearer token, as [Connecting to a server](#connecting-to-a-server) shows. |
 
 The user name is how others add a user to their projects, so with the default, teammates add each other by email address.
 
-## Connect to it
-
-Each user signs in once with the `virtx` command, built from `virtx-cli/`.
-It asks the server which provider to use, and shows a code to approve in the browser:
-
-```sh
-virtx login https://virtx.example
-```
-
-Then a program connects with the token `virtx token` prints, which the client asks for again whenever it runs out:
-
-<Tabs syncKey="lang">
-<TabItem label="Python">
-
-```python
-from virtx import Client, CommandAuth
-
-client = Client.connect("https://virtx.example", CommandAuth("virtx", ("token", "--json")))
-```
-
-</TabItem>
-<TabItem label="Node.js">
-
-```js
-const client = Client.connect('https://virtx.example', {
-  type: 'command',
-  program: 'virtx',
-  args: ['token', '--json'],
-})
-```
-
-</TabItem>
-<TabItem label="Rust">
-
-```rust
-use virtx::{Auth, Client};
-
-let client = Client::connect(
-    "https://virtx.example",
-    Auth::Command { program: "virtx".into(), args: vec!["token".into(), "--json".into()] },
-    None,
-    [] as [(&str, &str); 0],
-)?;
-```
-
-</TabItem>
-</Tabs>
-
-For a provider that gives its public clients a secret, pass it to `virtx login` with `--client-secret`.
-A program that gets its token some other way passes it as it is, with `BearerAuth` in Python, `{ type: 'bearer', token }` in Node.js, or `Auth::Bearer` in Rust.
-
-`virtx whoami` shows who is signed in, and `virtx logout` signs out; see the CLI's [Signing in](/docs/reference/cli/#signing-in).
-Signed in to more than one provider, name the server's to `virtx token`: `virtx token --json --issuer https://idp.example --client-id virtx`.
+Then give your users the server's URL, and the client's secret if your provider gave it one; [Connecting to a server](#connecting-to-a-server) is what they do with them.

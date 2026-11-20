@@ -11,6 +11,10 @@
 // call onto the main thread, so a wake only runs once the event loop does: nothing here blocks
 // the main thread on the library's threads, and releasing a client, which waits for them, runs
 // on a worker.
+//
+// What the library warns of beside an answer, such as a forwarded connection that reached nothing
+// in its sandbox, is emitted as a process warning of the type `VirtxWarning`, queued onto the main
+// thread as a wake is.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -40,13 +44,16 @@ const PLATFORM_PACKAGE = {
 }[`${process.platform}-${process.arch}`]
 
 class VirtxError extends Error {
-  constructor(message, status = null, body = null, source = 'client') {
+  constructor(message, status = null, body = null, source = 'client', code = null) {
     super(message)
     this.name = 'VirtxError'
     // Where it failed: `server`, `job`, `transport` or `client`.
     this.source = source
     // The HTTP status the server refused the request with, if it did.
     this.status = status
+    // The protocol's code it refused with, where it answered one: `not_found`, `in_use` and the
+    // like -- what to branch on, not the message.
+    this.code = code
     // The server's response body, where it was not a JSON error.
     this.body = body
   }
@@ -62,6 +69,7 @@ const VirtxWaker = koffi.struct('VirtxWaker', {
   release: koffi.pointer(Callback),
 })
 const Out = koffi.out(koffi.pointer(VirtxBytes))
+const Warn = koffi.proto('void VirtxWarn(const char *message)')
 
 const PLAIN = ['uintptr_t', ['uintptr_t']]
 const WITH_ARGS = ['uintptr_t', ['uintptr_t', 'uint8_t *', 'size_t']]
@@ -134,6 +142,7 @@ const SIGNATURES = {
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
+  virtx_client_find_sandbox: WITH_ARGS,
   virtx_client_remove_sandbox: WITH_ARGS,
   virtx_client_list_sandbox_job: WITH_ARGS,
   virtx_client_exec_sandbox: WITH_ARGS,
@@ -142,11 +151,14 @@ const SIGNATURES = {
   virtx_client_signal_sandbox_job: WITH_ARGS,
   virtx_client_write_sandbox_job_stdin: WITH_ARGS,
   virtx_client_sandbox_job_log: WITH_ARGS,
+  virtx_client_exec_sandbox_log: WITH_ARGS,
   virtx_port_forwarder_open: [
     'int',
     ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
+  virtx_port_forwarder_last_error: ['int', ['uintptr_t', Out]],
   virtx_port_forwarder_free: ['void', ['uintptr_t']],
+  virtx_set_warn: ['void', [koffi.pointer(Warn)]],
   virtx_bytes_free: ['void', [VirtxBytes]],
   virtx_future_poll: ['int', ['uintptr_t', VirtxWaker, Out]],
   virtx_future_wait: ['int', ['uintptr_t', Out]],
@@ -176,6 +188,10 @@ function settle(key, release) {
 // Registered once and kept for the process: wakers are only ever these two.
 const wake = koffi.register((key) => settle(key, false), koffi.pointer(Callback))
 const release = koffi.register((key) => settle(key, true), koffi.pointer(Callback))
+const warn = koffi.register(
+  (message) => process.emitWarning(message, 'VirtxWarning'),
+  koffi.pointer(Warn),
+)
 
 class Library {
   constructor(file) {
@@ -185,6 +201,7 @@ class Library {
     for (const [name, [result, args]] of Object.entries(SIGNATURES)) {
       this[name] = lib.func(name, result, args)
     }
+    this.virtx_set_warn(warn)
   }
 
   // What the library wrote for `status`, read and freed: the output, as JSON unless `raw`, or
@@ -204,6 +221,7 @@ class Library {
         failure.status ?? null,
         failure.body ?? null,
         failure.source,
+        failure.code ?? null,
       )
     }
     throw new VirtxError(`unknown status ${status}`)
@@ -375,9 +393,36 @@ class StartedJob extends Promise {
     this._log = log
   }
 
-  // `started`, a promise of the job; `log`, its log by the job.
-  static of(started, log) {
-    return new StartedJob((resolve, reject) => started.then(resolve, reject), log)
+  // `start()`, the request that answers the job, sent as the call returns, as a promise's work
+  // is; `log`, its log by the job. Given `run()`, one iterated at once -- before that -- starts
+  // the job and reads its log as one: `run` settles the job, and yields the log's entries.
+  static of(start, log, run = null) {
+    let started = null
+    let settle = null
+    const job = new StartedJob((resolve, reject) => {
+      settle = { resolve, reject }
+    }, log)
+    job._start = () => {
+      if (!started) {
+        started = start()
+        started.then(settle.resolve, settle.reject)
+      }
+    }
+    job._run =
+      run &&
+      (() => {
+        if (started) return null
+        started = true
+        return run(settle)
+      })
+    queueMicrotask(job._start)
+    return job
+  }
+
+  // biome-ignore lint/suspicious/noThenProperty: a started job is awaited as the job it starts.
+  then(resolved, rejected) {
+    this._start?.()
+    return super.then(resolved, rejected)
   }
 
   async complete(options) {
@@ -385,7 +430,15 @@ class StartedJob extends Promise {
   }
 
   async *[Symbol.asyncIterator]() {
-    yield* this._log(await this)
+    const items = this._run?.()
+    if (!items) {
+      yield* this._log(await this)
+      return
+    }
+    // Read as one with its log, a start that fails is the loop's to throw: the job's own
+    // promise, rejected with it, is not left unheard -- which would end the process.
+    Promise.prototype.then.call(this, undefined, () => {})
+    yield* items
   }
 }
 
@@ -580,7 +633,7 @@ class Client {
 
   _imageJob(name, args) {
     return StartedJob.of(
-      this._call(name, args).then((info) => new ImageJob(this, info)),
+      () => this._call(name, args).then((info) => new ImageJob(this, info)),
       (job) => job.log(),
     )
   }
@@ -687,6 +740,12 @@ class Client {
   async getSandbox(id) {
     return new Sandbox(this, await this._call('virtx_client_get_sandbox', { id }))
   }
+
+  // `undefined` where no sandbox has the name.
+  async findSandbox(name) {
+    const info = await this._call('virtx_client_find_sandbox', { name })
+    return info ? new Sandbox(this, info) : undefined
+  }
 }
 
 // `await using`, where the runtime has it.
@@ -701,7 +760,9 @@ const forwarders = new FinalizationRegistry(({ lib, raw }) => {
 //
 // It runs on its client's session, so the client's last close stops it. Over stdio the server is
 // on this machine and its own address is the forwarder's; over HTTP each connection to the
-// forwarder is carried to the port in a WebSocket.
+// forwarder is carried to the port in a WebSocket. A connection whose WebSocket is refused, or
+// closed before the port sent a byte, is closed, and what was seen is `lastError`, and emitted as
+// a `VirtxWarning`.
 class PortForwarder {
   constructor(raw, lib, address) {
     this._raw = raw
@@ -712,16 +773,36 @@ class PortForwarder {
     forwarders.register(this, { lib, raw }, this._token)
   }
 
-  // Forward the port a sandbox answered `url` for, as `createSandbox` answers one in `ports`,
-  // over `client`'s session. Blocks until it is open.
-  static open(client, url) {
+  // Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it,
+  // over `client`'s session. Given the port, what a connection that fails says names its number.
+  // Returns once its local address is open, which takes no request of the server. A port without
+  // its `url`, as `getSandbox` answers one, is refused, naming it.
+  static open(client, port) {
     const lib = client._lib
-    const bytes = encode({ url })
+    const bytes = encode(
+      typeof port === 'string' ? { url: port } : { url: port.url, port: port.port },
+    )
     const raw = [0]
     const out = {}
     const status = lib.virtx_port_forwarder_open(client._held(), bytes, bytes.length, raw, out)
     const { address } = lib.take(status, out)
     return new PortForwarder(raw[0], lib, address)
+  }
+
+  // Why the last connection to the forwarder that failed did, its message naming the port, as a
+  // `VirtxError`; `null` while none has, and again once a later connection's port sends a byte.
+  // Its `status` is the server's, where it refused the connection's WebSocket.
+  get lastError() {
+    if (this._raw === null) throw new VirtxError('the forwarder is closed')
+    const out = {}
+    const status = this._lib.virtx_port_forwarder_last_error(this._raw, out)
+    try {
+      this._lib.take(status, out)
+    } catch (error) {
+      if (error instanceof VirtxError) return error
+      throw error
+    }
+    return null
   }
 
   // The address's host: a loopback IP.
@@ -949,13 +1030,33 @@ class Sandbox extends Files {
   }
 
   // Starts `cmd` in it, its stdin open for `writeStdin` if `stdin`, killed after `timeoutMs` if
-  // given: the job, and its output as its `log`.
+  // given: the job, and its output as its `log`. Iterated before the code awaits anything else,
+  // the job is started and its log read as one request, where the server answers so; the job is
+  // started on its own at the next microtask otherwise, and its log is a second request.
   exec(cmd, options = {}) {
+    const { client, id } = this
+    const args = { ...options, sandbox: id, cmd }
+    const handle = (info) => new SandboxJob(client, id, info)
     return StartedJob.of(
-      this.client
-        ._call('virtx_client_exec_sandbox', { ...options, sandbox: this.id, cmd })
-        .then((info) => new SandboxJob(this.client, this.id, info)),
+      () => client._call('virtx_client_exec_sandbox', args).then(handle),
       (job) => job.log(),
+      async function* (settle) {
+        let answered = false
+        try {
+          for await (const item of client._items('virtx_client_exec_sandbox_log', args)) {
+            if (item.job) {
+              answered = true
+              settle.resolve(handle(item.job))
+            } else {
+              yield item
+            }
+          }
+          if (!answered) settle.reject(new VirtxError("the job's log ended before its job"))
+        } catch (e) {
+          if (!answered) settle.reject(e)
+          throw e
+        }
+      },
     )
   }
 

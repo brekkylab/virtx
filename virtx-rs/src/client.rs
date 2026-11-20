@@ -20,7 +20,7 @@ use virtx_core::{
     ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
     ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
     RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
-    SandboxJob as SandboxJobInfo, SandboxJobEntry, VolumeCreateArgs,
+    SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, VolumeCreateArgs,
     VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
@@ -367,7 +367,8 @@ impl Client {
         self.call(self.api.virtx_client_tag_image, args)
     }
 
-    /// Remove the tag `reference` (`name:tag`), leaving the image it points at.
+    /// Remove the tag `reference` (`name:tag`), leaving the image it points at. The last tag of
+    /// an image a sandbox or a build uses is refused `409`, and kept.
     pub fn untag_image(&self, reference: impl Into<String>) -> Call<()> {
         let args = ImageUntagArgs {
             reference: reference.into(),
@@ -376,7 +377,7 @@ impl Client {
     }
 
     /// Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on
-    /// it in that name.
+    /// it in that name. An image a sandbox or a build uses is refused `409`, with nothing removed.
     pub fn remove_image(&self, reference: impl Into<String>) -> Call<()> {
         let args = ImageRemoveArgs {
             reference: reference.into(),
@@ -713,7 +714,7 @@ impl Client {
         self.call(self.api.virtx_client_copy_file, args)
     }
 
-    /// Every sandbox the server holds.
+    /// Every sandbox the server holds, each port without its `url`.
     pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
         let client = self.clone();
         let call: Call<Vec<SandboxInfo>> = Call::new(self.api, unsafe {
@@ -727,8 +728,8 @@ impl Client {
         })
     }
 
-    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are answered
-    /// here only.
+    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports' `url`s are
+    /// answered here only.
     ///
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
     /// tag the server has no image by is refused with `404`.
@@ -744,12 +745,20 @@ impl Client {
         Sandbox::new(self.clone(), info)
     }
 
-    /// The sandbox `id`, without its ports.
+    /// The sandbox `id`, each port without its `url`.
     pub fn get_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
         let args = json!({ "id": id.as_ref() });
         let client = self.clone();
         let call: Call<SandboxInfo> = self.call(self.api.virtx_client_get_sandbox, args);
         call.map(move |info| Sandbox::new(client.clone(), info))
+    }
+
+    /// The sandbox named `name`, each port without its `url`, if one is.
+    pub fn find_sandbox(&self, name: impl AsRef<str>) -> Call<Option<Sandbox>> {
+        let args = json!({ "name": name.as_ref() });
+        let client = self.clone();
+        let call: Call<Option<SandboxInfo>> = self.call(self.api.virtx_client_find_sandbox, args);
+        call.map(move |info| info.map(|info| Sandbox::new(client.clone(), info)))
     }
 
     /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
@@ -860,6 +869,26 @@ impl Client {
         Events::new(
             self.api,
             self.start(self.api.virtx_client_sandbox_job_log, args),
+        )
+    }
+
+    /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
+    /// first, then each entry until its `end`. One request where the server answers an exec
+    /// with its log, two elsewhere. Dropping it leaves the job running.
+    pub(crate) fn exec_sandbox_with_log(
+        &self,
+        id: impl AsRef<str>,
+        args: &SandboxExecArgs,
+    ) -> Events<SandboxExecItem> {
+        let args = json!({
+            "sandbox": id.as_ref(),
+            "cmd": args.cmd,
+            "stdin": args.stdin,
+            "timeout_ms": args.timeout_ms,
+        });
+        Events::new(
+            self.api,
+            self.start(self.api.virtx_client_exec_sandbox_log, args),
         )
     }
 

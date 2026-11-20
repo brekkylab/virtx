@@ -8,9 +8,11 @@
 //! copy either way skips what the other side has already.
 
 use std::io::Write;
+use std::sync::Arc;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use futures_util::future::BoxFuture;
 use oci_client::Client;
 use oci_client::client::{ClientConfig, LayerDescriptor};
 use oci_client::errors::OciDistributionError;
@@ -121,6 +123,21 @@ impl Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Where `reference`, an image of Docker Hub, is in the mirror at `mirror`: none for another
+/// registry's. `mirror` is taken as a host, one named with no `.` or port too.
+fn mirrored(reference: &Reference, mirror: &str) -> Option<Reference> {
+    if reference.registry() != "docker.io" {
+        return None;
+    }
+    let (registry, repository) = (mirror.to_owned(), reference.repository().to_owned());
+    Some(match (reference.digest(), reference.tag()) {
+        (Some(digest), _) => Reference::with_digest(registry, repository, digest.to_owned()),
+        (None, tag) => {
+            Reference::with_tag(registry, repository, tag.unwrap_or("latest").to_owned())
+        }
+    })
+}
+
 /// An HTTP CONNECT proxy a client's every connection goes through ([`RegistryClient::through`]),
 /// as an embedder runs it: what holds its server's pulls, pushes and builds to the registries it
 /// may reach.
@@ -145,6 +162,30 @@ pub struct ProxyRefusal {
     pub why: String,
 }
 
+/// Where an embedder shares what anonymous pulls bring, between stores that would each pull it
+/// from its registry: virtx cloud's nodes, between projects. Only an anonymous pull asks it or
+/// tells it anything ([`RegistryClient::with_public`]): what one fetches anyone may, and what a
+/// pull with credentials fetches is private.
+///
+/// What one store's pull put here makes another's faster, so how long a pull takes says whether
+/// someone sharing it pulled that image before. An embedder shares only between stores whose
+/// owners may know that of each other, and none across a boundary meant to share nothing, such
+/// as between organizations.
+pub trait PublicImages: Send + Sync {
+    /// The image registry manifest `origin` became, filed in `store` from where it is shared,
+    /// with its origin recorded there: none, where it is not shared. An error is said in the
+    /// pull's log, and the image pulled from its registry as for none.
+    fn fetch<'a>(
+        &'a self,
+        store: &'a Store,
+        origin: &'a Digest,
+    ) -> BoxFuture<'a, anyhow::Result<Option<Digest>>>;
+
+    /// Registry manifest `origin` -- served as `manifest`, naming `config` -- was pulled
+    /// anonymously from its registry, and became `image`.
+    fn pulled(&self, origin: &Digest, manifest: &[u8], config: &[u8], image: &Digest);
+}
+
 /// A client of remote OCI registries, with one set of credentials, copying images to and from
 /// one store.
 ///
@@ -158,9 +199,14 @@ pub struct RegistryClient {
     store: Store,
     client: Client,
     auth: oci_client::secrets::RegistryAuth,
+    /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first
+    /// ([`RegistryClient::with_mirror`]).
+    mirror: Option<String>,
     /// Its way through the proxy every connection goes through, if one does
     /// ([`RegistryClient::through`]).
     pass: Option<Box<dyn ProxyPass>>,
+    /// Where its anonymous pulls are shared ([`RegistryClient::with_public`]).
+    public: Option<Arc<dyn PublicImages>>,
 }
 
 impl std::fmt::Debug for RegistryClient {
@@ -189,7 +235,9 @@ impl RegistryClient {
             store,
             client: Client::new(ClientConfig::default()),
             auth,
+            mirror: None,
             pass: None,
+            public: None,
         }
     }
 
@@ -215,6 +263,31 @@ impl RegistryClient {
         })?;
         self.pass = Some(pass);
         Ok(self)
+    }
+
+    /// As [`RegistryClient::new`], Docker Hub's images pulled anonymously from its mirror at
+    /// `mirror` first (`mirror.gcr.io`, say): Docker Hub refuses anonymous pulls past a few an
+    /// hour from one address, which a server pulling for many reaches. What the mirror does not
+    /// have, or will not answer, comes from Docker Hub after all: a digest names the same image
+    /// in either, and a tag is as the mirror last copied it. None, or credentials -- which are Docker Hub's own, and go
+    /// there -- is no mirror, as a client has by default. Its connections to the mirror go
+    /// through its proxy ([`RegistryClient::through`]) as any other.
+    pub fn with_mirror(mut self, mirror: Option<&str>) -> Self {
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        self.mirror = mirror
+            .map(|m| m.trim().trim_end_matches('/'))
+            .filter(|m| anonymous && !m.is_empty())
+            .map(str::to_owned);
+        self
+    }
+
+    /// As [`RegistryClient::new`], its anonymous pulls shared through `public`: an image it has
+    /// is fetched from there and not pulled, and one pulled is told it. None, or credentials --
+    /// whose images are private -- is nothing shared, as a client has by default.
+    pub fn with_public(mut self, public: Option<Arc<dyn PublicImages>>) -> Self {
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        self.public = public.filter(|_| anonymous);
+        self
     }
 
     /// `source`, as an error at `reference`: what the proxy refused this client, if it did,
@@ -497,12 +570,37 @@ impl RegistryClient {
         mut report: impl FnMut(String) + Send,
     ) -> Result<(Digest, Digest)> {
         report(format!("pulling {reference}"));
-        let (digest, served, manifest) = self.pull_manifest(reference).await?;
+        // Docker Hub's image from its mirror, if one is named and has it: the same manifest,
+        // byte for byte, so the same digest. Else from Docker Hub.
+        let from_mirror = match self.mirror.as_deref().and_then(|m| mirrored(reference, m)) {
+            Some(mirrored) => match self.pull_manifest(&mirrored).await {
+                Ok(pulled) => Some((mirrored, pulled)),
+                Err(e) => {
+                    report(format!("not from the mirror ({e}): from Docker Hub"));
+                    None
+                }
+            },
+            None => None,
+        };
+        let (reference, (digest, served, manifest)) = match from_mirror {
+            Some((mirrored, pulled)) => (mirrored, pulled),
+            None => (reference.clone(), self.pull_manifest(reference).await?),
+        };
+        let reference = &reference;
         // Renewed, so that a prune leaves it for the tag to come; one gone meanwhile is pulled.
         if let Some(image) = self.store.get_image_origin(&digest)? {
             let (store, found) = (self.store.clone(), image.clone());
             if tokio::task::spawn_blocking(move || store.renew_image(&found)).await?? {
                 return Ok((digest, image));
+            }
+        }
+        if let Some(public) = &self.public {
+            // Said as nothing more than a pull's own: whose it was, and where it is kept, are
+            // not the asker's.
+            match public.fetch(&self.store, &digest).await {
+                Ok(Some(image)) => return Ok((digest, image)),
+                Ok(None) => {}
+                Err(e) => log::warn!("sharing {digest}: {e:#}"),
             }
         }
 
@@ -546,8 +644,19 @@ impl RegistryClient {
             let store = self.store.clone();
             tokio::task::spawn_blocking(move || store.insert_image(&config, &layers)).await??
         };
-        self.store
-            .insert_image_origin(&digest, &served, &config_served, &image)?;
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        match anonymous {
+            true => self.store.insert_anonymous_image_origin(
+                &digest,
+                &served,
+                &config_served,
+                &image,
+            )?,
+            false => (self.store).insert_image_origin(&digest, &served, &config_served, &image)?,
+        }
+        if let Some(public) = &self.public {
+            public.pulled(&digest, &served, &config_served, &image);
+        }
         Ok((digest, image))
     }
 
@@ -804,6 +913,117 @@ mod tests {
         assert_eq!(read.digest(), tree.digest());
     }
 
+    #[test]
+    fn docker_hub_s_images_are_found_in_its_mirror_by_name_and_no_other_registry_s() {
+        let at = |r: &str| mirrored(&r.parse().unwrap(), "mirror.gcr.io").map(|m| m.to_string());
+        assert_eq!(
+            at("alpine:3.21").as_deref(),
+            Some("mirror.gcr.io/library/alpine:3.21")
+        );
+        assert_eq!(
+            at("team/app").as_deref(),
+            Some("mirror.gcr.io/team/app:latest")
+        );
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(
+            at(&format!("alpine@{digest}")),
+            Some(format!("mirror.gcr.io/library/alpine@{digest}"))
+        );
+        assert_eq!(at("ghcr.io/team/app:v1"), None);
+
+        for mirror in ["registry-mirror", "localhost:5000", "mirror.gcr.io"] {
+            let found = mirrored(&"alpine:3.21".parse().unwrap(), mirror).unwrap();
+            assert_eq!(
+                (found.registry(), found.repository(), found.tag()),
+                (mirror, "library/alpine", Some("3.21")),
+                "{mirror}"
+            );
+        }
+    }
+
+    /// The hosts `registry`, through a proxy that refuses every `CONNECT`, asks it for as it
+    /// pulls `reference`, in order.
+    async fn connects(registry: RegistryClient, reference: &str) -> Vec<String> {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        let (proxy_listener, proxy_port) = listener();
+        let proxy_listener = tokio::net::TcpListener::from_std(proxy_listener).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&asked);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = proxy_listener.accept().await {
+                let mut stream = tokio::io::BufReader::new(stream);
+                let mut line = String::new();
+                let _ = stream.read_line(&mut line).await;
+                if let Some(host) = line.strip_prefix("CONNECT ") {
+                    let host = host.split(' ').next().unwrap_or_default().to_owned();
+                    recorded.lock().unwrap().push(host);
+                }
+                let _ = stream
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let proxy = StandIn {
+            url: format!("http://127.0.0.1:{proxy_port}"),
+            refusal: None,
+        };
+        let registry = registry.through(Some(&proxy)).unwrap();
+        let reference: Reference = reference.parse().unwrap();
+        // A guard against a hang, not a measure of anything.
+        let pull = registry.pull(&reference, |_| {});
+        tokio::time::timeout(std::time::Duration::from_secs(60), pull)
+            .await
+            .expect("the pull went on")
+            .unwrap_err();
+        asked.lock().unwrap().clone()
+    }
+
+    /// An anonymous pull of Docker Hub's image asks its mirror first, and Docker Hub once the
+    /// mirror does not answer.
+    #[tokio::test]
+    async fn docker_hub_s_image_is_asked_of_its_mirror_first() {
+        let scratch = Scratch::new("mirror-first");
+        let registry =
+            RegistryClient::new(scratch.0.clone(), None).with_mirror(Some("mirror.example:5000"));
+        let asked = connects(registry, "alpine:3.21").await;
+        let mirror = asked
+            .iter()
+            .take_while(|host| *host == "mirror.example:5000")
+            .count();
+        assert!(mirror > 0, "{asked:?}");
+        assert!(asked.len() > mirror, "{asked:?}");
+        assert!(
+            asked[mirror..]
+                .iter()
+                .all(|host| host.ends_with("docker.io:443")),
+            "{asked:?}"
+        );
+    }
+
+    /// A pull with credentials, and a pull of another registry's image, ask no mirror.
+    #[tokio::test]
+    async fn a_pull_with_credentials_or_of_another_registry_asks_no_mirror() {
+        let scratch = Scratch::new("mirror-not");
+        let auth = RegistryAuth::Bearer {
+            token: "token".into(),
+        };
+        let registry = RegistryClient::new(scratch.0.clone(), Some(auth))
+            .with_mirror(Some("mirror.example:5000"));
+        let asked = connects(registry, "alpine:3.21").await;
+        assert!(!asked.is_empty(), "{asked:?}");
+        assert!(
+            asked.iter().all(|host| host.ends_with("docker.io:443")),
+            "{asked:?}"
+        );
+
+        let registry =
+            RegistryClient::new(scratch.0.clone(), None).with_mirror(Some("mirror.example:5000"));
+        let asked = connects(registry, "ghcr.io/team/app:1").await;
+        assert!(!asked.is_empty(), "{asked:?}");
+        assert!(asked.iter().all(|host| host == "ghcr.io:443"), "{asked:?}");
+    }
+
     /// A listener on the loopback, standing in for a registry there, that answers nothing.
     fn listener() -> (std::net::TcpListener, u16) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -943,13 +1163,35 @@ mod tests {
         assert_eq!(first[0], 0x16, "{first:?}");
     }
 
+    /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. Docker Hub's image through its
+    /// mirror, with Docker Hub named: the same digest, tagged by Docker Hub's name.
+    #[tokio::test]
+    #[ignore]
+    async fn docker_hub_s_image_comes_from_its_mirror() {
+        let scratch = Scratch::new("mirror");
+        let registry =
+            RegistryClient::new(scratch.0.clone(), None).with_mirror(Some("mirror.gcr.io"));
+        let reference: Reference = "alpine:3.21".parse().unwrap();
+        let mut said = Vec::new();
+        let (digest, _) = registry
+            .pull(&reference, |line| said.push(line))
+            .await
+            .unwrap();
+        assert_eq!(said[0], "pulling docker.io/library/alpine:3.21");
+        let direct = RegistryClient::new(scratch.0.clone(), None);
+        let mirrored: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
+        assert_eq!(direct.pull_manifest(&mirrored).await.unwrap().0, digest);
+    }
+
     /// Needs a network: `cargo test -p virtx-uvm -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn pulls_a_public_image() {
         let scratch = Scratch::new("public");
         let registry = RegistryClient::new(scratch.0.clone(), None);
-        let reference: Reference = "alpine:3.21".parse().unwrap();
+        // Docker Hub's alpine from Google's mirror of it: Docker Hub refuses anonymous pulls
+        // past a few an hour.
+        let reference: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
         let (_, _, manifest) = registry.pull_manifest(&reference).await.unwrap();
         let (_, config) = registry.pull_config(&reference, &manifest).await.unwrap();
         assert_eq!(config.os().to_string(), "linux");
@@ -996,7 +1238,7 @@ mod tests {
         let scratch = Scratch::new("pull");
         let store = &scratch.0;
         let registry = RegistryClient::new(store.clone(), None);
-        let reference: Reference = "docker.io/library/alpine:3.21".parse().unwrap();
+        let reference: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
 
         let mut said = Vec::new();
         let (digest, image) = registry
@@ -1016,5 +1258,82 @@ mod tests {
             .unwrap();
         assert_eq!(again, (digest, image));
         assert_eq!(said, vec![format!("pulling {reference}")]);
+    }
+
+    /// Shares what pulls told it from `from`, as an embedder's cache would: each image's layers
+    /// linked into the store asking.
+    struct Shared {
+        from: Store,
+        told: std::sync::Mutex<Vec<Digest>>,
+    }
+
+    impl PublicImages for Shared {
+        fn fetch<'a>(
+            &'a self,
+            store: &'a Store,
+            origin: &'a Digest,
+        ) -> BoxFuture<'a, anyhow::Result<Option<Digest>>> {
+            Box::pin(async move {
+                if !self.told.lock().unwrap().contains(origin) {
+                    return Ok(None);
+                }
+                let image = self.from.get_image_origin(origin)?.unwrap();
+                for layer in self.from.get_image(&image)?.unwrap().1 {
+                    store.link_layer(&self.from.layer_path(&layer), &layer)?;
+                }
+                let (manifest, config) = self.from.get_image_manifest(&image)?.unwrap();
+                assert_eq!(store.insert_image_manifest(&manifest, &config)?, image);
+                let (served, config) = self.from.image_origins_of(&image)?.remove(0);
+                store.insert_image_origin(origin, &served, &config, &image)?;
+                Ok(Some(image))
+            })
+        }
+
+        fn pulled(&self, origin: &Digest, _: &[u8], _: &[u8], _: &Digest) {
+            self.told.lock().unwrap().push(origin.clone());
+        }
+    }
+
+    #[test]
+    fn a_client_with_credentials_shares_nothing() {
+        let scratch = Scratch::new("shares-nothing");
+        let shared: Arc<dyn PublicImages> = Arc::new(Shared {
+            from: scratch.0.clone(),
+            told: Default::default(),
+        });
+        let anonymous =
+            RegistryClient::new(scratch.0.clone(), None).with_public(Some(shared.clone()));
+        assert!(anonymous.public.is_some());
+        let auth = RegistryAuth::Bearer { token: "t".into() };
+        let with = RegistryClient::new(scratch.0.clone(), Some(auth)).with_public(Some(shared));
+        assert!(with.public.is_none());
+    }
+
+    /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. An image one store pulled
+    /// anonymously, shared: another's pull of it takes it from there, and pulls no layer.
+    #[tokio::test]
+    #[ignore]
+    async fn an_image_shared_is_not_pulled_again() {
+        let (first, second) = (Scratch::new("shared-1"), Scratch::new("shared-2"));
+        let shared: Arc<dyn PublicImages> = Arc::new(Shared {
+            from: first.0.clone(),
+            told: Default::default(),
+        });
+        let reference: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
+        let (digest, image) = RegistryClient::new(first.0.clone(), None)
+            .with_public(Some(shared.clone()))
+            .pull(&reference, |_| {})
+            .await
+            .unwrap();
+
+        let mut said = Vec::new();
+        let pulled = RegistryClient::new(second.0.clone(), None)
+            .with_public(Some(shared))
+            .pull(&reference, |line| said.push(line))
+            .await
+            .unwrap();
+        assert_eq!(pulled, (digest.clone(), image.clone()));
+        assert_eq!(said, vec![format!("pulling {reference}")]);
+        assert_eq!(second.0.get_image_origin(&digest).unwrap(), Some(image));
     }
 }

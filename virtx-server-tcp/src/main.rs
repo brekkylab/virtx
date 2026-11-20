@@ -1,7 +1,7 @@
-//! `virtx-server-tcp` -- a virtx server over HTTP, to the projects its config names and the
-//! users its OpenID Connect provider does (see [`virtx_server_tcp::config`]): each request
-//! carries a user's token and names a project, and the endpoints `virtx-core`'s `PROTOCOL.md`
-//! names answer it from that project's home; see [`virtx_server_tcp::serve`] for the rest.
+//! `virtx-server-tcp` -- a virtx server over HTTP, to the projects its config names and the users
+//! its OpenID Connect provider does (see [`virtx_server_tcp::config`]): each request carries a
+//! user's token and names a project, and the endpoints the protocol names answer it from that
+//! project's home; see [`virtx_server_tcp::serve`] for the rest.
 //!
 //! `virtx-server-tcp vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].
@@ -36,9 +36,10 @@ async fn run(config: Config) -> anyhow::Result<()> {
     serve::keep_pruned(Arc::clone(&access));
     let listener = serve::bind(config.listen).await?;
     let served = serve::run(listener, router).await;
+    // Each sandbox parked and kept, for this server started again to know it.
     tokio::task::spawn_blocking(move || {
         for home in access.homes() {
-            home.close_all();
+            home.leave_all();
         }
     })
     .await?;

@@ -14,7 +14,7 @@ use crate::{
     transport::{Body, TransportClient, full, http::refused, resolved, segment, segments},
 };
 
-/// What a `PROPFIND` asks for: the properties `PROTOCOL.md` says every server answers.
+/// What a `PROPFIND` asks for: the properties the protocol says every server answers.
 const PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:getcontentlength/><D:getlastmodified/><D:getetag/></D:prop></D:propfind>"#;
 
 /// The WebDAV namespace.
@@ -306,24 +306,6 @@ async fn send(
     let per_path = matches!(request.method().as_str(), "DELETE" | "COPY" | "MOVE");
     let response = client.send(request).await?;
     if !response.status().is_success() {
-        let is_plain_text = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .map(|media_type| media_type.trim().eq_ignore_ascii_case("text/plain"))
-            .unwrap_or(false);
-        if is_plain_text {
-            let status = response.status().as_u16();
-            let body = response
-                .into_body()
-                .collect()
-                .await
-                .map_err(|e| Error::Transport(format!("reading the response: {e}")))?
-                .to_bytes();
-            let message = String::from_utf8_lossy(&body).trim().to_owned();
-            return Err(Error::Status(status, message));
-        }
         return Err(refused(response).await);
     }
     let status = response.status();

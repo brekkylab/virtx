@@ -24,6 +24,10 @@ pub struct SandboxJob {
     /// Once it has ended, its exit status; `128 + signal` for one a signal ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
+
+    /// Once it has ended, why, if it did not end by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SandboxJobEndReason>,
 }
 
 /// What a sandbox job does.
@@ -117,6 +121,75 @@ pub enum SandboxJobEntry {
 pub struct SandboxJobEnd {
     /// Its exit status; `128 + signal` for one a signal ended.
     pub code: i32,
+
+    /// Why, if it did not end by itself: without one, it exited, or a signal sent it ended it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SandboxJobEndReason>,
+}
+
+impl SandboxJobEnd {
+    /// The process's own end, with `code`.
+    pub fn exited(code: i32) -> Self {
+        Self { code, reason: None }
+    }
+}
+
+/// Why a process did not end by itself: it was killed, as `SIGKILL` does, its `code` `137`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxJobEndReason {
+    /// Its `timeout_ms` ran out.
+    Timeout,
+
+    /// Its job was cancelled: removed while it ran, by its own `DELETE`.
+    Cancelled,
+
+    /// Its sandbox was deleted under it, and everything it had with it.
+    SandboxDeleted,
+
+    /// Its sandbox's VM exited on its own under it.
+    VmExited,
+
+    /// Its server restarted while it ran: a sandbox kept across a restart keeps its jobs, and
+    /// each that ran then is ended so.
+    Restarted,
+}
+
+/// What an exec read with its log yields
+/// ([`Client::exec_sandbox_with_log`](crate::Client::exec_sandbox_with_log)): its job, once,
+/// first; then each entry of its log, until its end. As JSON, `{"job": {...}}`, or the entry as
+/// a log's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ExecItem", into = "ExecItem")]
+pub enum SandboxExecItem {
+    Job(SandboxJob),
+    Log(crate::LogEntry<SandboxJobEntry>),
+}
+
+/// [`SandboxExecItem`] as JSON has it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ExecItem {
+    Job { job: SandboxJob },
+    Log(crate::LogEntry<SandboxJobEntry>),
+}
+
+impl From<ExecItem> for SandboxExecItem {
+    fn from(item: ExecItem) -> Self {
+        match item {
+            ExecItem::Job { job } => SandboxExecItem::Job(job),
+            ExecItem::Log(entry) => SandboxExecItem::Log(entry),
+        }
+    }
+}
+
+impl From<SandboxExecItem> for ExecItem {
+    fn from(item: SandboxExecItem) -> Self {
+        match item {
+            SandboxExecItem::Job(job) => ExecItem::Job { job },
+            SandboxExecItem::Log(entry) => ExecItem::Log(entry),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -134,8 +207,43 @@ mod tests {
             ),
             (SandboxJobEntry::Truncated {}, json!({"truncated": {}})),
             (
-                SandboxJobEntry::End(SandboxJobEnd { code: 137 }),
+                SandboxJobEntry::End(SandboxJobEnd::exited(137)),
                 json!({"end": {"code": 137}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Timeout),
+                }),
+                json!({"end": {"code": 137, "reason": "timeout"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Cancelled),
+                }),
+                json!({"end": {"code": 137, "reason": "cancelled"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::SandboxDeleted),
+                }),
+                json!({"end": {"code": 137, "reason": "sandbox_deleted"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::VmExited),
+                }),
+                json!({"end": {"code": 137, "reason": "vm_exited"}}),
+            ),
+            (
+                SandboxJobEntry::End(SandboxJobEnd {
+                    code: 137,
+                    reason: Some(SandboxJobEndReason::Restarted),
+                }),
+                json!({"end": {"code": 137, "reason": "restarted"}}),
             ),
         ];
         for (entry, value) in cases {
@@ -164,8 +272,36 @@ mod tests {
         let value = json!({"end": {"code": 137, "signal": "SIGKILL"}});
         assert_eq!(
             serde_json::from_value::<SandboxJobEntry>(value).unwrap(),
-            SandboxJobEntry::End(SandboxJobEnd { code: 137 })
+            SandboxJobEntry::End(SandboxJobEnd::exited(137))
         );
+    }
+
+    #[test]
+    fn a_job_says_why_the_server_ended_it_and_only_then() {
+        let mut job = SandboxJob {
+            id: "j".into(),
+            kind: SandboxJobKind::Exec,
+            pid: 7,
+            cmd: vec!["sleep".into(), "9".into()],
+            running: false,
+            code: Some(137),
+            reason: None,
+        };
+        let value = json!({
+            "id": "j",
+            "kind": "exec",
+            "pid": 7,
+            "cmd": ["sleep", "9"],
+            "running": false,
+            "code": 137,
+        });
+        assert_eq!(serde_json::to_value(&job).unwrap(), value);
+        assert_eq!(serde_json::from_value::<SandboxJob>(value).unwrap(), job);
+
+        job.reason = Some(SandboxJobEndReason::Timeout);
+        let value = serde_json::to_value(&job).unwrap();
+        assert_eq!(value["reason"], "timeout");
+        assert_eq!(serde_json::from_value::<SandboxJob>(value).unwrap(), job);
     }
 
     #[test]
@@ -178,5 +314,23 @@ mod tests {
             value,
             json!({"cmd": ["cat"], "stdin": true, "timeout_ms": 5})
         );
+    }
+
+    #[test]
+    fn an_exec_read_with_its_log_is_its_job_then_its_entries() {
+        let job = json!({"id": "j", "kind": "exec", "pid": 1, "cmd": ["x"], "running": true});
+        let item: SandboxExecItem = serde_json::from_value(json!({"job": job})).unwrap();
+        assert!(matches!(&item, SandboxExecItem::Job(job) if job.id == "j"));
+        assert_eq!(serde_json::to_value(&item).unwrap(), json!({"job": job}));
+        let entry = json!({"id": 2, "end": {"code": 0}});
+        let item: SandboxExecItem = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!(
+            item,
+            SandboxExecItem::Log(crate::LogEntry {
+                id: 2,
+                entry: SandboxJobEntry::End(SandboxJobEnd::exited(0)),
+            })
+        );
+        assert_eq!(serde_json::to_value(&item).unwrap(), entry);
     }
 }

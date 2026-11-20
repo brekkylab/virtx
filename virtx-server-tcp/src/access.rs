@@ -16,8 +16,8 @@ use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
 use virtx_uvm::{
-    ImageStore, ProjectError, ProjectId, ProjectStore, PublicRegistries, RegistryProxy,
-    RegistryServer, Sandbox,
+    ImageStore, ProjectError, ProjectId, ProjectStore, PublicImages, PublicRegistries,
+    RegistryProxy, RegistryServer, Sandbox,
 };
 
 use crate::config::Config;
@@ -72,7 +72,8 @@ impl Homes for ProjectStore {
             let dir = self.path(id);
             let images = ImageStore::new(dir.join("images"))?;
             let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
-            Ok(Some(Home::new(images, registry, &dir)?))
+            let made = move || Home::new(images, registry, &dir);
+            Ok(Some(tokio::task::spawn_blocking(made).await??))
         })
     }
 }
@@ -92,6 +93,10 @@ pub struct Access {
     making: tokio::sync::Mutex<()>,
     /// What the image jobs of the homes it makes connect to registries through.
     registries: Arc<dyn RegistryProxy>,
+    /// Docker Hub's mirror, which the homes' anonymous pulls of Docker Hub's images go to first.
+    mirror: Option<Arc<str>>,
+    /// Where the homes' anonymous pulls are shared, in place of what each home was made with.
+    public: Option<Arc<dyn PublicImages>>,
 }
 
 impl Access {
@@ -115,6 +120,8 @@ impl Access {
             homes: Mutex::default(),
             making: tokio::sync::Mutex::default(),
             registries: Arc::new(PublicRegistries::default()),
+            mirror: None,
+            public: None,
         }
     }
 
@@ -125,9 +132,28 @@ impl Access {
         self
     }
 
+    /// This, the anonymous pulls of the homes it makes from here on -- a pull, a build's base --
+    /// of Docker Hub's images going to its mirror at `mirror` first (`mirror.gcr.io`, say),
+    /// through the registry proxy as any other connection. None is no mirror, as an access has
+    /// by default. See [`RegistryClient::with_mirror`](virtx_uvm::RegistryClient::with_mirror).
+    pub fn mirroring(mut self, mirror: Option<&str>) -> Access {
+        self.mirror = mirror.map(Arc::from);
+        self
+    }
+
+    /// This, the anonymous pulls of the homes it makes from here on shared through `public`, in
+    /// place of what [`Homes`] made each with ([`Home::sharing`]). None leaves each as it was
+    /// made.
+    pub fn sharing(mut self, public: Option<Arc<dyn PublicImages>>) -> Access {
+        self.public = public;
+        self
+    }
+
     /// What `config` says: the users of its issuer, the projects kept at its home, each home in
-    /// its directory, and the registries the homes' image jobs reach. The home of each project
-    /// there is made now, so that its sandboxes left from before are swept as the server starts.
+    /// its directory, the registries the homes' image jobs reach, Docker Hub's mirror, and,
+    /// where `share_public_images` says so, the projects' anonymous pulls shared between them
+    /// ([`SharedPulls`](crate::shared::SharedPulls)). The home of each project there is made now,
+    /// so that its sandboxes left from before are swept as the server starts.
     pub async fn configured(config: &Config) -> anyhow::Result<Access> {
         let store = ProjectStore::new(config.home());
         let access = Access::new(
@@ -137,7 +163,9 @@ impl Access {
             store.clone(),
             Arc::new(store),
         )
-        .through(Arc::new(config.registries()?));
+        .through(Arc::new(config.registries()?))
+        .mirroring(config.registry_mirror.as_deref())
+        .sharing(config.public_images());
         for id in access.store.list()? {
             access.home_of(&id).await?;
         }
@@ -247,7 +275,10 @@ impl Access {
         let Some(made) = self.maker.make(id).await? else {
             return Ok(None);
         };
-        let made = made.through(Arc::clone(&self.registries));
+        let mut made = made.through(Arc::clone(&self.registries), self.mirror.clone());
+        if let Some(public) = &self.public {
+            made = made.sharing(Some(Arc::clone(public)));
+        }
         match self.homes.lock().unwrap().entry(*id) {
             // Taken away for its removal while it was made.
             Entry::Occupied(taken) => Ok(taken.get().clone()),

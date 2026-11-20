@@ -122,7 +122,7 @@ fn carry_a_token(headers: &HeaderMap) -> bool {
 }
 
 /// Refuses a `token` to `base` where it would go in the clear: over `http` to any host but
-/// this machine's loopback, where a local server is (`PROTOCOL.md`) and no wire.
+/// this machine's loopback, where a local server is (the protocol) and no wire.
 fn not_in_the_clear(base: &Url, token: bool) -> Result<(), Error> {
     if !token || base.scheme() == "https" {
         return Ok(());

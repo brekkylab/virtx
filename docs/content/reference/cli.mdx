@@ -3,13 +3,29 @@ title: "CLI"
 description: "Build and manage a server's images, and sign in, from a shell."
 ---
 
-The `virtx` command does to a server's images what `docker` does to its own. The Python and Node.js packages install it, as `libvirtx_core` carries it, and the [virtx repository](https://github.com/brekkylab/virtx) builds it as a binary of its own:
+The `virtx` command does two things from a shell: it does to a server's images what `docker` does to its own, and it signs a person in to a server, for a client to send the session's token.
+
+## Installing
+
+The Python and Node.js packages carry it, so their package managers run it without installing anything:
 
 ```sh
-uvx virtx images                 # or `pip install virtx`
-npx @brekkylab/virtx images      # or `npm install -g @brekkylab/virtx`
-cargo install --path virtx-cli   # in the repository: -> ~/.cargo/bin/virtx
+uvx virtx images                 # pipx run virtx, without uv
+npx -y @brekkylab/virtx images
 ```
+
+To have `virtx` on `PATH`, install it with one of:
+
+| With | Command |
+| --- | --- |
+| uv | `uv tool install virtx` |
+| pipx | `pipx install virtx` |
+| npm | `npm install -g @brekkylab/virtx` |
+| Rust, from a clone of the [virtx repository](https://github.com/brekkylab/virtx) | `cargo install --path virtx-cli` |
+
+Any of them will do: they all behave the same.
+
+## Images
 
 | Command | What it does |
 | --- | --- |
@@ -17,7 +33,7 @@ cargo install --path virtx-cli   # in the repository: -> ~/.cargo/bin/virtx
 | `virtx images` | Lists images. |
 | `virtx inspect IMAGE…` | Prints images as JSON, each by a ref (`name:tag`), image ID or digest. |
 | `virtx tag SOURCE TARGET[:TAG]` | Points a ref at an image, moving the ref if it is in use. |
-| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. |
+| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. An image a sandbox or a build uses keeps its last ref. |
 | `virtx pull NAME[:TAG]` | Pulls an image from a registry, tagged as it is named. |
 | `virtx push NAME[:TAG]` | Pushes an image to the registry its ref names. |
 | `virtx save -o FILE IMAGE` | Writes an image to an OCI archive. |
@@ -34,13 +50,15 @@ virtx save -o jq.tar jq:latest
 virtx rmi jq:latest
 ```
 
-## Which server
+### Which server
 
 Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. `--project NAME` (`$VIRTX_PROJECT`) names the project the requests belong to, a project of the user's by its name or any by its id, sent as the `virtx-project` header; without it, the requests are in the user's own, `default`. `--host` and `--server` together are refused; otherwise a flag wins over the environment and a host over a program, so `--server` starts its program with `$VIRTX_HOST` set, and `$VIRTX_HOST` is reached with `$VIRTX_STDIO` set. See [Hello world](/docs/hello-world/#run-it) for the two servers.
 
 ## Signing in
 
-The `virtx` command also signs a person in, to virtx cloud or to the OpenID Connect provider of a virtx server, for a client to send the session's token.
+These commands are for connecting to a `virtx-server-tcp` that you or your team run: they sign you in to the server's OpenID Connect provider, and a client sends the session's token with each request.
+For a server of your own, see [Connecting to a server](/docs/guides/self-hosting/#connecting-to-a-server).
+A local server, which `Client.spawn()` starts, needs no signing in.
 
 | Command | What it does |
 | --- | --- |
@@ -49,22 +67,10 @@ The `virtx` command also signs a person in, to virtx cloud or to the OpenID Conn
 | `virtx whoami` | Says who is signed in. |
 | `virtx logout` | Signs out: the session is forgotten on this machine, and where it was signed in to is asked to end it. |
 
-The `virtx` the Python and Node.js packages install signs in to virtx cloud alone. The one built from `virtx-cli/` signs in to both: a command is of the provider it names; naming none, of virtx cloud with `--domain`; and otherwise of what was signed in to last, or of virtx cloud where nothing was.
+A client given a command for its token runs it each time it needs one: `uvx virtx token --json` (or `pipx run virtx token --json`, without uv) or `npx -y @brekkylab/virtx token --json` with nothing installed, or `virtx token --json` where an installed `virtx` is on `PATH`.  
+On Windows, where npm installs a command as a `.cmd`, the program is `npx.cmd`, or `virtx.cmd` for one `npm install -g` installed.
 
-### virtx cloud
-
-The page `virtx login` shows is the console's. `--domain` (`$VIRTX_DOMAIN`) names where virtx cloud is, `virtx.sh` by default.
-
-`virtx token` prints the session's ID token, which lasts at most 15 minutes. The token names no project: virtx cloud takes it with the project each request names by its ID. `virtx logout` forgets the session on this machine whatever virtx cloud answers; if virtx cloud could not be told, the command says so and exits with an error, and the session ends there as it expires.
-
-The session is kept in `~/.config/virtx/<domain>.token` and `<domain>.access`. On Linux and macOS they are readable by their owner alone.
-
-A client made by [`Client.from_env()`](/docs/reference/api/#client) authenticates with `$VIRTX_API_KEY` if it is set. Without one and with `$VIRTX_PROJECT` set to a project's ID, it authenticates as the person signed in, with every request in that project. It runs `virtx token --json` for each token, so the `virtx` the package installs serves it with no other program. The console shows a project's ID on the project's API keys page.
-
-```sh
-virtx login
-export VIRTX_PROJECT=<the project's ID>
-```
+A command is of the provider it names with `--issuer` and `--client-id`, or the one the server `login` is given names, and otherwise of what was signed in to last.
 
 ### A server's provider
 
@@ -72,4 +78,4 @@ export VIRTX_PROJECT=<the project's ID>
 
 `virtx token` prints the ID token, which the server checks against the provider's keys. `virtx logout` asks the provider to end the session, where the provider takes that.
 
-The session is kept under `~/.config/virtx/`. The refresh token is in the OS's keychain, or in a file where the keychain cannot be used, and the ID token last issued is in a file. The files are named for the client and the provider: `virtx@idp.example.token` and `virtx@idp.example.id` for the `oidc` of the server in [Running your own server](/docs/guides/self-hosting/#configure). On Linux and macOS they are readable by their owner alone.
+The session is kept under `~/.config/virtx/`. The refresh token and the ID token last issued are kept in files. The files are named for the client and the provider: `virtx@idp.example.token` and `virtx@idp.example.id` for the `oidc` of the server in [Running your own server](/docs/guides/self-hosting/#configure). On Linux and macOS the directory is set to `0700`, the files are written `0600`, readable by their owner alone, and a file there that the directory's owner does not own is not read.

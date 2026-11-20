@@ -755,11 +755,13 @@ impl Sandbox {
     }
 
     /// Resize it as `args` says, answered as it is to be: its vCPUs and memory those its
-    /// machine boots with from its next boot on, and its upper disk grown, never shrunk, as its
-    /// machine next boots. A machine is the size it booted with: one up whose vCPUs or memory
-    /// change is parked now if nothing uses it, and refused [`InUse`](Error::InUse) if something
-    /// does; one whose disk alone grows is left up, and boots with it after its next park. One
-    /// kept past its process keeps its size in its record.
+    /// machine boots with from its next boot on, and its upper disk grown as its machine next
+    /// boots. A disk is never shrunk: a size under what it is on the host is refused, and one
+    /// down to it taken, so a grow asked for and not yet done can be taken back. A machine is
+    /// the size it booted with: one up whose vCPUs or memory change is parked now if nothing
+    /// uses it, and refused [`InUse`](Error::InUse) if something does; one whose disk alone
+    /// grows is left up, and boots with it after its next park. One kept past its process keeps
+    /// its size in its record.
     pub async fn resize(
         self: &Arc<Self>,
         args: &SandboxResizeArgs,
@@ -772,9 +774,13 @@ impl Sandbox {
         }
         let spec = self.config.lock().unwrap().spec.clone();
         let disk_gib = self.disk_gib.load(Ordering::Relaxed);
-        if args.disk_gib.is_some_and(|gib| gib < disk_gib) {
+        let on_host = match &*self.upper.lock().unwrap() {
+            Some(upper) => upper.gib()?,
+            None => disk_gib,
+        };
+        if args.disk_gib.is_some_and(|gib| gib < on_host) {
             return Err(Error::Invalid(format!(
-                "disk_gib: a disk is grown, never shrunk -- it is {disk_gib} GiB"
+                "disk_gib: a disk is grown, never shrunk -- it is {on_host} GiB"
             )));
         }
         let vcpus = args.vcpus.unwrap_or(spec.vcpus);
@@ -895,12 +901,15 @@ impl Sandbox {
             }
         }
         // Booting is blocking work, until the guest takes commands: its disk grown first to as
-        // large as it was last resized to.
+        // large as it was last resized to. A grow that fails leaves the disk as it was, which it
+        // boots on, to be grown at a later boot.
         let vm = self.vm.clone();
         let (booting, gib) = (Arc::clone(self), self.disk_gib.load(Ordering::Relaxed));
         let machine = tokio::task::spawn_blocking(move || {
-            if let Some(upper) = &*booting.upper.lock().unwrap() {
-                upper.grow(gib)?;
+            if let Some(upper) = &*booting.upper.lock().unwrap()
+                && let Err(e) = upper.grow(gib)
+            {
+                eprintln!("sandbox {}'s disk not grown to {gib} GiB: {e}", booting.id);
             }
             Ok::<_, Error>(Machine::start(config, &vm)?)
         });

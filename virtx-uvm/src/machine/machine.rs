@@ -82,7 +82,8 @@ pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
 /// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
 /// no room to grow in place, which a kernel will not grow either -- is read whole and written
 /// again at the new size: at `part`, moved over it once whole, so a failure leaves it as it
-/// was. What it costs is what is written to it, not `gib`.
+/// was. Each file is read whole, its holes too, so a file larger than the disk could hold is
+/// refused, and the new disk takes on the host what its files are long, not `gib`.
 pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
     let size = u64::from(gib) << 30;
     let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);

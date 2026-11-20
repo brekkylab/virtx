@@ -1433,6 +1433,50 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     assert_eq!(home.left(), Vec::<String>::new());
 }
 
+async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
+    let mut args = small();
+    args.disk_gib = Some(1);
+    let sandbox = home.sandbox(&args, None).await;
+    let said = async |sandbox: &Arc<Sandbox>, cmd: &str| -> String {
+        let (lines, _) = run(sandbox, &["sh", "-c", cmd], None).await.unwrap();
+        lines.join("\n")
+    };
+    let disk = async |sandbox: &Arc<Sandbox>| -> u64 {
+        let kib: u64 = said(sandbox, "df -k / | awk 'NR==2 {print $2}'")
+            .await
+            .parse()
+            .unwrap();
+        (kib + (1 << 19)) >> 20
+    };
+    let resize = |disk_gib| SandboxResizeArgs {
+        disk_gib: Some(disk_gib),
+        ..SandboxResizeArgs::default()
+    };
+    // A file with holes larger than the disk, which a grow reads whole and refuses.
+    said(&sandbox, "truncate -s 2G /root/f && echo kept > /root/kept").await;
+    let grown = sandbox.resize(&resize(3)).await.unwrap();
+    assert_eq!((grown.disk_gib, grown.up), (3, true));
+
+    // Its grow fails, and it boots on its disk as it was.
+    sandbox.park().await.unwrap();
+    assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
+    assert_eq!(disk(&sandbox).await, 1);
+
+    // Taken down to the size it has, not under it; and grown at a later boot once it can be.
+    let back = sandbox.resize(&resize(2)).await.unwrap();
+    assert_eq!(back.disk_gib, 2);
+    said(&sandbox, "rm /root/f").await;
+    sandbox.park().await.unwrap();
+    assert_eq!(disk(&sandbox).await, 2);
+    let refused = sandbox.resize(&resize(1)).await;
+    assert!(
+        matches!(refused, Err(SandboxError::Invalid(_))),
+        "{refused:?}"
+    );
+    assert_eq!(sandbox.resize(&resize(2)).await.unwrap().disk_gib, 2);
+    close(sandbox).await;
+}
+
 async fn sandboxes_made_at_once_each_run_their_own(home: Home) {
     let args = small();
     let made = join_all((0..3).map(|_| home.sandbox(&args, None))).await;
@@ -2224,6 +2268,7 @@ fn main() -> ExitCode {
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
+        a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
         sandboxes_made_at_once_each_run_their_own,
         a_sandbox_closed_twice_at_once_ends_once,
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,

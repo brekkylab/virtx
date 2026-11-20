@@ -59,6 +59,14 @@ impl Upper {
         Ok(Some(upper))
     }
 
+    /// How large it is on the host, in GiB, rounded up: what it was made or last grown to.
+    pub(super) fn gib(&self) -> Result<u32, Error> {
+        let len = fs::metadata(&self.path)
+            .map_err(|e| io(format!("reading {}", self.path.display()), e))?
+            .len();
+        Ok(u32::try_from(len.div_ceil(1 << 30)).unwrap_or(u32::MAX))
+    }
+
     /// Grow it to `gib` GiB, with what is on it kept, while no machine runs over it.
     pub(super) fn grow(&self, gib: u32) -> Result<(), Error> {
         Ok(crate::machine::grow_upper(

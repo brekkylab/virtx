@@ -177,8 +177,11 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     let gone = home.sandbox(&small(), None).await;
     let write = ["sh", "-c", "echo kept > /root/kept"];
     assert_eq!(run(&kept, &write, None).await.unwrap().1, 0);
-    let sleeping = kept.exec(vec!["sleep".into(), "600".into()], None).await;
-    let sleeping = sleeping.unwrap().get().id;
+    let running = kept.exec(vec!["sleep".into(), "600".into()], None).await;
+    let running = running.unwrap();
+    let sleeping = running.get().id;
+    let deleted = gone.exec(vec!["sleep".into(), "600".into()], None).await;
+    let deleted = deleted.unwrap();
     assert!(
         home.kept().is_empty(),
         "one this process knows is no other's"
@@ -186,6 +189,12 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
 
     let id = kept.id().to_owned();
     tokio::join!(leave(kept), leave(gone));
+    // This server ends each job as the next one knows it: restarted where its sandbox is kept,
+    // cancelled where it is deleted.
+    let restarted = Some(SandboxJobEndReason::Restarted);
+    assert_eq!(running.get().reason, restarted);
+    let cancelled = Some(SandboxJobEndReason::Cancelled);
+    assert_eq!(deleted.get().reason, cancelled);
     let known = home.kept();
     assert_eq!(known.len(), 1, "the one made without keys goes");
     let again = &known[0];
@@ -198,7 +207,6 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
         .into_iter()
         .map(|job| (job.id == sleeping, job.running, job.code, job.reason))
         .collect();
-    let restarted = Some(SandboxJobEndReason::Restarted);
     assert!(ended.contains(&(false, false, Some(0), None)), "{ended:?}");
     assert!(
         ended.contains(&(true, false, Some(137), restarted)),

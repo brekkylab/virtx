@@ -5,7 +5,8 @@ use std::{env, future, pin::Pin};
 use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
-    SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Source, Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry,
+    Source, Step,
 };
 
 mod common;
@@ -75,10 +76,24 @@ fn a_process_run_in_a_sandbox_is_read_from_its_log() {
     assert_eq!(ended, SandboxJobEntry::End(SandboxJobEnd::exited(128 + 15)));
     let again = sandbox.job(sleep.id()).wait().unwrap();
     assert!(!again.info().running, "{again:?}");
+    assert_eq!(again.info().reason, None);
     again.remove().wait().unwrap();
     let gone = sleep.get().wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
     assert_eq!(gone.source_kind(), Source::Server);
+
+    // Past its `timeout_ms`, the server kills it, and its end and its job say so.
+    let timed = SandboxExecArgs::new(["sleep", "60"]).timeout_ms(200);
+    let timed = sandbox.exec(&timed).wait().unwrap();
+    assert_eq!(timed.complete(false).wait().unwrap(), 137);
+    let ended = common::entries(timed.log(None)).pop().unwrap().entry;
+    let killed = SandboxJobEnd {
+        code: 137,
+        reason: Some(SandboxJobEndReason::Timeout),
+    };
+    assert_eq!(ended, SandboxJobEntry::End(killed));
+    let timed = timed.get().wait().unwrap();
+    assert_eq!(timed.info().reason, Some(SandboxJobEndReason::Timeout));
 
     sandbox.remove().wait().unwrap();
     let gone = client.get_sandbox(sandbox.id()).wait().unwrap_err();

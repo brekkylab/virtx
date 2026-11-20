@@ -171,6 +171,8 @@ pub struct Sandbox {
     config: MachineConfig,
     vm: Vec<OsString>,
     state: Mutex<State>,
+    /// Why a job that runs as it ends is ended, once it is closed or let go of.
+    ended_for: Mutex<Option<SandboxJobEndReason>>,
     /// Held while its machine boots or stops, so one does at a time.
     turn: tokio::sync::Mutex<()>,
     /// Its jobs, by id, until each is removed.
@@ -447,6 +449,7 @@ impl Sandbox {
                 true => State::Exited,
                 false => State::Parked,
             }),
+            ended_for: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(jobs),
             starting: Mutex::default(),
@@ -645,15 +648,22 @@ impl Sandbox {
 
     /// Let go of it as its server ends: its machine stopped as parking stops it, every job in
     /// it ended, and nothing booting it again in this process. One kept past its process is
-    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]); one not
-    /// kept is deleted, as [`close`](Sandbox::close) deletes it. Blocks as `close` does.
+    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]), its jobs
+    /// that ran ended `restarted`; one not kept is deleted, as [`close`](Sandbox::close)
+    /// deletes it. Blocks as `close` does.
     pub fn leave(&self) {
         self.end(true);
     }
 
     /// Stop its machine for good, and end and remove every job in it; its upper disk deleted,
-    /// or left where it is kept and `leaving`.
+    /// or left where it is kept and `leaving`. A job that runs ends as `restarted` where the
+    /// sandbox is kept past its server, and as `cancelled` where it is deleted.
     fn end(&self, leaving: bool) {
+        let reason = match leaving && self.record.lock().unwrap().is_some() {
+            true => SandboxJobEndReason::Restarted,
+            false => SandboxJobEndReason::Cancelled,
+        };
+        *self.ended_for.lock().unwrap() = Some(reason);
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
         // A park or a boot under way finishes first, so its machine is down by the time this
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
@@ -671,7 +681,7 @@ impl Sandbox {
         }
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
-            job.cut(SandboxJobEndReason::Cancelled);
+            job.cut(reason);
             job.remove();
         }
     }
@@ -804,9 +814,9 @@ impl Sandbox {
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
-        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked or
-        // closed, it was stopped under them; otherwise it ended on its own, and nothing boots it
-        // again.
+        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Closed or
+        // let go of, it was stopped under them, for the reason `end` gave; otherwise it ended on
+        // its own, and nothing boots it again.
         let mut starting = self.starting.lock().unwrap();
         let exited = {
             let mut state = self.state.lock().unwrap();
@@ -827,7 +837,11 @@ impl Sandbox {
         starting.clear();
         let reason = match exited {
             true => SandboxJobEndReason::VmExited,
-            false => SandboxJobEndReason::Cancelled,
+            false => self
+                .ended_for
+                .lock()
+                .unwrap()
+                .unwrap_or(SandboxJobEndReason::Cancelled),
         };
         for job in running.into_values() {
             job.cut(reason);

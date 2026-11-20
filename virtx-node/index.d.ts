@@ -23,6 +23,11 @@ export class VirtxError extends Error {
   code: string | null
   /** The server's response body, where it was not a JSON error. */
   body: string | null
+  /**
+   * How many bytes of a write to a job's stdin went in before its process closed the stdin under
+   * it: that `409`, `ended`, alone has it.
+   */
+  written: number | null
 }
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */

@@ -1,6 +1,6 @@
 ---
 name: index
-description: Index document files and search them
+description: "Index document files and search them"
 ---
 
 Index document files and search them

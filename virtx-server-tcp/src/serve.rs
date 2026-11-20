@@ -1,8 +1,8 @@
-//! The server's routes, for an [`Access`]: the endpoints of `virtx-core`'s `PROTOCOL.md`
-//! ([`crate::endpoints`]), each answered from the home its request reaches, the images as an
-//! OCI registry, and each sandbox's ports. A server built on this one gives [`router`] an
-//! authenticator of its own in the access, and routes of its own beside these; the server a
-//! config alone makes is [`configured`], which does both.
+//! The server's routes, for an [`Access`]: the endpoints of the protocol ([`crate::endpoints`]),
+//! each answered from the home its request reaches, the images as an OCI registry, and each
+//! sandbox's ports. A server built on this one gives [`router`] an authenticator of its own in the
+//! access, and routes of its own beside these; the server a config alone makes is [`configured`],
+//! which does both.
 //!
 //! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
@@ -540,7 +540,7 @@ mod tests {
     /// The HTTP status a request was refused with.
     fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
         match answered {
-            Err(virtx_core::Error::Status(status, _)) => status,
+            Err(virtx_core::Error::Status(status, _, _)) => status,
             other => panic!("expected a status, got {other:?}"),
         }
     }
@@ -1176,9 +1176,9 @@ mod tests {
         assert_eq!(told.pulled.lock().unwrap().len(), 2);
     }
 
-    /// A refusal made before a handler runs is in PROTOCOL.md's envelope too, where a client
-    /// reads its code: a body over the server's limit is `413` `too_large`, naming the limit,
-    /// and a path whose segment does not read as one is `400` `invalid`.
+    /// A refusal made before a handler runs is in the protocol's envelope too, where a client reads
+    /// its code: a body over the server's limit is `413` `too_large`, naming the limit, and a path
+    /// whose segment does not read as one is `400` `invalid`.
     #[tokio::test]
     async fn a_body_over_the_limit_and_a_path_that_does_not_read_are_refused_as_any_refusal_is() {
         let served = Served::spawn("envelope").await;
@@ -1704,8 +1704,8 @@ mod tests {
                 b.write_file(&root, "read", from_b.clone(), Some(&etag)),
             );
             let landed = match (by_a, by_b) {
-                (Ok(()), Err(virtx_core::Error::Status(412, _))) => &from_a,
-                (Err(virtx_core::Error::Status(412, _)), Ok(())) => &from_b,
+                (Ok(()), Err(virtx_core::Error::Status(412, _, _))) => &from_a,
+                (Err(virtx_core::Error::Status(412, _, _)), Ok(())) => &from_b,
                 (by_a, by_b) => panic!("round {round}, over one etag: {by_a:?} and {by_b:?}"),
             };
             let read = a.read_file(&root, "read", 0, None).await.unwrap();

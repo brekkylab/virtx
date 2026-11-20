@@ -214,7 +214,9 @@ impl Home {
     }
 
     /// Park every sandbox here that nothing uses now ([`Sandbox::park`]), however recently it
-    /// was used, side by side; those in use are left as they are.
+    /// was used, side by side; those in use are left as they are. These are the sandboxes here
+    /// as it is called: one made meanwhile is left up, so a server that drains its host stops
+    /// sending it work first.
     pub async fn park_unused(&self) {
         let parked = self
             .sandboxes()
@@ -228,7 +230,7 @@ impl Home {
 
     /// Park every sandbox here, in use or not ([`Sandbox::park_anyway`]), side by side: what
     /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
-    /// used.
+    /// used. As [`park_unused`](Home::park_unused), the sandboxes here as it is called.
     pub async fn park_all(&self) {
         let parked = self
             .sandboxes()

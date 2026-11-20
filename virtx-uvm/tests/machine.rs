@@ -378,7 +378,9 @@ async fn a_sandbox_is_parked_when_asked_unless_in_use_or_parked_anyway(home: Hom
     let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
     assert_eq!(lines, ["kept"]);
     assert!(sandbox.last_used() >= used);
-    close(sandbox).await;
+    close(Arc::clone(&sandbox)).await;
+    // Closed, it is ended.
+    assert!(matches!(sandbox.park().await, Err(SandboxError::Ended)));
 }
 
 async fn a_guest_that_powers_itself_off_ends_its_machine_and_its_jobs(home: Home) {

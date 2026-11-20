@@ -156,8 +156,8 @@ impl Provider {
     }
 }
 
-/// The provider the server at `url` says to sign in to, and the client to sign in as
-/// (the protocol, Authentication); `None` from a server that names none.
+/// The provider the server at `url` says to sign in to, and the client to sign in as (the protocol,
+/// Authentication); `None` from a server that names none.
 pub fn advertised(url: &str) -> anyhow::Result<Option<(String, String)>> {
     let asked = format!("{}/auth", url.trim_end_matches('/'));
     let said: Value = reqwest::blocking::Client::builder()

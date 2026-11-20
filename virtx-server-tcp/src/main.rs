@@ -1,7 +1,7 @@
-//! `virtx-server-tcp` -- a virtx server over HTTP, to the projects its config names and the
-//! users its OpenID Connect provider does (see [`virtx_server_tcp::config`]): each request
-//! carries a user's token and names a project, and the endpoints the protocol
-//! names answer it from that project's home; see [`virtx_server_tcp::serve`] for the rest.
+//! `virtx-server-tcp` -- a virtx server over HTTP, to the projects its config names and the users
+//! its OpenID Connect provider does (see [`virtx_server_tcp::config`]): each request carries a
+//! user's token and names a project, and the endpoints the protocol names answer it from that
+//! project's home; see [`virtx_server_tcp::serve`] for the rest.
 //!
 //! `virtx-server-tcp vm …` is this binary spawned by itself to be a machine; see
 //! [`virtx_uvm::Machine`].

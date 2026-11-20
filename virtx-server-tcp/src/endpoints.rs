@@ -1,5 +1,5 @@
-//! The endpoints the protocol names, but the images' registry: those in a project
-//! ([`router`]), each answered from the [`Home`] of the project its request reaches, which
+//! The endpoints the protocol names, but the images' registry: those in a project ([`router`]),
+//! each answered from the [`Home`] of the project its request reaches, which
 //! [`access`](crate::access) puts in its extensions; and those of the projects themselves
 //! ([`projects`]), answered from the [`Access`] there.
 //!
@@ -1437,8 +1437,8 @@ fn reference(reference: &str) -> Result<Reference, Refused> {
 /// The most a request's body may be, but a file's, which is streamed: `413` `too_large` past it.
 const BODY_LIMIT: usize = 2 << 20;
 
-/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid`
-/// if it broke off, as any refusal here is, in the protocol's envelope rather than as text.
+/// A request's body, whole: refused `413` `too_large` past [`BODY_LIMIT`], and `400` `invalid` if
+/// it broke off, as any refusal here is, in the protocol's envelope rather than as text.
 ///
 /// A body past the limit is still read to its end, and what comes after the limit let go of as
 /// it comes, before it is refused: answered with its body unread, the connection is closed with
@@ -1484,8 +1484,8 @@ impl<S: Send + Sync> FromRequest<S> for Whole {
     }
 }
 
-/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when
-/// they do not read as one, in the protocol's envelope and the server's words.
+/// A path's segments read as a `T`, as axum's `Path` reads them: refused `400` `invalid` when they
+/// do not read as one, in the protocol's envelope and the server's words.
 struct Segments<T>(T);
 
 impl<T, S> FromRequestParts<S> for Segments<T>

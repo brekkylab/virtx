@@ -13,8 +13,8 @@ categories = ["virtualization", "api-bindings"]
 
 [lib]
 # `rlib` for Rust (this crate's tests, and any crate that depends on it); `cdylib` and
-# `staticlib` for C, as `libvirtx_core.{so,dylib,dll}` and `libvirtx_core.a`, declared by
-# `include/virtx.h`.
+# `staticlib` for C, as `libvirtx_core.{so,dylib}` (`virtx_core.dll` on Windows) and
+# `libvirtx_core.a`, declared by `include/virtx.h`.
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]

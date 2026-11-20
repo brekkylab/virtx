@@ -108,8 +108,8 @@ pub(super) fn authorized(
     }
 }
 
-/// Refuses `auth` to `base` when its token would go in the clear: over `http` to any host but
-/// this machine's loopback, where a local server is (the protocol) and no wire.
+/// Refuses `auth` to `base` when its token would go in the clear: over `http` to any host but this
+/// machine's loopback, where a local server is (the protocol) and no wire.
 fn not_in_the_clear(base: &Url, auth: &Auth) -> Result<(), Error> {
     if matches!(auth, Auth::None) || base.scheme() == "https" {
         return Ok(());

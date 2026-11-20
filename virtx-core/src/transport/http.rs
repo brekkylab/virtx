@@ -1,5 +1,5 @@
-//! What every endpoint's client shares over HTTP: a path segment percent-encoded, a refusal
-//! read as an [`Error`], and a JSON request and its answer, as the protocol's Resources says.
+//! What every endpoint's client shares over HTTP: a path segment percent-encoded, a refusal read as
+//! an [`Error`], and a JSON request and its answer, as the protocol's Resources says.
 
 use bytes::Bytes;
 use http::{Method, header};

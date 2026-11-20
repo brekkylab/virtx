@@ -87,7 +87,7 @@ device rather than something bolted on afterwards.
 has no notion of where it belongs: it exports a directory under a tag, and
 something in the guest has to run `mount -t virtiofs <tag> <dir>`. libkrun's init
 mounts the root and one tmpfs and stops there, which leaves automounting to
-whoever builds the guest's boot — and for a machine that is this crate. The patch
+whoever builds the guest's boot — and for a machine that is `virtx-uvm`. The patch
 reads the rest of the `mounts` list the init already parses out of
 `/.krun_config.json`, and mounts each entry as the config spells it. It touches
 `init/init-binary/src/config.rs` and `init/init-binary/src/main.rs` and adds
@@ -109,6 +109,23 @@ where the guarantee lives.
 Nothing here is a sandbox of the host's filesystem by itself. libkrun's own README is explicit
 that a virtio-fs share offers no protection against a guest reaching other directories on the
 same host filesystem, and read-only bounds what a guest may write, not what it may read.
+
+### `virtiofs-external`: a volume's remote stores
+
+A remote store mounted in a volume is served to the guest from the server's own process, not
+from a directory on the host: nothing of it is on the host's disk to share.
+
+The patch adds `ExternalFs`, a read-only tree the embedder implements inode by inode in plain
+types (`lookup`, `forget`, `getattr`, `readdir`, `read`), and
+`FsDevice::new_external(tag, fs)`, a virtio-fs device whose server is that tree rather than
+the passthrough of a host directory. The guest mounts it under its tag like any other share.
+An error is the host's errno; files are `0444`, directories `0555`, and the guest may cache
+what it was told for a second. It touches `src/devices/src/virtio/fs/` (`external.rs` is new)
+and `src/libkrun/src/api/device_builders.rs`.
+
+[`Served`](../virtx-uvm/src/volume/served.rs) is `virtx-uvm`'s `ExternalFs`: it keeps the
+table between the inodes the guest holds and a store's paths, and answers each call on a
+runtime of its own, since libkrun calls in from its own threads.
 
 ### `tsi`: the network
 
@@ -210,6 +227,19 @@ resolves against the directory of whatever did the `dlopen`.
 What this replaces is an environment variable that whoever runs the binary had to set,
 which a wrapper can do for `cargo xtask run` and nothing can do for an installed binary
 someone runs by hand.
+
+### `macos-path-shares`
+
+On macOS, virtio-fs names a file it shares by its volfs path, `/.vol/{dev}/{ino}`, which APFS
+and HFS+ answer. NFS, SMB and FSKit volumes do not, a FUSE-T mount among them, so a directory
+on one of those could be shared but not one file in it opened.
+
+The patch asks the share's root for its volfs path in `init`. Where there is none, each inode
+keeps the parent it was last looked up under and its name there, and is addressed by the path
+those spell from the root. A lookup records where it found an inode, so a rename or another
+link moves it; a `RENAME_EXCHANGE` looks both names up again, since each now holds the other
+inode. An inode whose parent the guest has forgotten has no path and answers `ENOENT`. Shares
+with volfs are addressed as before. It touches only `src/devices/src/virtio/fs/macos/passthrough.rs`.
 
 ### `windows-virtiofs`
 
@@ -503,6 +533,19 @@ library so consumers need a single `PKG_CONFIG_PATH` entry. That entry is set in
 `.cargo/config.toml` without `force`, so an existing `PKG_CONFIG_PATH` in your
 environment wins — if you set one, add `build/virglrenderer/lib/pkgconfig` to it.
 
+### `heap-limit`
+
+The guest maps every host-visible allocation through one window of guest-physical addresses,
+so the window is all the guest's GPU can hold at once
+([`machine/gpu.rs`](../virtx-uvm/src/machine/gpu.rs)). venus reported the host device's
+heaps, 19 GB on an 18 GB Mac, and a guest program sized itself to that, then failed a
+`vkMapMemory` past the window; ncnn went on to copy out of the null pointer it got back.
+
+With the patch venus caps every heap it reports, and each budget of `VK_EXT_memory_budget`,
+at `VKR_HEAP_SIZE_MAX` bytes, read once from the environment; unset or `0` caps nothing.
+`virtx-uvm` sets it to the window before the render server starts. It touches only
+`src/venus/vkr_physical_device.c`.
+
 ### `windows`
 
 Built on a Windows host at `8167744` with no further fixes, and carried to
@@ -588,7 +631,7 @@ cargo xtask build server-stdio
 ```
 
 runs `xtask/scripts/build-deps.ps1`, which produces `build/virglrenderer/lib/libvirglrenderer.a`, linked against
-`vulkan-1.dll` and `epoxy-0.dll`, exporting the 48 `virgl_renderer_*` entry
+`vulkan-1.dll` and a static libepoxy, exporting the 48 `virgl_renderer_*` entry
 points — `virgl_renderer_resource_get_map_ptr` among them, which is the one the
 blob mapping in [Guest Vulkan on Windows](#guest-vulkan-on-windows) is built on.
 
@@ -598,7 +641,7 @@ the symptoms.
 **clang-cl, not cl.** This is mesa-derived C, written against GCC builtins,
 function attributes and VLAs. Configure under `cl` answers NO to every
 `cc.has_function` and every `cc.has_function_attribute` in the list, and sets
-`__STDC_NO_VLA__`. clang-cl keeps the MSVC ABI, so the DLL still links with the
+`__STDC_NO_VLA__`. clang-cl keeps the MSVC ABI, so the archive still links with the
 msvc Rust toolchain, and the porting work drops to what is genuinely missing
 rather than what GCC merely spells differently.
 
@@ -680,8 +723,8 @@ silently ran without one costs it the whole run to find out. A host with no Vulk
 runs a `gpu` build -- the boot opens the loader at run time -- so one build serves hosts with a
 GPU and without.
 
-[`MachineSpec::gpu`](../virtx-uvm/src/machine/machine.rs) itself is ignored in a build of this crate without
-the feature, so a caller of the crate never has to `cfg` around it.
+[`MachineSpec::gpu`](../virtx-uvm/src/machine/machine.rs) itself is ignored in a build of `virtx-uvm` without
+the feature, so a caller of `virtx-uvm` never has to `cfg` around it.
 
 ### Which Vulkan version the guest device reports
 
@@ -797,7 +840,7 @@ object that `MapViewOfFile` accepts, which macOS could not offer: the
 descriptor route stays open here, and `export_blob` need not stay
 `Unsupported` forever.
 
-Getting the guest packages in took three of the libkrun commits: `windows-virtiofs` and `windows-vsock`. Every `.so.N`
+Getting the guest packages in took two of the libkrun commits: `windows-virtiofs` and `windows-vsock`. Every `.so.N`
 symlink failed to extract, `stat` on a freshly renamed file answered ENOENT,
 and a download into a slow consumer — `apk` unpacking a 190 MiB library while
 still fetching it — stopped dead about a third of the way in.

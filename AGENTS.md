@@ -45,7 +45,7 @@ export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, 
 ```
 
 - The first `build kernel` is a full kernel build, 10 to 20 minutes; `LIBKRUNFW_REBUILD=1` builds it again. `build abin` and `build alib` (which needs Docker) make what sandboxes get at `/abin` and `/alib`, and `install` copies them with the rest.
-- `cargo xtask build`, `run` and `test` put the guest kernel beside a server, where it looks for it, and on macOS sign the server with `com.apple.security.hypervisor`, which Hypervisor.framework requires. A plain `cargo build`, `run` or `test`, an IDE's Run button included, does neither, and its server cannot boot a machine. On Windows, `cargo xtask run` also puts `build/epoxy/bin/` on `PATH` for a `gpu` build.
+- `cargo xtask build` and `test` put the guest kernel beside a server, where it looks for it, and on macOS sign the server with `com.apple.security.hypervisor`, which Hypervisor.framework requires; `cargo xtask run` only signs. A plain `cargo build`, `run` or `test`, an IDE's Run button included, does neither, and its server cannot boot a machine.
 - Set no library search path for the servers: one wide enough to find the kernel lets another virglrenderer, such as krunkit's, stand in for the one in `build/`, silently.
 - `KRUN_LOG=debug` (or `info`, `warn`, `trace`) turns on libkrun's log, which reaches the server with the guest's console.
 - `build/` is untracked and reproducible from `xtask/scripts/`: the kernel, the GPU libraries, alib's builds, the musl sysroot and the meson venv.

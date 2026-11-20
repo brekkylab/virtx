@@ -70,7 +70,7 @@ A sandbox without a GPU gets neither, and runs the image's own Vulkan, if it has
 
 ## What the device offers
 
-The device reports Vulkan 1.4.
+The device reports up to Vulkan 1.4, as the host's driver allows.
 On a Mac with an Apple7 GPU or later (M1 and later), it also offers bfloat16 (`VK_KHR_shader_bfloat16`) and cooperative matrices (`VK_KHR_cooperative_matrix`), in 8x8 and 16x16 shapes.
 An image that brings its own venus driver through `VK_DRIVER_FILES` needs Mesa 26.0 or later for those two: earlier venus does not pass them through.
 

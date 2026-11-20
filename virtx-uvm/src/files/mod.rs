@@ -1,5 +1,5 @@
-//! The files endpoints of the protocol: the files of a volume or a sandbox over
-//! WebDAV at `/volumes/{name}/files/` and `/sandboxes/{id}/files/`.
+//! The files endpoints of the protocol: the files of a volume or a sandbox over WebDAV at
+//! `/volumes/{name}/files/` and `/sandboxes/{id}/files/`.
 //!
 //! A volume's files are the directory on this host a machine shares, its mounts at their
 //! paths. A sandbox's are its machine's root as its processes see it, asked of the agent there

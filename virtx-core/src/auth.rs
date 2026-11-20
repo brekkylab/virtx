@@ -1,5 +1,5 @@
-//! The credentials a client sends with every request to a server over HTTP, as the
-//! Authentication section of the protocol has a server want them.
+//! The credentials a client sends with every request to a server over HTTP, as the Authentication
+//! section of the protocol has a server want them.
 
 use serde::{Deserialize, Serialize};
 

@@ -22,8 +22,8 @@ use crate::{
         ProjectMemberSetArgs, Role,
     },
     sandbox::{
-        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxJob, SandboxJobEntry,
-        SandboxSignalArgs, SandboxStdinArgs,
+        self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
+        SandboxJobEntry, SandboxSignalArgs, SandboxStdinArgs,
     },
     transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
     volume::{
@@ -468,6 +468,17 @@ impl Client {
         args: &SandboxExecArgs,
     ) -> Result<SandboxJob, Error> {
         sandbox::client::exec(&self.inner, id.as_ref(), args).await
+    }
+
+    /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
+    /// first, then each entry until its `end`. One request where the server answers an exec
+    /// with its log, two elsewhere. Dropping it leaves the job running.
+    pub fn exec_sandbox_with_log(
+        &self,
+        id: &str,
+        args: &SandboxExecArgs,
+    ) -> impl Stream<Item = Result<SandboxExecItem, Error>> + Unpin + Send + use<'_> {
+        Box::pin(sandbox::client::exec_log(&self.inner, id, args))
     }
 
     /// The job `job` in the sandbox `id`.
@@ -1852,6 +1863,40 @@ pub(crate) mod ffi {
                 timeout_ms,
             };
             client.exec_sandbox(sandbox, &args).await
+        })
+    }
+
+    /// Starts a process as `virtx_client_exec_sandbox` does, given the same, and reads its log:
+    /// its first item is `{"job": {...}}`, the job as that answers it, and the rest are the
+    /// log's entries as `virtx_client_sandbox_job_log` gives them. One request where the server
+    /// answers an exec with its log, two elsewhere. Freeing it leaves the job as it is.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_exec_sandbox_log(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxStream {
+        let args = unsafe { json::<Exec>(args, args_len) };
+        unsafe { &(*client).0 }.stream(|client| {
+            async_stream::stream! {
+                let (sandbox, args) = match args {
+                    Ok(Exec { sandbox, cmd, stdin, timeout_ms }) => {
+                        (sandbox, SandboxExecArgs { cmd, stdin, timeout_ms })
+                    }
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+                let mut items = client.exec_sandbox_with_log(&sandbox, &args);
+                while let Some(item) = items.next().await {
+                    yield item;
+                }
+            }
         })
     }
 

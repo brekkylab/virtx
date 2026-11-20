@@ -5,7 +5,8 @@ use std::{env, future, pin::Pin};
 use futures_core::Stream;
 use virtx::{
     ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName, MountSource, Recipe, RegistryAuth,
-    SandboxCreateArgs, SandboxExecArgs, SandboxJobEnd, SandboxJobEntry, Source, Step,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEntry, Source,
+    Step,
 };
 
 mod common;
@@ -377,6 +378,30 @@ fn a_built_image_runs_with_what_its_steps_made() {
 }
 
 #[test]
+fn an_image_whose_working_dir_is_empty_builds_and_boots_in_the_root() {
+    // busybox 1.36.0, whose config sets `WorkingDir` to "" as images of older tools do: by
+    // digest, so that it is that build whatever its tag points at later.
+    let base = "busybox@sha256:9e2bbca079387d7965c3a9cee6d0c53f4f4e63ff7637877a83c4c05f2a666112";
+    let client = common::client();
+    let reference = format!("{}:latest", common::unique("rootdir"));
+    let recipe = Recipe::new(base).step(Step::run("pwd > /built-in"));
+    client
+        .build_image(recipe, &reference)
+        .complete(false)
+        .wait()
+        .unwrap();
+
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(reference.as_str()))
+        .wait()
+        .unwrap();
+    let ran = common::run(&sandbox, &["sh", "-c", "cat /built-in && pwd"]);
+    assert_eq!(ran, (vec!["/".to_owned(), "/".to_owned()], 0));
+    sandbox.remove().wait().unwrap();
+    client.remove_image(&reference).wait().unwrap();
+}
+
+#[test]
 fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
     let client = common::client();
     // A registry that does not resolve, so each fails before it reaches anyone.
@@ -397,4 +422,113 @@ fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
         assert_eq!(completed.to_string(), failed.to_string());
     }
     assert_eq!(common::tagged(&client, &built), None);
+}
+
+#[test]
+fn a_process_is_read_with_its_log_its_job_first() {
+    for client in [common::client(), common::tcp_client()] {
+        common::alpine(&client);
+        let sandbox = client
+            .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+            .wait()
+            .unwrap();
+        let mut items =
+            sandbox.exec_with_log(&SandboxExecArgs::new(["sh", "-c", "echo hi; exit 3"]));
+        let mut read = Vec::new();
+        while let Some(item) = items.wait_next() {
+            read.push(item.unwrap());
+        }
+        let SandboxExecItem::Job(job) = &read[0] else {
+            panic!("its job first: {read:?}");
+        };
+        assert_eq!(job.cmd, ["sh", "-c", "echo hi; exit 3"]);
+        let entries: Vec<_> = read[1..]
+            .iter()
+            .map(|item| match item {
+                SandboxExecItem::Log(entry) => entry.entry.clone(),
+                SandboxExecItem::Job(_) => panic!("one job: {read:?}"),
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                SandboxJobEntry::Stdout("hi".into()),
+                SandboxJobEntry::End(SandboxJobEnd::exited(3)),
+            ]
+        );
+        let got = sandbox.job(&job.id).wait().unwrap();
+        assert_eq!(got.info().code, Some(3));
+        sandbox.remove().wait().unwrap();
+    }
+}
+
+/// `virtx-server-tcp` answers an exec that accepts `text/event-stream` with its job as the first
+/// event, with no `id`, then its log numbered as the job's own log is, and the job's path in
+/// `Location`; and one that does not with the job alone.
+#[test]
+fn an_exec_that_accepts_an_event_stream_is_answered_with_its_job_then_its_log() {
+    let client = common::tcp_client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE))
+        .wait()
+        .unwrap();
+    let common::Fixture {
+        url,
+        token,
+        project,
+        ..
+    } = common::fixture();
+    let url = url.trim_end_matches('/');
+    let request = |method: reqwest::Method, path: &str| {
+        reqwest::blocking::Client::new()
+            .request(method, format!("{url}{path}"))
+            .bearer_auth(token)
+            .header("virtx-project", project)
+    };
+    let exec = |accept: &str| {
+        request(
+            reqwest::Method::POST,
+            &format!("/sandboxes/{}/jobs/exec/", sandbox.id()),
+        )
+        .header("content-type", "application/json")
+        .header("accept", accept)
+        .body(r#"{"cmd": ["echo", "hi"]}"#)
+        .send()
+        .unwrap()
+    };
+
+    let answered = exec("text/event-stream");
+    assert_eq!(answered.status(), 201);
+    let headers = answered.headers().clone();
+    assert_eq!(headers["content-type"], "text/event-stream");
+    assert!(headers.get("virtx-job").is_none());
+    let body = answered.text().unwrap();
+    let (first, log) = body.split_once("\n\n").unwrap();
+    let job = first.strip_prefix("data: ").unwrap();
+    let job: serde_json::Value = serde_json::from_str(job).unwrap();
+    let job: virtx::SandboxJobInfo = serde_json::from_value(job["job"].clone()).unwrap();
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    let location = format!("/sandboxes/{}/jobs/{}", sandbox.id(), job.id);
+    assert_eq!(headers["location"], location.as_str());
+    assert_eq!(
+        log,
+        "id: 1\ndata: {\"stdout\":\"hi\"}\n\nid: 2\ndata: {\"end\":{\"code\":0}}\n\n"
+    );
+    // Cut off after its first entry, the job's log is read on after that entry's id.
+    let rest = request(reqwest::Method::GET, &format!("{location}/events"))
+        .header("accept", "text/event-stream")
+        .header("last-event-id", "1")
+        .send()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert_eq!(rest, "id: 2\ndata: {\"end\":{\"code\":0}}\n\n");
+
+    let answered = exec("application/json");
+    assert_eq!(answered.status(), 201);
+    assert_eq!(answered.headers()["content-type"], "application/json");
+    let job: virtx::SandboxJobInfo = serde_json::from_str(&answered.text().unwrap()).unwrap();
+    assert_eq!(job.cmd, ["echo", "hi"]);
+    sandbox.remove().wait().unwrap();
 }

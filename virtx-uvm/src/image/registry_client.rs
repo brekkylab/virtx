@@ -8,9 +8,11 @@
 //! copy either way skips what the other side has already.
 
 use std::io::Write;
+use std::sync::Arc;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use futures_util::future::BoxFuture;
 use oci_client::Client;
 use oci_client::client::{ClientConfig, LayerDescriptor};
 use oci_client::errors::OciDistributionError;
@@ -160,6 +162,30 @@ pub struct ProxyRefusal {
     pub why: String,
 }
 
+/// Where an embedder shares what anonymous pulls bring, between stores that would each pull it
+/// from its registry: virtx cloud's nodes, between projects. Only an anonymous pull asks it or
+/// tells it anything ([`RegistryClient::with_public`]): what one fetches anyone may, and what a
+/// pull with credentials fetches is private.
+///
+/// What one store's pull put here makes another's faster, so how long a pull takes says whether
+/// someone sharing it pulled that image before. An embedder shares only between stores whose
+/// owners may know that of each other, and none across a boundary meant to share nothing, such
+/// as between organizations.
+pub trait PublicImages: Send + Sync {
+    /// The image registry manifest `origin` became, filed in `store` from where it is shared,
+    /// with its origin recorded there: none, where it is not shared. An error is said in the
+    /// pull's log, and the image pulled from its registry as for none.
+    fn fetch<'a>(
+        &'a self,
+        store: &'a Store,
+        origin: &'a Digest,
+    ) -> BoxFuture<'a, anyhow::Result<Option<Digest>>>;
+
+    /// Registry manifest `origin` -- served as `manifest`, naming `config` -- was pulled
+    /// anonymously from its registry, and became `image`.
+    fn pulled(&self, origin: &Digest, manifest: &[u8], config: &[u8], image: &Digest);
+}
+
 /// A client of remote OCI registries, with one set of credentials, copying images to and from
 /// one store.
 ///
@@ -179,6 +205,8 @@ pub struct RegistryClient {
     /// Its way through the proxy every connection goes through, if one does
     /// ([`RegistryClient::through`]).
     pass: Option<Box<dyn ProxyPass>>,
+    /// Where its anonymous pulls are shared ([`RegistryClient::with_public`]).
+    public: Option<Arc<dyn PublicImages>>,
 }
 
 impl std::fmt::Debug for RegistryClient {
@@ -209,6 +237,7 @@ impl RegistryClient {
             auth,
             mirror: None,
             pass: None,
+            public: None,
         }
     }
 
@@ -249,6 +278,15 @@ impl RegistryClient {
             .map(|m| m.trim().trim_end_matches('/'))
             .filter(|m| anonymous && !m.is_empty())
             .map(str::to_owned);
+        self
+    }
+
+    /// As [`RegistryClient::new`], its anonymous pulls shared through `public`: an image it has
+    /// is fetched from there and not pulled, and one pulled is told it. None, or credentials --
+    /// whose images are private -- is nothing shared, as a client has by default.
+    pub fn with_public(mut self, public: Option<Arc<dyn PublicImages>>) -> Self {
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        self.public = public.filter(|_| anonymous);
         self
     }
 
@@ -556,6 +594,15 @@ impl RegistryClient {
                 return Ok((digest, image));
             }
         }
+        if let Some(public) = &self.public {
+            // Said as nothing more than a pull's own: whose it was, and where it is kept, are
+            // not the asker's.
+            match public.fetch(&self.store, &digest).await {
+                Ok(Some(image)) => return Ok((digest, image)),
+                Ok(None) => {}
+                Err(e) => log::warn!("sharing {digest}: {e:#}"),
+            }
+        }
 
         let (config_served, config) = self.pull_config(reference, &manifest).await?;
         let count = manifest.layers().len();
@@ -597,8 +644,19 @@ impl RegistryClient {
             let store = self.store.clone();
             tokio::task::spawn_blocking(move || store.insert_image(&config, &layers)).await??
         };
-        self.store
-            .insert_image_origin(&digest, &served, &config_served, &image)?;
+        let anonymous = matches!(self.auth, oci_client::secrets::RegistryAuth::Anonymous);
+        match anonymous {
+            true => self.store.insert_anonymous_image_origin(
+                &digest,
+                &served,
+                &config_served,
+                &image,
+            )?,
+            false => (self.store).insert_image_origin(&digest, &served, &config_served, &image)?,
+        }
+        if let Some(public) = &self.public {
+            public.pulled(&digest, &served, &config_served, &image);
+        }
         Ok((digest, image))
     }
 
@@ -1200,5 +1258,82 @@ mod tests {
             .unwrap();
         assert_eq!(again, (digest, image));
         assert_eq!(said, vec![format!("pulling {reference}")]);
+    }
+
+    /// Shares what pulls told it from `from`, as an embedder's cache would: each image's layers
+    /// linked into the store asking.
+    struct Shared {
+        from: Store,
+        told: std::sync::Mutex<Vec<Digest>>,
+    }
+
+    impl PublicImages for Shared {
+        fn fetch<'a>(
+            &'a self,
+            store: &'a Store,
+            origin: &'a Digest,
+        ) -> BoxFuture<'a, anyhow::Result<Option<Digest>>> {
+            Box::pin(async move {
+                if !self.told.lock().unwrap().contains(origin) {
+                    return Ok(None);
+                }
+                let image = self.from.get_image_origin(origin)?.unwrap();
+                for layer in self.from.get_image(&image)?.unwrap().1 {
+                    store.link_layer(&self.from.layer_path(&layer), &layer)?;
+                }
+                let (manifest, config) = self.from.get_image_manifest(&image)?.unwrap();
+                assert_eq!(store.insert_image_manifest(&manifest, &config)?, image);
+                let (served, config) = self.from.image_origins_of(&image)?.remove(0);
+                store.insert_image_origin(origin, &served, &config, &image)?;
+                Ok(Some(image))
+            })
+        }
+
+        fn pulled(&self, origin: &Digest, _: &[u8], _: &[u8], _: &Digest) {
+            self.told.lock().unwrap().push(origin.clone());
+        }
+    }
+
+    #[test]
+    fn a_client_with_credentials_shares_nothing() {
+        let scratch = Scratch::new("shares-nothing");
+        let shared: Arc<dyn PublicImages> = Arc::new(Shared {
+            from: scratch.0.clone(),
+            told: Default::default(),
+        });
+        let anonymous =
+            RegistryClient::new(scratch.0.clone(), None).with_public(Some(shared.clone()));
+        assert!(anonymous.public.is_some());
+        let auth = RegistryAuth::Bearer { token: "t".into() };
+        let with = RegistryClient::new(scratch.0.clone(), Some(auth)).with_public(Some(shared));
+        assert!(with.public.is_none());
+    }
+
+    /// Needs a network: `cargo test -p virtx-uvm -- --ignored`. An image one store pulled
+    /// anonymously, shared: another's pull of it takes it from there, and pulls no layer.
+    #[tokio::test]
+    #[ignore]
+    async fn an_image_shared_is_not_pulled_again() {
+        let (first, second) = (Scratch::new("shared-1"), Scratch::new("shared-2"));
+        let shared: Arc<dyn PublicImages> = Arc::new(Shared {
+            from: first.0.clone(),
+            told: Default::default(),
+        });
+        let reference: Reference = "mirror.gcr.io/library/alpine:3.21".parse().unwrap();
+        let (digest, image) = RegistryClient::new(first.0.clone(), None)
+            .with_public(Some(shared.clone()))
+            .pull(&reference, |_| {})
+            .await
+            .unwrap();
+
+        let mut said = Vec::new();
+        let pulled = RegistryClient::new(second.0.clone(), None)
+            .with_public(Some(shared))
+            .pull(&reference, |line| said.push(line))
+            .await
+            .unwrap();
+        assert_eq!(pulled, (digest.clone(), image.clone()));
+        assert_eq!(said, vec![format!("pulling {reference}")]);
+        assert_eq!(second.0.get_image_origin(&digest).unwrap(), Some(image));
     }
 }

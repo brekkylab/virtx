@@ -131,7 +131,7 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
         error = forwarder.last_error
         assert isinstance(error, VirtxError), "no error was kept"
         assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
-        assert "nothing listens on the port" in str(error)
+        assert "before the port sent a byte" in str(error)
         assert sandbox.ports[0].url not in str(error)
 
         for _ in range(6000):

@@ -7,10 +7,11 @@
 //! is carried in one, its bytes as binary messages, opened by the same HTTP client the requests
 //! go by.
 //!
-//! A connection that reaches nothing in the sandbox -- its WebSocket refused, or closed before
-//! the port sent a byte, as it is when nothing listens there -- is closed as the server closed
-//! it, and why is kept as the forwarder's [last error](PortForwarder::last_error) and warned
-//! of, naming the port and never its URL, which is secret.
+//! A connection whose WebSocket is refused, or closed before the port sent a byte, is closed as
+//! the server closed it, and what was seen -- the refusal, or the close and the reason the
+//! server gave for it -- is kept as the forwarder's [last error](PortForwarder::last_error)
+//! until a connection reaches the port, and warned of, naming the port and never its URL, which
+//! is secret.
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -49,9 +50,9 @@ const TCP_SUBPROTOCOL: &str = "virtx.tcp";
 /// How much of a port's TCP one message carries at most.
 const CHUNK: usize = 64 << 10;
 
-/// Why a connection to a forwarder reached nothing in the sandbox: its WebSocket refused, the
-/// server not reached, or the WebSocket closed before the port sent a byte, as the server
-/// closes it when nothing listens on the port.
+/// Why a connection to a forwarder failed: its WebSocket refused, the server not reached, or
+/// the WebSocket closed before the port sent a byte, with the reason the server gave if it gave
+/// one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ForwardError {
     /// For a person: the port, and what the server answered.
@@ -77,7 +78,8 @@ impl ForwardError {
     }
 }
 
-/// A forwarder's failures: the port they are of, as a person knows it, and the last.
+/// A forwarder's failures: the port they are of, as a person knows it, and the last since a
+/// connection last reached the port.
 struct Failures {
     port: String,
     last: Mutex<Option<ForwardError>>,
@@ -92,6 +94,22 @@ impl Failures {
         };
         warning::warn(failed.message.clone());
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(failed);
+    }
+
+    /// A connection reached the port: what failed before is no longer the port's state.
+    fn reached(&self) {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+/// How long the forwarder waits before accepting again after `error`: not at all where it is
+/// one connection's, reset before it was taken, and a second where it is the process's, such as
+/// running out of descriptors, which taking the next one at once would meet again.
+fn accept_backoff(error: &std::io::Error) -> Option<std::time::Duration> {
+    use std::io::ErrorKind::*;
+    match error.kind() {
+        ConnectionAborted | ConnectionRefused | ConnectionReset | Interrupted | WouldBlock => None,
+        _ => Some(std::time::Duration::from_secs(1)),
     }
 }
 
@@ -145,9 +163,10 @@ impl PortForwarder {
         self.address
     }
 
-    /// Why the last connection to the forwarder that reached nothing in the sandbox failed;
-    /// `None` while none has. A server on this machine is reached at its own address, with no
-    /// connection through the forwarder, so it has none.
+    /// Why the last connection to the forwarder that failed did, since one last reached the
+    /// port: `None` while none has, and again once a connection's port sends a byte. It is the
+    /// last failure, not whether the port is reached now. A server on this machine is reached at
+    /// its own address, with no connection through the forwarder, so it has none.
     pub fn last_error(&self) -> Option<ForwardError> {
         let failures = self.failures.as_ref()?;
         failures
@@ -214,7 +233,22 @@ impl PortForwarder {
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
-                        let Ok((accepted, _)) = accepted else { break };
+                        // An error here is a connection's or the process's, and the listener
+                        // stays open either way.
+                        let accepted = match accepted {
+                            Ok((accepted, _)) => accepted,
+                            Err(e) => {
+                                if let Some(wait) = accept_backoff(&e) {
+                                    warning::warn(format!(
+                                        "{}: accepting a connection failed, trying again in {}s: {e}",
+                                        failed.port,
+                                        wait.as_secs()
+                                    ));
+                                    tokio::time::sleep(wait).await;
+                                }
+                                continue;
+                            }
+                        };
                         let (http, url) = (http.clone(), url.clone());
                         let (credentials, headers) = (Arc::clone(&credentials), current(&headers));
                         let failed = Arc::clone(&failed);
@@ -225,7 +259,7 @@ impl PortForwarder {
                                     "no token to reach the server: {e}"
                                 ))),
                                 Ok(token) => match open(&http, token.as_deref(), headers, url).await {
-                                    Ok(socket) => carry(accepted, socket).await.err(),
+                                    Ok(socket) => carry(accepted, socket, &failed).await.err(),
                                     Err(refused) => {
                                         if refused.status == Some(StatusCode::UNAUTHORIZED.as_u16()) {
                                             credentials.refused();
@@ -343,11 +377,12 @@ impl End {
 }
 
 /// Carry bytes between `tcp` and `socket` until either ends: what is read from `tcp` as binary
-/// messages, and the binary messages to `tcp`. Ended by the server before the port sent a
-/// byte, why.
+/// messages, and the binary messages to `tcp`. The port's first byte is said to `failures` as
+/// reached. Ended by the server before the port sent a byte, what was seen.
 async fn carry(
     mut tcp: TcpStream,
     socket: WebSocketStream<reqwest::Upgraded>,
+    failures: &Failures,
 ) -> Result<(), ForwardError> {
     let (mut sink, mut messages) = socket.split();
     let (mut from, mut to) = tcp.split();
@@ -365,7 +400,10 @@ async fn carry(
             },
             received = messages.next() => match received {
                 Some(Ok(Message::Binary(bytes))) => {
-                    answered = true;
+                    if !answered {
+                        answered = true;
+                        failures.reached();
+                    }
                     if to.write_all(&bytes).await.is_err() {
                         break End::Client;
                     }
@@ -392,8 +430,7 @@ async fn carry(
     match end {
         End::Client => Ok(()),
         End::Closed(None) => Err(ForwardError::new(format!(
-            "the server closed its WebSocket {before}, as it does when nothing listens on the \
-             port in the sandbox"
+            "the server closed its WebSocket {before}"
         ))),
         End::Closed(Some(reason)) => Err(ForwardError::new(format!(
             "the server closed its WebSocket {before}: {reason}"
@@ -419,19 +456,23 @@ mod tests {
     };
 
     /// A server under the base path `/virtx/`, whose port `open` echoes what it is sent, whose
-    /// port `deaf` closes its WebSocket at once, and whose every other port is refused. Given
-    /// `token`, it wants it as a bearer token.
+    /// port `deaf` closes its WebSocket at once, `gone` closes it saying why, `late` closes its
+    /// first connection at once and echoes every later one, and whose every other port is
+    /// refused. Given `token`, it wants it as a bearer token.
     async fn serve(token: Option<&'static str>) -> String {
+        let late = Arc::new(AtomicUsize::new(0));
         let app = axum::Router::new().route(
             "/virtx/ports/{capability}",
             axum::routing::get(
                 move |Path(capability): Path<String>,
                       headers: HeaderMap,
                       upgrade: WebSocketUpgrade| async move {
+                    let first = capability == "late" && late.fetch_add(1, SeqCst) == 0;
                     let offered = headers
                         .get(header::SEC_WEBSOCKET_PROTOCOL)
                         .is_some_and(|value| value == TCP_SUBPROTOCOL);
-                    if !["open", "deaf"].contains(&capability.as_str()) || !offered {
+                    if !["open", "deaf", "gone", "late"].contains(&capability.as_str()) || !offered
+                    {
                         return (
                             StatusCode::NOT_FOUND,
                             axum::Json(serde_json::json!({
@@ -446,11 +487,22 @@ mod tests {
                     {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
-                    if capability == "deaf" {
+                    if capability == "deaf" || first {
                         // Closed at once, as a port nothing listens on is.
                         return upgrade.protocols([TCP_SUBPROTOCOL]).on_upgrade(
                             |mut socket| async move {
                                 let _ = socket.send(ws::Message::Close(None)).await;
+                            },
+                        );
+                    }
+                    if capability == "gone" {
+                        return upgrade.protocols([TCP_SUBPROTOCOL]).on_upgrade(
+                            |mut socket| async move {
+                                let frame = ws::CloseFrame {
+                                    code: 1011,
+                                    reason: "no machine runs to reach port 7000 in".into(),
+                                };
+                                let _ = socket.send(ws::Message::Close(Some(frame))).await;
                             },
                         );
                     }
@@ -540,7 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_websocket_closed_before_the_port_sent_a_byte_says_nothing_listens() {
+    async fn a_websocket_closed_before_the_port_sent_a_byte_says_so() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
         let forward = PortForwarder::open(&client, "ports/deaf", Some(7000)).unwrap();
@@ -559,9 +611,64 @@ mod tests {
             failed.message
         );
         assert!(
-            failed.message.contains("nothing listens on the port"),
+            failed
+                .message
+                .ends_with("the server closed its WebSocket before the port sent a byte"),
             "{}",
             failed.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_websocket_closed_with_a_reason_says_the_servers_reason() {
+        let client =
+            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let forward = PortForwarder::open(&client, "ports/gone", Some(7000)).unwrap();
+        let mut stream = TcpStream::connect(forward.address()).await.unwrap();
+        let _ = stream.read_to_end(&mut Vec::new()).await;
+        let failed = failed(&forward).await;
+        assert!(
+            failed.message.ends_with(
+                "the server closed its WebSocket before the port sent a byte: no machine runs \
+                 to reach port 7000 in"
+            ),
+            "{}",
+            failed.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_reaches_the_port_clears_the_last_error() {
+        let client =
+            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let forward = PortForwarder::open(&client, "ports/late", Some(7000)).unwrap();
+        let mut stream = TcpStream::connect(forward.address()).await.unwrap();
+        let _ = stream.read_to_end(&mut Vec::new()).await;
+        failed(&forward).await;
+
+        let mut stream = TcpStream::connect(forward.address()).await.unwrap();
+        stream.write_all(b"up").await.unwrap();
+        let mut echoed = [0u8; 2];
+        stream.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"up");
+        assert_eq!(forward.last_error(), None, "the port was reached");
+    }
+
+    #[test]
+    fn an_accept_error_of_one_connection_is_taken_again_at_once_and_the_processs_after_a_wait() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            accept_backoff(&Error::from(ErrorKind::ConnectionAborted)),
+            None
+        );
+        assert_eq!(
+            accept_backoff(&Error::from(ErrorKind::ConnectionReset)),
+            None
+        );
+        // EMFILE, as the process running out of descriptors answers.
+        assert_eq!(
+            accept_backoff(&Error::from_raw_os_error(24)),
+            Some(Duration::from_secs(1))
         );
     }
 
@@ -721,9 +828,9 @@ mod ffi {
         status
     }
 
-    /// Why the last connection to `forwarder` that reached nothing in the sandbox failed: its
-    /// WebSocket refused, or closed before the port sent a byte, as it is when nothing listens
-    /// there. `VIRTX_OK` with `null` written to `out` while none has, or `VIRTX_ERROR` with
+    /// Why the last connection to `forwarder` that failed did, since one last reached the port:
+    /// its WebSocket refused, or closed before the port sent a byte, with the server's reason if
+    /// it gave one. `VIRTX_OK` with `null` written to `out` while none has, or `VIRTX_ERROR` with
     /// the failure written as a call's error is, its message naming the port: `{"message",
     /// "status"?, "code"?}`, `status` and `code` the server's refusal of the WebSocket. Each
     /// such failure is also handed to the function `virtx_set_warn` set.

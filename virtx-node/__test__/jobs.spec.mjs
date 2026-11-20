@@ -447,7 +447,7 @@ test('a forwarded port nothing listens on says so', async () => {
         error.message.startsWith(`port 7000, forwarded at ${forwarder.address}: `),
         error.message,
       )
-      assert.match(error.message, /nothing listens on the port/)
+      assert.match(error.message, /before the port sent a byte/)
       assert.ok(!error.message.includes(sandbox.ports[0].url))
       while (!warned.includes(error.message) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 10))

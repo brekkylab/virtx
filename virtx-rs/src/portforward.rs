@@ -14,10 +14,9 @@ use crate::{
 ///
 /// It runs on its client's session, so the client's last drop stops it. Over stdio the server is
 /// on this machine and its own address is the forwarder's; over HTTP each connection to the
-/// forwarder is carried to the port in a WebSocket. A connection that reaches nothing in the
-/// sandbox -- its WebSocket refused, or closed before the port sent a byte, as it is when
-/// nothing listens there -- is closed, and why is [`last_error`](PortForwarder::last_error),
-/// and logged as a warning under the target `virtx`.
+/// forwarder is carried to the port in a WebSocket. A connection whose WebSocket is refused, or
+/// closed before the port sent a byte, is closed, and what was seen is
+/// [`last_error`](PortForwarder::last_error), and logged as a warning under the target `virtx`.
 pub struct PortForwarder {
     api: &'static Api,
     raw: *mut Opaque,
@@ -115,10 +114,11 @@ impl PortForwarder {
         self.address
     }
 
-    /// Why the last connection to the forwarder that reached nothing in the sandbox failed, its
-    /// message naming the port; `None` while none has. [`Error::Status`] where the server
-    /// refused the connection's WebSocket. A server on this machine is reached at its own
-    /// address, not through the forwarder, so it has none.
+    /// Why the last connection to the forwarder that failed did, its message naming the port,
+    /// with the server's reason for closing it if it gave one; `None` while none has, and again
+    /// once a later connection's port sends a byte. [`Error::Status`] where the server refused
+    /// the connection's WebSocket. A server on this machine is reached at its own address, not
+    /// through the forwarder, so it has none.
     pub fn last_error(&self) -> Option<Error> {
         let mut out = VirtxBytes::empty();
         let status = unsafe { (self.api.virtx_port_forwarder_last_error)(self.raw, &mut out) };

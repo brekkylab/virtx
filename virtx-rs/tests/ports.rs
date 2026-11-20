@@ -34,7 +34,7 @@ fn until(mut holds: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// What `nc`, listening on 8000 in the sandbox, says to a connection to `at`, once it listens.
+/// What `nc`, listening in the sandbox, says to a connection to `at`, once it listens.
 fn said(at: impl std::net::ToSocketAddrs + Copy) -> Vec<u8> {
     let mut said = Vec::new();
     let heard = until(|| {
@@ -163,10 +163,23 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
     };
     let named = format!("port 7000, forwarded at {}: ", forwarder.address());
     assert!(failed.starts_with(&named), "{failed}");
-    assert!(failed.contains("nothing listens on the port"), "{failed}");
+    assert!(failed.contains("before the port sent a byte"), "{failed}");
     assert!(!failed.contains(&port.url), "{failed}");
     let warned = until(|| WARNED.lock().unwrap().contains(&failed));
     assert!(warned, "not warned of: {:?}", WARNED.lock().unwrap());
+
+    // Once a connection reaches what listens there, the failure is no longer kept.
+    let serve = SandboxExecArgs {
+        timeout_ms: Some(30_000),
+        ..SandboxExecArgs::new([
+            "sh",
+            "-c",
+            "while true; do echo hello | nc -l -p 7000; done",
+        ])
+    };
+    sandbox.exec(&serve).wait().unwrap();
+    assert_eq!(said(forwarder.address()), b"hello\n");
+    assert_eq!(forwarder.last_error(), None);
     sandbox.remove().wait().unwrap();
 }
 

@@ -18,10 +18,9 @@ class PortForwarder:
 
     It runs on its client's session, so the client's last close stops it. Over stdio the server
     is on this machine and its own address is the forwarder's; over HTTP each connection to the
-    forwarder is carried to the port in a WebSocket. A connection that reaches nothing in the
-    sandbox -- its WebSocket refused, or closed before the port sent a byte, as it is when
-    nothing listens there -- is closed, and why is ``last_error``, and logged as a warning by
-    the ``virtx`` logger.
+    forwarder is carried to the port in a WebSocket. A connection whose WebSocket is refused, or
+    closed before the port sent a byte, is closed, and what was seen is ``last_error``, and
+    logged as a warning by the ``virtx`` logger.
     """
 
     def __init__(self, raw: int, lib: Library, address: str) -> None:
@@ -52,10 +51,11 @@ class PortForwarder:
 
     @property
     def last_error(self) -> VirtxError | None:
-        """Why the last connection to the forwarder that reached nothing in the sandbox failed,
-        its message naming the port; ``None`` while none has. ``status`` and ``code`` are the
-        server's, where it refused the connection's WebSocket. A server on this machine is
-        reached at its own address, not through the forwarder, so it has none."""
+        """Why the last connection to the forwarder that failed did, its message naming the port,
+        with the server's reason for closing it if it gave one; ``None`` while none has, and again
+        once a later connection's port sends a byte. ``status`` and ``code`` are the server's,
+        where it refused the connection's WebSocket. A server on this machine is reached at its
+        own address, not through the forwarder, so it has none."""
         if self._raw is None:
             raise VirtxError("the forwarder is closed")
         out = _Bytes()

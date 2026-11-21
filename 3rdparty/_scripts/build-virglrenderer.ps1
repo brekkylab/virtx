@@ -190,10 +190,16 @@ Invoke-Checked 'virglrenderer configure' {
 }
 
 Write-Output 'Compiling virglrenderer'
-# Kept in a log rather than dropped, so that a build that fails can say why -- in CI there is
-# no tree left to look in afterwards.
+# Kept in a log rather than printed, and a build that fails prints what failed of it -- in CI
+# there is no tree left to look in afterwards.
 $virglrendererLog = Join-Path $build 'virglrenderer-build.log'
-Invoke-Checked 'virglrenderer build' { & $meson compile -C $virglrendererBuild *> $virglrendererLog }
+Invoke-Checked 'virglrenderer build' {
+    & $meson compile -C $virglrendererBuild *> $virglrendererLog
+    if ($LASTEXITCODE -ne 0) {
+        Select-String -Path $virglrendererLog -CaseSensitive -Context 3, 6 `
+            -Pattern '^FAILED|error( [A-Z]+[0-9]+)?:' | Select-Object -First 20 | Out-String -Width 400
+    }
+}
 Invoke-Checked 'virglrenderer install' { & $meson install -C $virglrendererBuild | Out-Null }
 
 $virglrendererPcdir = Join-Path $virglrendererPrefix 'lib\pkgconfig'

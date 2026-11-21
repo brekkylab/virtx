@@ -33,7 +33,7 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxPort, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
     VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
     accepts_event_stream, described_type, from_body,
 };
@@ -84,6 +84,9 @@ pub struct Home {
     sandboxes: Mutex<HashMap<String, Held>>,
     /// The names sandboxes being made have taken, each until it is made or is not.
     naming: Mutex<HashSet<String>>,
+    /// The port keys sandboxes being made by [`Home::make`] have taken, each until it is made
+    /// or is not.
+    keying: Mutex<HashSet<String>>,
     /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
     /// with why, and refused all but its `DELETE`.
     unknown: Mutex<HashMap<String, UnknownSandbox>>,
@@ -151,6 +154,7 @@ impl Home {
             sandboxes: Mutex::new(sandboxes),
             unknown: Mutex::new(unknown),
             naming: Mutex::default(),
+            keying: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
             backing,
@@ -230,6 +234,86 @@ impl Home {
             return Err(forbidden("this project is being removed"));
         }
         Ok(sandbox.answer())
+    }
+
+    /// A sandbox made of `args` under the id and port keys `given` it, rather than ones picked
+    /// here: for a server built on this one that names its sandboxes itself, as one that moves
+    /// them between servers does, each keeping the id and port URLs its client holds. Made and
+    /// answered as `POST /sandboxes/` makes and answers one, each port's URL `ports/<key>`,
+    /// relative; but a port may be asked for over HTTP and carry inbound rules, which serving
+    /// and keeping are the embedder's. Refused `400` for an id that cannot be one, or keys that
+    /// are not one for each port; `409` `exists` for an id a sandbox here has, has made or keeps
+    /// -- one let go of here is [taken in](Home::take_in) instead -- or a key one opens a port
+    /// by or is being made with; and as `POST /sandboxes/` is otherwise. See [`Given::keys`]
+    /// for what keeps a key one port's across the server's homes, which this does not check.
+    pub async fn make(
+        &self,
+        args: SandboxCreateArgs,
+        given: Given,
+    ) -> Result<virtx_core::Sandbox, Refused> {
+        let Given { id, keys } = given;
+        if let Some(key) = keys.keys().find(|key| !is_key(key)) {
+            return Err(invalid(format!(
+                "keys: {key:?} is not a key: letters and digits, 128 at most"
+            )));
+        }
+        let ports: HashSet<u16> = args.ports.iter().map(|spec| spec.port).collect();
+        let opened: HashSet<u16> = keys.values().copied().collect();
+        if opened != ports || keys.len() != ports.len() {
+            return Err(invalid("keys: not one for each of its ports"));
+        }
+        let _keying = self.keying(&keys)?;
+        self.create(args, Some(&id), keys).await
+    }
+
+    /// A sandbox made of `args`, under `id` where it is given, each port behind its key in
+    /// `keys`, and answered with each port's URL `ports/<key>`.
+    async fn create(
+        &self,
+        args: SandboxCreateArgs,
+        id: Option<&str>,
+        keys: HashMap<String, u16>,
+    ) -> Result<virtx_core::Sandbox, Refused> {
+        let _naming = self.naming(args.name.as_deref())?;
+        let sandbox = Sandbox::create(
+            &self.images,
+            &self.root,
+            &self.volumes,
+            &args,
+            self.vm.clone(),
+            park_after(),
+            id,
+            Some(keys.clone()),
+            &self.backing,
+        )
+        .await?;
+
+        let id = sandbox.id().to_owned();
+        let mut answer = sandbox.answer();
+        for port in &mut answer.ports {
+            let key = keys.iter().find(|(_, opens)| **opens == port.port);
+            port.url = key.map(|(key, _)| format!("ports/{key}"));
+        }
+        let held = Held {
+            sandbox: Arc::clone(&sandbox),
+            capabilities: keys,
+        };
+        let closed = {
+            let mut sandboxes = self.sandboxes.lock().unwrap();
+            let closed = self.closed.load(Ordering::SeqCst);
+            if !closed {
+                sandboxes.insert(id.clone(), held);
+            }
+            closed
+        };
+        if closed {
+            tokio::task::spawn_blocking(move || sandbox.close()).await?;
+            if let Some(backend) = self.backing.get() {
+                let _ = backend.remove(Stored::Disk(&id)).await;
+            }
+            return Err(forbidden("this project is being removed"));
+        }
+        Ok(answer)
     }
 
     /// Let go of sandbox `id` here, as this server lets go of each as it ends
@@ -362,6 +446,28 @@ impl Home {
             ));
         }
         Ok(Naming(self, Some(name.to_owned())))
+    }
+
+    /// `keys` taken for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here, or one being made, opens a port by one of them.
+    fn keying(&self, keys: &HashMap<String, u16>) -> Result<Keying<'_>, Refused> {
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut keying = self.keying.lock().unwrap();
+        let taken = |key: &String| {
+            keying.contains(key)
+                || sandboxes
+                    .values()
+                    .any(|held| held.capabilities.contains_key(key))
+        };
+        if keys.keys().any(taken) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                "keys: a sandbox here opens a port by one of them",
+            ));
+        }
+        keying.extend(keys.keys().cloned());
+        Ok(Keying(self, keys.keys().cloned().collect()))
     }
 
     /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
@@ -520,6 +626,38 @@ impl Drop for Naming<'_> {
             self.0.naming.lock().unwrap().remove(name);
         }
     }
+}
+
+/// Port keys a sandbox being made has taken, given back as this drops: once the sandbox is
+/// among [`Home`]'s, which holds them from there, or once its making failed.
+struct Keying<'a>(&'a Home, Vec<String>);
+
+impl Drop for Keying<'_> {
+    fn drop(&mut self) {
+        let mut keying = self.0.keying.lock().unwrap();
+        for key in &self.1 {
+            keying.remove(key);
+        }
+    }
+}
+
+/// The id a sandbox is made under and the port each of its keys opens, by key, chosen by a
+/// server built on this one rather than picked here ([`Home::make`]).
+pub struct Given {
+    /// Letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
+    pub id: String,
+    /// One for each port it is made with, each letters and digits, 128 at most: its URL is
+    /// `ports/<key>`, which asks for no token, so whoever has the URL reaches the port. Each key
+    /// is to be as hard to guess as one `POST /sandboxes/` picks (64 hex digits), and to open
+    /// one port across every home of the server: [`Home::make`] refuses a key only where a
+    /// sandbox of its own home has it or is being made with it, and `ports/<key>` reaches the
+    /// first sandbox of any home that has it.
+    pub keys: HashMap<String, u16>,
+}
+
+/// Whether `key` can be a port's key given it: a URL's segment, letters and digits, 128 at most.
+fn is_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 128 && key.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// A sandbox, and the port each capability its making answered opens.
@@ -1383,67 +1521,23 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             spec.port
         )));
     }
-    let _naming = home.naming(args.name.as_deref())?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
     // what reaches this server from outside is not this server's to know. Kept with the
     // sandbox, so that its URLs reach it across this server's restart.
-    let mut opened = Vec::new();
-    let mut capabilities = HashMap::new();
-    for spec in &args.ports {
-        let capability = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
-        opened.push(SandboxPort {
-            port: spec.port,
-            url: Some(format!("ports/{capability}")),
-            label: spec.label.clone(),
-            protocol: spec.protocol,
-            address: None,
-            inbound_error: None,
-        });
-        capabilities.insert(capability, spec.port);
-    }
-    let sandbox = Sandbox::create(
-        &home.images,
-        &home.root,
-        &home.volumes,
-        &args,
-        home.vm.clone(),
-        park_after(),
-        Some(capabilities.clone()),
-        &home.backing,
-    )
-    .await?;
-
-    let id = sandbox.id().to_owned();
-    let held = Held {
-        sandbox: Arc::clone(&sandbox),
-        capabilities,
-    };
-    let closed = {
-        let mut sandboxes = home.sandboxes.lock().unwrap();
-        let closed = home.closed.load(Ordering::SeqCst);
-        if !closed {
-            sandboxes.insert(id.clone(), held);
-        }
-        closed
-    };
-    if closed {
-        tokio::task::spawn_blocking(move || sandbox.close()).await?;
-        if let Some(backend) = home.backing.get() {
-            let _ = backend.remove(Stored::Disk(&id)).await;
-        }
-        return Err(forbidden("this project is being removed"));
-    }
-    let answer = virtx_core::Sandbox {
-        ports: opened,
-        ..sandbox.answer()
-    };
-    Ok(created(format!("/sandboxes/{id}"), &answer))
+    let capabilities = (args.ports.iter())
+        .map(|spec| {
+            let capability = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            (capability, spec.port)
+        })
+        .collect();
+    let answer = home.create(args, None, capabilities).await?;
+    Ok(created(format!("/sandboxes/{}", answer.id), &answer))
 }
 
 async fn sandbox_get(
@@ -1904,6 +1998,7 @@ impl From<SandboxError> for Refused {
         match e {
             SandboxError::Invalid(_) => invalid(e),
             SandboxError::NotFound(_) => not_found(e),
+            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::Unsupported(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "unsupported", e)
             }

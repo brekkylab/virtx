@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fstree::FsTree;
 use crate::machine::{
-    Error, Network, Result,
+    Error, Result,
     boot::{self, BootArgs, CONSOLE_TARGET},
     wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
@@ -180,9 +180,12 @@ pub struct MachineSpec {
     /// Ignored without [`gpu`](MachineSpec::gpu).
     pub gpu_memory_mib: Option<u32>,
 
-    /// Where the guest's own connections may go: the way out.
+    /// Whether the guest's own connections go anywhere: on, to the addresses the internet
+    /// routes, and never to this host's loopback, its private and link-local ranges or cloud
+    /// metadata at `169.254.169.254`; off, nowhere, and no names resolve. A guest reaches its
+    /// own published ports either way.
     #[serde(default)]
-    pub network: Network,
+    pub network: bool,
 }
 
 /// A volume shown in the guest. Pointed at rather than carried, so its mounts' credentials stay
@@ -745,7 +748,7 @@ mod tests {
                 ram_mib: 2048,
                 gpu: false,
                 gpu_memory_mib: None,
-                network: Network::Public,
+                network: true,
             },
             volumes: vec![VolumeMount {
                 path: PathBuf::from("/store/volume/data"),

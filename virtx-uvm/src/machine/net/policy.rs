@@ -11,39 +11,28 @@
 //! # What it answers
 //!
 //! ```text
-//!   the guest asks for          it gets                          under
+//!   the guest asks for          it gets                              with a network
 //!   ─────────────────────────────────────────────────────────────────────────────────
-//!   NAMESERVER:53               this host's resolver             Host, Public
-//!   loopback, or 0.0.0.0        its own published listener on    any
-//!                               that port, refused while there
-//!                               is none
-//!                               else that port on this host's    Host
-//!                               loopback
-//!   anywhere else               where it asked                   Host
-//!                               where it asked, if the internet  Public
+//!   NAMESERVER:53               this host's resolver                 only
+//!   loopback, or 0.0.0.0        its own published listener on that   or without
+//!                               port, refused while there is none
+//!   anywhere else               where it asked, if the internet      only
 //!                               routes it
-//!   listen on a published port  a listener on this host's        any
-//!                               loopback
-//!   listen on any other port    a listener in the guest, and     any
+//!   listen on a published port  a listener on this host's loopback   or without
+//!   listen on any other port    a listener in the guest, and         or without
 //!                               nothing here
 //! ```
 //!
 //! Whatever is not answered is refused: `ECONNREFUSED` for a `connect`, and a dropped
 //! datagram for a `sendto`.
 //!
-//! **Under [`Host`](Network::Host), this host's loopback is the guest's to reach**, as it is
-//! every other process's here: a dev server, the person's own browser, another machine's
-//! published port. A guest only falls through to here for loopback when its own stack had
-//! nothing listening on that port, so `127.0.0.1:<port>` in the guest is first its own and
-//! then this host's. So is everything else this host reaches, its LAN included.
+//! **Nothing of this host's is the guest's to reach**: a machine on a server others reach
+//! would otherwise reach whatever the server does, which is its own loopback, its private
+//! network and its cloud's metadata. The resolver is the one exception, and only for DNS: it
+//! is how the guest's names resolve at all.
 //!
-//! **Under [`Public`](Network::Public), none of that is**: a machine on a server others
-//! reach would otherwise reach whatever the server does, which is its own loopback, its
-//! private network and its cloud's metadata. The resolver is the one exception, and only
-//! for DNS: it is how the guest's names resolve at all.
-//!
-//! **Its own published ports are the guest's under any of them**, [`None`](Network::None)
-//! included: they are in the machine, and reaching them leaves nothing.
+//! **Its own published ports are the guest's with or without a network**: they are in the
+//! machine, and reaching them leaves nothing.
 //!
 //! # A published port, listened on
 //! A guest's `listen` on a port that was published is carried to this host's loopback at a
@@ -59,7 +48,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::sync::Mutex;
 
-use super::{NAMESERVER, Network};
+use super::NAMESERVER;
 
 /// The DNS port, the one [`NAMESERVER`] answers on.
 const DNS_PORT: u16 = 53;
@@ -67,10 +56,11 @@ const DNS_PORT: u16 = 53;
 /// Everything a guest's request is judged by: where it may go, where names go, and which
 /// console ports are published.
 pub(crate) struct Policy {
-    network: Network,
+    /// Whether the guest's own connections reach the addresses the internet routes.
+    network: bool,
 
-    /// Where a query to [`NAMESERVER`] goes, and `None` for a host that names no resolver --
-    /// whose guest then resolves no names, which is what every other process here gets.
+    /// Where a query to [`NAMESERVER`] goes, and `None` for a machine with no network or a
+    /// host that names no resolver -- whose guest then resolves no names.
     resolver: Option<Ipv4Addr>,
 
     /// The console ports a connection from this host may reach.
@@ -111,7 +101,7 @@ impl Listeners {
 
 impl Policy {
     pub(crate) fn new(
-        network: Network,
+        network: bool,
         resolver: Option<Ipv4Addr>,
         published: impl IntoIterator<Item = u16>,
     ) -> Self {
@@ -171,48 +161,31 @@ impl krun::TsiPolicy for Policy {
     fn connect(&self, to: SocketAddr) -> Option<SocketAddr> {
         let ip = to.ip().to_canonical();
         if ip == IpAddr::V4(NAMESERVER) {
-            return (self.network != Network::None && to.port() == DNS_PORT)
+            return (to.port() == DNS_PORT)
                 .then_some(self.resolver)
                 .flatten()
                 .map(|resolver| SocketAddr::new(resolver.into(), DNS_PORT));
         }
         // What `0.0.0.0` means as a destination on Linux is this machine, so it is loopback
-        // by another name.
+        // by another name: the guest's own port, refused while nothing in it listens there.
+        // Not carried to the relay, which would take the connection and close it: a program
+        // waiting for its own server to come up would hear "closed" where it retries on
+        // "refused".
         if ip.is_loopback() || ip.is_unspecified() {
-            if let Some(listeners) = self.listener(to.port()) {
-                // Over v4, through the relay, which tries the guest's listener in both
-                // families: a program that listened on `::` alone takes v4 in the guest, but on
-                // this host it has only a v6 listener, which a v4 socket cannot connect to.
-                if ip.is_ipv4()
-                    && let Some(relay) = self.relays.get(&to.port())
-                {
-                    return Some(*relay);
-                }
-                return listeners
-                    .get(ip)
-                    .map(|port| SocketAddr::new(loopback(ip), port));
+            let listeners = self.listener(to.port())?;
+            // Over v4, through the relay, which tries the guest's listener in both families: a
+            // program that listened on `::` alone takes v4 in the guest, but on this host it
+            // has only a v6 listener, which a v4 socket cannot connect to.
+            if ip.is_ipv4()
+                && let Some(relay) = self.relays.get(&to.port())
+            {
+                return Some(*relay);
             }
-            // One of this machine's own ports that nothing in it listens on yet is refused, as
-            // it is without a network. Not carried out to the door on this host that leads
-            // back in, which would take the connection and close it: a program waiting for
-            // its own server to come up would hear "closed" where it retries on "refused".
-            if self.published.contains(&to.port()) || self.network != Network::Host {
-                return None;
-            }
-            // `0.0.0.0` is this host's loopback in the socket's family; any other loopback
-            // address is reached as asked.
-            let host = if ip.is_unspecified() {
-                loopback(ip)
-            } else {
-                ip
-            };
-            return Some(SocketAddr::new(host, to.port()));
+            return listeners
+                .get(ip)
+                .map(|port| SocketAddr::new(loopback(ip), port));
         }
-        match self.network {
-            Network::None => None,
-            Network::Host => Some(to),
-            Network::Public => routed(ip).then_some(to),
-        }
+        (self.network && routed(ip)).then_some(to)
     }
 
     fn listen(&self, at: SocketAddr) -> Option<SocketAddr> {
@@ -289,77 +262,47 @@ mod tests {
     }
 
     fn policy(published: impl IntoIterator<Item = u16>) -> Policy {
-        Policy::new(Network::Host, None, published)
+        Policy::new(true, None, published)
     }
 
-    /// On is what this host reaches: anywhere goes where it was asked.
-    #[test]
-    fn the_outside_is_where_it_was_asked_for() {
-        let policy = policy([]);
-        assert_eq!(policy.connect(PUBLIC), Some(PUBLIC));
-        let lan = at(Ipv4Addr::new(192, 168, 1, 1), 80);
-        assert_eq!(policy.connect(lan), Some(lan));
-    }
-
-    /// This host's loopback is reached, whatever the port and however it is spelled.
-    #[test]
-    fn this_hosts_loopback_is_reached() {
-        let policy = policy([]);
-        for to in [
-            at(Ipv4Addr::LOCALHOST, 8080),
-            at(Ipv4Addr::new(127, 1, 2, 3), 22),
-            at(Ipv6Addr::LOCALHOST, 8080),
-        ] {
-            assert_eq!(policy.connect(to), Some(to), "{to}");
-        }
-        assert_eq!(
-            policy.connect(at(Ipv4Addr::UNSPECIFIED, 8080)),
-            Some(at(Ipv4Addr::LOCALHOST, 8080))
-        );
-        assert_eq!(
-            policy.connect(at(Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 8080)),
-            Some(at(Ipv4Addr::LOCALHOST, 8080))
-        );
-    }
-
-    /// The guest's resolver is this host's, for DNS and nothing else.
+    /// The guest's resolver is this host's, for DNS and nothing else -- a private one too: it
+    /// is how names resolve at all.
     #[test]
     fn the_nameserver_is_this_hosts_resolver() {
         let resolver = Ipv4Addr::new(192, 168, 1, 1);
-        let policy = Policy::new(Network::Host, Some(resolver), []);
+        let policy = Policy::new(true, Some(resolver), []);
         assert_eq!(policy.connect(at(NAMESERVER, 53)), Some(at(resolver, 53)));
         assert_eq!(policy.connect(at(NAMESERVER, 80)), None);
         assert_eq!(
-            Policy::new(Network::Host, None, []).connect(at(NAMESERVER, 53)),
+            Policy::new(true, None, []).connect(at(NAMESERVER, 53)),
             None
         );
-        // A private resolver is still the guest's under `Public`, for DNS: it is how names
-        // resolve at all.
-        let public = Policy::new(Network::Public, Some(resolver), []);
-        assert_eq!(public.connect(at(NAMESERVER, 53)), Some(at(resolver, 53)));
-        let none = Policy::new(Network::None, Some(resolver), []);
-        assert_eq!(none.connect(at(NAMESERVER, 53)), None);
     }
 
-    /// `None` reaches nothing off the machine, but still its own published ports.
+    /// Without a network nothing off the machine is reached, but still its own published
+    /// ports.
     #[test]
-    fn none_reaches_only_its_own_ports() {
-        let policy = Policy::new(Network::None, None, [80]);
+    fn no_network_reaches_only_its_own_ports() {
+        let policy = Policy::new(false, None, [80]);
         assert_eq!(policy.connect(PUBLIC), None);
         assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 8080)), None);
         let here = policy.listen(at(Ipv4Addr::UNSPECIFIED, 80)).unwrap();
         assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 80)), Some(here));
     }
 
-    /// `Public` reaches the internet and nothing of this host's or its network's.
+    /// A network reaches the internet and nothing of this host's or its network's: not its
+    /// loopback, however it is spelled, nor a published port nothing in the guest listens on.
     #[test]
-    fn public_reaches_only_what_the_internet_routes() {
-        let policy = Policy::new(Network::Public, None, [80]);
+    fn a_network_reaches_only_what_the_internet_routes() {
+        let policy = policy([80]);
         assert_eq!(policy.connect(PUBLIC), Some(PUBLIC));
         let v6 = at("2606:4700::1111".parse::<Ipv6Addr>().unwrap(), 443);
         assert_eq!(policy.connect(v6), Some(v6));
         for to in [
             at(Ipv4Addr::LOCALHOST, 8080),
+            at(Ipv4Addr::LOCALHOST, 80),
+            at(Ipv4Addr::new(127, 1, 2, 3), 22),
+            at(Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 8080),
             at(Ipv4Addr::UNSPECIFIED, 8080),
             at(Ipv4Addr::new(10, 1, 2, 3), 80),
             at(Ipv4Addr::new(172, 16, 0, 1), 80),

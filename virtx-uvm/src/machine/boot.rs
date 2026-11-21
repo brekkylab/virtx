@@ -13,7 +13,7 @@
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
 //! virtio-vsock              the guest's network, on a machine with one or with published
-//!                           ports -- see [`Network`]
+//!                           ports -- see [`net`]
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag once the overlay is
@@ -84,7 +84,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "gpu")]
 use super::gpu;
 use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
-use super::{Error, MachineConfig, Network, Result, STOP_TIMEOUT, net};
+use super::{Error, MachineConfig, Result, STOP_TIMEOUT, net};
 use crate::volume::{Remote, Served};
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
@@ -205,7 +205,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         upper_device: UPPER_DEVICE.to_owned(),
         upper_fstype: UPPER_FSTYPE.to_owned(),
         shares: Vec::new(),
-        nameserver: (machine.spec.network != Network::None).then(|| net::NAMESERVER.to_string()),
+        nameserver: machine.spec.network.then(|| net::NAMESERVER.to_string()),
         workdir: workdir(&machine.config),
     };
 
@@ -426,7 +426,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network != Network::None || !published.is_empty() {
+    if machine.spec.network || !published.is_empty() {
         devices.add(net::attach(machine.spec.network, published)?);
     }
 

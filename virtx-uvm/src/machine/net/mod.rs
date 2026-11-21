@@ -21,10 +21,10 @@
 //!
 //! # The way out and the way in
 //!
-//! Apart, as the protocol has them. [`Network`] is where the guest's own connections may go;
-//! a published port is how this host reaches a listener in the guest, and works whatever
-//! the network is -- a machine with none is still reached on its published ports, and
-//! reaches its own.
+//! Apart, as the protocol has them. [`network`](super::MachineSpec::network) is whether the
+//! guest's own connections go anywhere; a published port is how this host reaches a listener
+//! in the guest, and works whether or not they do -- a machine with no network is still
+//! reached on its published ports, and reaches its own.
 //!
 //! # What a guest's own sockets still are
 //!
@@ -46,43 +46,22 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::sync::Arc;
 
 use krun::{TsiFlags, VsockDevice};
-use serde::{Deserialize, Serialize};
 
 use policy::Policy;
 pub(crate) use policy::routed;
 
 use super::{Error, Result};
 
-/// Where the guest's own connections may go.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Network {
-    /// Nowhere: the guest reaches its own loopback and its own published ports, and no
-    /// names resolve.
-    #[default]
-    None,
-
-    /// Everything this host reaches, its loopback and its LAN included -- as it is every
-    /// other process's here. For a machine on its user's own computer.
-    Host,
-
-    /// Only addresses the internet routes: this host's loopback, private and link-local
-    /// ranges, and cloud metadata at `169.254.169.254` are refused. For a machine on a
-    /// server others reach, where what the host reaches is not the guest's to reach.
-    Public,
-}
-
 /// Start this machine's network and hand back the device that is its near end.
 ///
-/// `published` are the listeners on this host whose connections reach a port in the guest
-/// -- each one bound by the caller, which is the end that knows where it is and says so.
-/// Each gets a thread that carries its connections to wherever the guest is listening on
-/// that port by then.
-pub(crate) fn attach(network: Network, published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
-    let resolver = match network {
-        Network::None => None,
-        Network::Host | Network::Public => resolver::host_resolvers().first().copied(),
-    };
+/// `network` is whether the guest's own connections reach the internet; `published` are the
+/// listeners on this host whose connections reach a port in the guest -- each one bound by
+/// the caller, which is the end that knows where it is and says so. Each gets a thread that
+/// carries its connections to wherever the guest is listening on that port by then.
+pub(crate) fn attach(network: bool, published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
+    let resolver = network
+        .then(|| resolver::host_resolvers().first().copied())
+        .flatten();
     let policy = Arc::new(
         Policy::new(network, resolver, published.iter().map(|(port, _)| *port)).with_relays(
             published

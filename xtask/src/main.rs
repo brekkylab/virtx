@@ -24,8 +24,8 @@ usage: cargo xtask init     [--force]
        cargo xtask fixture  -- <command>...
        cargo xtask fixture  --serve
 
-  init      checks out the submodules that are not, and adds the guest's musl target --
-            ready to build the servers
+  init      checks out the submodules that are not, applies 3rdparty/_patches to libkrun's
+            and rutabaga_gfx's, and adds the guest's musl target -- ready to build the servers
   build     builds the components from source
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
@@ -396,6 +396,10 @@ fn init(force: bool) -> anyhow::Result<()> {
         }
     }
 
+    for (tree, patches) in PATCHED {
+        apply_patches(tree, patches, force)?;
+    }
+
     // The agent every machine runs is built for it, by `virtx-uvm`'s build script.
     let target = guest_target()?;
     if has_guest_target()? == Some(false) {
@@ -410,12 +414,114 @@ fn init(force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The submodules cargo takes crates from by path, each with its patches: a submodule's tree is
+/// the commit this repository pins with each patch applied to it in order. libkrun is
+/// `virtx-uvm`'s dependency, and rutabaga_gfx is patched in for libkrun's.
+const PATCHED: &[(&str, &str)] = &[
+    ("3rdparty/libkrun", "3rdparty/_patches/libkrun"),
+    ("3rdparty/rutabaga_gfx", "3rdparty/_patches/rutabaga_gfx"),
+];
+
+/// What `git` in `dir` prints for `args`.
+fn git(dir: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .context("running git")?;
+    ensure!(
+        out.status.success(),
+        "git {} failed in {}: {}",
+        args.join(" "),
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(out.stdout)
+}
+
+/// The patches of `patches` in the order they apply, and what `tree` is to be made of: the
+/// commit this repository's index pins, and every byte of them.
+fn patches_of(tree: &str, patches: &str) -> anyhow::Result<(Vec<PathBuf>, Vec<u8>)> {
+    let root = root_path();
+    let mut files: Vec<PathBuf> = fs::read_dir(root.join(patches))
+        .with_context(|| format!("reading {patches}"))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "patch"))
+        .collect();
+    files.sort();
+    let mut made_of = git(&root, &["ls-files", "--stage", "--", tree])?;
+    for file in &files {
+        made_of.extend(fs::read(file).with_context(|| format!("reading {}", file.display()))?);
+    }
+    Ok((files, made_of))
+}
+
+/// Where `init` keeps, in the git directory of the submodule at `tree`, what it last made the
+/// tree of and how the tree then differed from its commit.
+fn patch_records(tree: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let dir = git(
+        &root_path().join(tree),
+        &["rev-parse", "--absolute-git-dir"],
+    )?;
+    let dir = PathBuf::from(String::from_utf8_lossy(&dir).trim());
+    Ok((dir.join("virtx-made-of"), dir.join("virtx-changes")))
+}
+
+/// How the submodule at `tree` differs from its commit: what is changed, added and removed, and
+/// each change itself. `init` applies the patches to the index too, so a file one adds is in it.
+fn changes_in(tree: &str) -> anyhow::Result<Vec<u8>> {
+    let tree = root_path().join(tree);
+    let mut changes = git(&tree, &["status", "--porcelain"])?;
+    changes.extend(git(&tree, &["diff", "HEAD"])?);
+    Ok(changes)
+}
+
+/// Brings the submodule at `tree` to its pinned commit with `patches` applied. A tree as `init`
+/// last left it is made again when the pin or a patch has changed. One changed since by anyone
+/// else is left as it is while the pin and the patches are what it was made of, and refused
+/// once they are not, unless `force`.
+fn apply_patches(tree: &str, patches: &str, force: bool) -> anyhow::Result<()> {
+    let root = root_path();
+    let (files, made_of) = patches_of(tree, patches)?;
+    let (was_made_of, were_changes) = patch_records(tree)?;
+    let changes = changes_in(tree)?;
+    let untouched = fs::read(&were_changes).is_ok_and(|were| were == changes);
+    if fs::read(&was_made_of).is_ok_and(|was| was == made_of) && (untouched || !force) {
+        return Ok(());
+    }
+    ensure!(
+        force || untouched || changes.is_empty(),
+        "{tree} has changes that are not {patches}'s -- `cargo xtask init --force` discards them"
+    );
+    eprintln!("Applying {patches} to {tree}");
+    git(&root.join(tree), &["reset", "--hard", "--quiet"])?;
+    git(&root.join(tree), &["clean", "-fdq"])?;
+    git(&root, &["submodule", "update", "--init", "--", tree])?;
+    for file in &files {
+        let file = file.to_str().context("a patch's path is not UTF-8")?;
+        git(&root.join(tree), &["apply", "--index", file])?;
+    }
+    fs::write(&was_made_of, made_of)?;
+    fs::write(&were_changes, changes_in(tree)?)?;
+    Ok(())
+}
+
 /// Why the servers cannot be built here yet, if they cannot: what `init` does is not done.
 fn servers_unready() -> anyhow::Result<Option<String>> {
     let root = root_path();
     for path in submodules()? {
         if !root.join(&path).join(".git").exists() {
             return Ok(Some(format!("{path} is not checked out")));
+        }
+    }
+    for (tree, patches) in PATCHED {
+        let (was_made_of, were_changes) = patch_records(tree)?;
+        if fs::read(&was_made_of).ok() != Some(patches_of(tree, patches)?.1) {
+            return Ok(Some(format!("{tree} is not at {patches}")));
+        }
+        if fs::read(&were_changes).ok() != Some(changes_in(tree)?) {
+            eprintln!("xtask: {tree} has changes that are not {patches}'s, and is built with them");
         }
     }
     if has_guest_target()? == Some(false) {
@@ -667,7 +773,8 @@ fn build_client(options: &Options) -> anyhow::Result<()> {
 }
 
 /// The GPU libraries the servers' `gpu` feature links, built under `build/` by this host's
-/// script; each script builds only what is not built yet.
+/// `build-deps`, which runs each library's script in `3rdparty/_scripts/`; each builds only what is not
+/// built yet.
 fn build_gpu_deps() -> anyhow::Result<()> {
     let scripts = root_path().join("xtask/scripts");
     let mut deps = if cfg!(windows) {

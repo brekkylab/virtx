@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jhlee525 <bmrcreative90@gmail.com>
+Date: Fri, 20 Nov 2026 22:26:59 +0900
+Subject: rng-seed: the device tree seeds the guest's random pool on aarch64
+
+## Why virtx needs it
+
+Without a seed the guest's pool starts empty, and each random number the kernel takes early in its boot asks whether the CPU has RNDR by reading ID_AA64ISAR0_EL1, a trap to the hypervisor every time: some 40 ms of a boot on an M3 Pro, before the kernel's clock starts.
+/chosen now carries 64 bytes of the host's entropy as rng-seed.
+
+## When it can go
+
+When upstream's device tree carries an rng-seed.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+---
+ src/devices/src/fdt/aarch64.rs | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/devices/src/fdt/aarch64.rs b/src/devices/src/fdt/aarch64.rs
+index da96e895..c4a83751 100644
+--- a/src/devices/src/fdt/aarch64.rs
++++ b/src/devices/src/fdt/aarch64.rs
+@@ -14,6 +14,7 @@ use crate::legacy::IrqChip;
+ use crate::legacy::gic::GICDevice;
+ use arch::aarch64::layout::{GTIMER_HYP, GTIMER_PHYS, GTIMER_SEC, GTIMER_VIRT};
+ use arch::{ArchMemoryInfo, InitrdConfig};
++use rand::{TryRng, rngs::SysRng};
+ use vm_fdt::{Error as FdtError, FdtWriter};
+ use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
+ 
+@@ -197,6 +198,13 @@ fn create_chosen_node<T: DeviceInfoForFDT + Clone + Debug>(
+     let chosen_node = fdt.begin_node("chosen")?;
+     fdt.property_string("bootargs", cmdline)?;
+ 
++    // Seed the guest's random pool before it boots. Without one, each early get_random_*()
++    // probes for RNDR by reading ID_AA64ISAR0_EL1, a trap to the hypervisor every time.
++    let mut rng_seed = [0u8; 64];
++    if SysRng.try_fill_bytes(&mut rng_seed).is_ok() {
++        fdt.property("rng-seed", &rng_seed)?;
++    }
++
+     // If we have a legacy serial device, tell the guest this is the default console.
+     // Clever guests will still switch to a better console (like virtio-console) if
+     // it becomes available later, and this gives us a good fallback.

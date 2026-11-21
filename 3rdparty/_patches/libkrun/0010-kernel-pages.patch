@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: khj809 <onsealeatang@gmail.com>
+Date: Mon, 9 Nov 2026 17:50:48 +0900
+Subject: kernel-pages: the kernel copied into the guest's memory, not mapped from its file, on Linux
+
+## Why virtx needs it
+
+Mapping the kernel from its file page by page made a machine's boot wait on page faults the guest took one at a time; copied whole, a machine boots in 161 ms on an EC2 node, not 490.
+
+## When it can go
+
+When upstream copies the kernel, or maps it populated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/libkrun/src/vmm/builder.rs | 48 +++++++++++++++++++++++++++++++---
+ 1 file changed, 44 insertions(+), 4 deletions(-)
+
+diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
+index fc44c129..d13be75e 100644
+--- a/src/libkrun/src/vmm/builder.rs
++++ b/src/libkrun/src/vmm/builder.rs
+@@ -596,11 +596,21 @@ pub enum Payload {
+         not(feature = "tee"),
+         not(target_os = "windows")
+     ))]
++    #[cfg_attr(
++        all(target_os = "linux", not(feature = "vhost-user")),
++        allow(dead_code)
++    )]
+     KernelMmap,
+     #[cfg(any(
+         target_arch = "aarch64",
+         target_arch = "riscv64",
+-        target_os = "windows"
++        target_os = "windows",
++        all(
++            target_os = "linux",
++            target_arch = "x86_64",
++            not(feature = "tee"),
++            not(feature = "vhost-user")
++        )
+     ))]
+     KernelCopy,
+     #[cfg(not(target_os = "windows"))]
+@@ -644,8 +654,25 @@ pub fn choose_payload(vm_resources: &VmResources) -> Result<Payload, StartMicrov
+         #[cfg(feature = "tee")]
+         return Ok(Payload::Tee);
+ 
+-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
++        // Copied into the guest's memory, where huge pages back it, rather than mapped from
++        // libkrunfw's file pages: under nested virtualization each 4K page of those is a fault
++        // to the outer hypervisor the first time the guest touches it, some 240 ms of a 490 ms
++        // boot on an EC2 node. vhost-user's devices share the kernel's memory, which takes the
++        // mapping.
++        #[cfg(all(
++            target_os = "linux",
++            target_arch = "x86_64",
++            not(feature = "tee"),
++            feature = "vhost-user"
++        ))]
+         return Ok(Payload::KernelMmap);
++        #[cfg(all(
++            target_os = "linux",
++            target_arch = "x86_64",
++            not(feature = "tee"),
++            not(feature = "vhost-user")
++        ))]
++        return Ok(Payload::KernelCopy);
+ 
+         #[cfg(any(
+             target_arch = "aarch64",
+@@ -1825,7 +1852,13 @@ pub fn load_payload(
+         #[cfg(any(
+             target_arch = "aarch64",
+             target_arch = "riscv64",
+-            target_os = "windows"
++            target_os = "windows",
++            all(
++                target_os = "linux",
++                target_arch = "x86_64",
++                not(feature = "tee"),
++                not(feature = "vhost-user")
++            )
+         ))]
+         Payload::KernelCopy => {
+             let (kernel_entry_addr, kernel_host_addr, kernel_guest_addr, kernel_size) =
+@@ -2138,7 +2171,14 @@ pub fn create_guest_memory(
+             let fw: Option<(u64, usize)> = None;
+             arch::arch_memory_regions(mem_size, None, 0, external_kernel.initramfs_size, fw)
+         }
+-        #[cfg(target_os = "windows")]
++        #[cfg(any(
++            target_os = "windows",
++            all(
++                target_os = "linux",
++                not(feature = "tee"),
++                not(feature = "vhost-user")
++            )
++        ))]
+         Payload::KernelCopy => arch::arch_memory_regions(mem_size, None, 0, 0, None),
+         #[cfg(feature = "tee")]
+         Payload::Tee => {

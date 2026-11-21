@@ -3,6 +3,10 @@
     "editor.defaultFormatter": "rust-lang.rust-analyzer",
     "editor.formatOnSave": true
   },
+  "git.ignoredRepositories": [
+    "3rdparty/libkrun",
+    "3rdparty/rutabaga_gfx"
+  ],
   "rust-analyzer.cargo.features": [
     "virtx-core/client",
     "virtx-core/server",

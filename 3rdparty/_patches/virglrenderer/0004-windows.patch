@@ -163,11 +163,11 @@ Parts of it stand alone and go when upstream has them: the null resource_map cal
  src/virgl_resource.c                |   8 +
  src/virgl_resource.h                |   1 +
  src/virgl_util.c                    |   4 +
- src/virglrenderer.c                 |  59 +++-
+ src/virglrenderer.c                 |  61 +++-
  src/virglrenderer.h                 |  17 +-
  src/win32_compat.c                  |  78 +++++
  src/win32_compat.h                  |  61 ++++
- 30 files changed, 1044 insertions(+), 16 deletions(-)
+ 30 files changed, 1046 insertions(+), 16 deletions(-)
  create mode 100644 src/venus_context.c
  create mode 100644 src/venus_context.h
  create mode 100644 src/win32_compat.c
@@ -1456,7 +1456,7 @@ index b770a0a9..3b4cd655 100644
  #include "util/os_misc.h"
  #include "util/u_pointer.h"
 diff --git a/src/virglrenderer.c b/src/virglrenderer.c
-index a4b760b6..3cdf29e6 100644
+index a4b760b6..318b7f8c 100644
 --- a/src/virglrenderer.c
 +++ b/src/virglrenderer.c
 @@ -38,7 +38,11 @@
@@ -1614,6 +1614,16 @@ index a4b760b6..3cdf29e6 100644
     case VIRGL_RESOURCE_FD_INVALID:
        /* Avoid a default case so that -Wswitch will tell us at compile time if a
         * new virgl resource type is added without being handled here.
+@@ -1712,7 +1767,9 @@ static int attach_in_fence_fd(struct virgl_context *ctx, int fence_fd)
+    int ret = -EINVAL;
+ 
+ #ifndef WIN32
++#ifndef _WIN32
+    ret = sync_accumulate("virglrenderer", &ctx->in_fence_fd, fence_fd);
++#endif
+ #endif
+    close(fence_fd);
+ 
 diff --git a/src/virglrenderer.h b/src/virglrenderer.h
 index 0bcafef4..26ef265d 100644
 --- a/src/virglrenderer.h

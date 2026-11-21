@@ -110,6 +110,7 @@ impl Home {
             args,
             vm(),
             park_after,
+            None,
             keys,
             &Backing::default(),
         )
@@ -450,6 +451,67 @@ async fn a_kept_sandbox_whose_making_is_cut_short_leaves_nothing(home: Home) {
     }
 }
 
+/// A sandbox made under an id given it has that id, and is kept and known again by it with its
+/// keys. Another is refused that id while it is here and once it is let go of, its disk and
+/// record left; an id that is not one is refused, and neither refusal makes anything.
+async fn a_sandbox_is_made_under_an_id_given_it(home: Home) {
+    let making = async |id: &str, keys: Option<HashMap<String, u16>>| {
+        Sandbox::create(
+            &home.images,
+            &home.root,
+            &home.volumes,
+            &small(),
+            vm(),
+            None,
+            Some(id),
+            keys,
+            &Backing::default(),
+        )
+        .await
+    };
+    let keys = HashMap::from([("key".to_owned(), 8080)]);
+    let made = making("sbx_given-1", Some(keys.clone())).await.unwrap();
+    assert_eq!(made.id(), "sbx_given-1");
+    assert_eq!(made.answer().id, "sbx_given-1");
+    assert_eq!(made.keys(), keys);
+    let left = home.left();
+    assert!(
+        left.contains(&"sbx_given-1.ext4".to_owned())
+            && left.contains(&"sbx_given-1.json".to_owned()),
+        "{left:?}"
+    );
+
+    let again = making("sbx_given-1", Some(HashMap::new())).await.err();
+    assert!(matches!(again, Some(SandboxError::Exists(_))), "{again:?}");
+    for id in [
+        "",
+        "../x",
+        "a/b",
+        "_x",
+        "-x",
+        "a.ext4",
+        "a b",
+        &"a".repeat(65),
+    ] {
+        let refused = making(id, None).await.err();
+        assert!(
+            matches!(refused, Some(SandboxError::Invalid(_))),
+            "{id:?}: {refused:?}"
+        );
+    }
+    assert_eq!(home.left(), left, "nothing made by a refusal");
+
+    leave(made).await;
+    let again = making("sbx_given-1", None).await.err();
+    assert!(matches!(again, Some(SandboxError::Exists(_))), "{again:?}");
+    let known = home.kept();
+    assert_eq!(known.len(), 1);
+    assert_eq!(known[0].id(), "sbx_given-1");
+    assert_eq!(known[0].keys(), keys);
+    close(Arc::clone(&known[0])).await;
+    assert_eq!(home.left(), Vec::<String>::new());
+}
+
 /// A storage backend that keeps nothing and says what it is asked, a line each, as what it is
 /// asked to let be written is let go too, a disk with no file under `root` let go of "over
 /// nothing"; and refuses a disk while `refusing`.
@@ -555,6 +617,7 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
         &args,
         vm(),
         park,
+        None,
         keys,
         &backing,
     );
@@ -1288,6 +1351,7 @@ async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
         vm,
         None,
         None,
+        None,
         &Backing::default(),
     )
     .await;
@@ -1581,6 +1645,7 @@ async fn a_machine_paused_past_the_silence_bound_runs_on(home: Home) {
         vm,
         None,
         None,
+        None,
         &Backing::default(),
     )
     .await
@@ -1635,6 +1700,7 @@ async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
         &args,
         vm,
         park_after,
+        None,
         None,
         &Backing::default(),
     )
@@ -2865,6 +2931,7 @@ fn main() -> ExitCode {
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,
         a_kept_sandbox_whose_machine_ends_on_its_own_has_exited_past_its_server,
         a_kept_sandbox_whose_making_is_cut_short_leaves_nothing,
+        a_sandbox_is_made_under_an_id_given_it,
         a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,

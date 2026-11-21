@@ -829,6 +829,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         home.vm.clone(),
         park_after(),
         None,
+        None,
         &Backing::default(),
     )
     .await?;
@@ -1274,6 +1275,7 @@ impl From<SandboxError> for Refused {
         match e {
             SandboxError::Invalid(_) => invalid(e),
             SandboxError::NotFound(_) => not_found(e),
+            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::Unsupported(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "unsupported", e)
             }

@@ -230,14 +230,14 @@ jobs:
         id: cache
         with:
           path: build/krunfw
-          key: kernel-${{ matrix.arch }}-${{ matrix.kernels }}-${{ hashFiles('xtask/scripts/build-libkrunfw.sh') }}
+          key: kernel-${{ matrix.arch }}-${{ matrix.kernels }}-${{ hashFiles('3rdparty/_scripts/build-libkrunfw.sh') }}
 
       - name: Kernel
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           for target in ${{ matrix.targets }}; do
             echo "::group::libkrunfw for $target"
-            LIBKRUNFW_TARGET=$target sh xtask/scripts/build-libkrunfw.sh
+            LIBKRUNFW_TARGET=$target sh 3rdparty/_scripts/build-libkrunfw.sh
             echo "::endgroup::"
           done
 
@@ -451,7 +451,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install lld llvm meson ninja
 
-      # pkg-config.exe for build-deps.ps1, which PowerShell runs (Git Bash's is not an .exe),
+      # pkg-config.exe for build-virglrenderer.ps1, which PowerShell runs (Git Bash's is not an .exe),
       # and libclang for bindgen.
       - name: Toolchain (Windows)
         if: runner.os == 'Windows'
@@ -466,14 +466,14 @@ jobs:
       - name: Add the guest's musl target
         run: cargo xtask init
 
-      # MoltenVK takes most of a macOS build, and changes only with its two submodules and its
-      # script.
+      # MoltenVK takes most of a macOS build, and changes only with its two submodules, their
+      # patches and its script.
       - name: MoltenVK cache
         if: runner.os == 'macOS'
         uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
         with:
-          path: 3rdparty/MoltenVK/Package
-          key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', '.git/modules/SPIRV-Cross/HEAD', 'xtask/scripts/build-moltenvk.sh') }}
+          path: build/MoltenVK
+          key: moltenvk-${{ hashFiles('.git/modules/MoltenVK/HEAD', '.git/modules/SPIRV-Cross/HEAD', '3rdparty/_patches/MoltenVK/**', '3rdparty/_patches/SPIRV-Cross/**', '3rdparty/_scripts/build-moltenvk.sh') }}
 
       - uses: ./.github/actions/guest
         with:

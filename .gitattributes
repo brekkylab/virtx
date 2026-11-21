@@ -2,3 +2,7 @@
 # reads; still expandable. Not `-diff` (binary): seeing which dependency moved is why the
 # lockfile is committed.
 Cargo.lock linguist-generated=true
+
+# Applied by `git apply`, which takes them byte for byte: a checkout that rewrote their line
+# endings would leave them applying to nothing.
+*.patch -text

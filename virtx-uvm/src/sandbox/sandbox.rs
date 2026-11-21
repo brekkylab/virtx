@@ -977,21 +977,10 @@ impl Sandbox {
                 }
             }
         }
-        // What its disk is fetched from while its machine runs, if the embedder's disks say,
-        // held with the machine.
-        let mut config = config;
-        let served = crate::disks::disks()
-            .serve(&config.upper)
-            .map_err(|e| Error::Io {
-                context: format!("serving the disk of sandbox {}", self.id),
-                source: e,
-            })?;
-        let (source, held) = served.unzip();
-        *self.served.lock().unwrap() = Some(source.is_some());
-        config.sandbox_disk = Some(SandboxDisk { source });
         // Booting is blocking work, until the guest takes commands: its disk grown first to as
         // large as it was last resized to. A grow that fails leaves the disk as it was, which it
         // boots on, to be grown at a later boot.
+        let mut config = config;
         let vm = self.vm.clone();
         let (booting, gib) = (Arc::clone(self), self.disk_gib.load(Ordering::Relaxed));
         let machine = tokio::task::spawn_blocking(move || {
@@ -1000,9 +989,20 @@ impl Sandbox {
             {
                 eprintln!("sandbox {}'s disk not grown to {gib} GiB: {e}", booting.id);
             }
-            Ok::<_, Error>(Machine::start(config, &vm)?)
+            // What its disk, as grown, is fetched from while its machine runs, if the
+            // embedder's disks say, held with the machine.
+            let served = crate::disks::disks()
+                .serve(&config.upper)
+                .map_err(|e| Error::Io {
+                    context: format!("serving the disk of sandbox {}", booting.id),
+                    source: e,
+                })?;
+            let (source, held) = served.unzip();
+            *booting.served.lock().unwrap() = Some(source.is_some());
+            config.sandbox_disk = Some(SandboxDisk { source });
+            Ok::<_, Error>((Machine::start(config, &vm)?, held))
         });
-        let machine = machine.await??;
+        let (machine, held) = machine.await??;
         let machine = Arc::new(machine.holding(held));
         *self.holding.lock().unwrap() = holding;
         let closed = {

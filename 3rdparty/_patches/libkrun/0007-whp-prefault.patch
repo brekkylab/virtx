@@ -45,8 +45,6 @@ machine tests on that runner take 59s with it and 182s without.
 ## When it can go
 
 When upstream has an option that populates guest memory on WHP, or virtx's Windows tests no longer run nested.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/libkrun/src/api/vmm_builder.rs    | 14 ++++++
  src/libkrun/src/vmm/builder.rs        |  4 +-

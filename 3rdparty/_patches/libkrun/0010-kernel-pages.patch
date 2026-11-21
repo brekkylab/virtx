@@ -10,8 +10,6 @@ Mapping the kernel from its file page by page made a machine's boot wait on page
 ## When it can go
 
 When upstream copies the kernel, or maps it populated.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/libkrun/src/vmm/builder.rs | 48 +++++++++++++++++++++++++++++++---
  1 file changed, 44 insertions(+), 4 deletions(-)

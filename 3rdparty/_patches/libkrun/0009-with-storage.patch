@@ -28,8 +28,6 @@ file still names the disk.
 ## When it can go
 
 When upstream's block device takes its storage from the embedder.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/devices/src/virtio/block/device.rs     | 17 +++++++++++------
  src/devices/src/virtio/block/mod.rs        |  3 +++

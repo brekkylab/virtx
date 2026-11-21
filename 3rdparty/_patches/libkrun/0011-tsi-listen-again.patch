@@ -10,8 +10,6 @@ A program that listens on a socket twice -- nginx does, to set its backlog -- ha
 ## When it can go
 
 With the TsiPolicy patch, which it corrects.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  src/devices/src/virtio/vsock/muxer.rs | 13 ++++++++++++-
  1 file changed, 12 insertions(+), 1 deletion(-)

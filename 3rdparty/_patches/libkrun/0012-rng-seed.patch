@@ -11,8 +11,6 @@ Without a seed the guest's pool starts empty, and each random number the kernel 
 ## When it can go
 
 When upstream's device tree carries an rng-seed.
-
-Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
 ---
  src/devices/src/fdt/aarch64.rs | 8 ++++++++
  1 file changed, 8 insertions(+)

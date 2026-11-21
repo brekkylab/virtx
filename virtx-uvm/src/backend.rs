@@ -76,10 +76,14 @@ pub enum Refusal {
 /// What is kept is the embedder's to remove where no request here does: a project's, as the
 /// project is removed, and a sandbox's disk let go of here and taken in nowhere else.
 pub trait StorageBackend: Send + Sync {
-    /// `what` was just made here, `size` bytes -- the most a disk may grow to; `0` for a volume,
+    /// `what` was just made here, `size` bytes -- the size a disk is made with; `0` for a volume,
     /// which grows with its files -- before anything is written to it: kept from now on.
     /// Refused [`Exists`](Refusal::Exists) where one of its name is kept already; what was made
     /// here is then removed.
+    ///
+    /// Asked once for a disk, as it is made. One [resized](crate::Sandbox::resize) larger is
+    /// grown past `size` as its machine boots, while it is [taken](Self::take), and is kept
+    /// larger once the machine is down, with no call to say so.
     fn made<'a>(&'a self, what: Stored<'a>, size: u64) -> BoxFuture<'a, Result<(), Refusal>> {
         let _ = (what, size);
         Box::pin(async { Ok(()) })

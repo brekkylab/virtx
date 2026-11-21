@@ -230,14 +230,14 @@ jobs:
         id: cache
         with:
           path: build/krunfw
-          key: kernel-${{ matrix.arch }}-${{ matrix.kernels }}-${{ hashFiles('xtask/scripts/build-libkrunfw.sh') }}
+          key: kernel-${{ matrix.arch }}-${{ matrix.kernels }}-${{ hashFiles('3rdparty/_scripts/build-libkrunfw.sh') }}
 
       - name: Kernel
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           for target in ${{ matrix.targets }}; do
             echo "::group::libkrunfw for $target"
-            LIBKRUNFW_TARGET=$target sh xtask/scripts/build-libkrunfw.sh
+            LIBKRUNFW_TARGET=$target sh 3rdparty/_scripts/build-libkrunfw.sh
             echo "::endgroup::"
           done
 

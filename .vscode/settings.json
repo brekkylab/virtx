@@ -4,8 +4,11 @@
     "editor.formatOnSave": true
   },
   "git.ignoredRepositories": [
+    "3rdparty/MoltenVK",
+    "3rdparty/SPIRV-Cross",
     "3rdparty/libkrun",
-    "3rdparty/rutabaga_gfx"
+    "3rdparty/rutabaga_gfx",
+    "3rdparty/virglrenderer"
   ],
   "rust-analyzer.cargo.features": [
     "virtx-core/client",

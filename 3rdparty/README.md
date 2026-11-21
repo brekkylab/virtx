@@ -3,6 +3,7 @@
 The projects virtx's server is built on that virtx changes.
 None is a fork: each is upstream's own repository, a submodule pinned to a commit, and each change of ours is a patch in [`_patches/`](_patches/), under the project's name, applied in order to that commit.
 A project virtx comes to change is taken the same way.
+The guest kernel, libkrunfw, is not among them: [`_scripts/build-libkrunfw.sh`](_scripts/build-libkrunfw.sh) builds it from upstream's tag as it is, with no submodule and no patch.
 
 | Project | Its patches | Where they are applied |
 | --- | --- | --- |

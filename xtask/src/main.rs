@@ -60,7 +60,7 @@ components:
   client        libvirtx_core, the library the Python, Node and Rust packages load
   server-stdio  the server a client spawns, as the `virtx-stdio` binary; also the VM process
   server-tcp   the server over HTTP, as the `virtx-server-tcp` binary
-  kernel        the guest kernel, as libkrunfw -- see xtask/scripts/build-libkrunfw.sh
+  kernel        the guest kernel, as libkrunfw -- see 3rdparty/_scripts/build-libkrunfw.sh
   abin          the executables a sandbox gets at /abin, those it names
   alib          the libraries every machine gets at /alib, into virtx's cache -- see
                 xtask/scripts/build-alib.sh
@@ -1015,7 +1015,7 @@ fn kernel_library() -> anyhow::Result<PathBuf> {
 
 /// Build the guest kernel.
 ///
-/// The whole of it is in [`build-libkrunfw.sh`](../scripts/build-libkrunfw.sh), including
+/// The whole of it is in [`build-libkrunfw.sh`](../../3rdparty/_scripts/build-libkrunfw.sh), including
 /// why this repository builds one at all rather than installing a release, and why never
 /// one older than v5.6.2: before it, the x86_64 config left the guest with no
 /// write-combining, which nothing reports and which costs a factor of 36 on the path a
@@ -1025,7 +1025,7 @@ fn kernel_library() -> anyhow::Result<PathBuf> {
 /// platforms, and Git Bash is already required for the submodules.
 fn build_kernel() -> anyhow::Result<()> {
     let mut sh = Command::new("sh");
-    sh.arg(root_path().join("xtask/scripts/build-libkrunfw.sh"));
+    sh.arg(root_path().join("3rdparty/_scripts/build-libkrunfw.sh"));
     let status = sh.status().context("running build-libkrunfw.sh")?;
     ensure!(status.success(), "building the guest kernel failed");
     Ok(())

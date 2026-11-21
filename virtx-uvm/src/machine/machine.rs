@@ -96,10 +96,16 @@ pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
 /// Grow the upper disk at `path`, which no machine runs over, to `gib` GiB, with what is on it
 /// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
 /// no room to grow in place, which a kernel will not grow either -- is read whole and written
-/// again at the new size: at `part`, moved over it once whole, so a failure leaves it as it
-/// was. Each file is read whole, its holes too, so a file larger than the disk could hold is
-/// refused, and the new disk takes on the host what its files are long, not `gib`.
-pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
+/// again at the new size: at `part`, moved over it once whole and `written` has answered, so a
+/// failure, `written`'s too, leaves it as it was. Each file is read whole, its holes too, so a
+/// file larger than the disk could hold is refused, and the new disk takes on the host what its
+/// files are long, not `gib`.
+pub(crate) fn grow_upper(
+    path: &Path,
+    part: &Path,
+    gib: u32,
+    written: impl FnOnce() -> io::Result<()>,
+) -> Result<()> {
     let size = u64::from(gib) << 30;
     let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);
     if std::fs::metadata(path).map_err(read)?.len() >= size {
@@ -110,6 +116,7 @@ pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
     let written = File::create_new(part)
         .map_err(|e| Error::io(format!("creating {}", part.display()), e))
         .and_then(|file| Ok(tree.to_ext4(sparse(file), size)?))
+        .and_then(|()| written().map_err(|e| Error::io(format!("growing {}", path.display()), e)))
         .and_then(|()| {
             std::fs::rename(part, path)
                 .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
@@ -614,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks() {
+    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks_and_told_once_written() {
         use crate::fstree::{Entry, Meta};
         let dir = tempfile::tempdir().unwrap();
         let (path, part) = (dir.path().join("w.ext4"), dir.path().join("w.ext4.part"));
@@ -629,13 +636,23 @@ mod tests {
             .unwrap();
         let before = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
 
-        grow_upper(&path, &part, 3).unwrap();
+        // Told once it is written, and left as it was where that fails.
+        let failed = grow_upper(&path, &part, 3, || {
+            assert_eq!(std::fs::metadata(&part).unwrap().len(), 3 << 30);
+            Err(io::Error::other("refused"))
+        });
+        assert!(matches!(failed, Err(Error::Io { .. })), "{failed:?}");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1 << 30);
+        assert!(!part.exists());
+
+        grow_upper(&path, &part, 3, || Ok(())).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
         let after = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
         assert_eq!(after.digest(), before.digest());
         assert!(!part.exists());
 
-        grow_upper(&path, &part, 2).unwrap();
+        let told = || panic!("told of a disk not grown");
+        grow_upper(&path, &part, 2, told).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
     }
 

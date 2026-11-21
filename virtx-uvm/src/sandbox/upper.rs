@@ -69,7 +69,8 @@ impl Upper {
 
     /// Grow it to `gib` GiB, with what is on it kept, while no machine runs over it: all in its
     /// file first, where the embedder's disks keep part of it elsewhere
-    /// ([`Disks::whole`](crate::disks::Disks::whole)), and forgotten by them once written again.
+    /// ([`Disks::whole`](crate::disks::Disks::whole)), and forgotten by them once the grown disk
+    /// is written, before it replaces this one. A failure of either leaves it as it was.
     pub(super) fn grow(&self, gib: u32) -> Result<(), Error> {
         let len = fs::metadata(&self.path)
             .map_err(|e| io(format!("reading {}", self.path.display()), e))?
@@ -80,11 +81,13 @@ impl Upper {
         let disks = crate::disks::disks();
         let whole = disks.whole(&self.path);
         whole.map_err(|e| io(format!("making {} all its file", self.path.display()), e))?;
-        crate::machine::grow_upper(&self.path, &part(&self.path), gib)?;
-        if let Err(e) = disks.forget(&self.path) {
-            eprintln!("forgetting the disk {} grown: {e}", self.path.display());
-        }
-        Ok(())
+        let forget = || disks.forget(&self.path);
+        Ok(crate::machine::grow_upper(
+            &self.path,
+            &part(&self.path),
+            gib,
+            forget,
+        )?)
     }
 
     /// The disk of each sandbox kept under `dir` that no process holds, held now. A record whose

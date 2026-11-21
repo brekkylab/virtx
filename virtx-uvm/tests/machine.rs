@@ -232,13 +232,13 @@ impl Limit {
 /// file, opened as libkrun would -- and served only under a test's home with a `serve` file in
 /// it, as an embedder serves some disks and not others. What each is served from and when its
 /// machine booted noted in `marks/` beside the test's `sandbox/`, how many are served counted,
-/// and those served, made whole and forgotten noted; made whole refused under a test's home with
-/// a `whole-fails` file in it.
+/// and those served, made whole and forgotten noted; made whole or forgotten refused under a
+/// test's home with a `whole-fails` or `forget-fails` file in it.
 struct Embedded;
 
 /// How many sandbox disks are served now, each while its machine is up.
 static SERVING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// The disks forgotten, as their sandboxes went or as each was grown.
+/// The disks asked to be forgotten, as their sandboxes went or as each was grown.
 static FORGOTTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 /// The disks served, each with how long its file was then.
 static SERVED: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
@@ -319,6 +319,10 @@ impl Disks for Embedded {
 
     fn forget(&self, disk: &Path) -> std::io::Result<()> {
         FORGOTTEN.lock().unwrap().push(disk.to_owned());
+        let home = disk.parent().unwrap().parent().unwrap();
+        if home.join("forget-fails").exists() {
+            return Err(std::io::Error::other("not forgotten"));
+        }
         Ok(())
     }
 }
@@ -1819,10 +1823,15 @@ async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
     let grown = sandbox.resize(&resize(3)).await.unwrap();
     assert_eq!((grown.disk_gib, grown.up), (3, true));
 
-    // Its grow fails, and it boots on its disk as it was.
+    // Its grow fails, and it boots on its disk as it was, which the embedder's disks still know.
     sandbox.park().await.unwrap();
     assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
     assert_eq!(disk(&sandbox).await, 1);
+    let file = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    assert!(!FORGOTTEN.lock().unwrap().contains(&file));
 
     // Taken down to the size it has, not under it; and grown at a later boot once it can be.
     let back = sandbox.resize(&resize(2)).await.unwrap();
@@ -1839,9 +1848,9 @@ async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
     close(sandbox).await;
 }
 
-/// A sandbox's disk is made all its file by the embedder's disks before it is grown, and
-/// forgotten by them once it is, and served as grown; one they fail to make whole is left as it
-/// was.
+/// A sandbox's disk is made all its file by the embedder's disks before it is grown, forgotten
+/// by them once the grown disk is written, and served as grown; one they fail to make whole or
+/// to forget is left as it was.
 async fn a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown(home: Home) {
     std::fs::write(home.root.join("serve"), "").unwrap();
     let mut args = small();
@@ -1894,13 +1903,22 @@ async fn a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown(home:
     assert_eq!(made_whole(), [1 << 30]);
     assert_eq!((len(), forgotten()), (1 << 30, 0));
 
-    // Made whole as it was, then grown, then forgotten.
+    // Made whole and not forgotten: not grown, and booted on as it was.
     std::fs::remove_file(home.root.join("whole-fails")).unwrap();
+    std::fs::write(home.root.join("forget-fails"), "").unwrap();
     sandbox.park().await.unwrap();
     let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
     assert_eq!(lines, ["kept"]);
     assert_eq!(made_whole(), [1 << 30, 1 << 30]);
-    assert_eq!((len().div_ceil(1 << 30), forgotten()), (2, 1));
+    assert_eq!((len(), forgotten()), (1 << 30, 1));
+
+    // Made whole as it was, then grown and forgotten.
+    std::fs::remove_file(home.root.join("forget-fails")).unwrap();
+    sandbox.park().await.unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert_eq!(made_whole(), [1 << 30, 1 << 30, 1 << 30]);
+    assert_eq!((len().div_ceil(1 << 30), forgotten()), (2, 2));
     assert_eq!(served_last(), len(), "served as grown");
     close(sandbox).await;
 }

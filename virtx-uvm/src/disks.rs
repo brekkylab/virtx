@@ -47,11 +47,12 @@ pub trait Disks: Send + Sync {
         Ok(())
     }
 
-    /// In the server's process: the disk at `disk` removed with its sandbox, or as one left
-    /// over, or written again whole ([`whole`](Disks::whole)): whatever beside it says what it
-    /// was goes with it. Called once the disk's file is gone or new, where there is no one to
-    /// answer to: a failure is logged and nothing more, and what the embedder kept for the disk
-    /// is its own to remove.
+    /// In the server's process: whatever beside the disk at `disk` says what it is goes with it.
+    /// For a disk removed with its sandbox, or as one left over, called once its file is gone,
+    /// where there is no one to answer to: a failure is logged and nothing more, and what the
+    /// embedder kept for the disk is its own to remove. For a disk grown, called once it is all
+    /// in its file ([`whole`](Disks::whole)) and the grown disk is written, before that replaces
+    /// it: a failure leaves the disk as it was, not grown, to be grown at a later boot.
     fn forget(&self, disk: &Path) -> io::Result<()> {
         let _ = disk;
         Ok(())

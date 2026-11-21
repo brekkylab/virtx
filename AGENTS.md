@@ -69,7 +69,7 @@ Then, in your own project, install the package for your language from the clone:
 
 - `load(path)` opens a library from the program itself, in place of `VIRTX_CORE_LIB`; a process opens one.
 - A module that takes a client from another opens the file `library_path()` answers, and takes the client from the pointer `client.clone().into_raw()` answers, with `Client.from_raw`. In Node, `libraryPath()`, `intoRaw()` and `fromRaw`.
-- A change to the client needs nothing of `init`, only those two submodules checked out, as every cargo command does. A change to the servers needs `init` and the guest kernel, and `init` again after a pull that changed their patches in `3rdparty/_patches/` or their pins: a server is not built from a tree `init` has not brought to them.
+- A change to the client needs nothing of `init`, only those two submodules checked out, as every cargo command does. A change to the servers needs `init` and the guest kernel, and `init` again after a pull that changed their patches in `3rdparty/_patches/` or their pins: a server is not built from a tree `init` has not brought to them. It is `init` that moves those two to a new pin, not `git submodule update` or `git pull --recurse-submodules`, which git refuses over a tree with the patches applied.
 
 ## Tests
 

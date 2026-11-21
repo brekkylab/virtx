@@ -22,8 +22,10 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
+use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, TcpStream};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
@@ -36,6 +38,7 @@ mod wire;
 
 use wire::{
     CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME, Taken,
+    VSOCK_PORT_BASE,
 };
 
 /// The port's writing half, shared by everything that says something on it, so two messages
@@ -569,6 +572,11 @@ fn serve() -> io::Result<()> {
         }
     });
 
+    // Before the guest is up, so a connection the host makes once it is finds the port taken.
+    for &port in &asked.ports {
+        forward(port)?;
+    }
+
     JOBS.get_or_init(jobs_cgroup);
     thread::spawn(watch_thrashing);
     send(&out, &CtrlResp::Ready(Vec::new()));
@@ -614,6 +622,77 @@ fn serve() -> io::Result<()> {
             CtrlReq::Ping => send(&out, &CtrlResp::Pong),
         }
     }
+    Ok(())
+}
+
+/// Carry each connection the host makes to guest port `port`, which arrives on the vsock port
+/// [`VSOCK_PORT_BASE`] plus it, to whatever listens on that port on the guest's loopback: v4
+/// first and v6 after, because a program listens in whichever family it chose. With nothing
+/// listening the connection is closed, as the port would have answered.
+fn forward(port: u16) -> io::Result<()> {
+    // SAFETY: plain values.
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a descriptor just made, owned by nothing else.
+    let listener = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: all zeroes is a `sockaddr_vm`, which the fields set below then name.
+    let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+    addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+    addr.svm_port = VSOCK_PORT_BASE + u32::from(port);
+    addr.svm_cid = libc::VMADDR_CID_ANY;
+    let len = std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
+    // SAFETY: a socket held open, and an address of the length given.
+    if unsafe { libc::bind(listener.as_raw_fd(), (&raw const addr).cast(), len) } != 0
+        || unsafe { libc::listen(listener.as_raw_fd(), libc::SOMAXCONN) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    thread::spawn(move || {
+        loop {
+            // SAFETY: a listening socket held open, and no address asked for.
+            let fd = unsafe {
+                libc::accept4(
+                    listener.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    libc::SOCK_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                // Out of descriptors, most likely: waited out rather than spun on.
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            // A vsock stream socket, which `UnixStream`'s calls -- read, write, shutdown,
+            // duplicating it -- serve as they do any stream socket.
+            // SAFETY: a descriptor just accepted, owned by nothing else.
+            let host = unsafe { UnixStream::from_raw_fd(fd) };
+            thread::spawn(move || {
+                let Ok(guest) = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                    .or_else(|_| TcpStream::connect((Ipv6Addr::LOCALHOST, port)))
+                else {
+                    return;
+                };
+                let _ = guest.set_nodelay(true);
+                let (Ok(host_back), Ok(guest_back)) = (host.try_clone(), guest.try_clone())
+                else {
+                    return;
+                };
+                // Each direction ends with the half-close that says so, and the other keeps
+                // going until its own end says the same.
+                let back = thread::spawn(move || {
+                    let _ = io::copy(&mut &guest_back, &mut &host_back);
+                    let _ = host_back.shutdown(Shutdown::Write);
+                });
+                let _ = io::copy(&mut &host, &mut &guest);
+                let _ = guest.shutdown(Shutdown::Write);
+                let _ = back.join();
+            });
+        }
+    });
     Ok(())
 }
 

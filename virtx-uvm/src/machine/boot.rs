@@ -207,6 +207,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         shares: Vec::new(),
         nameserver: machine.spec.network.then(|| net::NAMESERVER.to_string()),
         workdir: workdir(&machine.config),
+        ports: machine.ports.clone(),
     };
 
     // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
@@ -614,8 +615,8 @@ impl log::Log for Logger {
 
     fn flush(&self) {}
 }
-/// A listener on this host's loopback for each of `ports`, which the guest's listener on that
-/// port is relayed from. Refused for `0`, which is no port, and for one given twice.
+/// A listener on this host's loopback for each of `ports`, which connections to that guest port
+/// are relayed from. Refused for `0`, which is no port, and for one given twice.
 fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
     let mut published = Vec::with_capacity(ports.len());
     for (i, &port) in ports.iter().enumerate() {
@@ -638,7 +639,7 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
 /// The path of `what`, such as `/abin`, as libkrun takes it, which is a `&str`. Refused rather
 /// than lossily converted: a name with a replacement character in it opens some other file or
 /// none.
-fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
+pub(super) fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| Error::Io {
         context: format!("the path of {what} is not valid UTF-8, which libkrun cannot name"),
         source: std::io::Error::from(std::io::ErrorKind::InvalidInput),

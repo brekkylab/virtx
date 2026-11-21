@@ -84,6 +84,9 @@ pub struct Home {
     sandboxes: Mutex<HashMap<String, Held>>,
     /// The names sandboxes being made have taken, each until it is made or is not.
     naming: Mutex<HashSet<String>>,
+    /// The port keys sandboxes being made by [`Home::make`] have taken, each until it is made
+    /// or is not.
+    keying: Mutex<HashSet<String>>,
     /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
     /// with why, and refused all but its `DELETE`.
     unknown: Mutex<HashMap<String, UnknownSandbox>>,
@@ -151,6 +154,7 @@ impl Home {
             sandboxes: Mutex::new(sandboxes),
             unknown: Mutex::new(unknown),
             naming: Mutex::default(),
+            keying: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
             backing,
@@ -240,7 +244,8 @@ impl Home {
     /// and keeping are the embedder's. Refused `400` for an id that cannot be one, or keys that
     /// are not one for each port; `409` `exists` for an id a sandbox here has, has made or keeps
     /// -- one let go of here is [taken in](Home::take_in) instead -- or a key one opens a port
-    /// by; and as `POST /sandboxes/` is otherwise.
+    /// by or is being made with; and as `POST /sandboxes/` is otherwise. See [`Given::keys`]
+    /// for what keeps a key one port's across the server's homes, which this does not check.
     pub async fn make(
         &self,
         args: SandboxCreateArgs,
@@ -257,19 +262,7 @@ impl Home {
         if opened != ports || keys.len() != ports.len() {
             return Err(invalid("keys: not one for each of its ports"));
         }
-        let held = self
-            .sandboxes
-            .lock()
-            .unwrap()
-            .values()
-            .any(|held| keys.keys().any(|key| held.capabilities.contains_key(key)));
-        if held {
-            return Err(refused(
-                StatusCode::CONFLICT,
-                "exists",
-                "keys: a sandbox here opens a port by one of them",
-            ));
-        }
+        let _keying = self.keying(&keys)?;
         self.create(args, Some(&id), keys).await
     }
 
@@ -455,6 +448,28 @@ impl Home {
         Ok(Naming(self, Some(name.to_owned())))
     }
 
+    /// `keys` taken for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here, or one being made, opens a port by one of them.
+    fn keying(&self, keys: &HashMap<String, u16>) -> Result<Keying<'_>, Refused> {
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut keying = self.keying.lock().unwrap();
+        let taken = |key: &String| {
+            keying.contains(key)
+                || sandboxes
+                    .values()
+                    .any(|held| held.capabilities.contains_key(key))
+        };
+        if keys.keys().any(taken) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                "keys: a sandbox here opens a port by one of them",
+            ));
+        }
+        keying.extend(keys.keys().cloned());
+        Ok(Keying(self, keys.keys().cloned().collect()))
+    }
+
     /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
     /// ([`serve::router`](crate::serve::router)'s `own`) and its work between requests, which
     /// may find, count or park them.
@@ -613,13 +628,30 @@ impl Drop for Naming<'_> {
     }
 }
 
+/// Port keys a sandbox being made has taken, given back as this drops: once the sandbox is
+/// among [`Home`]'s, which holds them from there, or once its making failed.
+struct Keying<'a>(&'a Home, Vec<String>);
+
+impl Drop for Keying<'_> {
+    fn drop(&mut self) {
+        let mut keying = self.0.keying.lock().unwrap();
+        for key in &self.1 {
+            keying.remove(key);
+        }
+    }
+}
+
 /// The id a sandbox is made under and the port each of its keys opens, by key, chosen by a
 /// server built on this one rather than picked here ([`Home::make`]).
 pub struct Given {
     /// Letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
     pub id: String,
     /// One for each port it is made with, each letters and digits, 128 at most: its URL is
-    /// `ports/<key>`.
+    /// `ports/<key>`, which asks for no token, so whoever has the URL reaches the port. Each key
+    /// is to be as hard to guess as one `POST /sandboxes/` picks (64 hex digits), and to open
+    /// one port across every home of the server: [`Home::make`] refuses a key only where a
+    /// sandbox of its own home has it or is being made with it, and `ports/<key>` reaches the
+    /// first sandbox of any home that has it.
     pub keys: HashMap<String, u16>,
 }
 

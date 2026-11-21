@@ -67,12 +67,26 @@ impl Upper {
         Ok(u32::try_from(len.div_ceil(1 << 30)).unwrap_or(u32::MAX))
     }
 
-    /// Grow it to `gib` GiB, with what is on it kept, while no machine runs over it.
+    /// Grow it to `gib` GiB, with what is on it kept, while no machine runs over it: all in its
+    /// file first, where the embedder's disks keep part of it elsewhere
+    /// ([`Disks::whole`](crate::disks::Disks::whole)), and forgotten by them once the grown disk
+    /// is written, before it replaces this one. A failure of either leaves it as it was.
     pub(super) fn grow(&self, gib: u32) -> Result<(), Error> {
+        let len = fs::metadata(&self.path)
+            .map_err(|e| io(format!("reading {}", self.path.display()), e))?
+            .len();
+        if len >= u64::from(gib) << 30 {
+            return Ok(());
+        }
+        let disks = crate::disks::disks();
+        let whole = disks.whole(&self.path);
+        whole.map_err(|e| io(format!("making {} all its file", self.path.display()), e))?;
+        let forget = || disks.forget(&self.path);
         Ok(crate::machine::grow_upper(
             &self.path,
             &part(&self.path),
             gib,
+            forget,
         )?)
     }
 

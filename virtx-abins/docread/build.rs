@@ -111,8 +111,7 @@ fn main() {
             format!("{:x}", Sha256::digest(data)) == *sha256
         });
         let at = models.join(at);
-        fs::create_dir_all(at.parent().expect("a model in a directory"))
-            .expect("making .models");
+        fs::create_dir_all(at.parent().expect("a model in a directory")).expect("making .models");
         if fs::hard_link(&fetched, &at).is_err() && !at.exists() {
             fs::copy(&fetched, &at).expect("placing a model");
         }
@@ -186,17 +185,24 @@ fn main() {
                 .arg(define("CMAKE_AR", &llvm("llvm-ar")))
                 .arg(define("CMAKE_RANLIB", &llvm("llvm-ranlib")));
         } else {
-            assert_eq!(target, host, "ONNX Runtime is built here for musl or for the host");
+            assert_eq!(
+                target, host,
+                "ONNX Runtime is built here for musl or for the host"
+            );
         }
         run(&mut configure);
 
         // `all` leaves out the session library and re2, which only the shared library and the
         // tests depend on, and this links in place of both.
         let jobs = env::var("NUM_JOBS").unwrap_or_else(|_| "1".into());
-        run(Command::new("cmake")
-            .arg("--build")
-            .arg(&build)
-            .args(["--parallel", &jobs, "--target", "all", "onnxruntime_session", "re2"]));
+        run(Command::new("cmake").arg("--build").arg(&build).args([
+            "--parallel",
+            &jobs,
+            "--target",
+            "all",
+            "onnxruntime_session",
+            "re2",
+        ]));
         fs::write(&built, VERSION).expect("marking the build done");
     }
 
@@ -225,7 +231,8 @@ fn main() {
 /// of each package per branch and deletes the last when a rebuild lands, and within a branch
 /// they are ABI-compatible by Alpine's own rule.
 fn alpine_sysroot(sysroot: &Path, arch: &str) {
-    if sysroot.join("usr/lib/libstdc++.a").exists() && sysroot.join("usr/lib/libgcc_s.so.1").exists()
+    if sysroot.join("usr/lib/libstdc++.a").exists()
+        && sysroot.join("usr/lib/libgcc_s.so.1").exists()
     {
         return;
     }
@@ -243,7 +250,11 @@ fn alpine_sysroot(sysroot: &Path, arch: &str) {
             })
             .max()
             .unwrap_or_else(|| panic!("no {package} in {repo}"));
-        let apk = fetch(sysroot.parent().expect("OUT_DIR"), &format!("{repo}/{file}"), |_| true);
+        let apk = fetch(
+            sysroot.parent().expect("OUT_DIR"),
+            &format!("{repo}/{file}"),
+            |_| true,
+        );
         // An apk is a gzipped tar with a signature segment in front, which tar reads past with a
         // warning and a failure status: what it unpacked is checked below instead.
         Command::new("tar")
@@ -256,7 +267,8 @@ fn alpine_sysroot(sysroot: &Path, arch: &str) {
             .expect("running tar");
     }
     assert!(
-        sysroot.join("usr/include/stdio.h").exists() && sysroot.join("usr/lib/libstdc++.a").exists(),
+        sysroot.join("usr/include/stdio.h").exists()
+            && sysroot.join("usr/lib/libstdc++.a").exists(),
         "unpacked Alpine's packages, and no libc or libstdc++ in {}",
         sysroot.display()
     );
@@ -319,7 +331,9 @@ fn protoc(dir: &Path, source: &Path, host: &str) -> PathBuf {
     let zip = fetch(dir, url, |data| format!("{:x}", Sha1::digest(data)) == sha1);
     let mut archive = zip::ZipArchive::new(fs::File::open(&zip).expect("opening protoc's zip"))
         .expect("protoc's zip");
-    let mut binary = archive.by_name("bin/protoc").expect("bin/protoc in its zip");
+    let mut binary = archive
+        .by_name("bin/protoc")
+        .expect("bin/protoc in its zip");
     let protoc = dir.join("protoc");
     let mut file = fs::File::create(&protoc).expect("writing protoc");
     std::io::copy(&mut binary, &mut file).expect("unpacking protoc");

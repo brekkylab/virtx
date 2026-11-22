@@ -90,9 +90,7 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
     let (lines, code) = run(&sandbox, &["docread", "/root/docs/a.md"]);
     assert_eq!(code, 0, "{lines:?}");
     assert!(
-        lines
-            .iter()
-            .any(|line| line.ends_with("\tthe borrow checker")),
+        lines.iter().any(|line| line == "the borrow checker"),
         "{lines:?}"
     );
 

@@ -86,7 +86,9 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
             continue;
         }
         // `path+file:///…/virtx-abins/docread#virtx-exec-docread@0.1.0`
-        let package = message["package_id"].as_str().and_then(|id| id.rsplit_once('#'));
+        let package = message["package_id"]
+            .as_str()
+            .and_then(|id| id.rsplit_once('#'));
         let package = package.and_then(|(_, name)| name.split('@').next());
         if let (Some(package), Some(dir)) = (package, message["out_dir"].as_str()) {
             out_dirs.insert(package.to_owned(), Path::new(dir).join("install"));

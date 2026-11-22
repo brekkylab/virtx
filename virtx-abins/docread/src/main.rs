@@ -21,7 +21,7 @@
 
 use std::{
     fs,
-    io::{ErrorKind, Write as _},
+    io::Write as _,
     path::{Path, PathBuf},
     process::ExitCode,
     time::Duration,
@@ -252,7 +252,10 @@ fn convert(cli: &Cli, path: &Path) -> Result<DoclingDocument, String> {
     // document this cannot read, not a crash. The default hook would print the panic first.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let converted = std::panic::catch_unwind(move || converter.convert(source));
+    // Unwind-safe as used: neither is touched again once it has panicked.
+    let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        converter.convert(source)
+    }));
     std::panic::set_hook(hook);
     match converted {
         Ok(converted) => converted.map(|c| c.document).map_err(|e| e.to_string()),
@@ -302,8 +305,7 @@ fn run(cli: &Cli) -> Result<(String, Vec<String>), String> {
         (None, Some(file)) => Destination::File(file),
         (None, None) => Destination::Stdout,
     };
-    if !matches!(destination, Destination::Dir(_)) && (documents.len() != 1 || cli.to.len() != 1)
-    {
+    if !matches!(destination, Destination::Dir(_)) && (documents.len() != 1 || cli.to.len() != 1) {
         return Err(format!(
             "{NAME}: {} documents in {} formats need --output DIR\n",
             documents.len(),
@@ -345,7 +347,9 @@ fn run(cli: &Cli) -> Result<(String, Vec<String>), String> {
                     continue;
                 }
                 Destination::File(file) => (file.to_path_buf(), file.parent()),
-                Destination::Dir(dir) => (dir.join(format!("{stem}.{}", to.extension())), Some(dir)),
+                Destination::Dir(dir) => {
+                    (dir.join(format!("{stem}.{}", to.extension())), Some(dir))
+                }
             };
             let base = base.unwrap_or(Path::new(""));
             let written = assets
@@ -422,9 +426,22 @@ mod tests {
         let out = dir.path().join("out");
         let out = out.to_str().expect("UTF-8");
 
-        let line = [path.as_str(), "--to", "json", "--to", "doclang", "--to", "text", "--output", out];
+        let line = [
+            path.as_str(),
+            "--to",
+            "json",
+            "--to",
+            "doclang",
+            "--to",
+            "text",
+            "--output",
+            out,
+        ];
         let (stdout, failed) = run(&parse(&line).unwrap()).expect("converted");
-        assert!(stdout.is_empty() && failed.is_empty(), "{stdout} {failed:?}");
+        assert!(
+            stdout.is_empty() && failed.is_empty(),
+            "{stdout} {failed:?}"
+        );
         let json = fs::read_to_string(dir.path().join("out/a.json")).expect("a.json");
         assert!(json.contains("A heading"), "{json}");
         let doclang = fs::read_to_string(dir.path().join("out/a.dclg")).expect("a.dclg");
@@ -453,7 +470,10 @@ mod tests {
         markdown(&dir, "notes.txt", "not a document\n");
 
         let all = documents(&[dir.path().to_path_buf()], &[]).expect("listed");
-        let names: Vec<_> = all.iter().map(|p| p.file_name().unwrap().to_owned()).collect();
+        let names: Vec<_> = all
+            .iter()
+            .map(|p| p.file_name().unwrap().to_owned())
+            .collect();
         assert_eq!(names, ["a.md", "b.html"]);
 
         let md = documents(&[dir.path().to_path_buf()], &[InputFormat::Md]).expect("listed");
@@ -469,7 +489,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join("a.docx");
         Docx::new()
-            .add_paragraph(Paragraph::new().add_insert(Insert::new(Run::new().add_text("Inserted"))))
+            .add_paragraph(
+                Paragraph::new().add_insert(Insert::new(Run::new().add_text("Inserted"))),
+            )
             .add_paragraph(
                 Paragraph::new()
                     .add_delete(Delete::new().add_run(Run::new().add_delete_text("Deleted"))),
@@ -480,10 +502,16 @@ mod tests {
         let path = path.to_str().expect("UTF-8");
 
         let (accepted, _) = run(&parse(&[path]).unwrap()).expect("converted");
-        assert!(accepted.contains("Inserted") && !accepted.contains("Deleted"), "{accepted}");
+        assert!(
+            accepted.contains("Inserted") && !accepted.contains("Deleted"),
+            "{accepted}"
+        );
         let (rejected, _) =
             run(&parse(&[path, "--track-changes", "reject"]).unwrap()).expect("converted");
-        assert!(!rejected.contains("Inserted") && rejected.contains("Deleted"), "{rejected}");
+        assert!(
+            !rejected.contains("Inserted") && rejected.contains("Deleted"),
+            "{rejected}"
+        );
     }
 
     /// A document that fails is said, named as it was given, and the others are still
@@ -499,10 +527,13 @@ mod tests {
         let out = dir.path().join("out");
         let out = out.to_str().expect("UTF-8");
 
-        let (_, failed) = run(&parse(&[broken, &good, &text, "--output", out]).unwrap())
-            .expect("ran");
+        let (_, failed) =
+            run(&parse(&[broken, &good, &text, "--output", out]).unwrap()).expect("ran");
         assert_eq!(failed.len(), 2, "{failed:?}");
-        assert!(failed[0].starts_with(&format!("{NAME}: {broken}: ")), "{failed:?}");
+        assert!(
+            failed[0].starts_with(&format!("{NAME}: {broken}: ")),
+            "{failed:?}"
+        );
         assert!(failed[1].contains("plain text"), "{failed:?}");
         assert!(dir.path().join("out/b.md").exists());
 
@@ -524,7 +555,10 @@ mod tests {
             let e = parse(&line).expect_err("refused");
             assert_eq!(e.kind(), ClapErrorKind::ValueValidation, "{line:?}");
         }
-        assert_eq!(parse(&["a.pdf", "--page-range", "3"]).unwrap().page_range, Some((3, 3)));
+        assert_eq!(
+            parse(&["a.pdf", "--page-range", "3"]).unwrap().page_range,
+            Some((3, 3))
+        );
     }
 
     /// Help is an answer, and bare `docread` is answered with it.

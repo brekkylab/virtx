@@ -1322,8 +1322,10 @@ impl Abin {
             }
             let installed = Path::new(INSTALL).join(program);
             let mut found = Vec::new();
-            installs(programs, &installed, &mut found)
-                .map_err(io(format!("reading {}", programs.join(&installed).display())))?;
+            installs(programs, &installed, &mut found).map_err(io(format!(
+                "reading {}",
+                programs.join(&installed).display()
+            )))?;
             for file in found {
                 let to = file.strip_prefix(&installed).unwrap_or(&file).to_path_buf();
                 files.push((file, to));

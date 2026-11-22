@@ -209,16 +209,14 @@ let client = Client::connect(
 ## 功能特色
 
 - **讓不受信任的程式碼遠離你的電腦：** 每個沙箱都是擁有獨立核心的 microVM，由 Hypervisor 隔離，而不只是靠命名空間，必要時還能完全切斷網路。
+- **為打造 AI 代理而最佳化：** RAG、瀏覽器操控、GUI 自動化等 AI 代理任務，在沙箱裡開箱即用。詳見 [RAG](https://virtx.sh/docs/guides/implementing-rag/)、[瀏覽器操控](https://virtx.sh/docs/guides/browser/)和 [GUI 程式](https://virtx.sh/docs/guides/gui-programs/) 指南。
+- **帶入外部脈絡：** 把 Notion、Google Drive、OneDrive 當成一般檔案掛載進沙箱。
+- **GPU 也能帶進去：** 在 Linux、macOS、Windows 上將主機 GPU 半虛擬化，沙箱裡就能跑深度學習模型和圖形工作。
 - **在哪裡工作都能用：** 任何用戶端都能搭配任何主機上的任何伺服器，從本機伺服器換到遠端伺服器或雲端，只要改一行程式碼。
   - **用戶端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **伺服器：** 💻 本機 (stdio) · 🖥️ 遠端 (tcp) · ☁️ 雲端
   - **主機：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **幾乎不用設定：** 裝好套件就能直接執行，不需要 Docker，也不用另外架設常駐程式。
-- **沿用你已經在用的映像檔：** 可以從 Docker Hub 或任何 OCI 映像檔倉庫拉取，也能用配方或 Dockerfile 建置，之後還能推送回去或複製到另一台伺服器。
-- **不開 shell 也能傳檔案：** 直接在程式碼裡讀取、寫入、複製和刪除沙箱中的檔案。
-- **連得到沙箱裡執行的服務：** 沙箱中的網頁伺服器、SSH、VNC 桌面或資料庫，都能透過你電腦上的位址連線。
-- **從上次停下的地方接著做：** 把沙箱寫下的內容存進磁碟區留給下一個沙箱、讓多個沙箱共用一個磁碟區，還能把 Notion、Google Drive、OneDrive 當成一般檔案掛載進來。
-- **GPU 也能帶進去：** 在沙箱裡使用主機的 GPU 執行深度學習和其他 Vulkan 工作。
 
 ## 系統需求
 

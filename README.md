@@ -208,16 +208,14 @@ let client = Client::connect(
 ## Features
 
 - **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
+- **Optimized for building AI agents:** a sandbox is ready for AI agent work, such as RAG, browser use and GUI automation. See the guides for [RAG](https://virtx.sh/docs/guides/implementing-rag/), [browser use](https://virtx.sh/docs/guides/browser/) and [GUI programs](https://virtx.sh/docs/guides/gui-programs/).
+- **Bring in outside context:** mount Notion, Google Drive or OneDrive in a sandbox as plain files.
+- **Bring the GPU along:** the host's GPU is paravirtualized on Linux, macOS and Windows, so a sandbox runs deep learning models and graphics work on it.
 - **Run it wherever you work:** any client works with any server on any host, and moving from a local server to a remote one or the cloud changes one line.
   - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **Servers:** 💻 local (stdio) · 🖥️ remote (tcp) · ☁️ cloud
   - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
-- **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
-- **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
-- **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
-- **Pick up where you left off:** keep what a sandbox wrote in a volume for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
-- **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
 
 ## Requirements
 

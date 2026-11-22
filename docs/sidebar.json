@@ -24,9 +24,10 @@
   {
     "label": "Guides",
     "items": [
+      { "slug": "guides/implementing-rag" },
+      { "slug": "guides/notion" },
       { "slug": "guides/gui-programs" },
       { "slug": "guides/browser" },
-      { "slug": "guides/implementing-rag" },
       { "slug": "guides/using-virtx-in-coding-agents" }
     ]
   },

@@ -340,6 +340,16 @@ function rekey(value, key) {
   }
   return rekeyed
 }
+// The members naming each kind of entry a log of this version has. An entry of a kind a later
+// version adds is passed over, its `id` still counting where a log is read from.
+const SANDBOX_ENTRIES = ['stdout', 'stderr', 'truncated', 'end']
+const IMAGE_ENTRIES = ['log', 'truncated', 'end']
+const knownEntry = (entry, kinds) => kinds.some((kind) => kind in entry)
+
+async function* knownEntries(entries, kinds) {
+  for await (const entry of entries) if (knownEntry(entry, kinds)) yield entry
+}
+
 const snake = (name) => name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)
 const camel = (name) => name.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
 
@@ -934,7 +944,10 @@ class ImageJob {
   // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
   // entry, or throwing the error it failed with in that entry's place.
   log(after) {
-    return this.client._items('virtx_client_image_job_log', { id: this.id, after })
+    return knownEntries(
+      this.client._items('virtx_client_image_job_log', { id: this.id, after }),
+      IMAGE_ENTRIES,
+    )
   }
 
   // Follows it to its end, each line of its log printed if `print`: the digest it ended with.
@@ -1052,7 +1065,7 @@ class Sandbox extends Files {
             if (item.job) {
               answered = true
               settle.resolve(handle(item.job))
-            } else {
+            } else if (knownEntry(item, SANDBOX_ENTRIES)) {
               yield item
             }
           }
@@ -1127,11 +1140,14 @@ class SandboxJob {
   // Its log entries, from its start or after the entry numbered `after`, ending after its `end`
   // entry.
   log(after) {
-    return this.client._items('virtx_client_sandbox_job_log', {
-      sandbox: this.sandboxId,
-      job: this.id,
-      after,
-    })
+    return knownEntries(
+      this.client._items('virtx_client_sandbox_job_log', {
+        sandbox: this.sandboxId,
+        job: this.id,
+        after,
+      }),
+      SANDBOX_ENTRIES,
+    )
   }
 
   // Follows it to its end, what its process writes to stdout and stderr printed there if

@@ -11,7 +11,7 @@ use http::HeaderMap;
 use tokio::process::Command;
 
 use crate::{
-    Auth, Error,
+    Auth, Error, LogEntry,
     image::{
         self, Event, ImageBuildArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
@@ -25,7 +25,7 @@ use crate::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
         SandboxJobEntry, SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
     },
-    transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
+    transport::{DirEntry, FileRoot, Metadata, TransportClient, webdav},
     volume::{
         self, MountSource, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
         VolumeMountListOutputItem,

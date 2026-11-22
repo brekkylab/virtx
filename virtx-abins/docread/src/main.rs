@@ -15,9 +15,9 @@
 //! page, and TableFormer a table's cells. The models are files in `.models/` beside the program.
 //! `--pipeline native` reads the text layer alone. There is no OCR, so a scanned PDF has no text.
 //!
-//! Plain text and source code are refused, being text already; so are images, audio and video,
-//! which hold no text without OCR or speech recognition, and this build has neither. Tracked
-//! changes are accepted unless `--track-changes` says otherwise.
+//! Source code is refused, being text already (a `.txt` docling reads as Markdown); so are
+//! images, audio and video, which hold no text without OCR or speech recognition, and this build
+//! has neither. Tracked changes are accepted unless `--track-changes` says otherwise.
 
 use std::{
     fs,
@@ -223,7 +223,7 @@ fn convert(cli: &Cli, path: &Path) -> Result<DoclingDocument, String> {
 
     let source = SourceDocument::from_file(path).map_err(|e| e.to_string())?;
     match source.format {
-        InputFormat::Text => return Err("is plain text, not a document: read it with cat".into()),
+        InputFormat::Text => return Err("is source code, not a document: read it with cat".into()),
         format if !readable(format) => {
             return Err(format!(
                 "is {}, which holds no text this build can read",
@@ -461,13 +461,13 @@ mod tests {
     }
 
     /// A directory's documents are the files docling knows by their extension that `--from`
-    /// accepts; plain text in it is not one.
+    /// accepts; source code in it is not one.
     #[test]
     fn a_directory_is_its_documents() {
         let dir = tempfile::tempdir().expect("a temporary directory");
         markdown(&dir, "a.md", "# A\n");
         markdown(&dir, "b.html", "<h1>B</h1>\n");
-        markdown(&dir, "notes.txt", "not a document\n");
+        markdown(&dir, "main.rs", "fn main() {}\n");
 
         let all = documents(&[dir.path().to_path_buf()], &[]).expect("listed");
         let names: Vec<_> = all
@@ -523,7 +523,7 @@ mod tests {
         fs::write(&broken, b"%PDF-1.4\ngarbage").expect("a file");
         let broken = broken.to_str().expect("UTF-8");
         let good = markdown(&dir, "b.md", "# B\n");
-        let text = markdown(&dir, "c.txt", "plain\n");
+        let text = markdown(&dir, "c.rs", "fn main() {}\n");
         let out = dir.path().join("out");
         let out = out.to_str().expect("UTF-8");
 
@@ -534,7 +534,7 @@ mod tests {
             failed[0].starts_with(&format!("{NAME}: {broken}: ")),
             "{failed:?}"
         );
-        assert!(failed[1].contains("plain text"), "{failed:?}");
+        assert!(failed[1].contains("source code"), "{failed:?}");
         assert!(dir.path().join("out/b.md").exists());
 
         let (_, failed) =

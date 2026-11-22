@@ -43,8 +43,7 @@ const MAX_FILE_BYTES: u64 = 128 << 20;
 /// What `docread` accepts.
 #[derive(Debug, clap::Parser)]
 #[command(
-    about = "Parse documents precisely: their headings, paragraphs, lists, tables and pictures, \
-             in reading order",
+    about = "Parse documents into text that keeps their headings, lists and tables",
     after_help = "Reads PDF, Word, PowerPoint, Excel, OpenDocument, RTF, HTML, Markdown, \
                   AsciiDoc, LaTeX, CSV, EPUB, email, HWP and more. Writes Markdown, JSON, HTML, \
                   text and DocLang.\n\n\

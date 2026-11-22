@@ -1,9 +1,9 @@
 ---
 name: docread
-description: "Parse documents precisely: their headings, paragraphs, lists, tables and pictures, in reading order"
+description: "Parse documents into text that keeps their headings, lists and tables"
 ---
 
-Parse documents precisely: their headings, paragraphs, lists, tables and pictures, in reading order
+Parse documents into text that keeps their headings, lists and tables
 
 Usage: docread [OPTIONS] <SOURCE>...
 

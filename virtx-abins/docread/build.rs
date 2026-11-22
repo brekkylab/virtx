@@ -102,10 +102,29 @@ fn main() {
     let musl = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|e| e == "musl");
 
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo names OUT_DIR"));
+    let source = out.join(format!("onnxruntime-{VERSION}"));
+    let sysroot = out.join("sysroot");
+    let build = out.join("build");
+    let install = out.join("install");
+
+    // `OUT_DIR` outlives a change to this file, so what was built is marked with the file it was
+    // built by, and anything else is built again from the start.
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("cargo names it"));
+    let script = fs::read(manifest.join("build.rs")).expect("reading build.rs");
+    let stamp = format!("{target}\n{:x}\n", Sha256::digest(script));
+    let built = out.join(".built");
+    let fresh = fs::read_to_string(&built).is_ok_and(|was| was == stamp);
+    if !fresh {
+        for dir in [&build, &sysroot, &install] {
+            if dir.exists() {
+                fs::remove_dir_all(dir).expect("removing what an older build.rs made");
+            }
+        }
+    }
 
     // What `docread` installs beside itself: the models, where docling looks for them, in a
     // `.models/` beside the program.
-    let models = out.join("install/.models");
+    let models = install.join(".models");
     for (name, at, sha256) in MODEL_FILES {
         let fetched = fetch(&out, &format!("{MODELS}/{name}"), |data| {
             format!("{:x}", Sha256::digest(data)) == *sha256
@@ -117,12 +136,7 @@ fn main() {
         }
     }
 
-    let source = out.join(format!("onnxruntime-{VERSION}"));
-    let sysroot = out.join("sysroot");
-    let build = out.join("build");
-    let built = build.join(".built");
-
-    if !built.exists() {
+    if !fresh {
         if !source.join("cmake/deps.txt").exists() {
             let tarball = fetch(&out, SOURCE, |data| {
                 format!("{:x}", Sha512::digest(data)) == SOURCE_SHA512
@@ -153,7 +167,10 @@ fn main() {
                 "-Donnxruntime_BUILD_BENCHMARKS=OFF",
                 "-DFETCHCONTENT_QUIET=ON",
             ])
-            .arg(define("ONNX_CUSTOM_PROTOC_EXECUTABLE", &protoc));
+            .arg(format!(
+                "-DONNX_CUSTOM_PROTOC_EXECUTABLE={}",
+                protoc.display()
+            ));
         if musl {
             alpine_sysroot(&sysroot, &arch);
             // The host's clang, which cross-compiles already, given Alpine's triple: the C++
@@ -181,9 +198,9 @@ fn main() {
                     "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld".to_owned(),
                     "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld".to_owned(),
                 ])
-                .arg(define("CMAKE_SYSROOT", &sysroot))
-                .arg(define("CMAKE_AR", &llvm("llvm-ar")))
-                .arg(define("CMAKE_RANLIB", &llvm("llvm-ranlib")));
+                .arg(format!("-DCMAKE_SYSROOT={}", sysroot.display()))
+                .arg(format!("-DCMAKE_AR={}", llvm("llvm-ar").display()))
+                .arg(format!("-DCMAKE_RANLIB={}", llvm("llvm-ranlib").display()));
         } else {
             assert_eq!(
                 target, host,
@@ -203,7 +220,7 @@ fn main() {
             "onnxruntime_session",
             "re2",
         ]));
-        fs::write(&built, VERSION).expect("marking the build done");
+        fs::write(&built, stamp).expect("marking the build done");
     }
 
     // Every archive the build made. Which libraries ONNX Runtime is made of is its own to say,
@@ -213,7 +230,14 @@ fn main() {
     }
 
     if musl {
-        let gcc = only_dir(&sysroot.join(format!("usr/lib/gcc/{arch}-alpine-linux-musl")));
+        // GCC's directory, whose name is its version.
+        let gccs = sysroot.join(format!("usr/lib/gcc/{arch}-alpine-linux-musl"));
+        let gcc = fs::read_dir(&gccs)
+            .expect("reading the GCC installation")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .unwrap_or_else(|| panic!("no GCC installation in {}", gccs.display()));
         link_static(&sysroot.join("usr/lib/libstdc++.a"));
         link_static(&gcc.join("libgcc.a"));
         link_static(&gcc.join("libgcc_eh.a"));
@@ -238,7 +262,12 @@ fn alpine_sysroot(sysroot: &Path, arch: &str) {
     }
     fs::create_dir_all(sysroot).expect("making the sysroot");
     let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE}/main/{arch}");
-    let index = output(Command::new("curl").args(["-fsSL", "--retry", "3", &format!("{repo}/")]));
+    let index = Command::new("curl")
+        .args(["-fsSL", "--retry", "3", &format!("{repo}/")])
+        .output()
+        .expect("running curl");
+    assert!(index.status.success(), "fetching {repo}/ failed");
+    let index = String::from_utf8_lossy(&index.stdout);
     for package in PACKAGES {
         let prefix = format!("{package}-");
         let file = index
@@ -248,7 +277,13 @@ fn alpine_sysroot(sysroot: &Path, arch: &str) {
                     .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
                     && name.ends_with(".apk")
             })
-            .max()
+            // The newest, by the numbers in its version and release: `-r10` after `-r9`.
+            .max_by_key(|name| {
+                name[prefix.len()..]
+                    .split(|c: char| !c.is_ascii_digit())
+                    .filter_map(|n| n.parse::<u64>().ok())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_else(|| panic!("no {package} in {repo}"));
         let apk = fetch(
             sysroot.parent().expect("OUT_DIR"),
@@ -287,21 +322,19 @@ fn llvm(name: &str) -> PathBuf {
     .unwrap_or_else(|| panic!("no {name}: brew install llvm, or put one on PATH"))
 }
 
-/// `-D<name>=<path>`.
-fn define(name: &str, path: &Path) -> String {
-    format!("-D{name}={}", path.display())
-}
-
 /// `url`, fetched into `dir` unless it is there already, and the path it is at; `good` says
-/// whether the bytes are the ones pinned.
+/// whether the bytes are the ones pinned. Fetched under another name and renamed whole, so a
+/// fetch cut off is never taken for the file.
 fn fetch(dir: &Path, url: &str, good: impl Fn(&[u8]) -> bool) -> PathBuf {
     let name = url.rsplit('/').next().expect("a URL with a file name");
     let path = dir.join(name.replace("%2B", "+"));
     if !fs::read(&path).is_ok_and(|data| good(&data)) {
+        let part = path.with_extension("part");
         run(Command::new("curl")
             .args(["-fsSL", "--retry", "3", "-o"])
-            .arg(&path)
+            .arg(&part)
             .arg(url));
+        fs::rename(&part, &path).expect("placing what curl fetched");
         let data = fs::read(&path).expect("reading what curl fetched");
         assert!(good(&data), "{url} is not what is pinned for it");
     }
@@ -369,25 +402,6 @@ fn link_static(path: &Path) {
     let dir = path.parent().expect("an archive in a directory");
     println!("cargo:rustc-link-search=native={}", dir.display());
     println!("cargo:rustc-link-lib=static={name}");
-}
-
-/// The one directory in `dir`: GCC's, whose name is its version.
-fn only_dir(dir: &Path) -> PathBuf {
-    fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.is_dir())
-        .unwrap_or_else(|| panic!("no GCC installation in {}", dir.display()))
-}
-
-/// What `command` prints, run to success.
-fn output(command: &mut Command) -> String {
-    let output = command
-        .output()
-        .unwrap_or_else(|e| panic!("running {command:?}: {e}"));
-    assert!(output.status.success(), "{command:?} failed");
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// `command`, run to success.

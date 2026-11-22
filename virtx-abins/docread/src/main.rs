@@ -20,6 +20,7 @@
 //! has neither. Tracked changes are accepted unless `--track-changes` says otherwise.
 
 use std::{
+    collections::HashMap,
     fs,
     io::Write as _,
     path::{Path, PathBuf},
@@ -60,7 +61,9 @@ struct Cli {
 
     /// Input formats to accept, by docling's names (pdf, docx, pptx, xlsx, html, md, ...);
     /// defaults to all
-    #[arg(long = "from", value_name = "FORMAT", value_parser = input_format)]
+    #[arg(long = "from", value_name = "FORMAT", value_parser = |text: &str| {
+        InputFormat::from_id(text).ok_or_else(|| format!("docling has no input format `{text}`"))
+    })]
     from: Vec<InputFormat>,
 
     /// Output formats
@@ -96,7 +99,7 @@ struct Cli {
     pdf_password: Option<String>,
 
     /// Tracked changes in Word and OpenDocument files: accept, reject or all
-    #[arg(long, value_name = "MODE", default_value = "accept", value_parser = track_changes)]
+    #[arg(long, value_name = "MODE", default_value = "accept", value_parser = |text: &str| text.parse::<TrackChanges>())]
     track_changes: TrackChanges,
 
     /// Number headings by the levels their numbering and font sizes imply, in a PDF
@@ -104,8 +107,8 @@ struct Cli {
     heading_hierarchy: bool,
 
     /// Give up on a document after this many seconds
-    #[arg(long, value_name = "SECONDS")]
-    document_timeout: Option<f64>,
+    #[arg(long, value_name = "SECONDS", value_parser = seconds)]
+    document_timeout: Option<Duration>,
 
     /// Stop at the first document that fails, rather than going on to the next
     #[arg(long)]
@@ -148,12 +151,12 @@ enum ImageExportMode {
     Referenced,
 }
 
-fn input_format(text: &str) -> Result<InputFormat, String> {
-    InputFormat::from_id(text).ok_or_else(|| format!("docling has no input format `{text}`"))
-}
-
-fn track_changes(text: &str) -> Result<TrackChanges, String> {
-    text.parse()
+fn seconds(text: &str) -> Result<Duration, String> {
+    let seconds = text.trim().parse::<f64>().map_err(|e| e.to_string())?;
+    Duration::try_from_secs_f64(seconds)
+        .ok()
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| format!("{text} is not a number of seconds above 0"))
 }
 
 fn page_range(text: &str) -> Result<(usize, usize), String> {
@@ -207,9 +210,6 @@ fn readable(format: InputFormat) -> bool {
 /// `path`, converted, or what to say about why it was not.
 fn convert(cli: &Cli, path: &Path) -> Result<DoclingDocument, String> {
     let about = fs::metadata(path).map_err(|e| e.to_string())?;
-    if about.is_dir() {
-        return Err("is a directory with no documents in it".into());
-    }
     if !about.is_file() {
         return Err("is not a regular file".into());
     }
@@ -242,7 +242,7 @@ fn convert(cli: &Cli, path: &Path) -> Result<DoclingDocument, String> {
         .no_table_former(cli.no_tables)
         .heading_hierarchy(cli.heading_hierarchy)
         .password(cli.pdf_password.clone())
-        .document_timeout(cli.document_timeout.map(Duration::from_secs_f64));
+        .document_timeout(cli.document_timeout);
     if let Some((first, last)) = cli.page_range {
         converter = converter.page_range(first, last);
     }
@@ -299,6 +299,9 @@ enum Destination<'a> {
 /// that cannot be carried out at all is the error.
 fn run(cli: &Cli) -> Result<(String, Vec<String>), String> {
     let documents = documents(&cli.sources, &cli.from).map_err(|e| format!("{NAME}: {e}\n"))?;
+    if documents.is_empty() {
+        return Err(format!("{NAME}: no documents in what was given\n"));
+    }
     let destination = match (&cli.output, &cli.output_file) {
         (Some(dir), _) => Destination::Dir(dir),
         (None, Some(file)) => Destination::File(file),
@@ -318,10 +321,24 @@ fn run(cli: &Cli) -> Result<(String, Vec<String>), String> {
             "{NAME}: --image-export-mode referenced writes files, and needs --output\n"
         ));
     }
+    // A directory's outputs are named by the document's name alone, so two of one name would
+    // be written over each other.
+    if matches!(destination, Destination::Dir(_)) {
+        let mut named = HashMap::new();
+        for path in &documents {
+            if let Some(other) = named.insert(path.file_stem(), path) {
+                return Err(format!(
+                    "{NAME}: {} and {} would be written as one: convert them one at a time\n",
+                    other.display(),
+                    path.display()
+                ));
+            }
+        }
+    }
 
     let mut stdout = String::new();
     let mut failed = Vec::new();
-    for path in &documents {
+    'documents: for path in &documents {
         let said = |e: &dyn std::fmt::Display| format!("{NAME}: {}: {e}\n", path.display());
         let document = match convert(cli, path) {
             Ok(document) => document,
@@ -356,7 +373,10 @@ fn run(cli: &Cli) -> Result<(String, Vec<String>), String> {
                 .try_for_each(|(asset, bytes)| write(&base.join(asset), bytes))
                 .and_then(|()| write(&file, text.as_bytes()));
             if let Err(e) = written {
-                return Err(format!("{NAME}: {}: {e}\n", file.display()));
+                failed.push(format!("{NAME}: {}: {e}\n", file.display()));
+                if cli.abort_on_error {
+                    break 'documents;
+                }
             }
         }
     }
@@ -382,10 +402,20 @@ fn main() -> ExitCode {
     for said in &failed {
         std::io::stderr().write_all(said.as_bytes()).ok();
     }
-    match std::io::stdout().write_all(stdout.as_bytes()) {
+    let written = match std::io::stdout().write_all(stdout.as_bytes()) {
         // A reader that stopped reading — `| head` — is not this program failing.
-        Ok(()) | Err(_) if failed.is_empty() => ExitCode::SUCCESS,
-        _ => ExitCode::FAILURE,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => true,
+        Err(e) => {
+            let said = format!("{NAME}: writing the answer: {e}\n");
+            std::io::stderr().write_all(said.as_bytes()).ok();
+            false
+        }
+        Ok(()) => true,
+    };
+    if written && failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -457,6 +487,57 @@ mod tests {
 
         let said = run(&parse(&[&a, &b]).unwrap()).expect_err("two documents, no --output");
         assert!(said.contains("--output"), "{said}");
+    }
+
+    /// Two documents of one name would be one output in a directory, and are refused before
+    /// either is written.
+    #[test]
+    fn documents_of_one_name_are_not_written_over_each_other() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let md = markdown(&dir, "report.md", "# From Markdown\n");
+        let html = markdown(&dir, "report.html", "<h1>From HTML</h1>\n");
+        let out = dir.path().join("out");
+
+        let line = [
+            md.as_str(),
+            html.as_str(),
+            "--output",
+            out.to_str().unwrap(),
+        ];
+        let said = run(&parse(&line).unwrap()).expect_err("one name, two documents");
+        assert!(said.contains("would be written as one"), "{said}");
+        assert!(!out.exists());
+    }
+
+    /// Sources with no document in them are said to be, not answered with nothing.
+    #[test]
+    fn sources_with_no_documents_are_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        markdown(&dir, "main.rs", "fn main() {}\n");
+        let path = dir.path().to_str().unwrap();
+        let out = dir.path().join("out");
+
+        for line in [vec![path], vec![path, "--output", out.to_str().unwrap()]] {
+            let said = run(&parse(&line).unwrap()).expect_err("no documents");
+            assert!(said.contains("no documents"), "{said}");
+        }
+    }
+
+    /// An output that cannot be written is a failure of its document, said with the others,
+    /// and the documents after it are still converted.
+    #[test]
+    fn an_output_that_cannot_be_written_is_said_and_the_rest_go_on() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let a = markdown(&dir, "a.md", "# A\n");
+        let b = markdown(&dir, "b.md", "# B\n");
+        let out = dir.path().join("out");
+        fs::create_dir_all(out.join("a.md")).expect("a directory where a.md goes");
+
+        let line = [a.as_str(), b.as_str(), "--output", out.to_str().unwrap()];
+        let (_, failed) = run(&parse(&line).unwrap()).expect("ran");
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("a.md"), "{failed:?}");
+        assert!(out.join("b.md").is_file());
     }
 
     /// A directory's documents are the files docling knows by their extension that `--from`
@@ -546,10 +627,14 @@ mod tests {
     #[test]
     fn options_are_checked_as_they_are_parsed() {
         for line in [
-            ["a.pdf", "--page-range", "0-3"],
-            ["a.pdf", "--page-range", "5-2"],
-            ["a.pdf", "--from", "nonsense"],
-            ["a.pdf", "--track-changes", "maybe"],
+            ["a.pdf", "--page-range=0-3"],
+            ["a.pdf", "--page-range=5-2"],
+            ["a.pdf", "--from=nonsense"],
+            ["a.pdf", "--track-changes=maybe"],
+            ["a.pdf", "--document-timeout=-1"],
+            ["a.pdf", "--document-timeout=0"],
+            ["a.pdf", "--document-timeout=inf"],
+            ["a.pdf", "--document-timeout=NaN"],
         ] {
             let e = parse(&line).expect_err("refused");
             assert_eq!(e.kind(), ClapErrorKind::ValueValidation, "{line:?}");

@@ -1332,6 +1332,14 @@ impl Abin {
             }
         }
         files.sort();
+        // Two of them at one path in /abin would be one linked over the other.
+        let mut at = HashSet::new();
+        if let Some((_, to)) = files.iter().find(|(_, to)| !at.insert(to)) {
+            return Err(Error::Invalid(format!(
+                "abins: more than one of them has {} in /abin",
+                to.display()
+            )));
+        }
         let mut key = Sha256::new();
         key.update(programs.as_os_str().as_encoded_bytes());
         for (file, _) in &files {
@@ -1777,6 +1785,17 @@ mod tests {
             b"model"
         );
         drop(docread);
+
+        // And two programs that install one path are not shown together.
+        let clash = programs.join(INSTALL).join("display").join(".models/tf");
+        fs::create_dir_all(&clash).unwrap();
+        fs::write(clash.join("model.onnx"), "other").unwrap();
+        let both = ["docread".to_string(), "display".to_string()];
+        assert!(matches!(
+            Abin::create(&dir, &programs, &both),
+            Err(Error::Invalid(_))
+        ));
+        fs::remove_dir_all(programs.join(INSTALL).join("display")).unwrap();
 
         let reversed = ["display".to_string(), "index".to_string()];
         let same = Abin::create(&dir, &programs, &reversed).unwrap();

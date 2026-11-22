@@ -14,9 +14,8 @@ path = "src/main.rs"
 # The command line, and where `--help` comes from.
 clap = { workspace = true }
 
-# The readers and the DocLang they are written out as. Pinned exactly: what a block is, and so
-# what `-o` counts, is docling's serializer, and a new version of it is a change to the numbers a
-# caller quoted.
+# The readers, and the formats they are written out as. Pinned exactly: what a document reads
+# as is docling's to say, and a new version is a change to what a caller gets back.
 #
 # `pdf` is the PDF pipeline with its models: the layout model finds headings, tables and
 # pictures on a page, and TableFormer a table's cells. The models are files beside the program,
@@ -28,13 +27,10 @@ docling = { version = "=2.86.14", default-features = false, features = ["pdf"] }
 # download a prebuilt one, and there is none for musl: `build.rs` builds it and links it in.
 ort-sys = { version = "=2.0.0-rc.15", default-features = false, features = ["disable-linking"] }
 
-# Cutting docling's DocLang into the top-level blocks a window counts. The version docling's own
-# reader is built with, so the build has one.
-quick-xml = "0.41"
-
 [build-dependencies]
-# Checking what `build.rs` fetches: the ONNX Runtime source by its sha512, and the `protoc` it
-# needs by the sha1 its own dependency list pins.
+# Checking what `build.rs` fetches: the ONNX Runtime source by its sha512, the `protoc` it
+# needs by the sha1 its own dependency list pins, and the models by their sha256; and `build.rs`
+# itself, by which a build kept in `OUT_DIR` is known to be this one's.
 sha1 = "0.10"
 sha2 = "0.10"
 # Unpacking that `protoc`, which comes as a zip.

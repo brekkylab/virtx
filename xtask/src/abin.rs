@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     env, fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -69,14 +69,34 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
         cargo.args(["-p", package]);
     }
     // The messages, for where each package's build script wrote: what one puts in
-    // `OUT_DIR/install` is what its program installs beside itself.
+    // `OUT_DIR/install` is what its program installs beside itself. Diagnostics and build
+    // scripts' output still reach the terminal, on stderr.
     cargo
         .arg("--message-format=json-render-diagnostics")
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
     let built = cargo
         .output()
         .with_context(|| format!("running cargo for abin for {target}"))?;
     ensure!(built.status.success(), "building abin for {target} failed");
+
+    // A message names its package by id, whose spelling is cargo's own: the workspace's
+    // metadata says which id is which package.
+    let metadata = cross_cargo(&crate_dir)
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .stderr(Stdio::inherit())
+        .output()
+        .context("running cargo metadata for abin")?;
+    ensure!(metadata.status.success(), "cargo metadata for abin failed");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&metadata.stdout).context("reading cargo metadata")?;
+    let names: HashMap<&str, &str> = metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|package| Some((package["id"].as_str()?, package["name"].as_str()?)))
+        .collect();
+
     let mut out_dirs = HashMap::new();
     for line in String::from_utf8_lossy(&built.stdout).lines() {
         let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -85,20 +105,15 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
         if message["reason"] != "build-script-executed" {
             continue;
         }
-        // `path+file:///…/virtx-abins/docread#virtx-exec-docread@0.1.0`
-        let package = message["package_id"]
-            .as_str()
-            .and_then(|id| id.rsplit_once('#'));
-        let package = package.and_then(|(_, name)| name.split('@').next());
+        let package = message["package_id"].as_str().and_then(|id| names.get(id));
         if let (Some(package), Some(dir)) = (package, message["out_dir"].as_str()) {
-            out_dirs.insert(package.to_owned(), Path::new(dir).join("install"));
+            out_dirs.insert(package.to_string(), Path::new(dir).join("install"));
         }
     }
 
     let profile = if debug { "debug" } else { "release" };
     fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let built = target_path().join(format!("{target}/{profile}"));
-    let mut installed = HashMap::new();
     for (package, program) in ABINS {
         place(&built.join(program), &out.join(program))?;
 
@@ -109,12 +124,6 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
             fs::remove_dir_all(&at).with_context(|| format!("removing {}", at.display()))?;
         }
         if let Some(from) = out_dirs.get(*package).filter(|dir| dir.is_dir()) {
-            for file in files(from)? {
-                let path = file.strip_prefix(from)?.to_path_buf();
-                if let Some(other) = installed.insert(path.clone(), *program) {
-                    bail!("{program} and {other} both install {}", path.display());
-                }
-            }
             place_dir(from, &at)?;
         }
 
@@ -130,20 +139,6 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Each file under `dir`.
-fn files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut found = Vec::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            found.extend(files(&entry.path())?);
-        } else {
-            found.push(entry.path());
-        }
-    }
-    Ok(found)
 }
 
 fn cross_cargo(crate_dir: &Path) -> Command {

@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 원격
 
-[직접 서버 운영하기](https://virtx.sh/docs/guides/self-hosting/)를 따라, 직접 관리하는 머신에 `virtx-server-tcp`를 설치하고 설정합니다.
+[직접 서버 운영하기](https://virtx.sh/docs/tutorials/self-hosting/)를 따라, 직접 관리하는 머신에 `virtx-server-tcp`를 설치하고 설정합니다.
 
 `uvx`나 `npx`로 설치 없이 실행되는 `virtx` 명령으로 한 번 로그인한 뒤, `Client.spawn()` 대신 그것이 출력하는 토큰으로 접속합니다.
 나머지는 로컬 예제와 같습니다.
@@ -254,7 +254,7 @@ virtx 서버를 실행하는 머신에 필요한 조건입니다.
 GPU를 쓰는 샌드박스에만 필요합니다.
 호스트에 Vulkan 로더가 있어야 합니다.
 게스트 쪽 Vulkan은 모든 샌드박스에 함께 들어 있어서 이미지에는 필요 없습니다.
-자세한 내용은 [GPU 사용하기](https://virtx.sh/docs/guides/using-gpus/)를 참고하세요.
+자세한 내용은 [GPU 사용하기](https://virtx.sh/docs/tutorials/using-gpus/)를 참고하세요.
 
 ## 동작 방식
 

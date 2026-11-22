@@ -7,18 +7,27 @@
     ]
   },
   {
+    "label": "Tutorials",
+    "items": [
+      { "slug": "tutorials/images" },
+      { "slug": "tutorials/setting-sandboxes" },
+      { "slug": "tutorials/running-commands" },
+      { "slug": "tutorials/reading-writing-files" },
+      { "slug": "tutorials/networks-ports" },
+      { "slug": "tutorials/mounting-volumes" },
+      { "slug": "tutorials/projects" },
+      { "slug": "tutorials/self-hosting" },
+      { "slug": "tutorials/using-gpus" },
+      { "slug": "tutorials/built-in-programs" }
+    ]
+  },
+  {
     "label": "Guides",
     "items": [
-      { "slug": "guides/images" },
-      { "slug": "guides/setting-sandboxes" },
-      { "slug": "guides/running-commands" },
-      { "slug": "guides/reading-writing-files" },
-      { "slug": "guides/networks-ports" },
-      { "slug": "guides/mounting-volumes" },
-      { "slug": "guides/projects" },
-      { "slug": "guides/self-hosting" },
-      { "slug": "guides/using-gpus" },
-      { "slug": "guides/coding-agents" }
+      { "slug": "guides/gui-programs" },
+      { "slug": "guides/browser" },
+      { "slug": "guides/implementing-rag" },
+      { "slug": "guides/using-virtx-in-coding-agents" }
     ]
   },
   {

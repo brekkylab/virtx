@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### リモート
 
-[自分でサーバーを運用する](https://virtx.sh/docs/guides/self-hosting/)に従って、自分で管理するマシンに`virtx-server-tcp`をセットアップします。
+[自分でサーバーを運用する](https://virtx.sh/docs/tutorials/self-hosting/)に従って、自分で管理するマシンに`virtx-server-tcp`をセットアップします。
 
 `uvx`または`npx`でインストールせずに実行できる`virtx`コマンドで一度サインインし、`Client.spawn()`の代わりに、それが出力するトークンで接続します。
 それ以外はローカルの例と同じです。
@@ -244,7 +244,7 @@ let client = Client::connect(
 
 #### GPU（任意）
 
-GPUを使うサンドボックスの場合だけ必要です。ホストにVulkanローダーを用意してください。ゲスト側のVulkanはすべてのサンドボックスに付いてくるので、イメージには不要です。詳しくは[GPUを使う](https://virtx.sh/docs/guides/using-gpus/)を参照してください。
+GPUを使うサンドボックスの場合だけ必要です。ホストにVulkanローダーを用意してください。ゲスト側のVulkanはすべてのサンドボックスに付いてくるので、イメージには不要です。詳しくは[GPUを使う](https://virtx.sh/docs/tutorials/using-gpus/)を参照してください。
 
 ## 仕組み
 

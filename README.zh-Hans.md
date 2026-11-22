@@ -147,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 远程
 
-按照[自行运行服务器](https://virtx.sh/docs/guides/self-hosting/)，在你自己的机器上部署 `virtx-server-tcp`。
+按照[自行运行服务器](https://virtx.sh/docs/tutorials/self-hosting/)，在你自己的机器上部署 `virtx-server-tcp`。
 
 用 `virtx` 命令登录一次（可通过 `uvx` 或 `npx` 免安装运行），然后不再调用 `Client.spawn()`，而是带上它打印的令牌去连接。
 其余部分和本地示例完全一样。
@@ -244,7 +244,7 @@ let client = Client::connect(
 
 #### GPU（可选）
 
-只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器。客户机这一侧的 Vulkan 随每个沙箱一起提供，镜像里不需要。详见[使用 GPU](https://virtx.sh/docs/guides/using-gpus/)。
+只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器。客户机这一侧的 Vulkan 随每个沙箱一起提供，镜像里不需要。详见[使用 GPU](https://virtx.sh/docs/tutorials/using-gpus/)。
 
 ## 工作原理
 

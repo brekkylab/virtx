@@ -1,0 +1,141 @@
+---
+title: "Running GUI programs"
+description: "Run a GUI program in a sandbox on a screen in memory, watch and drive it over VNC, and take screenshots of it."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+import vscode from "../../images/gui-programs-vscode.png";
+
+A sandbox has no screen of its own.
+`display` gives it one, where GUI programs run as on a desktop: a person watches and takes over from a VNC viewer, and code takes screenshots of it.
+The image needs only the GUI program.
+This guide runs [VS Code](https://code.visualstudio.com/) as its example.
+
+## Show a program on a screen
+
+Give the sandbox `display` and the VNC port, 5900.
+`display run -- <program>` shows the program on a screen and says `ready` once a viewer can connect; then connect one through a [port forwarder](/docs/tutorials/networks-ports/).
+
+This builds an image with VS Code in it, as [Working with images](/docs/tutorials/images/) shows, and opens it on `/root`:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import PortForwarder, Recipe, Stdout
+
+await client.build_image(
+    Recipe("debian:bookworm-slim").run(
+        # VS Code needs libx11-xcb1 to start, and its package does not install it
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libx11-xcb1 fonts-dejavu-core"
+        " && curl -fsSL -o /tmp/code.deb https://update.code.visualstudio.com/latest/linux-deb-$(dpkg --print-architecture | sed s/amd64/x64/)/stable"
+        " && apt-get install -y --no-install-recommends /tmp/code.deb"
+    ),
+    "vscode:latest"
+).complete()
+
+sandbox = await client.create_sandbox("vscode:latest", abins=["display"], ports=[5900])
+
+async for entry in sandbox.exec(
+    ["display", "run", "--password", "secret", "--",
+     "code", "--wait", "--no-sandbox", "--user-data-dir", "/tmp/code", "/root"]
+):
+    if isinstance(entry.entry, Stdout) and entry.entry.line == "ready":
+        break  # the screen keeps running
+
+with PortForwarder.open(client, sandbox.ports[0]) as forwarder:
+    print(f"vnc://{forwarder.address}")
+    input("Press Enter to stop watching")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const { PortForwarder, Recipe } = require('@brekkylab/virtx')
+
+await client.buildImage(
+  new Recipe('debian:bookworm-slim').run(
+    // VS Code needs libx11-xcb1 to start, and its package does not install it
+    'apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libx11-xcb1 fonts-dejavu-core' +
+      ' && curl -fsSL -o /tmp/code.deb https://update.code.visualstudio.com/latest/linux-deb-$(dpkg --print-architecture | sed s/amd64/x64/)/stable' +
+      ' && apt-get install -y --no-install-recommends /tmp/code.deb'
+  ),
+  'vscode:latest'
+).complete()
+
+const sandbox = await client.createSandbox('vscode:latest', { abins: ['display'], ports: [5900] })
+
+for await (const entry of sandbox.exec(
+  ['display', 'run', '--password', 'secret', '--',
+   'code', '--wait', '--no-sandbox', '--user-data-dir', '/tmp/code', '/root']
+)) {
+  if (entry.stdout === 'ready') break // the screen keeps running
+}
+
+const forwarder = PortForwarder.open(client, sandbox.ports[0])
+console.log(`vnc://${forwarder.address}`)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+client.build_image(
+    Recipe::new("debian:bookworm-slim").step(Step::run(concat!(
+        // VS Code needs libx11-xcb1 to start, and its package does not install it
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libx11-xcb1 fonts-dejavu-core",
+        " && curl -fsSL -o /tmp/code.deb https://update.code.visualstudio.com/latest/linux-deb-$(dpkg --print-architecture | sed s/amd64/x64/)/stable",
+        " && apt-get install -y --no-install-recommends /tmp/code.deb",
+    ))),
+    "vscode:latest"
+).complete(false).await?;
+
+let args = SandboxCreateArgs::new("vscode:latest").abin("display").port(5900);
+let sandbox = client.create_sandbox(&args).await?;
+
+let mut log = sandbox.exec(&SandboxExecArgs::new(
+    ["display", "run", "--password", "secret", "--",
+     "code", "--wait", "--no-sandbox", "--user-data-dir", "/tmp/code", "/root"]
+)).log();
+while let Some(entry) = log.next().await {
+    if matches!(entry?.entry, SandboxJobEntry::Stdout(ref line) if line == "ready") {
+        break; // the screen keeps running
+    }
+}
+
+let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0])?;
+println!("vnc://{}", forwarder.address());
+```
+
+</TabItem>
+</Tabs>
+
+VS Code runs as root here, which takes `--no-sandbox` and a `--user-data-dir`, and `--wait` keeps `display run` up while its window is.
+
+<img src={vscode.src} width={vscode.width} height={vscode.height} alt="A VNC viewer showing the sandbox's screen, with VS Code open on a folder." />
+
+In the viewer you see the program, and type and click in it as on your own desktop.
+The screen stays up as long as the program runs.
+
+<Aside type="caution">
+Without `--password`, any viewer that reaches the port is let in.
+</Aside>
+
+`display run --help` lists its options, such as the screen's size.
+
+## Let an AI agent use the screen
+
+An AI agent that works a GUI program needs to see the screen, with no person watching.
+These commands are what it looks with:
+
+```bash
+display shot /tmp/screen.png   # what the screen shows now, as a PNG
+display cursor                 # where the pointer is, and the cursor's name: 640 360 xterm
+```
+
+An agent learns them from `/abin/skills/display/SKILL.md`, and an [Ailoy](https://github.com/brekkylab/ailoy) agent is given it by itself.
+
+## What does not run
+
+Programs that draw with OpenGL do not start on this screen.

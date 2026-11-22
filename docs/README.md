@@ -5,7 +5,7 @@ folder and serves it at <https://virtx.sh/docs/> with the site's own look; this 
 the docs say, not how they look.
 
 ```
-content/      the pages, as MDX; the path is the address: guides/using-gpus.mdx is /docs/guides/using-gpus/
+content/      the pages, as MDX; the path is the address: tutorials/using-gpus.mdx is /docs/tutorials/using-gpus/
 sidebar.json  the sidebar: its groups and the order of the pages
 preview/      the preview's own code: its content config and the link check
 ```
@@ -29,7 +29,7 @@ A page is rendered twice, by the preview and by virtx.sh, so it uses only what b
   `tableOfContents`, ...).
 - Starlight's own components, imported from `@astrojs/starlight/components` (`Tabs`, `TabItem`,
   `Aside`, ...). Nothing imported from anywhere else: virtx.sh's files are not here.
-- Links to other pages as absolute paths with `/docs/`: `[Networks and ports](/docs/guides/networks-ports/)`. They
+- Links to other pages as absolute paths with `/docs/`: `[Networks and ports](/docs/tutorials/networks-ports/)`. They
   resolve the same in both, and the link check verifies them.
 - Links to virtx.sh's own pages (`/signin/`, `/signup/`) as plain paths. The preview does not
   have them; add one to `SITE_PAGES` in `preview/linkcheck.mjs` before linking to it.

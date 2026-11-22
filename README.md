@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Remote
 
-Set up `virtx-server-tcp` on a machine of yours, as [Running your own server](https://virtx.sh/docs/guides/self-hosting/) shows.
+Set up `virtx-server-tcp` on a machine of yours, as [Running your own server](https://virtx.sh/docs/tutorials/self-hosting/) shows.
 
 Sign in to it once with the `virtx` command, which `uvx` or `npx` runs without installing, and connect with the token it prints in place of `Client.spawn()`.
 The rest is the same as the local example.
@@ -250,7 +250,7 @@ Guests are always Linux.
 
 #### (Optional) GPU
 
-Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](https://virtx.sh/docs/guides/using-gpus/).
+Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](https://virtx.sh/docs/tutorials/using-gpus/).
 
 ## How it works
 

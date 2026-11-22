@@ -209,6 +209,7 @@ let client = Client::connect(
 ## 功能特色
 
 - **讓不受信任的程式碼遠離你的電腦：** 每個沙箱都是擁有獨立核心的 microVM，由 Hypervisor 隔離，而不只是靠命名空間，必要時還能完全切斷網路。
+- **毫秒級啟動：** 新建立的沙箱 35 毫秒內即可執行命令（M3 Pro Mac，1 個 vCPU，128 MB 記憶體）。
 - **為打造 AI 代理而最佳化：** RAG、瀏覽器操控、GUI 自動化等 AI 代理任務，在沙箱裡開箱即用。詳見 [RAG](https://virtx.sh/docs/guides/implementing-rag/)、[瀏覽器操控](https://virtx.sh/docs/guides/browser/)和 [GUI 程式](https://virtx.sh/docs/guides/gui-programs/) 指南。
 - **帶入外部脈絡：** 把 Notion、Google Drive、OneDrive 當成一般檔案掛載進沙箱。
 - **使用 GPU：** 在 Linux、macOS、Windows 上將主機 GPU 半虛擬化，沙箱裡就能跑深度學習模型和圖形工作。

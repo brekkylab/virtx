@@ -207,6 +207,7 @@ let client = Client::connect(
 ## 特長
 
 - **信頼できないコードを手元から切り離す:** サンドボックスはすべて独自のカーネルを持つmicroVMで、名前空間だけでなくハイパーバイザーによって隔離され、ネットワークを完全に遮断することもできます。
+- **ミリ秒単位で起動:** 新しいサンドボックスは35msでコマンドを実行できる状態になります(M3 Pro Mac、vCPU 1つ、メモリ128MBの場合)。
 - **AIエージェント開発に最適化:** RAG、ブラウザ操作、GUI自動化といったAIエージェントの作業を、サンドボックスですぐに行えます。詳しくは[RAG](https://virtx.sh/docs/guides/implementing-rag/)、[ブラウザ操作](https://virtx.sh/docs/guides/browser/)、[GUIプログラム](https://virtx.sh/docs/guides/gui-programs/)のガイドを参照してください。
 - **外部のコンテキストを取り込む:** Notion、Google Drive、OneDriveを普通のファイルとしてサンドボックスにマウントできます。
 - **GPUを使う:** Linux、macOS、WindowsでホストのGPUを準仮想化しているので、サンドボックス内でディープラーニングのモデルを動かしたり、グラフィックスの処理をしたりできます。

@@ -208,6 +208,7 @@ let client = Client::connect(
 ## Features
 
 - **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
+- **Boots in milliseconds:** a new sandbox is ready to run commands in 35 ms, with 1 vCPU and 128 MB of memory (on an M3 Pro Mac).
 - **Optimized for building AI agents:** a sandbox is ready for AI agent work, such as RAG, browser use and GUI automation. See the guides for [RAG](https://virtx.sh/docs/guides/implementing-rag/), [browser use](https://virtx.sh/docs/guides/browser/) and [GUI programs](https://virtx.sh/docs/guides/gui-programs/).
 - **Bring in outside context:** mount Notion, Google Drive or OneDrive in a sandbox as plain files.
 - **Use the GPU:** the host's GPU is paravirtualized on Linux, macOS and Windows, so a sandbox can run deep learning models and graphics workloads on it.

@@ -209,6 +209,7 @@ let client = Client::connect(
 ## 주요 기능
 
 - **신뢰할 수 없는 코드는 내 컴퓨터 밖에서:** 샌드박스는 모두 자체 커널을 가진 microVM이라 네임스페이스 수준이 아니라 하이퍼바이저 수준에서 격리되고, 네트워크도 완전히 끊을 수 있습니다.
+- **밀리초 단위 부팅:** 새 샌드박스가 35ms 만에 명령을 실행할 준비를 마칩니다(M3 Pro Mac, vCPU 1개, 메모리 128MB 기준).
 - **AI 에이전트 개발에 최적화된 샌드박스:** RAG, 브라우저 사용, GUI 자동화 같은 AI 에이전트 작업을 샌드박스에서 바로 할 수 있습니다. 자세한 내용은 [RAG](https://virtx.sh/docs/guides/implementing-rag/), [브라우저 사용](https://virtx.sh/docs/guides/browser/), [GUI 프로그램](https://virtx.sh/docs/guides/gui-programs/) 가이드를 참고하세요.
 - **외부 컨텍스트 가져오기:** Notion, Google Drive, OneDrive를 샌드박스에 평범한 파일처럼 마운트할 수 있습니다.
 - **GPU 사용:** Linux, macOS, Windows에서 호스트의 GPU를 반가상화해, 샌드박스 안에서 딥러닝 모델을 돌리거나 그래픽 작업을 할 수 있습니다.

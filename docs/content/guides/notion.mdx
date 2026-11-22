@@ -3,18 +3,21 @@ title: "Importing a Notion workspace"
 description: "Mount a Notion workspace in a sandbox, so an agent reads its pages and databases as files."
 ---
 
-import { Tabs, TabItem } from "@astrojs/starlight/components";
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
 Mount a Notion workspace in a sandbox, and its pages and databases appear as read-only files an agent browses and reads with its usual filesystem tools.
 The files are read from Notion as they are opened, not copied in, so they follow the workspace as it changes.
 
-Google Drive and OneDrive mount the same way with their own credentials; see [Mounting volumes](/docs/tutorials/mounting-volumes/#mount-a-remote-store-inside-it).
-
 ## Connect Notion
 
-1. As a workspace owner, create an internal connection and give it the **Read content** capability. [Notion authorization guide](https://developers.notion.com/guides/authorization/overview#internal-connection-auth-flow-set-up)
+1. As a workspace owner, create an internal connection and give it the **Read content** capability.
 2. On the top-level page you want to expose, open the **•••** menu, select **Add connections**, and choose your connection.
 3. Set `NOTION_API_KEY` in the environment of the program running the virtx client, using the API token from the connection's **Configuration** tab.
+
+<Aside type="caution">
+These steps follow Notion's settings as this guide was written, and Notion may rename or move them.
+If a menu or tab differs, follow the [Notion authorization guide](https://developers.notion.com/guides/authorization/overview#internal-connection-auth-flow-set-up).
+</Aside>
 
 ## Mount and list pages
 

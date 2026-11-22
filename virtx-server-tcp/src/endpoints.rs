@@ -1438,7 +1438,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             port: spec.port,
             url: Some(format!("ports/{capability}")),
             label: spec.label.clone(),
-            protocol: spec.protocol,
+            protocol: spec.protocol.clone(),
             address: None,
             inbound_error: None,
         });

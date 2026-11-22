@@ -7,8 +7,8 @@ use super::{
     ImagePushArgs,
 };
 use crate::{
-    Error,
-    transport::{LogEntry, TransportClient, http, segment, sse},
+    Error, LogEntry,
+    transport::{TransportClient, http, segment, sse},
 };
 
 /// The path of the image job `id`.

@@ -510,7 +510,7 @@ impl Sandbox {
                     port: spec.port,
                     url: None,
                     label: spec.label.clone(),
-                    protocol: spec.protocol,
+                    protocol: spec.protocol.clone(),
                     address: None,
                     inbound_error: None,
                 })
@@ -918,7 +918,7 @@ impl Sandbox {
             true => SandboxJobEndReason::Restarted,
             false => SandboxJobEndReason::SandboxDeleted,
         };
-        *self.ended_for.lock().unwrap() = Some(reason);
+        *self.ended_for.lock().unwrap() = Some(reason.clone());
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
         // A park or a boot under way finishes first, so its machine is down by the time this
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
@@ -939,7 +939,7 @@ impl Sandbox {
         }
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
-            job.cut(reason);
+            job.cut(reason.clone());
             job.remove();
         }
     }
@@ -1238,10 +1238,11 @@ impl Sandbox {
                 .ended_for
                 .lock()
                 .unwrap()
+                .clone()
                 .unwrap_or(SandboxJobEndReason::SandboxDeleted),
         };
         for job in running.into_values() {
-            job.cut(reason);
+            job.cut(reason.clone());
         }
         drop(starting);
         self.keep_jobs();

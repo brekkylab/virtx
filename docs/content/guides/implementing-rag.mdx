@@ -8,8 +8,8 @@ import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 Retrieval-augmented generation (RAG) answers a question from documents: it finds the passages that bear on the question, and a model answers from them.
 Here a sandbox does the finding and an agent the answering:
 
-- `docread` parses documents precisely, into text that keeps their structure.
-- `index` keeps that text searchable, and finds the passages that bear on a question.
+- [`docread`](/docs/tutorials/built-in-programs/) parses documents precisely, into text that keeps their structure.
+- [`index`](/docs/tutorials/built-in-programs/) keeps that text searchable, and finds the passages that bear on a question.
 - An [Ailoy](https://github.com/brekkylab/ailoy) agent, given the sandbox, searches with `index` and answers from what it finds.
 
 `docread` and `index` run on any image, without the network.

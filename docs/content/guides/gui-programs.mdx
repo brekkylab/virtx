@@ -1,14 +1,14 @@
 ---
 title: "Running GUI programs"
-description: "Run a GUI program in a sandbox on a screen in memory, watch and drive it over VNC, and take screenshots of it."
+description: "Run the code editor VS Code in a sandbox on a screen in memory, watch and drive it over VNC, and take screenshots of it."
 ---
 
 import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 import vscode from "../../images/gui-programs-vscode.png";
 
 A sandbox has no screen of its own.
-`display` gives it one, where GUI programs run as on a desktop: a person watches and takes over from a VNC viewer, and code takes screenshots of it.
-The image needs only the GUI program.
+[`display`](/docs/tutorials/built-in-programs/) gives it one, where GUI programs run as on a desktop: a person watches and takes over from a VNC viewer, and code takes screenshots of it.
+The image needs the GUI program.
 This guide runs [VS Code](https://code.visualstudio.com/) as its example.
 
 ## Show a program on a screen
@@ -138,4 +138,4 @@ An agent learns them from `/abin/skills/display/SKILL.md`, and an [Ailoy](https:
 
 ## What does not run
 
-Programs that draw with OpenGL do not start on this screen.
+Programs that need OpenGL from the X server (GLX) do not start on this screen.

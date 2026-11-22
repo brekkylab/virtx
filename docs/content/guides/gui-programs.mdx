@@ -52,6 +52,7 @@ with PortForwarder.open(client, sandbox.ports[0]) as forwarder:
 <TabItem label="Node.js">
 
 ```js
+const readline = require('node:readline/promises')
 const { PortForwarder, Recipe } = require('@brekkylab/virtx')
 
 await client.buildImage(
@@ -75,6 +76,10 @@ for await (const entry of sandbox.exec(
 
 const forwarder = PortForwarder.open(client, sandbox.ports[0])
 console.log(`vnc://${forwarder.address}`)
+const prompt = readline.createInterface({ input: process.stdin, output: process.stdout })
+await prompt.question('Press Enter to stop watching')
+prompt.close()
+forwarder.close()
 ```
 
 </TabItem>
@@ -106,6 +111,8 @@ while let Some(entry) = log.next().await {
 
 let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0])?;
 println!("vnc://{}", forwarder.address());
+println!("Press Enter to stop watching");
+std::io::stdin().read_line(&mut String::new())?;
 ```
 
 </TabItem>

@@ -3,11 +3,16 @@
 //! built from -- `virtx-abins/`, the toolchain, the musl scripts and this file -- so a change to
 //! the rest of xtask builds nothing again.
 
-use std::{env, fs, path::Path, process::Command};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, bail, ensure};
 
-use crate::{cargo, guest_target, place, root_path, run, target_path};
+use crate::{cargo, guest_target, place, place_dir, root_path, target_path};
 
 /// Each program's package in `virtx-abins/`, and the name it has in the guest.
 const ABINS: &[(&str, &str)] = &[
@@ -16,8 +21,8 @@ const ABINS: &[(&str, &str)] = &[
     ("virtx-exec-display", "display"),
 ];
 
-/// Build the `/abin` programs for the guest, in the debug or release profile, and place them
-/// and their `SKILL.md` in `out`.
+/// Build the `/abin` programs for the guest, in the debug or release profile, and place them,
+/// their `SKILL.md` and what each installs in `out`.
 pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
@@ -63,13 +68,53 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
     for (package, _) in ABINS {
         cargo.args(["-p", package]);
     }
-    run(cargo, &format!("abin for {target}"))?;
+    // The messages, for where each package's build script wrote: what one puts in
+    // `OUT_DIR/install` is what its program installs beside itself.
+    cargo
+        .arg("--message-format=json-render-diagnostics")
+        .stdout(Stdio::piped());
+    let built = cargo
+        .output()
+        .with_context(|| format!("running cargo for abin for {target}"))?;
+    ensure!(built.status.success(), "building abin for {target} failed");
+    let mut out_dirs = HashMap::new();
+    for line in String::from_utf8_lossy(&built.stdout).lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message["reason"] != "build-script-executed" {
+            continue;
+        }
+        // `path+file:///…/virtx-abins/docread#virtx-exec-docread@0.1.0`
+        let package = message["package_id"].as_str().and_then(|id| id.rsplit_once('#'));
+        let package = package.and_then(|(_, name)| name.split('@').next());
+        if let (Some(package), Some(dir)) = (package, message["out_dir"].as_str()) {
+            out_dirs.insert(package.to_owned(), Path::new(dir).join("install"));
+        }
+    }
 
     let profile = if debug { "debug" } else { "release" };
     fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let built = target_path().join(format!("{target}/{profile}"));
-    for (_, program) in ABINS {
+    let mut installed = HashMap::new();
+    for (package, program) in ABINS {
         place(&built.join(program), &out.join(program))?;
+
+        // Under `install/<program>/`, at the paths it has in `/abin`; replaced whole, so that
+        // what a program stopped installing goes.
+        let at = out.join("install").join(program);
+        if at.exists() {
+            fs::remove_dir_all(&at).with_context(|| format!("removing {}", at.display()))?;
+        }
+        if let Some(from) = out_dirs.get(*package).filter(|dir| dir.is_dir()) {
+            for file in files(from)? {
+                let path = file.strip_prefix(from)?.to_path_buf();
+                if let Some(other) = installed.insert(path.clone(), *program) {
+                    bail!("{program} and {other} both install {}", path.display());
+                }
+            }
+            place_dir(from, &at)?;
+        }
 
         let skill = crate_dir.join(program).join("SKILL.md");
         let at = out.join("skills").join(program);
@@ -83,6 +128,20 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Each file under `dir`.
+fn files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            found.extend(files(&entry.path())?);
+        } else {
+            found.push(entry.path());
+        }
+    }
+    Ok(found)
 }
 
 fn cross_cargo(crate_dir: &Path) -> Command {

@@ -1,652 +1,541 @@
-//! `docread` — a file's lines, numbered, a window at a time.
+//! `docread` — documents parsed with docling, `docling convert`'s command line.
 //!
 //! ```text
-//! docread src/main.rs
-//! docread src/main.rs -o 200 -n 50
+//! docread report.pdf
+//! docread report.pdf --to json --output out/
+//! docread papers/ --from pdf --to md --to doclang --output out/
 //! ```
 //!
-//! # Lines, because a line is what a caller can name
+//! The options are `docling convert`'s, by the same names, for what this build does: the
+//! formats docling reads, converted to Markdown (the default), docling's JSON, HTML, plain text or
+//! DocLang. One document in one format is written to stdout; more need `--output`.
 //!
-//! The console protocol already reads files, and it reads them by the byte: an offset and a
-//! length, which is what moving a file's contents from one side of a session to the other
-//! needs and all it needs. Nothing about those bytes has to mean anything to anybody.
+//! A PDF is read through docling's models (`--pipeline standard`, the default), on the ONNX
+//! Runtime `build.rs` links in: the layout model finds the headings, tables and pictures on a
+//! page, and TableFormer a table's cells. The models are files in `.models/` beside the program.
+//! `--pipeline native` reads the text layer alone. There is no OCR, so a scanned PDF has no text.
 //!
-//! This is the other kind of read — the one whose answer is about to be *acted on*. What
-//! comes back from that has to be quotable: an argument to make about line 412, an edit to
-//! ask for at line 87, a second window starting where the first one stopped. Bytes are none
-//! of those. A byte offset into a file is a number nobody can say out loud, it moves the
-//! moment a character above ASCII appears earlier in the file, and a window cut by it starts
-//! and ends mid-line. So this counts lines, prints their numbers, and takes them back.
-//!
-//! That is the whole of what "semantic" means here, and it is deliberately not more: there is
-//! no notion of a function, a section, or a symbol below. Those need a parser per language
-//! and are wrong in a way a line number cannot be — a window that claims to be a function and
-//! is not is worse than one that claims to be lines 100 to 150.
-//!
-//! # The window is bounded before the caller says anything
-//!
-//! [`DEFAULT_LIMIT`] lines, unasked. A file is as long as it is and the thing reading this is
-//! working from a fixed amount of room, so an unbounded read is a read that either fits by
-//! luck or costs everything downstream. `-n` raises it for the caller who knows what they are
-//! asking for.
-//!
-//! Which makes what was *left out* part of the answer. When the window is not the whole file,
-//! the last line says so and says where the rest starts, so a caller reading the output has
-//! the next command in front of them:
-//!
-//! ```text
-//! [lines 1-2000 of 4210; the rest starts at --offset 2001]
-//! ```
-//!
-//! And when it is the whole file, there is no such line. Silence is the statement that
-//! nothing is missing — the one thing a caller most needs to know and would otherwise have to
-//! work out by comparing two numbers.
-//!
-//! # What it does not do
-//!
-//! It does not search — that is `index`, which answers with paths, and this is what to run on
-//! one of them. It does not write, so there is no file this program can be the reason for
-//! losing. And it answers about text: a window on bytes that do not decode is refused at the
-//! line that does not, because printing them would mean handing back a line whose length on
-//! screen is not its length and whose number is the only true thing on it.
-//!
-//! # Documents, which hold text without being text
-//!
-//! Two of them are read rather than refused: a Word document ([`docx`]) and a PDF ([`pdf`]),
-//! both in every build there is. The rest — a `.pptx`, a spreadsheet — are named and refused,
-//! and become readable here the way anything else does: by something turning them into a file
-//! that has lines.
-//!
-//! **What comes back from a document is not the file's lines**, and the answer says so on its
-//! own line before the first of them. A paragraph is a unit somebody wrote and a PDF's line is
-//! one an engine guessed at, so the two are worth different amounts — but neither is a line of
-//! the file, and a number quoted out of one means what it means only as long as the rules that
-//! produced it hold. Those rules are written down in each of those modules.
-
-mod docx;
-mod pdf;
-mod text;
+//! Plain text and source code are refused, being text already; so are images, audio and video,
+//! which hold no text without OCR or speech recognition, and this build has neither. Tracked
+//! changes are accepted unless `--track-changes` says otherwise.
 
 use std::{
-    io::Write as _,
+    fs,
+    io::{ErrorKind, Write as _},
     path::{Path, PathBuf},
     process::ExitCode,
+    time::Duration,
 };
 
-use clap::Parser as _;
-
-use crate::text::Window;
+use clap::{Parser as _, ValueEnum};
+use docling::{
+    DoclingDocument, DocumentConverter, ImageMode, InputFormat, SourceDocument, TrackChanges,
+};
 
 /// The name every message this program writes about itself is spelled with.
-///
-/// Taken from the target rather than written out, so that it is the name a caller actually
-/// typed and the same one clap puts in the usage line.
 const NAME: &str = env!("CARGO_BIN_NAME");
 
-/// How many lines a window holds when the caller does not say.
-///
-/// Long enough that most files are one window and the note at the end never appears; short
-/// enough that a file which is not fits in what is reading it anyway.
-const DEFAULT_LIMIT: usize = 2000;
+/// The most of a file this reads, in bytes. docling holds a document whole, and the model it
+/// parses into is several times the file's size; on the guest a read past memory is the program
+/// killed rather than an answer.
+const MAX_FILE_BYTES: u64 = 128 << 20;
 
-/// The one line `--help` opens with, naming the formats this reads.
-///
-/// All three are always here. That is what makes this a sentence rather than something assembled
-/// per build: there is no compilation of this program that refuses one of them, so a caller who
-/// read this line once knows what any `docread` they meet will do.
-const ABOUT: &str = "Read a document file (text, Word, PDF) by numbered lines, a window at a time";
-
-/// What `docread` accepts and what it says about it.
+/// What `docread` accepts.
 #[derive(Debug, clap::Parser)]
 #[command(
-    about = ABOUT,
-    after_help = "Lines are counted from 1, and the numbers printed are the ones -o takes back. \
-                  Output ends with a bracketed line only when the window is not the whole file; \
-                  no such line means there is nothing else in it.",
-    // The doc comments here are for whoever reads this file. What a caller of the command sees
-    // is `about` and the first line of each item's; nothing below argues a design decision at
-    // somebody who typed `--help`.
+    about = "Parse documents precisely: their headings, paragraphs, lists, tables and pictures, \
+             in reading order",
+    after_help = "Reads PDF, Word, PowerPoint, Excel, OpenDocument, RTF, HTML, Markdown, \
+                  AsciiDoc, LaTeX, CSV, EPUB, email, HWP and more. Writes Markdown, JSON, HTML, \
+                  text and DocLang.\n\n\
+                  Uses docling inside, and its ML models where a file's structure has to be \
+                  found, as in a PDF. There is no OCR: a scanned PDF has no text.\n\n\
+                  One document in one format goes to stdout; more need --output.",
     long_about = None,
-    // Bare `docread` is a line that asked for nothing, and the help is the useful answer
-    // to it.
     arg_required_else_help = true
 )]
 struct Cli {
-    /// the file to read
-    ///
-    /// One file and not several. Two files' lines under one set of numbers would be an answer
-    /// in which a line number means nothing without a header saying which file it is of — and
-    /// a caller who wants that has `cat`, which is not pretending the result is addressable.
-    #[arg(value_name = "FILE", long_help = None)]
-    file: PathBuf,
+    /// Files or directories to convert; a directory's documents are found by their extension
+    #[arg(value_name = "SOURCE", required = true)]
+    sources: Vec<PathBuf>,
 
-    /// the line to start at
-    ///
-    /// The line number as printed, so reading the note at the end of one window and typing the
-    /// number it names is how the next one is asked for.
-    #[arg(
-        short = 'o',
-        long,
-        value_name = "N",
-        default_value_t = 1,
-        value_parser = line_number,
-        long_help = None
-    )]
-    offset: usize,
+    /// Input formats to accept, by docling's names (pdf, docx, pptx, xlsx, html, md, ...);
+    /// defaults to all
+    #[arg(long = "from", value_name = "FORMAT", value_parser = input_format)]
+    from: Vec<InputFormat>,
 
-    /// how many lines to show
-    ///
-    /// A count and not an end line, because what bounds the answer is how much of it there is
-    /// room for — which is a number the caller knows about themselves and not about the file.
-    #[arg(
-        short = 'n',
-        long,
-        value_name = "N",
-        default_value_t = DEFAULT_LIMIT,
-        value_parser = count,
-        long_help = None
-    )]
-    limit: usize,
+    /// Output formats
+    #[arg(long = "to", value_enum, value_name = "FORMAT", default_values_t = [To::Md])]
+    to: Vec<To>,
+
+    /// Directory to write each document's outputs in, as <name>.<format>
+    #[arg(long, value_name = "DIR", conflicts_with = "output_file")]
+    output: Option<PathBuf>,
+
+    /// File to write the output to, for one document in one format
+    #[arg(long, value_name = "PATH")]
+    output_file: Option<PathBuf>,
+
+    /// How a PDF is read: with the layout and table models, or its text layer alone
+    #[arg(long, value_enum, default_value_t = Pipeline::Standard)]
+    pipeline: Pipeline,
+
+    /// Do not recover tables' structure with TableFormer
+    #[arg(long)]
+    no_tables: bool,
+
+    /// How pictures are written: a placeholder, embedded, or files beside the output
+    #[arg(long, value_enum, default_value_t = ImageExportMode::Placeholder)]
+    image_export_mode: ImageExportMode,
+
+    /// The pages of a PDF to convert, from 1, as FIRST-LAST
+    #[arg(long, value_name = "FIRST-LAST", value_parser = page_range)]
+    page_range: Option<(usize, usize)>,
+
+    /// The password of an encrypted PDF
+    #[arg(long, value_name = "PASSWORD")]
+    pdf_password: Option<String>,
+
+    /// Tracked changes in Word and OpenDocument files: accept, reject or all
+    #[arg(long, value_name = "MODE", default_value = "accept", value_parser = track_changes)]
+    track_changes: TrackChanges,
+
+    /// Number headings by the levels their numbering and font sizes imply, in a PDF
+    #[arg(long)]
+    heading_hierarchy: bool,
+
+    /// Give up on a document after this many seconds
+    #[arg(long, value_name = "SECONDS")]
+    document_timeout: Option<f64>,
+
+    /// Stop at the first document that fails, rather than going on to the next
+    #[arg(long)]
+    abort_on_error: bool,
 }
 
-/// A line number the file could have: one and up.
-///
-/// Refused at the parser rather than quietly read as 1, which is what a program that took a 0
-/// would be doing. Lines here are numbered from 1 everywhere they are printed, and a caller
-/// who typed 0 is either counting from somewhere else or arrived here by arithmetic — both
-/// worth a `2` and a sentence naming the argument.
-fn line_number(text: &str) -> Result<usize, String> {
-    match text.parse::<usize>() {
-        Ok(0) => Err("lines are counted from 1, so there is no line 0".into()),
-        Ok(number) => Ok(number),
-        Err(e) => Err(e.to_string()),
-    }
+/// An output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum To {
+    Md,
+    Json,
+    Html,
+    Text,
+    Doclang,
 }
 
-/// A window's size: at least one line.
-fn count(text: &str) -> Result<usize, String> {
-    match text.parse::<usize>() {
-        Ok(0) => Err("a window of no lines would answer nothing".into()),
-        Ok(count) => Ok(count),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-/// The line a read that could not be carried out leaves on stderr.
-///
-/// One place that spells this program's failures, with the file named the way the caller named
-/// it: a path they typed is the one thing in the message they can act on.
-fn refused(file: &Path, said: impl std::fmt::Display) -> String {
-    format!("{NAME}: {}: {said}\n", file.display())
-}
-
-/// `n` lines, spelled as a count of them.
-fn lines(n: usize) -> String {
-    match n {
-        1 => "1 line".to_owned(),
-        n => format!("{n} lines"),
-    }
-}
-
-/// What the window is, said: the lines, and what is missing from them.
-///
-/// Every case where the answer is not simply the file gets a line of its own, because each is
-/// a different next command — a window with more after it, an offset past the end, and a file
-/// with nothing in it are three things a caller does three different things about, and all
-/// three look identical as bare output.
-fn said(window: Window, origin: Option<&'static str>) -> String {
-    let Window {
-        mut shown,
-        first,
-        count,
-        total,
-    } = window;
-
-    // Said before the lines rather than after them, and only when the lines are not the
-    // file's own. A caller who reads the numbers first and the note last has already quoted
-    // one somewhere, and what this warns about is exactly that quoting.
-    let origin = match origin {
-        Some(origin) => format!("[these lines are {origin}]\n"),
-        None => String::new(),
-    };
-    shown.insert_str(0, &origin);
-
-    // A file with nothing in it. Otherwise this is a command that printed nothing and
-    // succeeded, which is what a failure nobody noticed also looks like.
-    if total == 0 {
-        return format!("{origin}[the file is empty]\n");
-    }
-
-    // A window that begins past the end. The file's length is the useful half of saying so:
-    // it is what the caller's next offset has to be under.
-    if count == 0 {
-        return format!(
-            "{origin}[the file has {}; there is nothing at line {first}]\n",
-            lines(total)
-        );
-    }
-
-    let last = first + count - 1;
-    if first > 1 || last < total {
-        shown.push_str(&format!("[lines {first}-{last} of {total}"));
-        // Where to pick up. The number rather than the whole command, so that a caller who
-        // spelled it `--offset` and a caller who spelled it `-o` both read something true.
-        if last < total {
-            shown.push_str(&format!("; the rest starts at --offset {}", last + 1));
+impl To {
+    /// The extension a file of this format is written with.
+    fn extension(self) -> &'static str {
+        match self {
+            To::Md => "md",
+            To::Json => "json",
+            To::Html => "html",
+            To::Text => "txt",
+            To::Doclang => "dclg",
         }
-        shown.push_str("]\n");
     }
-    shown
 }
 
-/// The command, done: what to say on stdout, or the line to say on stderr instead.
-///
-/// Every way this can end is decided here rather than on the way out, because what a reader
-/// wants to know about a message is which case produced it. A line that was not understood
-/// never reaches here, clap having already answered it.
-fn run(cli: Cli) -> Result<String, String> {
-    let (window, origin) =
-        read(&cli.file, cli.offset, cli.limit).map_err(|e| refused(&cli.file, e))?;
-    Ok(said(window, origin))
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Pipeline {
+    Standard,
+    Native,
 }
 
-/// The file, windowed — and where its lines came from, when they are not the file's own.
-///
-/// The documents come first and the text reader last, because a document is only a document
-/// when its bytes say so: each of these asks the file what it is and steps aside otherwise, so
-/// an ordinary file reaches [`text::read`] having cost two cheap questions. Nothing looks at
-/// the extension, for the reason every question about a file's contents is asked of its bytes:
-/// the name is a claim.
-///
-/// **Asking has to be cheaper than reading**, because these questions are asked of every file
-/// and answered `no` about nearly all of them. The one below is bounded on purpose ([`docx`],
-/// and see [`docx::read`]): a window onto two lines of a gigabyte of text costs a peek here,
-/// or else the reader whose whole design is to hold the window and walk the rest is bounded by
-/// a module that already read the file.
-fn read(
-    file: &Path,
-    offset: usize,
-    limit: usize,
-) -> std::io::Result<(text::Window, Option<&'static str>)> {
-    if starts_with(file, pdf::MAGIC) {
-        return pdf::read(file, offset, limit).map(|window| (window, Some(pdf::ORIGIN)));
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ImageExportMode {
+    Placeholder,
+    Embedded,
+    Referenced,
+}
+
+fn input_format(text: &str) -> Result<InputFormat, String> {
+    InputFormat::from_id(text).ok_or_else(|| format!("docling has no input format `{text}`"))
+}
+
+fn track_changes(text: &str) -> Result<TrackChanges, String> {
+    text.parse()
+}
+
+fn page_range(text: &str) -> Result<(usize, usize), String> {
+    let (first, last) = text.split_once('-').unwrap_or((text, text));
+    let parse = |n: &str| n.trim().parse::<usize>().map_err(|e| e.to_string());
+    match (parse(first)?, parse(last)?) {
+        (0, _) => Err("pages are counted from 1".into()),
+        (first, last) if last < first => Err(format!("{last} comes before {first}")),
+        range => Ok(range),
+    }
+}
+
+/// The documents `sources` name: each file as given, and each file under a directory that
+/// docling knows by its extension and `from` accepts, in order.
+fn documents(sources: &[PathBuf], from: &[InputFormat]) -> std::io::Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for source in sources {
+        if !source.is_dir() {
+            found.push(source.clone());
+            continue;
+        }
+        let mut entries: Vec<PathBuf> = fs::read_dir(source)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<_>>()?;
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                found.extend(documents(&[path], from)?);
+                continue;
+            }
+            let format = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(|ext| InputFormat::from_extension(&ext.to_ascii_lowercase()));
+            if format.is_some_and(|f| readable(f) && (from.is_empty() || from.contains(&f))) {
+                found.push(path);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Whether a format is one this build converts.
+fn readable(format: InputFormat) -> bool {
+    !matches!(
+        format,
+        InputFormat::Text | InputFormat::Image | InputFormat::Audio | InputFormat::Video
+    ) && format.is_compiled_in()
+}
+
+/// `path`, converted, or what to say about why it was not.
+fn convert(cli: &Cli, path: &Path) -> Result<DoclingDocument, String> {
+    let about = fs::metadata(path).map_err(|e| e.to_string())?;
+    if about.is_dir() {
+        return Err("is a directory with no documents in it".into());
+    }
+    if !about.is_file() {
+        return Err("is not a regular file".into());
+    }
+    if about.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "is more than the {} MiB of file this reads at once",
+            MAX_FILE_BYTES >> 20
+        ));
     }
 
-    if let Some(read) = docx::read(file, offset, limit) {
-        return read.map(|window| (window, Some(docx::ORIGIN)));
+    let source = SourceDocument::from_file(path).map_err(|e| e.to_string())?;
+    match source.format {
+        InputFormat::Text => return Err("is plain text, not a document: read it with cat".into()),
+        format if !readable(format) => {
+            return Err(format!(
+                "is {}, which holds no text this build can read",
+                format.as_str()
+            ));
+        }
+        format if !cli.from.is_empty() && !cli.from.contains(&format) => {
+            return Err(format!("is {}, which --from leaves out", format.as_str()));
+        }
+        _ => {}
     }
 
-    text::read(file, offset, limit).map(|window| (window, None))
+    let mut converter = DocumentConverter::new()
+        .no_ocr(true)
+        .track_changes(Some(cli.track_changes))
+        .text_layer_only(matches!(cli.pipeline, Pipeline::Native))
+        .no_table_former(cli.no_tables)
+        .heading_hierarchy(cli.heading_hierarchy)
+        .password(cli.pdf_password.clone())
+        .document_timeout(cli.document_timeout.map(Duration::from_secs_f64));
+    if let Some((first, last)) = cli.page_range {
+        converter = converter.page_range(first, last);
+    }
+
+    // The input is somebody's file, and a reader meeting one it was not written for is a
+    // document this cannot read, not a crash. The default hook would print the panic first.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let converted = std::panic::catch_unwind(move || converter.convert(source));
+    std::panic::set_hook(hook);
+    match converted {
+        Ok(converted) => converted.map(|c| c.document).map_err(|e| e.to_string()),
+        Err(panic) => Err(panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "docling gave up on it".into())),
+    }
 }
 
-/// Whether `file` begins with `magic`.
-///
-/// A failure to look is a `false` and not a refusal: whatever is wrong with the file, the read
-/// that follows meets it too and says so about the file rather than about a peek.
-fn starts_with(file: &Path, magic: &[u8]) -> bool {
-    use std::io::Read as _;
-
-    let mut head = vec![0; magic.len()];
-    std::fs::File::open(file)
-        .and_then(|mut file| file.read_exact(&mut head))
-        .is_ok()
-        && head == magic
+/// `document` in `to`, and the pictures to write beside it, each at a path relative to the
+/// output, under `artifacts`.
+fn export(
+    document: &DoclingDocument,
+    to: To,
+    images: ImageExportMode,
+    artifacts: &str,
+) -> (String, Vec<(String, Vec<u8>)>) {
+    let mode = match images {
+        ImageExportMode::Placeholder => ImageMode::Placeholder,
+        ImageExportMode::Embedded => ImageMode::Embedded,
+        ImageExportMode::Referenced => ImageMode::Referenced,
+    };
+    match to {
+        To::Md => document.export_to_markdown_with_images(mode, artifacts),
+        To::Html => document.export_to_html_with_images(mode, artifacts),
+        To::Doclang => document.export_to_doclang_with_images(mode),
+        To::Json => (document.export_to_json(), Vec::new()),
+        To::Text => (document.export_to_text(), Vec::new()),
+    }
 }
 
-/// A line in, and what it produced out.
-///
-/// No runtime: the one thing this program waits on is a file, which it waits on in this
-/// thread.
+/// Where the outputs go.
+enum Destination<'a> {
+    Stdout,
+    File(&'a Path),
+    Dir(&'a Path),
+}
+
+/// The command, done: what goes to stdout, and a line for each document that failed. A line
+/// that cannot be carried out at all is the error.
+fn run(cli: &Cli) -> Result<(String, Vec<String>), String> {
+    let documents = documents(&cli.sources, &cli.from).map_err(|e| format!("{NAME}: {e}\n"))?;
+    let destination = match (&cli.output, &cli.output_file) {
+        (Some(dir), _) => Destination::Dir(dir),
+        (None, Some(file)) => Destination::File(file),
+        (None, None) => Destination::Stdout,
+    };
+    if !matches!(destination, Destination::Dir(_)) && (documents.len() != 1 || cli.to.len() != 1)
+    {
+        return Err(format!(
+            "{NAME}: {} documents in {} formats need --output DIR\n",
+            documents.len(),
+            cli.to.len()
+        ));
+    }
+    if matches!(destination, Destination::Stdout)
+        && cli.image_export_mode == ImageExportMode::Referenced
+    {
+        return Err(format!(
+            "{NAME}: --image-export-mode referenced writes files, and needs --output\n"
+        ));
+    }
+
+    let mut stdout = String::new();
+    let mut failed = Vec::new();
+    for path in &documents {
+        let said = |e: &dyn std::fmt::Display| format!("{NAME}: {}: {e}\n", path.display());
+        let document = match convert(cli, path) {
+            Ok(document) => document,
+            Err(e) => {
+                failed.push(said(&e));
+                if cli.abort_on_error {
+                    break;
+                }
+                continue;
+            }
+        };
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        let artifacts = format!("{stem}_artifacts");
+        for &to in &cli.to {
+            let (text, assets) = export(&document, to, cli.image_export_mode, &artifacts);
+            let (file, base) = match destination {
+                Destination::Stdout => {
+                    stdout.push_str(&text);
+                    if !text.ends_with('\n') {
+                        stdout.push('\n');
+                    }
+                    continue;
+                }
+                Destination::File(file) => (file.to_path_buf(), file.parent()),
+                Destination::Dir(dir) => (dir.join(format!("{stem}.{}", to.extension())), Some(dir)),
+            };
+            let base = base.unwrap_or(Path::new(""));
+            let written = assets
+                .iter()
+                .try_for_each(|(asset, bytes)| write(&base.join(asset), bytes))
+                .and_then(|()| write(&file, text.as_bytes()));
+            if let Err(e) = written {
+                return Err(format!("{NAME}: {}: {e}\n", file.display()));
+            }
+        }
+    }
+    Ok((stdout, failed))
+}
+
+/// `bytes` at `path`, its directory made.
+fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, bytes)
+}
+
 fn main() -> ExitCode {
-    // `parse` and not a result to inspect: a line that was not understood, and `--help`, are
-    // both clap's to answer — help on stdout with a `0`, usage on stderr with a `2`, which is
-    // what a caller reading one out of a pipe expects of any program.
-    let said = match run(Cli::parse()) {
-        Ok(said) => said,
+    let (stdout, failed) = match run(&Cli::parse()) {
+        Ok(done) => done,
         Err(said) => {
-            // Straight out, because this is the last thing that happens.
             std::io::stderr().write_all(said.as_bytes()).ok();
             return ExitCode::FAILURE;
         }
     };
-
-    // Written as bytes: this is program output on its way to whatever the shell pointed at,
-    // and a caller piping it into something byte-oriented has to get what was produced.
-    match std::io::stdout().write_all(said.as_bytes()) {
-        Ok(()) => ExitCode::SUCCESS,
+    for said in &failed {
+        std::io::stderr().write_all(said.as_bytes()).ok();
+    }
+    match std::io::stdout().write_all(stdout.as_bytes()) {
         // A reader that stopped reading — `| head` — is not this program failing.
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-        // Anything else and the answer is not the answer: a caller cannot be told that by a
-        // zero, which is what says the window held everything it was going to.
-        Err(e) => {
-            std::io::stderr()
-                .write_all(format!("{NAME}: writing the answer: {e}\n").as_bytes())
-                .ok();
-            ExitCode::FAILURE
-        }
+        Ok(()) | Err(_) if failed.is_empty() => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        alloc::{GlobalAlloc, Layout, System},
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-
-    use clap::error::ErrorKind;
-    use tempfile::TempDir;
+    use clap::error::ErrorKind as ClapErrorKind;
 
     use super::*;
 
-    /// The largest single allocation this test binary has made.
-    ///
-    /// What is being watched is a file's size turning into memory, and that has one shape: a
-    /// `Vec` as long as the file, allocated in one go and grown by doubling. So the largest
-    /// allocation is the whole of the number worth having, and it needs no allocator that
-    /// tracks what is live — a `fetch_max` on the way past.
-    ///
-    /// It is global because an allocator is: every test here is measured whether it looks or
-    /// not, and they run at the same time. Which is why what is asserted below is a fraction
-    /// of the file that was written rather than a tight number — everything else running
-    /// allocates kilobytes, and what this is here to catch is a megabyte per megabyte of file.
-    static LARGEST: AtomicUsize = AtomicUsize::new(0);
-
-    /// [`System`], counted.
-    struct Counted;
-
-    #[global_allocator]
-    static ALLOCATOR: Counted = Counted;
-
-    unsafe impl GlobalAlloc for Counted {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            LARGEST.fetch_max(layout.size(), Ordering::Relaxed);
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            LARGEST.fetch_max(layout.size(), Ordering::Relaxed);
-            unsafe { System.alloc_zeroed(layout) }
-        }
-
-        // Counted too, and not only for tidiness: a `Vec` that was not told how long the file
-        // is arrives at the file's length through this and never through `alloc`.
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-            LARGEST.fetch_max(size, Ordering::Relaxed);
-            unsafe { System.realloc(ptr, layout, size) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
-        }
-    }
-
-    /// Through the same parser the program runs on, so that what these pin is what runs. The
-    /// program's own name in front, because that is what `argv` carries.
     fn parse(line: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once(NAME).chain(line.iter().copied()))
     }
 
-    /// A line, carried out, as typing it would.
-    fn run_line(line: &[&str]) -> Result<String, String> {
-        run(parse(line).expect("the line parses"))
-    }
-
-    /// A file holding `text`, named absolutely: a relative path would resolve against a
-    /// working directory the whole test binary shares.
-    fn file(dir: &TempDir, name: &str, text: &str) -> String {
+    fn markdown(dir: &tempfile::TempDir, name: &str, text: &str) -> String {
         let path = dir.path().join(name);
-        std::fs::File::create(&path)
-            .expect("a file")
-            .write_all(text.as_bytes())
-            .expect("the text");
-        path.to_str()
-            .expect("a temporary directory is UTF-8")
-            .to_owned()
+        fs::write(&path, text).expect("a file");
+        path.to_str().expect("UTF-8").to_owned()
     }
 
-    /// A file with `n` numbered lines, so that a window's contents say where it landed.
-    fn numbered(dir: &TempDir, name: &str, n: usize) -> String {
-        let text: String = (1..=n).map(|i| format!("line {i}\n")).collect();
-        file(dir, name, &text)
-    }
-
-    /// The whole thing, `cat -n`, and nothing after it: a file that fits in one window is
-    /// answered with the file, and the absence of a note is what says so.
+    /// One document is written to stdout as Markdown, unasked.
     #[test]
-    fn a_file_that_fits_is_the_whole_answer() {
+    fn a_document_is_markdown_on_stdout() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = numbered(&dir, "a.txt", 3);
+        let path = markdown(&dir, "a.md", "# A heading\n\nA paragraph.\n");
 
-        assert_eq!(
-            run_line(&[&path]).expect("the file reads"),
-            "     1\tline 1\n     2\tline 2\n     3\tline 3\n"
-        );
+        let (stdout, failed) = run(&parse(&[&path]).unwrap()).expect("converted");
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(stdout.contains("# A heading"), "{stdout}");
+        assert!(stdout.contains("A paragraph."), "{stdout}");
     }
 
-    /// A window, and the note that makes the next one obvious: where it starts, how long the
-    /// file is, and the offset to type.
+    /// Each format asked for is a file in `--output`, named after the document.
     #[test]
-    fn a_window_says_what_it_left_out() {
+    fn formats_are_files_in_the_output_directory() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = numbered(&dir, "a.txt", 10);
+        let path = markdown(&dir, "a.md", "# A heading\n");
+        let out = dir.path().join("out");
+        let out = out.to_str().expect("UTF-8");
 
-        let said = run_line(&[&path, "-n", "2"]).expect("the file reads");
-        assert_eq!(
-            said,
-            "     1\tline 1\n     2\tline 2\n\
-             [lines 1-2 of 10; the rest starts at --offset 3]\n"
-        );
-
-        // And typing that offset picks up at the line after the last one shown.
-        let said = run_line(&[&path, "-o", "3", "-n", "2"]).expect("the file reads");
-        assert!(said.starts_with("     3\tline 3\n"), "{said}");
-
-        // A window that reaches the end still says where it began, and names no next offset:
-        // there is nothing to pick up.
-        let said = run_line(&[&path, "-o", "9"]).expect("the file reads");
-        assert_eq!(
-            said,
-            "     9\tline 9\n    10\tline 10\n[lines 9-10 of 10]\n"
-        );
+        let line = [path.as_str(), "--to", "json", "--to", "doclang", "--to", "text", "--output", out];
+        let (stdout, failed) = run(&parse(&line).unwrap()).expect("converted");
+        assert!(stdout.is_empty() && failed.is_empty(), "{stdout} {failed:?}");
+        let json = fs::read_to_string(dir.path().join("out/a.json")).expect("a.json");
+        assert!(json.contains("A heading"), "{json}");
+        let doclang = fs::read_to_string(dir.path().join("out/a.dclg")).expect("a.dclg");
+        assert!(doclang.starts_with("<doclang"), "{doclang}");
+        assert!(dir.path().join("out/a.txt").exists());
     }
 
-    /// An offset past the end is an answer about the file rather than an empty one: the length
-    /// is what tells the caller which offset would have worked.
+    /// Several documents need somewhere to go other than stdout, and are not written there.
     #[test]
-    fn an_offset_past_the_end_says_how_long_the_file_is() {
+    fn several_documents_need_an_output_directory() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = numbered(&dir, "a.txt", 3);
+        let a = markdown(&dir, "a.md", "a\n");
+        let b = markdown(&dir, "b.md", "b\n");
 
-        assert_eq!(
-            run_line(&[&path, "-o", "50"]).expect("the file reads"),
-            "[the file has 3 lines; there is nothing at line 50]\n"
-        );
+        let said = run(&parse(&[&a, &b]).unwrap()).expect_err("two documents, no --output");
+        assert!(said.contains("--output"), "{said}");
     }
 
-    /// A file with nothing in it says so, rather than being a command that printed nothing.
+    /// A directory's documents are the files docling knows by their extension that `--from`
+    /// accepts; plain text in it is not one.
     #[test]
-    fn an_empty_file_says_it_is_empty() {
+    fn a_directory_is_its_documents() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = file(&dir, "a.txt", "");
+        markdown(&dir, "a.md", "# A\n");
+        markdown(&dir, "b.html", "<h1>B</h1>\n");
+        markdown(&dir, "notes.txt", "not a document\n");
 
-        assert_eq!(
-            run_line(&[&path]).expect("the file reads"),
-            "[the file is empty]\n"
-        );
+        let all = documents(&[dir.path().to_path_buf()], &[]).expect("listed");
+        let names: Vec<_> = all.iter().map(|p| p.file_name().unwrap().to_owned()).collect();
+        assert_eq!(names, ["a.md", "b.html"]);
+
+        let md = documents(&[dir.path().to_path_buf()], &[InputFormat::Md]).expect("listed");
+        assert_eq!(md.len(), 1);
     }
 
-    /// A long line is cut and marked, and the number in front of it is still the line's.
+    /// The document as it stands by default: what was inserted is in it, what was deleted is
+    /// not; `--track-changes reject` is the other way round.
     #[test]
-    fn a_long_line_is_cut_where_it_is_marked() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let long: String = std::iter::repeat_n('x', text::MAX_LINE_CHARS + 100).collect();
-        let path = file(&dir, "a.txt", &format!("{long}\nshort\n"));
-
-        let said = run_line(&[&path]).expect("the file reads");
-        let first = said.lines().next().expect("a line");
-        assert!(first.ends_with(text::TRUNCATED), "{first}");
-        assert_eq!(
-            first.chars().filter(|&c| c == 'x').count(),
-            text::MAX_LINE_CHARS
-        );
-        assert!(said.contains("     2\tshort"), "the file goes on: {said}");
-    }
-
-    /// Bytes that are not text end the command and print nothing: half a binary on stdout
-    /// would be an answer a caller has no way to read as a failure.
-    #[test]
-    fn a_file_that_is_not_text_is_refused_and_nothing_is_printed() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, b"\x7fELF\x02\x01\x01\x00\x00\x00").expect("a binary");
-        let path = path.to_str().expect("UTF-8").to_owned();
-
-        let said = run_line(&[&path]).expect_err("this is not text");
-        assert!(
-            said.contains(&path),
-            "the file is named as the caller named it: {said}"
-        );
-        assert!(said.contains("not text"), "{said}");
-    }
-
-    /// A file that is not there ends the line, named the way it was typed.
-    #[test]
-    fn a_file_that_is_not_there_says_so() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = dir.path().join("missing.txt");
-        let path = path.to_str().expect("UTF-8").to_owned();
-
-        let said = run_line(&[&path]).expect_err("there is no such file");
-        assert!(said.contains(&path), "{said}");
-        assert!(
-            said.starts_with(NAME),
-            "the program says which program it is: {said}"
-        );
-    }
-
-    /// A directory is refused as a directory, which is what a caller who typed one needs to
-    /// read.
-    #[test]
-    fn a_directory_is_not_a_file() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = dir.path().to_str().expect("UTF-8").to_owned();
-
-        let said = run_line(&[&path]).expect_err("a directory is not a file");
-        assert!(said.contains("is a directory"), "{said}");
-    }
-
-    /// The defaults are the whole of what a caller has to know to type this: a path.
-    #[test]
-    fn a_file_is_all_this_needs_to_be_told() {
-        let cli = parse(&["src/main.rs"]).expect("a file is all it needs");
-        assert_eq!(cli.file, Path::new("src/main.rs"));
-        assert_eq!(cli.offset, 1);
-        assert_eq!(cli.limit, DEFAULT_LIMIT);
-    }
-
-    /// Counting from 1 is the rule, and a 0 is a line that was not understood rather than a
-    /// read that quietly happened somewhere else. A `2` and not a `1`, and clap names the
-    /// argument.
-    #[test]
-    fn there_is_no_line_zero_and_no_empty_window() {
-        for line in [["a.txt", "-o", "0"], ["a.txt", "-n", "0"]] {
-            let e = parse(&line).expect_err("0 is not a number this takes");
-            assert_eq!(e.kind(), ErrorKind::ValueValidation);
-            assert_eq!(e.exit_code(), 2);
-        }
-    }
-
-    /// Help is an answer, not a refusal: a zero, so a caller can pipe it, and the name they
-    /// typed in the usage line.
-    #[test]
-    fn help_is_an_answer() {
-        let e = parse(&["--help"]).expect_err("help is not a read");
-        assert_eq!(e.kind(), ErrorKind::DisplayHelp);
-        assert_eq!(e.exit_code(), 0);
-
-        // The name this was built as, not one written out here: the usage line has to tell a
-        // caller a command they actually have.
-        let said = e.render().to_string();
-        assert!(said.contains(&format!("Usage: {NAME}")), "{said}");
-        for flag in ["--offset", "--limit", "FILE"] {
-            assert!(said.contains(flag), "{flag} is missing from: {said}");
-        }
-    }
-
-    /// What came out of a document says so before its first line, so that a caller quoting a
-    /// number has already read what the number is a number of.
-    #[test]
-    fn a_document_says_that_its_lines_are_its_own() {
-        use docx_rs::{Docx, Paragraph, Run};
+    fn tracked_changes_are_accepted_unless_asked_otherwise() {
+        use docx_rs::{Delete, Docx, Insert, Paragraph, Run};
 
         let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join("a.docx");
         Docx::new()
-            .add_paragraph(Paragraph::new().add_run(Run::new().add_text("A paragraph")))
+            .add_paragraph(Paragraph::new().add_insert(Insert::new(Run::new().add_text("Inserted"))))
+            .add_paragraph(
+                Paragraph::new()
+                    .add_delete(Delete::new().add_run(Run::new().add_delete_text("Deleted"))),
+            )
             .build()
-            .pack(std::fs::File::create(&path).expect("a file"))
+            .pack(fs::File::create(&path).expect("a file"))
             .expect("a document");
-        let path = path.to_str().expect("UTF-8").to_owned();
+        let path = path.to_str().expect("UTF-8");
 
-        let said = run_line(&[&path]).expect("the document reads");
-        assert!(
-            said.starts_with(&format!("[these lines are {}]\n", docx::ORIGIN)),
-            "{said}"
-        );
-        assert!(said.contains("     1\tA paragraph\n"), "{said}");
+        let (accepted, _) = run(&parse(&[path]).unwrap()).expect("converted");
+        assert!(accepted.contains("Inserted") && !accepted.contains("Deleted"), "{accepted}");
+        let (rejected, _) =
+            run(&parse(&[path, "--track-changes", "reject"]).unwrap()).expect("converted");
+        assert!(!rejected.contains("Inserted") && rejected.contains("Deleted"), "{rejected}");
     }
 
-    /// A file is not held in memory because it was looked at.
-    ///
-    /// The bound belongs to the text reader — the window is what it keeps — and what can take
-    /// it away is a question asked *before* it: reading a file to decide what it is costs the
-    /// file, whatever the reader would then have done. So this is a read of two lines of a
-    /// file far larger than the answer, in the build that also reads Word documents, and what
-    /// it asserts is that nothing on the way allocated the file's size.
-    ///
-    /// 64 MiB and a bound of an eighth of it: large enough that a read of the whole file is
-    /// unmistakable next to what a window and a `BufReader` cost, small enough to write in a
-    /// test. The number is a fraction of the file rather than a tight bound because [`LARGEST`]
-    /// is global — see it for why.
+    /// A document that fails is said, named as it was given, and the others are still
+    /// converted; `--abort-on-error` stops at it.
     #[test]
-    fn a_large_file_that_is_not_a_document_is_not_held_in_memory() {
-        const SIZE: usize = 64 << 20;
-
+    fn a_failure_is_said_and_the_rest_go_on() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let path = dir.path().join("big.txt");
-        let mut file = std::fs::File::create(&path).expect("a file");
-        // Written a chunk at a time, so that the fixture is not itself the allocation being
-        // looked for.
-        let chunk: String = std::iter::repeat_n("line...\n", (1 << 20) / 8).collect();
-        for _ in 0..SIZE / chunk.len() {
-            file.write_all(chunk.as_bytes()).expect("the text");
-        }
-        file.sync_all().expect("the file");
-        let path = path.to_str().expect("UTF-8").to_owned();
+        let broken = dir.path().join("a.pdf");
+        fs::write(&broken, b"%PDF-1.4\ngarbage").expect("a file");
+        let broken = broken.to_str().expect("UTF-8");
+        let good = markdown(&dir, "b.md", "# B\n");
+        let text = markdown(&dir, "c.txt", "plain\n");
+        let out = dir.path().join("out");
+        let out = out.to_str().expect("UTF-8");
 
-        // From here on the numbers are the program's.
-        LARGEST.store(0, Ordering::Relaxed);
-        let said = run_line(&[&path, "-o", "5", "-n", "2"]).expect("the file reads");
-        let largest = LARGEST.load(Ordering::Relaxed);
+        let (_, failed) = run(&parse(&[broken, &good, &text, "--output", out]).unwrap())
+            .expect("ran");
+        assert_eq!(failed.len(), 2, "{failed:?}");
+        assert!(failed[0].starts_with(&format!("{NAME}: {broken}: ")), "{failed:?}");
+        assert!(failed[1].contains("plain text"), "{failed:?}");
+        assert!(dir.path().join("out/b.md").exists());
 
-        assert!(
-            said.starts_with("     5\tline...\n     6\tline...\n"),
-            "{said}"
-        );
-        assert!(
-            largest < SIZE / 8,
-            "a window of 2 lines allocated {largest} bytes of a {SIZE}-byte file"
-        );
+        let (_, failed) =
+            run(&parse(&[broken, &good, "--output", out, "--abort-on-error"]).unwrap())
+                .expect("ran");
+        assert_eq!(failed.len(), 1, "{failed:?}");
     }
 
-    /// Bare `docread` is a line that asked for nothing, and help is the useful answer to it.
+    /// Options are refused where they are typed wrong, not where they are used.
     #[test]
-    fn asking_for_nothing_is_answered_with_help() {
-        let e = parse(&[]).expect_err("nothing was asked for");
+    fn options_are_checked_as_they_are_parsed() {
+        for line in [
+            ["a.pdf", "--page-range", "0-3"],
+            ["a.pdf", "--page-range", "5-2"],
+            ["a.pdf", "--from", "nonsense"],
+            ["a.pdf", "--track-changes", "maybe"],
+        ] {
+            let e = parse(&line).expect_err("refused");
+            assert_eq!(e.kind(), ClapErrorKind::ValueValidation, "{line:?}");
+        }
+        assert_eq!(parse(&["a.pdf", "--page-range", "3"]).unwrap().page_range, Some((3, 3)));
+    }
+
+    /// Help is an answer, and bare `docread` is answered with it.
+    #[test]
+    fn help_is_an_answer() {
+        let e = parse(&["--help"]).expect_err("help is not a conversion");
+        assert_eq!(e.kind(), ClapErrorKind::DisplayHelp);
+        assert!(e.render().to_string().contains(&format!("Usage: {NAME}")));
         assert_eq!(
-            e.kind(),
-            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            parse(&[]).expect_err("nothing was asked for").kind(),
+            ClapErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
     }
 }

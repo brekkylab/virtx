@@ -67,7 +67,7 @@ impl Job {
         }
         let end = SandboxJobEnd {
             code: job.code.unwrap_or(128 + SIGKILL),
-            reason: job.reason,
+            reason: job.reason.clone(),
         };
         let kept = Job::new(job, false);
         kept.log.end(SandboxJobEntry::End(end), || {
@@ -104,7 +104,9 @@ impl Job {
     /// killed it, if it did, or for its memory running out where the guest says `oom`.
     pub(super) fn end(&self, code: i32, oom: bool) {
         let killed = code == 128 + SIGKILL;
-        let reason = killed.then(|| *self.killing.lock().unwrap()).flatten();
+        let reason = killed
+            .then(|| self.killing.lock().unwrap().clone())
+            .flatten();
         let reason = reason.or((killed && oom).then_some(SandboxJobEndReason::Oom));
         self.end_as(SandboxJobEnd { code, reason });
     }
@@ -112,7 +114,7 @@ impl Job {
     /// End it now, if it runs still, as killed for `reason`, or for the reason it is being
     /// killed for already: whatever its process does after is not its job's.
     pub(super) fn cut(&self, reason: SandboxJobEndReason) {
-        let reason = self.killing.lock().unwrap().unwrap_or(reason);
+        let reason = self.killing.lock().unwrap().clone().unwrap_or(reason);
         self.end_as(SandboxJobEnd {
             code: 128 + SIGKILL,
             reason: Some(reason),
@@ -123,7 +125,7 @@ impl Job {
     /// will be: whoever waits on it is told so.
     fn end_as(&self, end: SandboxJobEnd) {
         *self.stdin.lock().unwrap() = Stdin::default();
-        let (code, reason) = (end.code, end.reason);
+        let (code, reason) = (end.code, end.reason.clone());
         self.log.end(SandboxJobEntry::End(end), || {
             let mut job = self.job.lock().unwrap();
             (job.running, job.code, job.reason) = (false, Some(code), reason);

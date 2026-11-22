@@ -104,7 +104,7 @@ pub struct SandboxStdinArgs {
 /// An entry of a kind a later version of the protocol adds is read as
 /// [`Other`](Self::Other), for a reader to pass over, so a log with one still reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", remote = "Self")]
 #[non_exhaustive]
 pub enum SandboxJobEntry {
     /// A line the process wrote to stdout, without its line ending.
@@ -120,16 +120,11 @@ pub enum SandboxJobEntry {
     End(SandboxJobEnd),
 
     /// One of a kind this version does not know.
-    #[serde(untagged, deserialize_with = "unknown_entry")]
+    #[serde(skip)]
     Other(crate::UnknownEntry),
 }
 
-/// [`SandboxJobEntry::Other`]: one named by none of the kinds above.
-fn unknown_entry<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<crate::UnknownEntry, D::Error> {
-    crate::UnknownEntry::not_of(deserializer, &["stdout", "stderr", "truncated", "end"])
-}
+crate::log_entry::open_entry!(SandboxJobEntry);
 
 /// How a process ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

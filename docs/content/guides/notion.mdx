@@ -10,14 +10,14 @@ The files are read from Notion as they are opened, not copied in, so they follow
 
 ## Connect Notion
 
-1. As a workspace owner, create an internal connection and give it the **Read content** capability.
-2. On the top-level page you want to expose, open the **•••** menu, select **Add connections**, and choose your connection.
-3. Set `NOTION_API_KEY` in the environment of the program running the virtx client, using the API token from the connection's **Configuration** tab.
-
 <Aside type="caution">
 These steps follow Notion's settings as this guide was written, and Notion may rename or move them.
 If a menu or tab differs, follow the [Notion authorization guide](https://developers.notion.com/guides/authorization/overview#internal-connection-auth-flow-set-up).
 </Aside>
+
+1. As a workspace owner, create an internal connection and give it the **Read content** capability.
+2. On the top-level page you want to expose, open the **•••** menu, select **Add connections**, and choose your connection.
+3. Set `NOTION_API_KEY` in the environment of the program running the virtx client, using the API token from the connection's **Configuration** tab.
 
 ## Mount and list pages
 

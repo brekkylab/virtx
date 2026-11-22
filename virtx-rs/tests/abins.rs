@@ -125,6 +125,95 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
     none.remove().wait().unwrap();
 }
 
+/// `browser` drives a page in an image of either C library with nothing of its own installed,
+/// and with no network: each command a job of its own, all in the one browser the first started.
+#[test]
+fn browser_drives_a_page_on_either_c_library() {
+    let client = common::client();
+    for image in [ALPINE, DEBIAN] {
+        pulled(&client, image);
+        let sandbox = client
+            .create_sandbox(&SandboxCreateArgs::new(image).abin("browser").network(false))
+            .wait()
+            .unwrap();
+        let (lines, code) = run(
+            &sandbox,
+            &[
+                "sh",
+                "-c",
+                "echo '<h1 id=t>before</h1><button onclick=\"t.textContent=`after`\">Go</button>' \
+                 > /root/page.html",
+            ],
+        );
+        assert_eq!(code, 0, "{image}: {lines:?}");
+
+        let (lines, code) = run(&sandbox, &["browser", "open", "file:///root/page.html"]);
+        assert_eq!(code, 0, "{image}: {lines:?}");
+        let (lines, code) = run(&sandbox, &["browser", "snapshot", "-i"]);
+        assert_eq!(code, 0, "{image}: {lines:?}");
+        assert!(
+            lines.iter().any(|line| line == r#"- button "Go" [ref=e2]"#),
+            "{image}: {lines:?}"
+        );
+        let (lines, code) = run(&sandbox, &["browser", "click", "@e2"]);
+        assert_eq!(code, 0, "{image}: {lines:?}");
+        assert_eq!(
+            run(&sandbox, &["browser", "get", "text", "#t"]),
+            (vec!["after".into()], 0),
+            "{image}"
+        );
+        let (lines, code) = run(&sandbox, &["browser", "screenshot", "/root/page.png"]);
+        assert_eq!(code, 0, "{image}: {lines:?}");
+        assert_eq!(
+            run(&sandbox, &["test", "-s", "/root/page.png"]).1,
+            0,
+            "{image}"
+        );
+        let (lines, code) = run(&sandbox, &["browser", "close"]);
+        assert_eq!(code, 0, "{image}: {lines:?}");
+        sandbox.remove().wait().unwrap();
+    }
+}
+
+/// `browser --headed` opens Chrome in a window on the screen `display` makes, where it is no
+/// headless Chrome to the page.
+#[test]
+fn browser_opens_a_window_on_a_display() {
+    let client = common::client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(
+            &SandboxCreateArgs::new(ALPINE)
+                .abin("browser")
+                .abin("display")
+                .network(false),
+        )
+        .wait()
+        .unwrap();
+    let (lines, code) = run(
+        &sandbox,
+        &[
+            "display",
+            "run",
+            "--",
+            "sh",
+            "-c",
+            "browser --headed open about:blank && browser eval navigator.userAgent \
+             && browser close",
+        ],
+    );
+    assert_eq!(code, 0, "{lines:?}");
+    let agent = lines
+        .iter()
+        .find(|line| line.starts_with("\"Mozilla/"))
+        .unwrap_or_else(|| panic!("no user agent in {lines:?}"));
+    assert!(
+        agent.contains(" Chrome/") && !agent.contains("Headless"),
+        "{agent}"
+    );
+    sandbox.remove().wait().unwrap();
+}
+
 /// `/alib` is read-only, with Vulkan for each C library; a sandbox without a GPU is given none
 /// of it on `LD_LIBRARY_PATH`, and no Vulkan driver.
 #[test]

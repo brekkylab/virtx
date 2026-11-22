@@ -209,8 +209,8 @@ let client = Client::connect(
 - **在隔离环境中运行不可信代码：** 每个沙箱都是拥有独立内核的 microVM，由 Hypervisor 提供隔离，而不只是靠命名空间，需要时还能完全断开网络。
 - **为构建 AI 智能体而优化：** RAG、浏览器操控、GUI 自动化等 AI 智能体任务，在沙箱里开箱即用。详见 [RAG](https://virtx.sh/docs/guides/implementing-rag/)、[浏览器操控](https://virtx.sh/docs/guides/browser/)和 [GUI 程序](https://virtx.sh/docs/guides/gui-programs/) 指南。
 - **接入外部上下文：** 把 Notion、Google Drive、OneDrive 当作普通文件挂载进沙箱。
-- **同样能用 GPU：** 在 Linux、macOS、Windows 上对宿主机 GPU 做了半虚拟化，沙箱里就能跑深度学习模型和图形任务。
-- **在哪儿开发都能用：** 任何客户端都能对接任何主机上的任何服务器，从本地服务器切到远程服务器或云端，只需改一行代码。
+- **使用 GPU：** 在 Linux、macOS、Windows 上对宿主机 GPU 做了半虚拟化，沙箱里就能跑深度学习模型和图形任务。
+- **随处运行：** 任何客户端都能对接任何主机上的任何服务器，从本地服务器切到远程服务器或云端，只需改一行代码。
   - **客户端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **服务器：** 💻 本地 (stdio) · 🖥️ 远程 (tcp) · ☁️ 云端
   - **主机：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows

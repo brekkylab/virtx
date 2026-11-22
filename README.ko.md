@@ -211,8 +211,8 @@ let client = Client::connect(
 - **신뢰할 수 없는 코드는 내 컴퓨터 밖에서:** 샌드박스는 모두 자체 커널을 가진 microVM이라 네임스페이스 수준이 아니라 하이퍼바이저 수준에서 격리되고, 네트워크도 완전히 끊을 수 있습니다.
 - **AI 에이전트 개발에 최적화된 샌드박스:** RAG, 브라우저 사용, GUI 자동화 같은 AI 에이전트 작업을 샌드박스에서 바로 할 수 있습니다. 자세한 내용은 [RAG](https://virtx.sh/docs/guides/implementing-rag/), [브라우저 사용](https://virtx.sh/docs/guides/browser/), [GUI 프로그램](https://virtx.sh/docs/guides/gui-programs/) 가이드를 참고하세요.
 - **외부 컨텍스트 가져오기:** Notion, Google Drive, OneDrive를 샌드박스에 평범한 파일처럼 마운트할 수 있습니다.
-- **GPU도 함께:** Linux, macOS, Windows에서 호스트의 GPU를 반가상화해, 샌드박스 안에서 딥러닝 모델을 돌리거나 그래픽 작업을 할 수 있습니다.
-- **어디서 작업하든 그대로:** 어떤 클라이언트든 어느 호스트의 어떤 서버와도 함께 쓸 수 있고, 로컬 서버에서 원격 서버나 클라우드로 옮길 때도 코드 한 줄만 바꾸면 됩니다.
+- **GPU 사용:** Linux, macOS, Windows에서 호스트의 GPU를 반가상화해, 샌드박스 안에서 딥러닝 모델을 돌리거나 그래픽 작업을 할 수 있습니다.
+- **어디서든 실행:** 어떤 클라이언트든 어느 호스트의 어떤 서버와도 함께 쓸 수 있고, 로컬 서버에서 원격 서버나 클라우드로 옮길 때도 코드 한 줄만 바꾸면 됩니다.
   - **클라이언트:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **서버:** 💻 로컬 (stdio) · 🖥️ 원격 (tcp) · ☁️ 클라우드
   - **호스트:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows

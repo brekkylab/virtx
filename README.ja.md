@@ -209,8 +209,8 @@ let client = Client::connect(
 - **信頼できないコードを手元から切り離す:** サンドボックスはすべて独自のカーネルを持つmicroVMで、名前空間だけでなくハイパーバイザーによって隔離され、ネットワークを完全に遮断することもできます。
 - **AIエージェント開発に最適化:** RAG、ブラウザ操作、GUI自動化といったAIエージェントの作業を、サンドボックスですぐに行えます。詳しくは[RAG](https://virtx.sh/docs/guides/implementing-rag/)、[ブラウザ操作](https://virtx.sh/docs/guides/browser/)、[GUIプログラム](https://virtx.sh/docs/guides/gui-programs/)のガイドを参照してください。
 - **外部のコンテキストを取り込む:** Notion、Google Drive、OneDriveを普通のファイルとしてサンドボックスにマウントできます。
-- **GPUも使える:** Linux、macOS、WindowsでホストのGPUを準仮想化しているので、サンドボックス内でディープラーニングのモデルを動かしたり、グラフィックスの処理をしたりできます。
-- **どこで作業していても同じように使える:** どのクライアントも、どのホスト上のどのサーバーとも組み合わせられ、ローカルサーバーからリモートやクラウドへの切り替えも1行の変更で済みます。
+- **GPUを使う:** Linux、macOS、WindowsでホストのGPUを準仮想化しているので、サンドボックス内でディープラーニングのモデルを動かしたり、グラフィックスの処理をしたりできます。
+- **どこでも動く:** どのクライアントも、どのホスト上のどのサーバーとも組み合わせられ、ローカルサーバーからリモートやクラウドへの切り替えも1行の変更で済みます。
   - **クライアント:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **サーバー:** 💻 ローカル (stdio) · 🖥️ リモート (tcp) · ☁️ クラウド
   - **ホスト:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows

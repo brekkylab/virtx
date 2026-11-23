@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::ffi::OsString;
+use std::fmt::Display;
 use std::fs::File;
 use std::io;
 use std::net::SocketAddr;
@@ -15,12 +16,16 @@ use serde::{Deserialize, Serialize};
 use crate::fstree::FsTree;
 use crate::machine::{
     Error, Network, Result,
-    boot::{self, BootArgs},
+    boot::{self, BootArgs, CONSOLE_TARGET},
     wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
 
 /// How many of the last lines the machine process logged a failure is told with.
 const TAIL: usize = 50;
+
+/// The log target [`enter`] tells the host why the machine could not be built under, as
+/// [`Error::told`] has it.
+const TOLD_TARGET: &str = "virtx_uvm::told";
 
 /// How long a machine told to shut down has to, before it is killed.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -96,10 +101,16 @@ pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
 /// Grow the upper disk at `path`, which no machine runs over, to `gib` GiB, with what is on it
 /// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
 /// no room to grow in place, which a kernel will not grow either -- is read whole and written
-/// again at the new size: at `part`, moved over it once whole, so a failure leaves it as it
-/// was. Each file is read whole, its holes too, so a file larger than the disk could hold is
-/// refused, and the new disk takes on the host what its files are long, not `gib`.
-pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
+/// again at the new size: at `part`, moved over it once whole and `before_move` has answered,
+/// so a failure, `before_move`'s too, leaves it as it was. Each file is read whole, its holes
+/// too, so a file larger than the disk could hold is refused, and the new disk takes on the host
+/// what its files are long, not `gib`.
+pub(crate) fn grow_upper(
+    path: &Path,
+    part: &Path,
+    gib: u32,
+    before_move: impl FnOnce() -> io::Result<()>,
+) -> Result<()> {
     let size = u64::from(gib) << 30;
     let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);
     if std::fs::metadata(path).map_err(read)?.len() >= size {
@@ -107,17 +118,20 @@ pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
     }
     let tree = FsTree::from_ext4(io::BufReader::new(File::open(path).map_err(read)?))?;
     let _ = std::fs::remove_file(part);
-    let written = File::create_new(part)
+    let grown = File::create_new(part)
         .map_err(|e| Error::io(format!("creating {}", part.display()), e))
         .and_then(|file| Ok(tree.to_ext4(sparse(file), size)?))
+        .and_then(|()| {
+            before_move().map_err(|e| Error::io(format!("growing {}", path.display()), e))
+        })
         .and_then(|()| {
             std::fs::rename(part, path)
                 .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
         });
-    if written.is_err() {
+    if grown.is_err() {
         let _ = std::fs::remove_file(part);
     }
-    written
+    grown
 }
 
 /// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not an
@@ -272,6 +286,7 @@ impl Machine {
         drop((their_ctrlin, their_ctrlout, their_ioin, their_ioout));
 
         let mut tail = VecDeque::with_capacity(TAIL);
+        let mut told = None;
         loop {
             match wire::recv(&mut ctrlout).ok().flatten() {
                 Some(CtrlResp::Ready(published)) => {
@@ -284,22 +299,23 @@ impl Machine {
                         held: None,
                     });
                 }
-                Some(CtrlResp::Log { message, .. }) => {
+                Some(CtrlResp::Log {
+                    target, message, ..
+                }) if target == TOLD_TARGET => told = Some(message),
+                Some(CtrlResp::Log {
+                    target, message, ..
+                }) => {
                     if tail.len() == TAIL {
                         tail.pop_front();
                     }
-                    tail.push_back(message);
+                    tail.push_back((target, message));
                 }
                 Some(_) => {}
                 None => {
                     let status = process
                         .wait()
                         .map_err(|e| Error::io("waiting for the machine's process", e))?;
-                    let why = format!("the machine's process ended with {status} before it was up");
-                    return Err(Error::DidNotStart(match tail.is_empty() {
-                        true => why,
-                        false => format!("{why}; last logged:\n{}", Vec::from(tail).join("\n")),
-                    }));
+                    return Err(did_not_start(status, tail.make_contiguous(), told));
                 }
             }
         }
@@ -522,6 +538,24 @@ fn exchange(
     Ok((answer, read))
 }
 
+/// Why a machine whose process ended with `status` before it was up did not start, from the
+/// last records it `logged`, each a target and a message, and `told`, why as [`enter`] told it.
+/// The account has every record; what a caller elsewhere is told has the guest console's and
+/// `told`, since libkrun's records and this crate's can name this host's paths.
+fn did_not_start(status: impl Display, logged: &[(String, String)], told: Option<String>) -> Error {
+    let why = format!("the machine's process ended with {status} before it was up");
+    let said = |lines: Vec<String>| match lines.is_empty() {
+        true => why.clone(),
+        false => format!("{why}; last logged:\n{}", lines.join("\n")),
+    };
+    let line = |(target, message): &(String, String)| format!("{target}: {message}");
+    let console = logged.iter().filter(|(target, _)| target == CONSOLE_TARGET);
+    Error::DidNotStart {
+        account: said(logged.iter().map(line).collect()),
+        told: said(console.map(line).chain(told).collect()),
+    }
+}
+
 /// A pipe end as the command line names it.
 ///
 /// Neither std nor tokio hands a child anything past its stdin, stdout and stderr, so the
@@ -590,6 +624,7 @@ pub fn enter() -> Result<Infallible> {
     let entered = boot::boot(args.config, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
+        log::error!(target: TOLD_TARGET, "{}", e.told());
     }
     entered
 }
@@ -614,7 +649,54 @@ mod tests {
     }
 
     #[test]
-    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks() {
+    fn a_machine_that_did_not_start_tells_its_console_and_why_and_no_more() {
+        let logged = [
+            (
+                "devices::virtio::block",
+                "opening /store/rootfs/a.vmdk: denied",
+            ),
+            (CONSOLE_TARGET, "[    0.100000] Booting"),
+            (
+                "virtx_uvm::machine::machine",
+                "attaching the root's image: boot error: /store/rootfs/a.vmdk",
+            ),
+        ]
+        .map(|(target, message)| (target.to_string(), message.to_string()));
+        let told = "attaching the root's image: boot error".to_string();
+        let Error::DidNotStart { account, told } =
+            did_not_start("exit status: 1", &logged, Some(told))
+        else {
+            unreachable!()
+        };
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        assert_eq!(
+            account,
+            format!(
+                "{why}; last logged:\n\
+                 devices::virtio::block: opening /store/rootfs/a.vmdk: denied\n\
+                 init_or_kernel: [    0.100000] Booting\n\
+                 virtx_uvm::machine::machine: attaching the root's image: boot error: \
+                 /store/rootfs/a.vmdk"
+            )
+        );
+        assert_eq!(
+            told,
+            format!(
+                "{why}; last logged:\n\
+                 init_or_kernel: [    0.100000] Booting\n\
+                 attaching the root's image: boot error"
+            )
+        );
+
+        let Error::DidNotStart { account, told } = did_not_start("signal: 9", &[], None) else {
+            unreachable!()
+        };
+        let why = "the machine's process ended with signal: 9 before it was up";
+        assert_eq!((account.as_str(), told.as_str()), (why, why));
+    }
+
+    #[test]
+    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks_and_told_once_written() {
         use crate::fstree::{Entry, Meta};
         let dir = tempfile::tempdir().unwrap();
         let (path, part) = (dir.path().join("w.ext4"), dir.path().join("w.ext4.part"));
@@ -629,13 +711,23 @@ mod tests {
             .unwrap();
         let before = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
 
-        grow_upper(&path, &part, 3).unwrap();
+        // Told once it is written, and left as it was where that fails.
+        let failed = grow_upper(&path, &part, 3, || {
+            assert_eq!(std::fs::metadata(&part).unwrap().len(), 3 << 30);
+            Err(io::Error::other("refused"))
+        });
+        assert!(matches!(failed, Err(Error::Io { .. })), "{failed:?}");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1 << 30);
+        assert!(!part.exists());
+
+        grow_upper(&path, &part, 3, || Ok(())).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
         let after = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
         assert_eq!(after.digest(), before.digest());
         assert!(!part.exists());
 
-        grow_upper(&path, &part, 2).unwrap();
+        let told = || panic!("told of a disk not grown");
+        grow_upper(&path, &part, 2, told).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
     }
 

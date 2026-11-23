@@ -26,7 +26,7 @@ use http::HeaderMap;
 use tower::ServiceExt as _;
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
 use virtx_uvm::{
-    ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
+    HostPaths, ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
     RegistryServer, Sandbox,
 };
 
@@ -204,7 +204,8 @@ impl Host {
         }
         let dir = self.store.path(id);
         let images = ImageStore::new(dir.join("images"))?;
-        let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+        let registry = RegistryServer::new(images.clone(), REGISTRY_PATH)?;
+        let registry = Arc::new(registry.with_host_paths(HostPaths::Named));
         let home = Arc::new(Home::new(images, registry, &dir)?);
         homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))
@@ -1168,6 +1169,40 @@ mod tests {
             .unwrap();
         let xml = String::from_utf8(body.to_vec()).unwrap();
         assert!(xml.contains("displayname"), "{xml}");
+    }
+
+    /// A failure on this host's files is answered as its account says it, naming their paths,
+    /// to a caller on this host: a volume whose mount table does not read, and the registry's
+    /// tags over a tag directory that is a file.
+    #[tokio::test]
+    async fn a_failure_on_this_host_s_files_is_answered_with_their_paths() {
+        use axum::body::Body;
+
+        let server = Server::spawn("host-paths").await;
+        server.client.create_volume(Some("v")).await.unwrap();
+        let table = server.home.join("volume").join("v").join("mounts.json");
+        std::fs::write(&table, "not a table").unwrap();
+        let tags = server.home.join("images").join("tag");
+        std::fs::remove_dir_all(&tags).unwrap();
+        std::fs::write(&tags, "not a directory").unwrap();
+
+        let answered = async |path: &str| {
+            let request = http::Request::get(path).body(Body::empty()).unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            assert_eq!(response.status(), 500, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        };
+        let files = answered("/volumes/v/files/").await;
+        let named = format!("reading {}", table.display());
+        assert!(files.starts_with(&named), "{files}");
+        let registry = answered("/images/oci/v2/app/tags/list").await;
+        let registry: serde_json::Value = serde_json::from_str(&registry).unwrap();
+        let message = registry["errors"][0]["message"].as_str().unwrap();
+        let named = format!("reading {}", tags.display());
+        assert!(message.starts_with(&named), "{message}");
     }
 
     /// Two conditional writes to one file at once, from two apps over one home as two server

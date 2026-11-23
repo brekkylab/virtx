@@ -21,11 +21,16 @@
 //! - [`endpoints::Home::take_in`] and [`let_go`](endpoints::Home::let_go): a sandbox taken into a
 //!   home whose record and disk were put there, and let go of with them left there, for moving a
 //!   sandbox between servers, or backing it up and restoring it.
+//! - [`endpoints::Home::make`]: a sandbox made under an id and port keys the server chose, as
+//!   one that names its sandboxes itself, or moves them between servers, does.
 //! - [`virtx_uvm::set_admission`]: room for its machines, every project's together. A sandbox
 //!   or a build there is none for is refused `503` `capacity`, nothing of it made. The binary
 //!   sets none, and every machine boots.
 //! - [`virtx_uvm::runs`]: each machine's coming up and going down, with when, in order, for it to
 //!   meter or report machine time by.
+//! - [`virtx_uvm::disks::set_disks`]: what a sandbox's upper disk is past its file, such as data
+//!   fetched from elsewhere as the guest first reads it. Said before
+//!   [`serve::become_machine_if_spawned`], so a machine's process has it too.
 //! - [`access::Access::through`]: what its image jobs connect to registries through. The
 //!   binary's is its config's ([`config::Config::registries`]); without one, a server's image
 //!   jobs reach registries on public addresses alone.

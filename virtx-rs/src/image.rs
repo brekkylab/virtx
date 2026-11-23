@@ -80,6 +80,8 @@ impl Ends for ImageJob {
             ImageJobEntry::End(end) => Some(end.digest.ok_or_else(|| {
                 Error::Call(Source::Server, "the job ended without a digest".into())
             })),
+            // A kind of entry this version does not know: passed over.
+            _ => None,
         }
     }
 }

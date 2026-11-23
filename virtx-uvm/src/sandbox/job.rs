@@ -67,7 +67,7 @@ impl Job {
         }
         let end = SandboxJobEnd {
             code: job.code.unwrap_or(128 + SIGKILL),
-            reason: job.reason,
+            reason: job.reason.clone(),
         };
         let kept = Job::new(job, false);
         kept.log.end(SandboxJobEntry::End(end), || {
@@ -104,7 +104,9 @@ impl Job {
     /// killed it, if it did, or for its memory running out where the guest says `oom`.
     pub(super) fn end(&self, code: i32, oom: bool) {
         let killed = code == 128 + SIGKILL;
-        let reason = killed.then(|| *self.killing.lock().unwrap()).flatten();
+        let reason = killed
+            .then(|| self.killing.lock().unwrap().clone())
+            .flatten();
         let reason = reason.or((killed && oom).then_some(SandboxJobEndReason::Oom));
         self.end_as(SandboxJobEnd { code, reason });
     }
@@ -112,7 +114,7 @@ impl Job {
     /// End it now, if it runs still, as killed for `reason`, or for the reason it is being
     /// killed for already: whatever its process does after is not its job's.
     pub(super) fn cut(&self, reason: SandboxJobEndReason) {
-        let reason = self.killing.lock().unwrap().unwrap_or(reason);
+        let reason = self.killing.lock().unwrap().clone().unwrap_or(reason);
         self.end_as(SandboxJobEnd {
             code: 128 + SIGKILL,
             reason: Some(reason),
@@ -123,7 +125,7 @@ impl Job {
     /// will be: whoever waits on it is told so.
     fn end_as(&self, end: SandboxJobEnd) {
         *self.stdin.lock().unwrap() = Stdin::default();
-        let (code, reason) = (end.code, end.reason);
+        let (code, reason) = (end.code, end.reason.clone());
         self.log.end(SandboxJobEntry::End(end), || {
             let mut job = self.job.lock().unwrap();
             (job.running, job.code, job.reason) = (false, Some(code), reason);
@@ -156,20 +158,29 @@ impl Job {
         send: impl FnOnce(u64) -> Result<(), super::Error>,
     ) -> Result<Option<Written>, super::Error> {
         let _turn = self.writing.lock().await;
-        let written = {
-            // Sent and waited for under one lock, so its answer finds it waiting.
+        // Registered before the send, so its answer finds it. Sent unlocked: the send blocks
+        // until the guest reads it, and the reader of the guest's answers takes this lock.
+        let (seq, written) = {
             let mut stdin = self.stdin.lock().unwrap();
             if !stdin.open {
                 return Ok(None);
             }
             let seq = stdin.next;
-            send(seq)?;
             stdin.next += 1;
             let (told, written) = oneshot::channel();
             stdin.waiting.insert(seq, (eof, told));
             stdin.open = !eof;
-            written
+            (seq, written)
         };
+        if let Err(e) = send(seq) {
+            // Unsent: as if never asked, unless the job ended or its stdin went meanwhile.
+            // `next` stays: part of it may have reached the guest.
+            let mut stdin = self.stdin.lock().unwrap();
+            if stdin.waiting.remove(&seq).is_some() && eof && !stdin.gone {
+                stdin.open = true;
+            }
+            return Err(e);
+        }
         Ok(written.await.ok())
     }
 
@@ -187,5 +198,83 @@ impl Job {
             Taken::Full => stdin.open |= eof && !stdin.gone,
         }
         let _ = told.send(written);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use virtx_core::SandboxJobKind;
+
+    use super::*;
+    use crate::sandbox::Error;
+
+    fn job() -> Arc<Job> {
+        let job = SandboxJob {
+            id: "j".into(),
+            kind: SandboxJobKind::Exec,
+            pid: 7,
+            cmd: vec!["cat".into()],
+            running: true,
+            code: None,
+            reason: None,
+        };
+        Job::new(job, true)
+    }
+
+    #[tokio::test]
+    async fn an_answer_read_while_its_write_is_sent_finds_the_write_waiting() {
+        let job = job();
+        let answering = Arc::clone(&job);
+        let send = move |seq| {
+            // Answered on another thread before the send returns, as a large write can be.
+            let (said, heard) = mpsc::channel();
+            std::thread::spawn(move || {
+                let written = Written {
+                    bytes: 2,
+                    taken: Taken::Whole,
+                };
+                answering.written(seq, written);
+                let _ = said.send(());
+            });
+            heard
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| Error::JobEnded("the answer waited on the send"))
+        };
+        let written = job.write_stdin(false, send).await.unwrap();
+        assert_eq!(written.map(|w| w.taken), Some(Taken::Whole));
+    }
+
+    #[tokio::test]
+    async fn a_write_not_sent_reopens_its_stdin_only_if_nothing_closed_it_meanwhile() {
+        let cases = [
+            ("nothing", (|_| {}) as fn(&Job), true),
+            ("its job ends", |job| job.end(0, false), false),
+            (
+                "its stdin goes",
+                |job| {
+                    let mut stdin = job.stdin.lock().unwrap();
+                    (stdin.open, stdin.gone) = (false, true);
+                },
+                false,
+            ),
+        ];
+        for (meanwhile, happens, open) in cases {
+            let job = job();
+            let during = Arc::clone(&job);
+            let send = move |_| {
+                happens(&during);
+                Err(Error::JobEnded("not sent"))
+            };
+            assert!(job.write_stdin(true, send).await.is_err(), "{meanwhile}");
+            let stdin = job.stdin.lock().unwrap();
+            assert_eq!(
+                (stdin.open, stdin.waiting.is_empty()),
+                (open, true),
+                "{meanwhile}"
+            );
+        }
     }
 }

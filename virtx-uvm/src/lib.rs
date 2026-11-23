@@ -7,6 +7,7 @@
 
 mod admission;
 pub mod backend;
+pub mod disks;
 mod files;
 mod fstree;
 mod image;
@@ -30,8 +31,8 @@ pub use image::{
     store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };
 pub use machine::{
-    Error as MachineError, Machine, MachineConfig, MachineSpec, Network, Ports, Publication,
-    VolumeMount, enter as enter_machine, wire,
+    Error as MachineError, Machine, MachineConfig, MachineSpec, Network, Paused, Ports,
+    Publication, SandboxDisk, VolumeMount, enter as enter_machine, wire,
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;
@@ -53,6 +54,35 @@ pub use volume::{
     ONEDRIVE_ORIGINS_ENV, Onedrive, OnedriveConfig, OnedriveOrigins, Remote, Served, Stat,
     Store as VolumeStore, Volume,
 };
+
+/// Whether a server's answers name this host's paths, which an account of a failure on its
+/// files does, as `reading /home/virtx/project/a/volume/v/mounts.json: …` does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostPaths {
+    /// Not named, for a caller elsewhere: such a failure is told by its kind, and its account
+    /// is written to this process's stderr.
+    #[default]
+    Hidden,
+    /// Named, for a caller on this host, as `virtx-stdio`'s is: such a failure is told as its
+    /// account says it.
+    Named,
+}
+
+impl HostPaths {
+    /// What an answer says of an operation on this host's files that failed with an error of
+    /// `kind`, `account` saying which and how. Answered even when stderr cannot take the
+    /// account, as on a disk that is full.
+    pub fn told(self, kind: std::io::ErrorKind, account: impl std::fmt::Display) -> String {
+        match self {
+            HostPaths::Hidden => {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(), "{account}");
+                format!("the server's files: {kind}")
+            }
+            HostPaths::Named => account.to_string(),
+        }
+    }
+}
 
 /// Whether `name` can name a volume or anything else kept under a name: letters,
 /// digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 bytes, since it

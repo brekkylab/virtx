@@ -194,6 +194,9 @@ async fn a_server_of_its_own_identity_projects_and_routes_is_built_from_the_libr
     let (status, body) = get("/volumes/", Some("acme-key"), Some("acme")).await;
     assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
     assert!(store.path(&ACME.parse().unwrap()).is_dir());
+    // Its home, as a server built over the library reads it by the project's id.
+    let home = access.home_of(&ACME.parse().unwrap()).await.unwrap();
+    assert!(home.is_some());
     assert_eq!(get("/node/homes", None, None).await.1, "1");
     let (status, body) = get("/projects/", Some("acme-key"), None).await;
     assert_eq!(

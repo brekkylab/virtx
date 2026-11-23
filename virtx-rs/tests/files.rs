@@ -233,12 +233,12 @@ fn a_sandbox_s_files_are_what_its_processes_see() {
     };
     let status = |refused: Result<(), virtx::Error>| refused.unwrap_err().status();
 
-    // The root as a process sees it, but for the kernel's filesystems and the agent's.
+    // The root as a process sees it, but for the kernel's filesystems.
     let listed = names("");
     for shown in ["etc", "root", "data"] {
         assert!(listed.iter().any(|name| name == shown), "{listed:?}");
     }
-    for hidden in ["proc", "sys", "dev", ".virtx"] {
+    for hidden in ["proc", "sys", "dev"] {
         assert!(!listed.iter().any(|name| name == hidden), "{listed:?}");
     }
     let gone = sandbox.stat_file("proc/self").wait().unwrap_err();

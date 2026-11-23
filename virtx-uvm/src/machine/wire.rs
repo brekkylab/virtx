@@ -4,8 +4,9 @@
 //!
 //! The same frames go on between the process and the agent in the guest, over the
 //! virtio-console port [`PORT_NAME`]: the process passes the host's on to the agent and the
-//! agent's back, so the channel runs end to end. The agent, built apart, includes this file by
-//! path.
+//! agent's back, so the channel runs end to end. Before any of the host's, the process writes
+//! one frame of its own there: the [`MachineInfo`] the agent builds its root from. The agent,
+//! built apart, includes this file by path.
 //!
 //! The I/O channel is two more pipes, `ioin` and `ioout`, which the process wires straight to
 //! the virtio-console port [`IO_PORT_NAME`]: the host writes [`IoReq`]s into it and
@@ -33,6 +34,25 @@ pub const IO_PORT_NAME: &str = "virtx-io";
 /// The most of a file one [`Read`](IoReq::Read) or [`Write`](IoReq::Write)
 /// moves.
 pub const MAX_DATA: usize = 1 << 20;
+
+/// What the machine's process tells the agent first, before anything of the host's: the root to
+/// build. The overlay of the two disks, the shares mounted over it in this order, and where the
+/// guest stands in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInfo {
+    /// The read-only disk under the overlay, and the filesystem on it.
+    pub lower_device: String,
+    pub lower_fstype: String,
+    /// The writable disk over it, and the filesystem on it.
+    pub upper_device: String,
+    pub upper_fstype: String,
+    /// Each virtio-fs share, by the tag it is attached under, and where it is mounted.
+    pub shares: Vec<(String, String)>,
+    /// The resolver `/etc/resolv.conf` names; `None` leaves the image's file as it is.
+    pub nameserver: Option<String>,
+    /// Where the agent, and so every command, stands.
+    pub workdir: String,
+}
 
 /// What the host tells the machine's process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +85,9 @@ pub enum CtrlReq {
         #[serde(default)]
         eof: bool,
     },
+    /// Put what the guest has written on its disks, as they are about to be copied, and say so
+    /// with [`Synced`](CtrlResp::Synced).
+    Sync,
     /// Answered with [`Pong`](CtrlResp::Pong), from the machine's process to the agent: how it
     /// hears a guest that is up. The host never sends it.
     Ping,
@@ -93,12 +116,20 @@ pub enum CtrlResp {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         oom: bool,
     },
+    /// What the guest had written is on its disks, as the last [`Sync`](CtrlReq::Sync) asked.
+    Synced,
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
-    /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
-    /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine
-    /// could not be built or broke, logged as an error as the process's last word -- so a
-    /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
-    Log { level: String, message: String },
+    /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`, under the
+    /// `target` it was logged under, empty in a record that carries none. Among it are the
+    /// guest's console, which libkrun logs under `init_or_kernel`, and why the machine could not
+    /// be built or broke, logged as an error as the process's last words -- so a process that
+    /// ends before [`Ready`](CtrlResp::Ready) has said why here.
+    Log {
+        level: String,
+        #[serde(default)]
+        target: String,
+        message: String,
+    },
     /// The answer to the [`Stdin`](CtrlReq::Stdin) `seq` to the process `id`: how many `bytes`
     /// of its `data` went in, and what became of it.
     Written {
@@ -273,6 +304,7 @@ mod tests {
             },
             CtrlResp::Log {
                 level: "ERROR".into(),
+                target: "virtx_uvm".into(),
                 message: "no".into(),
             },
         ];
@@ -288,6 +320,17 @@ mod tests {
             );
         }
         assert_eq!(recv::<CtrlResp>(&mut input).unwrap(), None);
+    }
+
+    #[test]
+    fn a_log_record_without_a_target_is_read_under_none() {
+        let record = br#"{"Log":{"level":"ERROR","message":"no"}}"#;
+        let expected = CtrlResp::Log {
+            level: "ERROR".into(),
+            target: String::new(),
+            message: "no".into(),
+        };
+        assert_eq!(decode::<CtrlResp>(record).unwrap(), expected);
     }
 
     #[test]

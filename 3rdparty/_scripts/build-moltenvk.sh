@@ -40,6 +40,13 @@ fi
 
 MoltenVK_commit="$(git -C "$MoltenVK_upstream" rev-parse HEAD)"
 SPIRV_Cross_commit="$(git -C "$SPIRV_Cross_upstream" rev-parse HEAD)"
+for checkout in "3rdparty/MoltenVK $MoltenVK_commit" "3rdparty/SPIRV-Cross $SPIRV_Cross_commit"; do
+    set -- $checkout
+    if [ "$2" != "$(git -C "$ROOT" ls-files -s "$1" | cut -d' ' -f2)" ]; then
+        echo "$1 is not at the commit this repository pins; run: git submodule update $1" >&2
+        exit 1
+    fi
+done
 # MoltenVK is written against one revision of SPIRV-Cross, which is the one the patches are on.
 SPIRV_Cross_pin="$(cat "$MoltenVK_upstream/ExternalRevisions/SPIRV-Cross_repo_revision")"
 if [ "$SPIRV_Cross_commit" != "$SPIRV_Cross_pin" ]; then

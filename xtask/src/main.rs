@@ -534,8 +534,7 @@ fn clippy_servers(gpu: bool) -> anyhow::Result<()> {
 /// Left out, saying so, where uv or npm is not on PATH -- except under CI, where that is a
 /// runner without what it needs.
 fn lint_bindings() -> anyhow::Result<()> {
-    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let missing: Vec<&str> = ["uv", npm]
+    let missing: Vec<&str> = ["uv", NPM]
         .into_iter()
         .filter(|tool| !on_path(tool))
         .collect();
@@ -575,7 +574,7 @@ fn lint_bindings() -> anyhow::Result<()> {
         "the format of the Python",
     )?;
     tool(
-        npm,
+        NPM,
         &[
             "install",
             "--prefix",
@@ -588,7 +587,7 @@ fn lint_bindings() -> anyhow::Result<()> {
     )?;
     let exec = ["exec", "--prefix", "virtx-node", "--"];
     tool(
-        npm,
+        NPM,
         &[
             &exec[..],
             &[
@@ -603,11 +602,15 @@ fn lint_bindings() -> anyhow::Result<()> {
         "biome of the JavaScript",
     )?;
     tool(
-        npm,
+        NPM,
         &[&exec[..], &["tsc", "-p", "virtx-node/tsconfig.json"]].concat(),
         "tsc of index.d.ts",
     )
 }
+
+/// npm as a command names it: `npm.cmd` on Windows, where a name without an extension is looked
+/// for as `.exe` alone.
+const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
 
 /// Whether `tool` runs from PATH.
 fn on_path(tool: &str) -> bool {
@@ -1560,7 +1563,7 @@ const INSTALLS: &[(&str, &[&str], &str, &[&str])] = &[
     ),
     (
         "virtx-node",
-        &["npm", "install", "--no-audit", "--no-fund"],
+        &[NPM, "install", "--no-audit", "--no-fund"],
         "node_modules/.package-lock.json",
         &["package.json", "package-lock.json"],
     ),
@@ -1665,7 +1668,7 @@ const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     ),
     ("virtx-cli", ".", &[SIGN_IN_TESTS]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
-    ("virtx-node", "virtx-node", &[&["npm", "test"]]),
+    ("virtx-node", "virtx-node", &[&[NPM, "test"]]),
 ];
 
 /// How a suite of `test_all` ended.

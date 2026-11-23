@@ -129,7 +129,7 @@ const ALIB_TAG: &str = "alib";
 const ALIB_HOST: &str = "alib";
 
 /// The log target libkrun gives what the guest's console prints.
-const CONSOLE_TARGET: &str = "init_or_kernel";
+pub(super) const CONSOLE_TARGET: &str = "init_or_kernel";
 
 /// What a machine's process is spawned with, as one argument: the machine, and its ends of
 /// the control channel and the I/O channel.
@@ -215,11 +215,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut shares = Vec::new();
     for (dir, at, tag) in [(&abin, ABIN_DIR, ABIN_TAG), (&alib, ALIB_DIR, ALIB_TAG)] {
         let Some(dir) = dir else { continue };
-        let host = utf8(dir)?;
+        let host = utf8(dir, at)?;
         info.shares.push((tag.to_owned(), at.to_owned()));
         shares.push(
             FsDevice::new_read_only(tag, host)
-                .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
+                .map_err(|e| Error::vmm(format!("sharing {at}"), e))?,
         );
     }
     let mut holds = Vec::with_capacity(machine.volumes.len());
@@ -247,7 +247,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         holds.push(volume.hold()?);
         let tag = format!("{MOUNT_TAG}{}", shares.len());
         let files = volume.files();
-        let host = utf8(&files)?;
+        let shared = format!("volume {} at {at}", volume.name());
+        let host = utf8(&files, &shared)?;
         info.shares.push((tag.clone(), at.clone()));
         // Read-only at the device, which is the whole of what `read_only` promises.
         shares.push(
@@ -255,7 +256,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 true => FsDevice::new_read_only(&tag, host),
                 false => FsDevice::new(&tag, host),
             }
-            .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
+            .map_err(|e| Error::vmm(format!("sharing {shared}"), e))?,
         );
         for mount in volume.mounts() {
             let served =
@@ -381,25 +382,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 
     // Read-only at the device and not merely in the guest's mount flags: what is behind
     // it is the layer files, shared with every other root filesystem over them.
-    let rootfs = utf8(&machine.rootfs)?;
+    let rootfs = utf8(&machine.rootfs, "the root's image")?;
     let mut lower = BlockDevice::new("vda", rootfs, DiskFormat::Vmdk)
-        .map_err(|e| Error::vmm(format!("attaching {rootfs}"), e))?;
+        .map_err(|e| Error::vmm("attaching the root's image", e))?;
     lower.set_read_only(true);
 
-    let upper_path = utf8(&machine.upper)?;
+    let upper_path = utf8(&machine.upper, "the upper disk")?;
     // A sandbox's disk as the embedder's disks open it ([`crate::disks`]): read and written
     // through what they make of it, if anything, rather than as the file is.
     let opened = match &machine.sandbox_disk {
         Some(disk) => crate::disks::disks()
             .open(&machine.upper, disk.source.as_deref())
-            .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
+            .map_err(|e| Error::io("opening the upper disk", e))?,
         None => None,
     };
     let upper_device = match &opened {
         Some(disk) => BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, disk.storage()),
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
-    .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
+    .map_err(|e| Error::vmm("attaching the upper disk", e))?;
     // Told its machine has booted, as its agent says it is ready.
     let booting = opened.clone();
     if let Some(disk) = opened {
@@ -598,7 +599,7 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
-        let message = format!("{}: {}", record.target(), record.args());
+        let message = record.args().to_string();
         // A terminal ends its lines with `\r\n`, and libkrun takes off only the `\n`.
         let message = match record.target() {
             CONSOLE_TARGET => message.trim_end_matches('\r').to_string(),
@@ -606,6 +607,7 @@ impl log::Log for Logger {
         };
         let _ = send(&CtrlResp::Log {
             level: record.level().to_string(),
+            target: record.target().to_string(),
             message,
         });
     }
@@ -633,14 +635,12 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
     Ok(published)
 }
 
-/// A path as libkrun takes it, which is a `&str`. Refused rather than lossily converted: a
-/// name with a replacement character in it opens some other file or none.
-fn utf8(path: &Path) -> Result<&str> {
+/// The path of `what`, such as `/abin`, as libkrun takes it, which is a `&str`. Refused rather
+/// than lossily converted: a name with a replacement character in it opens some other file or
+/// none.
+fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| Error::Io {
-        context: format!(
-            "{} is not valid UTF-8, which libkrun cannot name",
-            path.display()
-        ),
+        context: format!("the path of {what} is not valid UTF-8, which libkrun cannot name"),
         source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
     })
 }

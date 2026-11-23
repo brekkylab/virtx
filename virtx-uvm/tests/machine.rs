@@ -32,8 +32,9 @@ use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
 use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
-    Admission, DEFAULT_DISK_GIB, Files, ImageStore, MachineSpec, NoRoom, Reference, RegistryClient,
-    Room, Sandbox, SandboxError, SandboxJob, StorageBackend, VolumeError, VolumeStore,
+    Admission, DEFAULT_DISK_GIB, Files, ImageStore, Machine, MachineConfig, MachineError,
+    MachineSpec, Network, NoRoom, Reference, RegistryClient, Room, Sandbox, SandboxError,
+    SandboxJob, StorageBackend, VolumeError, VolumeMount, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -2042,6 +2043,48 @@ async fn a_sandbox_closed_twice_at_once_ends_once(home: Home) {
     assert_eq!(left, 0);
 }
 
+/// A machine whose volume does not open does not start, and says why to a caller elsewhere
+/// without the volume's path, which its whole account names.
+async fn a_machine_that_did_not_start_tells_why_without_this_host_s_paths(home: Home) {
+    let volume = home.volumes.create("broken").unwrap();
+    std::fs::write(volume.path().join("mounts.json"), "not a table").unwrap();
+    let config = MachineConfig {
+        rootfs: home.root.join("rootfs.vmdk"),
+        config: Default::default(),
+        upper: home.root.join("upper.ext4"),
+        spec: MachineSpec {
+            vcpus: 1,
+            ram_mib: 512,
+            gpu: false,
+            gpu_memory_mib: None,
+            network: Network::None,
+        },
+        volumes: vec![VolumeMount {
+            path: volume.path().to_path_buf(),
+            at: "/data".into(),
+            read_only: false,
+        }],
+        abin: None,
+        ports: Vec::new(),
+        sandbox_disk: None,
+    };
+    let started = tokio::task::spawn_blocking(move || Machine::start(config, &vm()))
+        .await
+        .unwrap();
+    let (account, told) = match started {
+        Err(MachineError::DidNotStart { account, told }) => (account, told),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("a machine whose volume does not open started"),
+    };
+    let path = volume.path().display().to_string();
+    assert!(account.contains(&path), "{account}");
+    assert!(!told.contains(&path), "{told}");
+    assert!(
+        told.ends_with("\nthe server's files: other error"),
+        "{told}"
+    );
+}
+
 async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Home) {
     home.volumes.create("data").unwrap();
     let mounting = |readonly| SandboxCreateArgs {
@@ -2831,6 +2874,7 @@ fn main() -> ExitCode {
         a_kept_sandbox_whose_making_is_cut_short_leaves_nothing,
         a_sandbox_is_made_under_an_id_given_it,
         a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs,
+        a_machine_that_did_not_start_tells_why_without_this_host_s_paths,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,
         a_parked_sandbox_holds_its_volume_against_removal,

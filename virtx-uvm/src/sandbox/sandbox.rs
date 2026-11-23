@@ -1498,22 +1498,18 @@ impl Sandbox {
                 Sandbox::build(
                     images, root, volumes, &args, digest, vm, park_after, kept, backing,
                 )
-                .map_err(|e| e.to_string())
             });
             match known {
                 Ok(sandbox) => kept.known.push(Arc::new(sandbox)),
-                Err(why) => {
-                    eprintln!(
-                        "sandbox {id} under {} not known again: {why}",
-                        dir.display()
-                    );
+                Err(e) => {
+                    eprintln!("sandbox {id} under {} not known again: {e}", dir.display());
                     // Let go as the sandbox not made was dropped, kept; held again here.
                     if let Some(upper) = Upper::kept_one(&dir, &id) {
                         kept.unknown.push(Unknown {
                             id,
                             name,
                             image,
-                            why,
+                            why: e.told(),
                             upper,
                         });
                     }
@@ -1552,8 +1548,8 @@ impl Sandbox {
                 "no sandbox {id} is kept here, or another server has it"
             ))
         })?;
-        let record = Record::read(&dir, id).map_err(Error::Invalid)?;
-        let digest = record.image().map_err(Error::Invalid)?;
+        let record = Record::read(&dir, id)?;
+        let digest = record.image()?;
         if let Some(backend) = backing.get() {
             backend.want(Wanted::Image(&digest)).await.map_err(failed)?;
             for asked in &record.args.volumes {
@@ -1613,7 +1609,9 @@ impl Unknown {
         self.name.as_deref()
     }
 
-    /// Why it could not be known again.
+    /// Why it could not be known again, without this host's paths: a failure on this host's
+    /// files by its kind. The whole account, which can name them, went to this process's stderr
+    /// as [`Sandbox::kept`] found it.
     pub fn why(&self) -> &str {
         &self.why
     }

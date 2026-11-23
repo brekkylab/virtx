@@ -1237,6 +1237,32 @@ async fn a_machine_s_process_leads_a_process_group_of_its_own(home: Home) {
     close(sandbox).await;
 }
 
+/// A machine's process holds what it was handed and none of its starter's other descriptors:
+/// not one left inheritable, as one another thread is making is for a moment on macOS, which
+/// held there would stay open for as long as the machine runs.
+#[cfg(unix)]
+async fn a_machine_s_process_holds_none_of_its_starter_s_descriptors(home: Home) {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    // SAFETY: a descriptor this test holds open.
+    assert_ne!(
+        unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFD, 0) },
+        -1
+    );
+    let sandbox = home.sandbox(&small(), None).await;
+    drop(writer);
+    // On a thread of its own, which a read held open does not keep this process past its end.
+    let (read, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || read.send(reader.read(&mut [0; 1]).unwrap()));
+    let got = tokio::task::spawn_blocking(move || got.recv_timeout(HANG))
+        .await
+        .unwrap();
+    close(sandbox).await;
+    assert_eq!(got.expect("no machine holds the pipe open"), 0);
+}
+
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&small(), park).await;
@@ -2995,12 +3021,16 @@ fn main() -> ExitCode {
         };
     }
     // Each of these looks at what the whole process holds -- the room its admission gives, the
-    // machines it started -- or at the host's GPU, so it runs with no other test beside it.
+    // machines it started, the descriptors they hold -- or at the host's GPU, so it runs with
+    // no other test beside it.
     let mut alone = Vec::from(tests![
         a_machine_boots_only_with_room_given_back_as_it_goes_down
     ]);
     #[cfg(unix)]
-    alone.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
+    alone.extend(tests![
+        a_machine_s_process_leads_a_process_group_of_its_own,
+        a_machine_s_process_holds_none_of_its_starter_s_descriptors
+    ]);
     if gpu {
         alone.extend(tests![
             a_gpu_sandbox_finds_the_host_s_gpu_through_venus,

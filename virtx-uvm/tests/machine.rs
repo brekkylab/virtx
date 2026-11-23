@@ -32,8 +32,9 @@ use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
 use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
-    Admission, DEFAULT_DISK_GIB, Files, ImageStore, MachineSpec, NoRoom, Reference, RegistryClient,
-    Room, Sandbox, SandboxError, SandboxJob, StorageBackend, VolumeError, VolumeStore,
+    Admission, DEFAULT_DISK_GIB, Files, ImageStore, Machine, MachineConfig, MachineError,
+    MachineSpec, Network, NoRoom, Reference, RegistryClient, Room, Sandbox, SandboxError,
+    SandboxJob, StorageBackend, VolumeError, VolumeMount, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -110,6 +111,7 @@ impl Home {
             args,
             vm(),
             park_after,
+            None,
             keys,
             &Backing::default(),
         )
@@ -169,7 +171,7 @@ async fn run(
         match entry(&event) {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => lines.push(line),
             SandboxJobEntry::End(end) => return Ok((lines, end.code)),
-            SandboxJobEntry::Truncated {} => {}
+            _ => {}
         }
     }
     panic!("a job's log ends with its end")
@@ -232,13 +234,18 @@ impl Limit {
 /// file, opened as libkrun would -- and served only under a test's home with a `serve` file in
 /// it, as an embedder serves some disks and not others. What each is served from and when its
 /// machine booted noted in `marks/` beside the test's `sandbox/`, how many are served counted,
-/// and those removed noted.
+/// and those served, made whole and forgotten noted; made whole or forgotten refused under a
+/// test's home with a `whole-fails` or `forget-fails` file in it.
 struct Embedded;
 
 /// How many sandbox disks are served now, each while its machine is up.
 static SERVING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// The disks forgotten, as their sandboxes went.
+/// The disks asked to be forgotten, as their sandboxes went or as each was grown.
 static FORGOTTEN: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// The disks served, each with how long its file was then.
+static SERVED: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+/// The disks made whole, each with how long its file was then.
+static WHOLE: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
 
 /// A disk served, until it drops.
 struct Serving;
@@ -285,6 +292,8 @@ impl Disks for Embedded {
         {
             return Ok(None);
         }
+        let len = std::fs::metadata(disk)?.len();
+        SERVED.lock().unwrap().push((disk.to_owned(), len));
         SERVING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Some((mark(disk, "source"), Box::new(Serving))))
     }
@@ -300,8 +309,22 @@ impl Disks for Embedded {
         Ok(Some(Arc::new(Opened(disk.to_owned()))))
     }
 
+    fn whole(&self, disk: &Path) -> std::io::Result<()> {
+        let len = std::fs::metadata(disk)?.len();
+        WHOLE.lock().unwrap().push((disk.to_owned(), len));
+        let home = disk.parent().unwrap().parent().unwrap();
+        if home.join("whole-fails").exists() {
+            return Err(std::io::Error::other("not made whole"));
+        }
+        Ok(())
+    }
+
     fn forget(&self, disk: &Path) -> std::io::Result<()> {
         FORGOTTEN.lock().unwrap().push(disk.to_owned());
+        let home = disk.parent().unwrap().parent().unwrap();
+        if home.join("forget-fails").exists() {
+            return Err(std::io::Error::other("not forgotten"));
+        }
         Ok(())
     }
 }
@@ -429,6 +452,67 @@ async fn a_kept_sandbox_whose_making_is_cut_short_leaves_nothing(home: Home) {
     }
 }
 
+/// A sandbox made under an id given it has that id, and is kept and known again by it with its
+/// keys. Another is refused that id while it is here and once it is let go of, its disk and
+/// record left; an id that is not one is refused, and neither refusal makes anything.
+async fn a_sandbox_is_made_under_an_id_given_it(home: Home) {
+    let making = async |id: &str, keys: Option<HashMap<String, u16>>| {
+        Sandbox::create(
+            &home.images,
+            &home.root,
+            &home.volumes,
+            &small(),
+            vm(),
+            None,
+            Some(id),
+            keys,
+            &Backing::default(),
+        )
+        .await
+    };
+    let keys = HashMap::from([("key".to_owned(), 8080)]);
+    let made = making("sbx_given-1", Some(keys.clone())).await.unwrap();
+    assert_eq!(made.id(), "sbx_given-1");
+    assert_eq!(made.answer().id, "sbx_given-1");
+    assert_eq!(made.keys(), keys);
+    let left = home.left();
+    assert!(
+        left.contains(&"sbx_given-1.ext4".to_owned())
+            && left.contains(&"sbx_given-1.json".to_owned()),
+        "{left:?}"
+    );
+
+    let again = making("sbx_given-1", Some(HashMap::new())).await.err();
+    assert!(matches!(again, Some(SandboxError::Exists(_))), "{again:?}");
+    for id in [
+        "",
+        "../x",
+        "a/b",
+        "_x",
+        "-x",
+        "a.ext4",
+        "a b",
+        &"a".repeat(65),
+    ] {
+        let refused = making(id, None).await.err();
+        assert!(
+            matches!(refused, Some(SandboxError::Invalid(_))),
+            "{id:?}: {refused:?}"
+        );
+    }
+    assert_eq!(home.left(), left, "nothing made by a refusal");
+
+    leave(made).await;
+    let again = making("sbx_given-1", None).await.err();
+    assert!(matches!(again, Some(SandboxError::Exists(_))), "{again:?}");
+    let known = home.kept();
+    assert_eq!(known.len(), 1);
+    assert_eq!(known[0].id(), "sbx_given-1");
+    assert_eq!(known[0].keys(), keys);
+    close(Arc::clone(&known[0])).await;
+    assert_eq!(home.left(), Vec::<String>::new());
+}
+
 /// A storage backend that keeps nothing and says what it is asked, a line each, as what it is
 /// asked to let be written is let go too, a disk with no file under `root` let go of "over
 /// nothing"; and refuses a disk while `refusing`.
@@ -534,6 +618,7 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
         &args,
         vm(),
         park,
+        None,
         keys,
         &backing,
     );
@@ -1267,6 +1352,7 @@ async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
         vm,
         None,
         None,
+        None,
         &Backing::default(),
     )
     .await;
@@ -1560,6 +1646,7 @@ async fn a_machine_paused_past_the_silence_bound_runs_on(home: Home) {
         vm,
         None,
         None,
+        None,
         &Backing::default(),
     )
     .await
@@ -1614,6 +1701,7 @@ async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
         &args,
         vm,
         park_after,
+        None,
         None,
         &Backing::default(),
     )
@@ -1842,10 +1930,15 @@ async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
     let grown = sandbox.resize(&resize(3)).await.unwrap();
     assert_eq!((grown.disk_gib, grown.up), (3, true));
 
-    // Its grow fails, and it boots on its disk as it was.
+    // Its grow fails, and it boots on its disk as it was, which the embedder's disks still know.
     sandbox.park().await.unwrap();
     assert_eq!(said(&sandbox, "cat /root/kept").await, "kept");
     assert_eq!(disk(&sandbox).await, 1);
+    let file = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    assert!(!FORGOTTEN.lock().unwrap().contains(&file));
 
     // Taken down to the size it has, not under it; and grown at a later boot once it can be.
     let back = sandbox.resize(&resize(2)).await.unwrap();
@@ -1859,6 +1952,81 @@ async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
         "{refused:?}"
     );
     assert_eq!(sandbox.resize(&resize(2)).await.unwrap().disk_gib, 2);
+    close(sandbox).await;
+}
+
+/// A sandbox's disk is made all its file by the embedder's disks before it is grown, forgotten
+/// by them once the grown disk is written, and served as grown; one they fail to make whole or
+/// to forget is left as it was.
+async fn a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown(home: Home) {
+    std::fs::write(home.root.join("serve"), "").unwrap();
+    let mut args = small();
+    args.disk_gib = Some(1);
+    let sandbox = home.sandbox(&args, None).await;
+    let disk = home
+        .root
+        .join("sandbox")
+        .join(format!("{}.ext4", sandbox.id()));
+    let made_whole = || -> Vec<u64> {
+        let whole = WHOLE.lock().unwrap();
+        whole
+            .iter()
+            .filter(|(d, _)| *d == disk)
+            .map(|(_, len)| *len)
+            .collect()
+    };
+    let forgotten = || {
+        FORGOTTEN
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| **d == disk)
+            .count()
+    };
+    let served_last = || -> u64 {
+        let served = SERVED.lock().unwrap();
+        served.iter().rev().find(|(d, _)| *d == disk).unwrap().1
+    };
+    let len = || std::fs::metadata(&disk).unwrap().len();
+    let resize = |disk_gib| SandboxResizeArgs {
+        disk_gib: Some(disk_gib),
+        ..SandboxResizeArgs::default()
+    };
+    run(&sandbox, &["sh", "-c", "echo kept > /root/kept"], None)
+        .await
+        .unwrap();
+
+    // Booted again with nothing to grow: nothing asked of the embedder.
+    sandbox.park().await.unwrap();
+    run(&sandbox, &["true"], None).await.unwrap();
+    assert_eq!(made_whole(), Vec::<u64>::new());
+
+    // Not made whole: not grown, and booted on as it was.
+    std::fs::write(home.root.join("whole-fails"), "").unwrap();
+    sandbox.resize(&resize(2)).await.unwrap();
+    sandbox.park().await.unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert_eq!(made_whole(), [1 << 30]);
+    assert_eq!((len(), forgotten()), (1 << 30, 0));
+
+    // Made whole and not forgotten: not grown, and booted on as it was.
+    std::fs::remove_file(home.root.join("whole-fails")).unwrap();
+    std::fs::write(home.root.join("forget-fails"), "").unwrap();
+    sandbox.park().await.unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert_eq!(made_whole(), [1 << 30, 1 << 30]);
+    assert_eq!((len(), forgotten()), (1 << 30, 1));
+
+    // Made whole as it was, then grown and forgotten.
+    std::fs::remove_file(home.root.join("forget-fails")).unwrap();
+    sandbox.park().await.unwrap();
+    let (lines, _) = run(&sandbox, &["cat", "/root/kept"], None).await.unwrap();
+    assert_eq!(lines, ["kept"]);
+    assert_eq!(made_whole(), [1 << 30, 1 << 30, 1 << 30]);
+    assert_eq!((len().div_ceil(1 << 30), forgotten()), (2, 2));
+    assert_eq!(served_last(), len(), "served as grown");
     close(sandbox).await;
 }
 
@@ -2014,6 +2182,48 @@ async fn a_sandbox_closed_twice_at_once_ends_once(home: Home) {
         .unwrap()
         .count();
     assert_eq!(left, 0);
+}
+
+/// A machine whose volume does not open does not start, and says why to a caller elsewhere
+/// without the volume's path, which its whole account names.
+async fn a_machine_that_did_not_start_tells_why_without_this_host_s_paths(home: Home) {
+    let volume = home.volumes.create("broken").unwrap();
+    std::fs::write(volume.path().join("mounts.json"), "not a table").unwrap();
+    let config = MachineConfig {
+        rootfs: home.root.join("rootfs.vmdk"),
+        config: Default::default(),
+        upper: home.root.join("upper.ext4"),
+        spec: MachineSpec {
+            vcpus: 1,
+            ram_mib: 512,
+            gpu: false,
+            gpu_memory_mib: None,
+            network: Network::None,
+        },
+        volumes: vec![VolumeMount {
+            path: volume.path().to_path_buf(),
+            at: "/data".into(),
+            read_only: false,
+        }],
+        abin: None,
+        ports: Vec::new(),
+        sandbox_disk: None,
+    };
+    let started = tokio::task::spawn_blocking(move || Machine::start(config, &vm()))
+        .await
+        .unwrap();
+    let (account, told) = match started {
+        Err(MachineError::DidNotStart { account, told }) => (account, told),
+        Err(e) => panic!("{e}"),
+        Ok(_) => panic!("a machine whose volume does not open started"),
+    };
+    let path = volume.path().display().to_string();
+    assert!(account.contains(&path), "{account}");
+    assert!(!told.contains(&path), "{told}");
+    assert!(
+        told.ends_with("\nthe server's files: other error"),
+        "{told}"
+    );
 }
 
 async fn a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go(home: Home) {
@@ -2793,6 +3003,7 @@ fn main() -> ExitCode {
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
         a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
+        a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown,
         a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
@@ -2804,7 +3015,9 @@ fn main() -> ExitCode {
         a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote,
         a_kept_sandbox_whose_machine_ends_on_its_own_has_exited_past_its_server,
         a_kept_sandbox_whose_making_is_cut_short_leaves_nothing,
+        a_sandbox_is_made_under_an_id_given_it,
         a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs,
+        a_machine_that_did_not_start_tells_why_without_this_host_s_paths,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,
         a_parked_sandbox_holds_its_volume_against_removal,

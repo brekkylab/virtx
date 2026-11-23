@@ -9,8 +9,8 @@ use super::{
     SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
-    Error,
-    transport::{LogEntry, TransportClient, full, http, segment, sse},
+    Error, LogEntry,
+    transport::{TransportClient, full, http, segment, sse},
 };
 
 /// The path of the sandbox `id`.

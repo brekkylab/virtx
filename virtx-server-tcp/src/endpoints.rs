@@ -33,17 +33,17 @@ use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxPort, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
     VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
     accepts_event_stream, described_type, from_body,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
-    ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
+    Activity, BuildError, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
+    HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, Network, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
-    RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend, UnknownSandbox,
-    VolumeError, VolumeStore, build_step, park_after, signal_number,
+    RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
+    UnknownSandbox, VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -84,6 +84,9 @@ pub struct Home {
     sandboxes: Mutex<HashMap<String, Held>>,
     /// The names sandboxes being made have taken, each until it is made or is not.
     naming: Mutex<HashSet<String>>,
+    /// The port keys sandboxes being made by [`Home::make`] have taken, each until it is made
+    /// or is not.
+    keying: Mutex<HashSet<String>>,
     /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
     /// with why, and refused all but its `DELETE`.
     unknown: Mutex<HashMap<String, UnknownSandbox>>,
@@ -151,6 +154,7 @@ impl Home {
             sandboxes: Mutex::new(sandboxes),
             unknown: Mutex::new(unknown),
             naming: Mutex::default(),
+            keying: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
             backing,
@@ -230,6 +234,86 @@ impl Home {
             return Err(forbidden("this project is being removed"));
         }
         Ok(sandbox.answer())
+    }
+
+    /// A sandbox made of `args` under the id and port keys `given` it, rather than ones picked
+    /// here: for a server built on this one that names its sandboxes itself, as one that moves
+    /// them between servers does, each keeping the id and port URLs its client holds. Made and
+    /// answered as `POST /sandboxes/` makes and answers one, each port's URL `ports/<key>`,
+    /// relative; but a port may be asked for over HTTP and carry inbound rules, which serving
+    /// and keeping are the embedder's. Refused `400` for an id that cannot be one, or keys that
+    /// are not one for each port; `409` `exists` for an id a sandbox here has, has made or keeps
+    /// -- one let go of here is [taken in](Home::take_in) instead -- or a key one opens a port
+    /// by or is being made with; and as `POST /sandboxes/` is otherwise. See [`Given::keys`]
+    /// for what keeps a key one port's across the server's homes, which this does not check.
+    pub async fn make(
+        &self,
+        args: SandboxCreateArgs,
+        given: Given,
+    ) -> Result<virtx_core::Sandbox, Refused> {
+        let Given { id, keys } = given;
+        if let Some(key) = keys.keys().find(|key| !is_key(key)) {
+            return Err(invalid(format!(
+                "keys: {key:?} is not a key: letters and digits, 128 at most"
+            )));
+        }
+        let ports: HashSet<u16> = args.ports.iter().map(|spec| spec.port).collect();
+        let opened: HashSet<u16> = keys.values().copied().collect();
+        if opened != ports || keys.len() != ports.len() {
+            return Err(invalid("keys: not one for each of its ports"));
+        }
+        let _keying = self.keying(&keys)?;
+        self.create(args, Some(&id), keys).await
+    }
+
+    /// A sandbox made of `args`, under `id` where it is given, each port behind its key in
+    /// `keys`, and answered with each port's URL `ports/<key>`.
+    async fn create(
+        &self,
+        args: SandboxCreateArgs,
+        id: Option<&str>,
+        keys: HashMap<String, u16>,
+    ) -> Result<virtx_core::Sandbox, Refused> {
+        let _naming = self.naming(args.name.as_deref())?;
+        let sandbox = Sandbox::create(
+            &self.images,
+            &self.root,
+            &self.volumes,
+            &args,
+            self.vm.clone(),
+            park_after(),
+            id,
+            Some(keys.clone()),
+            &self.backing,
+        )
+        .await?;
+
+        let id = sandbox.id().to_owned();
+        let mut answer = sandbox.answer();
+        for port in &mut answer.ports {
+            let key = keys.iter().find(|(_, opens)| **opens == port.port);
+            port.url = key.map(|(key, _)| format!("ports/{key}"));
+        }
+        let held = Held {
+            sandbox: Arc::clone(&sandbox),
+            capabilities: keys,
+        };
+        let closed = {
+            let mut sandboxes = self.sandboxes.lock().unwrap();
+            let closed = self.closed.load(Ordering::SeqCst);
+            if !closed {
+                sandboxes.insert(id.clone(), held);
+            }
+            closed
+        };
+        if closed {
+            tokio::task::spawn_blocking(move || sandbox.close()).await?;
+            if let Some(backend) = self.backing.get() {
+                let _ = backend.remove(Stored::Disk(&id)).await;
+            }
+            return Err(forbidden("this project is being removed"));
+        }
+        Ok(answer)
     }
 
     /// Let go of sandbox `id` here, as this server lets go of each as it ends
@@ -362,6 +446,28 @@ impl Home {
             ));
         }
         Ok(Naming(self, Some(name.to_owned())))
+    }
+
+    /// `keys` taken for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here, or one being made, opens a port by one of them.
+    fn keying(&self, keys: &HashMap<String, u16>) -> Result<Keying<'_>, Refused> {
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut keying = self.keying.lock().unwrap();
+        let taken = |key: &String| {
+            keying.contains(key)
+                || sandboxes
+                    .values()
+                    .any(|held| held.capabilities.contains_key(key))
+        };
+        if keys.keys().any(taken) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                "keys: a sandbox here opens a port by one of them",
+            ));
+        }
+        keying.extend(keys.keys().cloned());
+        Ok(Keying(self, keys.keys().cloned().collect()))
     }
 
     /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
@@ -520,6 +626,38 @@ impl Drop for Naming<'_> {
             self.0.naming.lock().unwrap().remove(name);
         }
     }
+}
+
+/// Port keys a sandbox being made has taken, given back as this drops: once the sandbox is
+/// among [`Home`]'s, which holds them from there, or once its making failed.
+struct Keying<'a>(&'a Home, Vec<String>);
+
+impl Drop for Keying<'_> {
+    fn drop(&mut self) {
+        let mut keying = self.0.keying.lock().unwrap();
+        for key in &self.1 {
+            keying.remove(key);
+        }
+    }
+}
+
+/// The id a sandbox is made under and the port each of its keys opens, by key, chosen by a
+/// server built on this one rather than picked here ([`Home::make`]).
+pub struct Given {
+    /// Letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
+    pub id: String,
+    /// One for each port it is made with, each letters and digits, 128 at most: its URL is
+    /// `ports/<key>`, which asks for no token, so whoever has the URL reaches the port. Each key
+    /// is to be as hard to guess as one `POST /sandboxes/` picks (64 hex digits), and to open
+    /// one port across every home of the server: [`Home::make`] refuses a key only where a
+    /// sandbox of its own home has it or is being made with it, and `ports/<key>` reaches the
+    /// first sandbox of any home that has it.
+    pub keys: HashMap<String, u16>,
+}
+
+/// Whether `key` can be a port's key given it: a URL's segment, letters and digits, 128 at most.
+fn is_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 128 && key.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// A sandbox, and the port each capability its making answered opens.
@@ -902,7 +1040,7 @@ where
                 },
                 Err(e) => ImageJobEnd {
                     digest: None,
-                    error: Some(e.to_string()),
+                    error: Some(failed(e)),
                 },
             };
             ending.end(
@@ -932,6 +1070,43 @@ where
         format!("/images/jobs/{id}"),
         &*job.job.lock().unwrap(),
     ))
+}
+
+/// Why an image job failed with `e`, as the job says it: a failure on the server's files by its
+/// kind, and a machine that did not start as its process told it, with the account of either,
+/// which can name the server's paths, on the server's stderr; the rest as it says itself.
+fn failed(e: Failure) -> String {
+    let e = match e.downcast::<BuildError>() {
+        Ok(e) => {
+            if let BuildError::Io { source, .. }
+            | BuildError::Fstree(FstreeError::Io { source, .. }) = &*e
+            {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                BuildError::Store(e) => Refused::from(e).2,
+                BuildError::Machine(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    let e = match e.downcast::<RegistryError>() {
+        Ok(e) => {
+            if let RegistryError::Fstree(FstreeError::Io { source, .. }) = &*e {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                RegistryError::Store(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    match e.downcast::<ImageStoreError>() {
+        Ok(e) => Refused::from(*e).2,
+        Err(e) => e.to_string(),
+    }
 }
 
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
@@ -1383,67 +1558,23 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             spec.port
         )));
     }
-    let _naming = home.naming(args.name.as_deref())?;
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
     // what reaches this server from outside is not this server's to know. Kept with the
     // sandbox, so that its URLs reach it across this server's restart.
-    let mut opened = Vec::new();
-    let mut capabilities = HashMap::new();
-    for spec in &args.ports {
-        let capability = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
-        opened.push(SandboxPort {
-            port: spec.port,
-            url: Some(format!("ports/{capability}")),
-            label: spec.label.clone(),
-            protocol: spec.protocol,
-            address: None,
-            inbound_error: None,
-        });
-        capabilities.insert(capability, spec.port);
-    }
-    let sandbox = Sandbox::create(
-        &home.images,
-        &home.root,
-        &home.volumes,
-        &args,
-        home.vm.clone(),
-        park_after(),
-        Some(capabilities.clone()),
-        &home.backing,
-    )
-    .await?;
-
-    let id = sandbox.id().to_owned();
-    let held = Held {
-        sandbox: Arc::clone(&sandbox),
-        capabilities,
-    };
-    let closed = {
-        let mut sandboxes = home.sandboxes.lock().unwrap();
-        let closed = home.closed.load(Ordering::SeqCst);
-        if !closed {
-            sandboxes.insert(id.clone(), held);
-        }
-        closed
-    };
-    if closed {
-        tokio::task::spawn_blocking(move || sandbox.close()).await?;
-        if let Some(backend) = home.backing.get() {
-            let _ = backend.remove(Stored::Disk(&id)).await;
-        }
-        return Err(forbidden("this project is being removed"));
-    }
-    let answer = virtx_core::Sandbox {
-        ports: opened,
-        ..sandbox.answer()
-    };
-    Ok(created(format!("/sandboxes/{id}"), &answer))
+    let capabilities = (args.ports.iter())
+        .map(|spec| {
+            let capability = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            (capability, spec.port)
+        })
+        .collect();
+    let answer = home.create(args, None, capabilities).await?;
+    Ok(created(format!("/sandboxes/{}", answer.id), &answer))
 }
 
 async fn sandbox_get(
@@ -1825,11 +1956,10 @@ impl IntoResponse for Refused {
 }
 
 /// What a refusal says of an operation on the host's files that failed with `e`: `e`'s kind.
-/// `message` can name the server's own paths, so it goes to the server's stderr instead, and the
-/// refusal is answered even when stderr cannot take it, as on a disk that is full.
+/// `message` can name the server's own paths, so it goes to the server's stderr instead
+/// ([`HostPaths::Hidden`]).
 fn io_failure(e: &std::io::Error, message: impl Display) -> String {
-    let _ = writeln!(io::stderr(), "{message}");
-    format!("the server's files: {}", e.kind())
+    HostPaths::Hidden.told(e.kind(), message)
 }
 
 /// The refusal an operation on the host's files that failed with `e` is.
@@ -1891,13 +2021,21 @@ impl From<ImageStoreError> for Refused {
     }
 }
 
-/// What booting a sandbox's machine, or sending it a command or a signal, fails with.
+/// What booting a sandbox's machine, or sending it a command or a signal, fails with. A machine
+/// that did not start is answered with why as its process told it, and its whole account, which
+/// can name the server's paths, goes to the server's stderr.
 impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
-                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
+            MachineError::DidNotStart { account, told } => {
+                let _ = writeln!(io::stderr(), "{account}");
+                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", told)
+            }
+            MachineError::Io { source, .. }
+            | MachineError::Fstree(FstreeError::Io { source, .. })
+            | MachineError::Volume(VolumeError::Io { source, .. }) => {
+                internal(io_failure(source, &e))
             }
             _ => internal(e),
         }
@@ -1909,6 +2047,7 @@ impl From<SandboxError> for Refused {
         match e {
             SandboxError::Invalid(_) => invalid(e),
             SandboxError::NotFound(_) => not_found(e),
+            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::Unsupported(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "unsupported", e)
             }
@@ -2017,8 +2156,19 @@ mod tests {
                 context: CONTEXT.into(),
                 source: source(),
             };
-            let internal: [Refused; 3] = [
+            let internal: [Refused; 6] = [
                 ImageStoreError::Fstree(tree()).into(),
+                MachineError::Fstree(tree()).into(),
+                MachineError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+                MachineError::Volume(VolumeError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                })
+                .into(),
                 ProjectError::Io {
                     context: CONTEXT.into(),
                     source: source(),
@@ -2065,6 +2215,113 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["message"], "the server's projects failed");
+    }
+
+    #[tokio::test]
+    async fn a_machine_that_did_not_start_is_answered_as_it_tells_it() {
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let told = format!("{why}; last logged:\nattaching the root's image: boot error");
+        let refusal: Refused = MachineError::DidNotStart {
+            account: format!(
+                "{why}; last logged:\nvirtx_uvm::machine::machine: attaching the root's image: \
+                 boot error: /home/virtx/project/a/images/rootfs/sha256/a.vmdk"
+            ),
+            told: told.clone(),
+        }
+        .into();
+        let response = refusal.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "boot_failed");
+        assert_eq!(body["error"]["message"], told.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_failed_image_job_says_why_without_the_server_s_paths() {
+        const CONTEXT: &str = "opening /home/virtx/project/a/images/rootfs/sha256/a.vmdk";
+        let source = || io::Error::new(io::ErrorKind::PermissionDenied, "under /home/virtx");
+        let store = move || ImageStoreError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let tree = move || FstreeError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let on_files: [Failure; 6] = [
+            Box::new(BuildError::Io {
+                context: CONTEXT.into(),
+                source: source(),
+            }),
+            Box::new(BuildError::Store(store())),
+            Box::new(BuildError::Fstree(tree())),
+            Box::new(RegistryError::Store(store())),
+            Box::new(RegistryError::Fstree(tree())),
+            Box::new(store()),
+        ];
+        for e in on_files {
+            assert_eq!(failed(e), "the server's files: permission denied");
+        }
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        cancelled.abort();
+        let elsewhere: [Failure; 2] = [
+            Box::new(BuildError::Join(cancelled.await.unwrap_err())),
+            Box::new(RegistryError::Io {
+                context: "making a registry client".into(),
+                source: io::Error::other("no proxy"),
+            }),
+        ];
+        for e in elsewhere {
+            let said = e.to_string();
+            assert_eq!(failed(e), said);
+        }
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let machine = BuildError::Machine(MachineError::DidNotStart {
+            account: format!("{why}; last logged:\n{CONTEXT}"),
+            told: why.into(),
+        });
+        assert_eq!(failed(Box::new(machine)), why);
+        let base = "base alpine:3.20: no image here is tagged alpine:3.20";
+        assert_eq!(failed(base.into()), base);
+
+        let root = std::env::temp_dir().join(format!("virtx-tcp-image-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let images = ImageStore::new(root.join("images")).unwrap();
+        let registry = Arc::new(RegistryServer::new(images.clone(), "/images").unwrap());
+        let home = Arc::new(Home::new(images, registry, &root).unwrap());
+        let started = image_job(
+            &home,
+            ImageJobKind::Build,
+            "app".into(),
+            None,
+            move |_| async move { Err(Failure::from(store())) },
+        );
+        assert!(started.is_ok());
+        let job = Arc::clone(&home.image_jobs.lock().unwrap().values().next().unwrap().0);
+        let ended = async {
+            loop {
+                if let ImageJob {
+                    running: false,
+                    error,
+                    ..
+                } = &*job.job.lock().unwrap()
+                {
+                    break error.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let error = tokio::time::timeout(Duration::from_secs(10), ended)
+            .await
+            .unwrap();
+        assert_eq!(
+            error.as_deref(),
+            Some("the server's files: permission denied")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A write its process closed its stdin under part-way is `409`, `ended`, with how much of

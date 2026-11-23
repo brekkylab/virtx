@@ -21,7 +21,7 @@ pub use backend::StorageBackend;
 pub use files::Files;
 pub use fstree::*;
 pub use image::{
-    image_build::{Error as BuildError, build_step},
+    image_build::{Error as BuildError, RECIPE_LABEL, build_step, recipe_kept},
     registry_client::{
         Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
         RegistryProxy,

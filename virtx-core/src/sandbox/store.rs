@@ -1,6 +1,11 @@
 //! Sandboxes: what one is, as the server answers it, and what making one takes.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
+
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, MapAccess, Unexpected, Visitor, value::MapAccessDeserializer},
+};
 
 use crate::image::ImageName;
 
@@ -313,8 +318,12 @@ pub struct InboundError {
 }
 
 /// How a port is reached from outside its sandbox.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// A protocol a later version of the protocol adds is read as [`Other`](Self::Other), as it was
+/// sent, so a sandbox with such a port still reads. A port asked for with one is refused.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PortProtocol {
     /// TCP: at a loopback address, or carried in a WebSocket of the subprotocol `virtx.tcp` to
     /// its `url`.
@@ -325,11 +334,25 @@ pub enum PortProtocol {
     /// reachable from other machines -- by a browser as by any client, WebSockets included. A
     /// server that cannot reach a port so refuses it.
     Http,
+
+    /// One this version does not know, as the server said it.
+    #[serde(untagged)]
+    Other(String),
 }
 
 impl PortProtocol {
     pub fn is_tcp(&self) -> bool {
-        *self == PortProtocol::Tcp
+        matches!(self, PortProtocol::Tcp)
+    }
+}
+
+/// A port's protocol as a request names it: one this version knows, as a server opens no other.
+fn known_protocol<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PortProtocol, D::Error> {
+    match PortProtocol::deserialize(deserializer)? {
+        PortProtocol::Other(other) => Err(de::Error::custom(format!(
+            "{other:?} is not a protocol this server opens"
+        ))),
+        known => Ok(known),
     }
 }
 
@@ -404,7 +427,11 @@ struct PortSpecObject {
     port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
-    #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
+    #[serde(
+        default,
+        deserialize_with = "known_protocol",
+        skip_serializing_if = "PortProtocol::is_tcp"
+    )]
     protocol: PortProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inbound: Option<Vec<InboundRule>>,
@@ -418,7 +445,7 @@ impl Serialize for PortSpec {
         PortSpecObject {
             port: self.port,
             label: self.label.clone(),
-            protocol: self.protocol,
+            protocol: self.protocol.clone(),
             inbound: self.inbound.clone(),
         }
         .serialize(serializer)
@@ -427,24 +454,44 @@ impl Serialize for PortSpec {
 
 impl<'de> Deserialize<'de> for PortSpec {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(
-            untagged,
-            expecting = r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
-        )]
-        enum Either {
-            Port(u16),
-            Spec(PortSpecObject),
+        // Told apart by what was sent, so a failure inside the object is told as itself, at its
+        // member, rather than as neither form.
+        struct Either;
+
+        impl<'de> Visitor<'de> for Either {
+            type Value = PortSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str(
+                    r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#,
+                )
+            }
+
+            fn visit_u64<E: de::Error>(self, port: u64) -> Result<PortSpec, E> {
+                u16::try_from(port)
+                    .map(PortSpec::new)
+                    .map_err(|_| E::invalid_value(Unexpected::Unsigned(port), &self))
+            }
+
+            fn visit_i64<E: de::Error>(self, port: i64) -> Result<PortSpec, E> {
+                match u64::try_from(port) {
+                    Ok(port) => self.visit_u64(port),
+                    Err(_) => Err(E::invalid_value(Unexpected::Signed(port), &self)),
+                }
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<PortSpec, A::Error> {
+                let spec = PortSpecObject::deserialize(MapAccessDeserializer::new(map))?;
+                Ok(PortSpec {
+                    port: spec.port,
+                    label: spec.label,
+                    protocol: spec.protocol,
+                    inbound: spec.inbound,
+                })
+            }
         }
-        Ok(match Either::deserialize(deserializer)? {
-            Either::Port(port) => PortSpec::new(port),
-            Either::Spec(spec) => PortSpec {
-                port: spec.port,
-                label: spec.label,
-                protocol: spec.protocol,
-                inbound: spec.inbound,
-            },
-        })
+
+        deserializer.deserialize_any(Either)
     }
 }
 
@@ -616,10 +663,10 @@ mod tests {
 
     #[test]
     fn a_port_that_is_neither_form_is_refused_saying_what_a_port_is() {
-        let refused = serde_json::from_value::<PortSpec>(json!({"port": "5900"})).unwrap_err();
+        let refused = serde_json::from_value::<PortSpec>(json!("5900")).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
+            r#"invalid type: string "5900", expected a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
         );
     }
 
@@ -663,6 +710,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(web.protocol, PortProtocol::Http);
+    }
+
+    #[test]
+    fn a_protocol_this_version_does_not_know_is_read_in_an_answer_and_refused_in_a_request() {
+        let answered = json!({"port": 53, "url": "ports/z", "protocol": "udp"});
+        let port: SandboxPort = serde_json::from_value(answered.clone()).unwrap();
+        assert_eq!(port.protocol, PortProtocol::Other("udp".into()));
+        assert_eq!(serde_json::to_value(&port).unwrap(), answered);
+
+        let asked = json!({"port": 53, "protocol": "udp"});
+        assert!(serde_json::from_value::<PortSpec>(asked).is_err());
     }
 
     #[test]

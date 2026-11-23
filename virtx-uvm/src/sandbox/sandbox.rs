@@ -233,6 +233,10 @@ impl Sandbox {
     /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
     /// nothing for `park_after`.
     ///
+    /// It is made under `id` where one is given -- letters, digits, `_` and `-`, the first a
+    /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
+    /// under `root` has, has made or keeps; under an id it picks otherwise.
+    ///
     /// With `keys`, the port each opens, it is kept past this process: its record is written
     /// once it has booted, and a making cut short before then leaves nothing. Without, it goes
     /// with this process.
@@ -249,6 +253,7 @@ impl Sandbox {
         args: &SandboxCreateArgs,
         vm: Vec<OsString>,
         park_after: Option<Duration>,
+        id: Option<&str>,
         keys: Option<HashMap<String, u16>>,
         backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
@@ -258,6 +263,18 @@ impl Sandbox {
                 "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
                  starting with '.' or '-', 128 at most"
             )));
+        }
+        if let Some(id) = id {
+            if !is_id(id) {
+                return Err(Error::Invalid(format!(
+                    "id: {id:?} is not a sandbox's id: letters, digits, '_' and '-', the first a \
+                     letter or digit, 64 at most"
+                )));
+            }
+            let dir = root.join(SANDBOX);
+            if dir.join(format!("{id}.ext4")).exists() || Record::path(&dir, id).exists() {
+                return Err(exists(id));
+            }
         }
         let mut given = HashSet::new();
         if let Some(spec) = args
@@ -380,10 +397,27 @@ impl Sandbox {
             args.clone(),
         );
         let backed = backing.clone();
+        let id = id.map(str::to_owned);
         let built = move || {
-            let given = (None, None);
+            // Its disk under the id given it, which the check above may have raced.
+            let upper = match id {
+                Some(id) => {
+                    let gib = made.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
+                    let upper = Upper::create(&root.join(SANDBOX), &id, gib)?;
+                    Some(upper.ok_or_else(|| exists(&id))?)
+                }
+                None => None,
+            };
             Sandbox::build(
-                &images, &root, &volumes, &made, digest, vm, park_after, given, backed,
+                &images,
+                &root,
+                &volumes,
+                &made,
+                digest,
+                vm,
+                park_after,
+                (upper, None),
+                backed,
             )
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
@@ -510,7 +544,7 @@ impl Sandbox {
                     port: spec.port,
                     url: None,
                     label: spec.label.clone(),
-                    protocol: spec.protocol,
+                    protocol: spec.protocol.clone(),
                     address: None,
                     inbound_error: None,
                 })
@@ -918,7 +952,7 @@ impl Sandbox {
             true => SandboxJobEndReason::Restarted,
             false => SandboxJobEndReason::SandboxDeleted,
         };
-        *self.ended_for.lock().unwrap() = Some(reason);
+        *self.ended_for.lock().unwrap() = Some(reason.clone());
         let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
         // A park or a boot under way finishes first, so its machine is down by the time this
         // returns: one being parked has synced, and one booting is stopped by `wake`, which
@@ -939,7 +973,7 @@ impl Sandbox {
         }
         drop(self.abin.lock().unwrap().take());
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
-            job.cut(reason);
+            job.cut(reason.clone());
             job.remove();
         }
     }
@@ -1238,10 +1272,11 @@ impl Sandbox {
                 .ended_for
                 .lock()
                 .unwrap()
+                .clone()
                 .unwrap_or(SandboxJobEndReason::SandboxDeleted),
         };
         for job in running.into_values() {
-            job.cut(reason);
+            job.cut(reason.clone());
         }
         drop(starting);
         self.keep_jobs();
@@ -1463,22 +1498,18 @@ impl Sandbox {
                 Sandbox::build(
                     images, root, volumes, &args, digest, vm, park_after, kept, backing,
                 )
-                .map_err(|e| e.to_string())
             });
             match known {
                 Ok(sandbox) => kept.known.push(Arc::new(sandbox)),
-                Err(why) => {
-                    eprintln!(
-                        "sandbox {id} under {} not known again: {why}",
-                        dir.display()
-                    );
+                Err(e) => {
+                    eprintln!("sandbox {id} under {} not known again: {e}", dir.display());
                     // Let go as the sandbox not made was dropped, kept; held again here.
                     if let Some(upper) = Upper::kept_one(&dir, &id) {
                         kept.unknown.push(Unknown {
                             id,
                             name,
                             image,
-                            why,
+                            why: e.told(),
                             upper,
                         });
                     }
@@ -1517,8 +1548,8 @@ impl Sandbox {
                 "no sandbox {id} is kept here, or another server has it"
             ))
         })?;
-        let record = Record::read(&dir, id).map_err(Error::Invalid)?;
-        let digest = record.image().map_err(Error::Invalid)?;
+        let record = Record::read(&dir, id)?;
+        let digest = record.image()?;
         if let Some(backend) = backing.get() {
             backend.want(Wanted::Image(&digest)).await.map_err(failed)?;
             for asked in &record.args.volumes {
@@ -1578,7 +1609,9 @@ impl Unknown {
         self.name.as_deref()
     }
 
-    /// Why it could not be known again.
+    /// Why it could not be known again, without this host's paths: a failure on this host's
+    /// files by its kind. The whole account, which can name them, went to this process's stderr
+    /// as [`Sandbox::kept`] found it.
     pub fn why(&self) -> &str {
         &self.why
     }
@@ -1656,6 +1689,21 @@ fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
 /// What a storage backend failed with, as making or booting a sandbox fails.
 fn failed(e: anyhow::Error) -> Error {
     Error::Backend(crate::backend::Refusal::Failed(e))
+}
+
+/// Whether `id` can be a sandbox's id given it: a file's name under `sandbox/` that no suffix
+/// there ends, letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
+fn is_id(id: &str) -> bool {
+    id.len() <= 64
+        && id.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// The refusal of a sandbox asked for under `id`, which one here has, has made or keeps.
+fn exists(id: &str) -> Error {
+    Error::Exists(format!("a sandbox here has the id {id}"))
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.

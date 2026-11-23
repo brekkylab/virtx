@@ -28,7 +28,6 @@ pub use client::{ForwardError, PortForwarder, TransportClient};
 pub(crate) use http::{resolved, segment, segments};
 #[cfg(feature = "server")]
 pub use server::serve_stdio;
-pub use sse::LogEntry;
 #[cfg(feature = "server")]
 pub use sse::server::{Log, accepts_event_stream};
 pub use webdav::{

@@ -635,8 +635,12 @@ jobs:
           echo "$py" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$PWD/build/virglrenderer/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
 
+      # The container's root does not own the checkout, and git works in this repository and its
+      # submodules, as `init` does, only where it is told to.
       - name: Add the guest's musl target
-        run: cargo xtask init
+        run: |
+          git config --global --add safe.directory '*'
+          cargo xtask init
 
       - uses: actions/download-artifact@v8.0.2
         with:

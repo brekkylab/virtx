@@ -477,10 +477,18 @@ fn changes_in(tree: &str) -> anyhow::Result<Vec<u8>> {
     Ok(changes)
 }
 
-/// Brings the submodule at `tree` to its pinned commit with `patches` applied. A tree as `init`
-/// last left it is made again when the pin or a patch has changed. One changed since by anyone
-/// else is left as it is while the pin and the patches are what it was made of, and refused
-/// once they are not, unless `force`.
+/// Whether the submodule at `tree` has the commit this repository's index pins checked out.
+fn at_pin(tree: &str) -> anyhow::Result<bool> {
+    let root = root_path();
+    Ok(git(&root, &["rev-parse", &format!(":{tree}")])?
+        == git(&root.join(tree), &["rev-parse", "HEAD"])?)
+}
+
+/// Brings the submodule at `tree` to its pinned commit with `patches` applied. A tree that is
+/// that commit alone is made whatever `init` recorded of it, and one as `init` last left it is
+/// made again when the pin or a patch has changed. One changed since by anyone else, in its files
+/// or by a commit, is left as it is while the pin and the patches are what it was made of; once
+/// they are not, changes in its files are refused unless `force`.
 fn apply_patches(tree: &str, patches: &str, force: bool) -> anyhow::Result<()> {
     let root = root_path();
     let (files, made_of) = patches_of(tree, patches)?;
@@ -488,8 +496,8 @@ fn apply_patches(tree: &str, patches: &str, force: bool) -> anyhow::Result<()> {
     let changes = changes_in(tree)?;
     let untouched = fs::read(&were_changes).is_ok_and(|were| were == changes);
     let made = fs::read(&was_made_of).is_ok_and(|was| was == made_of);
-    // A tree that is its commit alone has none of the patches, whatever the records say.
-    let bare = changes.is_empty() && !files.is_empty();
+    // A tree that is its pinned commit alone has none of the patches, whatever the records say.
+    let bare = !files.is_empty() && changes.is_empty() && at_pin(tree)?;
     if made && !bare && (untouched || !force) {
         return Ok(());
     }
@@ -533,7 +541,8 @@ fn servers_unready() -> anyhow::Result<Option<String>> {
         let (was_made_of, were_changes) = patch_records(tree)?;
         let (files, made_of) = patches_of(tree, patches)?;
         let changes = changes_in(tree)?;
-        if fs::read(&was_made_of).ok() != Some(made_of) || (changes.is_empty() && !files.is_empty())
+        if fs::read(&was_made_of).ok() != Some(made_of)
+            || (!files.is_empty() && changes.is_empty() && at_pin(tree)?)
         {
             return Ok(Some(format!("{tree} is not at {patches}")));
         }

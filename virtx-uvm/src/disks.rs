@@ -47,6 +47,16 @@ pub trait Disks: Send + Sync {
         Ok(())
     }
 
+    /// In the machine's process: whether a flush the guest asks of the disk at `disk` reaches
+    /// the host's storage, as it has to where the file is the disk's only copy. One whose copy
+    /// that counts is kept elsewhere -- taken from the file as it is, a lost host losing the
+    /// file with it -- may say not: the guest is then told the disk has no write cache, and
+    /// its writes, its kernel's journal's among them, wait on no `fsync` of the host's.
+    fn flushed(&self, disk: &Path) -> bool {
+        let _ = disk;
+        true
+    }
+
     /// In the server's process: whatever beside the disk at `disk` says what it is goes with it.
     /// For a disk removed with its sandbox, or as one left over, called once its file is gone,
     /// where there is no one to answer to: a failure is logged and nothing more, and what the

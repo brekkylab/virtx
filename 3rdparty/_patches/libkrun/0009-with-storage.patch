@@ -1,0 +1,195 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: khj809 <onsealeatang@gmail.com>
+Date: Mon, 9 Nov 2026 17:50:48 +0900
+Subject: with-storage: a block device reads and writes its image through a Storage the embedder gives
+
+## Why virtx needs it
+
+A server built on virtx-uvm can keep a sandbox's disk elsewhere than in a file (virtx-uvm/src/disks.rs) -- virtx cloud's lazy disk, its chunks fetched from object storage as the guest first reads them.
+BlockDevice::with_storage reads and writes the image through an imago storage the embedder gives; the file still names the disk.
+
+## What it changes
+
+A sandbox's upper disk is a file, which libkrun opens and reads and writes itself. A server built
+on `virtx-uvm` can say otherwise (`disks` (virtx-uvm/src/disks.rs), `set_disks`, in its own
+process and in each machine's, which is the same binary). Before a sandbox's machine boots, the
+server's process is asked what the machine fetches the disk's data from while it runs, such as a
+socket that answers for data kept elsewhere, and holds what serves it until the machine is down.
+The machine's process opens the disk through a storage of the embedder's, given that source, and
+tells it when the guest is up. Each removed disk is reported to the embedder too. A disk the
+embedder serves is its to copy: `Sandbox::copy_disk` refuses it, and `Sandbox::sync` has the guest
+put what it wrote on the disk first. A build's disk,
+made and thrown away within its step, is always a file.
+
+**The patch** is `BlockDevice::with_storage`: a block device that reads and writes its image
+through an `imago` storage the embedder gives, rather than through the file opened plainly. The
+file still names the disk.
+
+## When it can go
+
+When upstream's block device takes its storage from the embedder.
+---
+ src/devices/src/virtio/block/device.rs     | 17 +++++++++++------
+ src/devices/src/virtio/block/mod.rs        |  3 +++
+ src/devices/src/virtio/block/test_utils.rs |  2 +-
+ src/devices/src/virtio/mod.rs              |  2 +-
+ src/libkrun/src/api/device_builders.rs     | 17 +++++++++++++++++
+ src/libkrun/src/api/mod.rs                 |  2 +-
+ 6 files changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/src/devices/src/virtio/block/device.rs b/src/devices/src/virtio/block/device.rs
+index 0016c546..8f4492d1 100644
+--- a/src/devices/src/virtio/block/device.rs
++++ b/src/devices/src/virtio/block/device.rs
+@@ -267,7 +267,8 @@ pub struct Block {
+ impl Block {
+     /// Create a new virtio block device that operates on the given file.
+     ///
+-    /// The given file must be seekable and sizable.
++    /// The given file must be seekable and sizable. With `storage`, the image is read and
++    /// written through it instead of the file opened plainly: the file names the disk still.
+     #[allow(clippy::too_many_arguments)]
+     pub fn new(
+         id: String,
+@@ -280,6 +281,7 @@ impl Block {
+         sync_mode: SyncMode,
+         parallel_reads: bool,
+         read_pool_size: Option<NonZeroUsize>,
++        storage: Option<Box<dyn DynStorage>>,
+     ) -> io::Result<Block> {
+         let disk_image = OpenOptions::new()
+             .read(true)
+@@ -295,14 +297,17 @@ impl Block {
+ 
+         #[cfg(target_os = "macos")]
+         let file_opts = file_opts.relaxed_sync(sync_mode == SyncMode::Relaxed);
+-        let file = ImagoFile::open(file_opts)?;
+-        let discard_alignment = file.discard_align();
++        let file: Box<dyn DynStorage> = match storage {
++            Some(storage) => storage,
++            None => Box::new(ImagoFile::open(file_opts)?),
++        };
++        let discard_alignment = file.dyn_discard_align();
+ 
+         let disk_image = match disk_image_format {
+             DiskFormat::Qcow2 => {
+                 let mut qcow2 =
+                     Qcow2::<Box<dyn DynStorage>, Arc<imago::FormatAccess<_>>>::open_image(
+-                        Box::new(file),
++                        file,
+                         !is_disk_read_only,
+                     )?;
+                 qcow2.open_implicit_dependencies()?;
+@@ -310,12 +315,12 @@ impl Block {
+             }
+             DiskFormat::Raw => {
+                 let raw =
+-                    Raw::<Box<dyn DynStorage>>::open_image(Box::new(file), !is_disk_read_only)?;
++                    Raw::<Box<dyn DynStorage>>::open_image(file, !is_disk_read_only)?;
+                 FormatAccess::new(raw)
+             }
+             DiskFormat::Vmdk => {
+                 let vmdk = Vmdk::<Box<dyn DynStorage>, Arc<imago::FormatAccess<_>>>::builder(
+-                    Box::new(file),
++                    file,
+                 )
+                 .open(PermissiveImplicitOpenGate::default())?;
+                 FormatAccess::new(vmdk)
+diff --git a/src/devices/src/virtio/block/mod.rs b/src/devices/src/virtio/block/mod.rs
+index 341e83e1..f28fc196 100644
+--- a/src/devices/src/virtio/block/mod.rs
++++ b/src/devices/src/virtio/block/mod.rs
+@@ -8,6 +8,9 @@ mod worker;
+ 
+ #[cfg(feature = "blk")]
+ pub use self::device::{Block, CacheType};
++/// What a [`Block`] may read and write its image through, in place of its file.
++#[cfg(feature = "blk")]
++pub use imago::DynStorage;
+ 
+ use vm_memory::GuestMemoryError;
+ 
+diff --git a/src/devices/src/virtio/block/test_utils.rs b/src/devices/src/virtio/block/test_utils.rs
+index af2eb16d..9a470305 100644
+--- a/src/devices/src/virtio/block/test_utils.rs
++++ b/src/devices/src/virtio/block/test_utils.rs
+@@ -21,7 +21,7 @@ pub fn default_block() -> Block {
+ pub fn default_block_with_path(path: String) -> Block {
+     let id = "test".to_string();
+     // The default block device is read-write and non-root.
+-    Block::new(id, None, CacheType::Unsafe, path, false, false).unwrap()
++    Block::new(id, None, CacheType::Unsafe, path, false, false, None).unwrap()
+ }
+ 
+ pub fn invoke_handler_for_queue_event(b: &mut Block) {
+diff --git a/src/devices/src/virtio/mod.rs b/src/devices/src/virtio/mod.rs
+index d65e4e51..b298df14 100644
+--- a/src/devices/src/virtio/mod.rs
++++ b/src/devices/src/virtio/mod.rs
+@@ -43,7 +43,7 @@ pub mod vsock;
+ #[cfg(not(feature = "tee"))]
+ pub use self::balloon::*;
+ #[cfg(feature = "blk")]
+-pub use self::block::{Block, CacheType};
++pub use self::block::{Block, CacheType, DynStorage};
+ pub use self::console::*;
+ pub use self::device::*;
+ #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
+index fc035c28..d00abfce 100644
+--- a/src/libkrun/src/api/device_builders.rs
++++ b/src/libkrun/src/api/device_builders.rs
+@@ -1618,6 +1618,7 @@ pub struct BlockDevice {
+     sync_mode: SyncMode,
+     parallel_reads: bool,
+     read_pool_size: Option<NonZeroUsize>,
++    storage: Option<Box<dyn devices::virtio::DynStorage>>,
+ }
+ 
+ #[cfg_attr(feature = "ffi", ffier::export(send, cfg = "feature = \"blk\""))]
+@@ -1637,9 +1638,24 @@ impl BlockDevice {
+             sync_mode: SyncMode::default(),
+             parallel_reads: false,
+             read_pool_size: None,
++            storage: None,
+         })
+     }
+ 
++    /// As [`new`](Self::new), the image read and written through `storage` instead of the file
++    /// at `disk_image_path` opened plainly -- a disk whose data is fetched as it is read, say.
++    #[cfg_attr(feature = "ffi", ffier(skip))]
++    pub fn with_storage(
++        id: &str,
++        disk_image_path: &str,
++        format: DiskFormat,
++        storage: Box<dyn devices::virtio::DynStorage>,
++    ) -> Result<Self, VmmError> {
++        let mut device = Self::new(id, disk_image_path, format)?;
++        device.storage = Some(storage);
++        Ok(device)
++    }
++
+     /// Set whether the block device is read-only.
+     pub fn set_read_only(&mut self, read_only: bool) {
+         self.is_read_only = read_only;
+@@ -1694,6 +1710,7 @@ impl<'a> AttachDevice<'a> for BlockDevice {
+             self.sync_mode,
+             self.parallel_reads,
+             self.read_pool_size,
++            self.storage,
+         )
+         .map_err(|e| VmmError::Internal(format!("block: {e}")))?;
+ 
+diff --git a/src/libkrun/src/api/mod.rs b/src/libkrun/src/api/mod.rs
+index 6bb5111c..38f563ba 100644
+--- a/src/libkrun/src/api/mod.rs
++++ b/src/libkrun/src/api/mod.rs
+@@ -62,7 +62,7 @@ pub use devices::virtio::TsiPolicy;
+ #[cfg(not(feature = "tee"))]
+ pub use devices::virtio::balloon::FreePageReportingMode;
+ #[cfg(feature = "blk")]
+-pub use devices::virtio::block::{DiskFormat, SyncMode};
++pub use devices::virtio::block::{DiskFormat, DynStorage, SyncMode};
+ #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
+ pub use devices::virtio::fs::{ExternalAttr, ExternalEntry, ExternalFs};
+ pub use error::VmmError;

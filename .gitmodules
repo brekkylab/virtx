@@ -1,21 +1,27 @@
-# Each submodule is a fork under brekkylab, pinned to a commit on its `virtx` branch: the
-# upstream commit it tracks, then one commit per change of ours. `git log upstream..virtx` in
-# a submodule lists them; 3rdparty/FORKS.md says what each is for.
+# Each submodule is upstream's own repository, pinned to a commit of its main; what virtx changes
+# in it is its patches in 3rdparty/_patches/. libkrun's and rutabaga_gfx's are applied in their
+# own trees by `cargo xtask init`, since cargo takes their crates by path from there, and
+# `ignore = dirty` keeps that out of `git status`; the others' are applied to a copy under
+# build/ by the build. 3rdparty/README.md says how a patch is written and when one is taken out.
 [submodule "virglrenderer"]
 	path = 3rdparty/virglrenderer
-	url = https://github.com/brekkylab/virglrenderer.git
-	branch = virtx
-[submodule "3rdparty/libepoxy"]
-	path = 3rdparty/libepoxy
-	# Built by xtask/scripts/build-deps.ps1 only: virglrenderer requires epoxy
-	# unconditionally, and Windows has no package manager here.
-	url = https://github.com/brekkylab/libepoxy.git
-	branch = virtx
+	url = https://gitlab.freedesktop.org/virgl/virglrenderer.git
+	branch = main
 [submodule "MoltenVK"]
 	path = 3rdparty/MoltenVK
-	url = https://github.com/brekkylab/MoltenVK.git
-	branch = virtx
+	url = https://github.com/KhronosGroup/MoltenVK.git
+	branch = main
 [submodule "SPIRV-Cross"]
 	path = 3rdparty/SPIRV-Cross
-	url = https://github.com/brekkylab/SPIRV-Cross.git
-	branch = virtx
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+	branch = main
+[submodule "libkrun"]
+	path = 3rdparty/libkrun
+	url = https://github.com/libkrun/libkrun.git
+	branch = main
+	ignore = dirty
+[submodule "rutabaga_gfx"]
+	path = 3rdparty/rutabaga_gfx
+	url = https://github.com/magma-gpu/rutabaga_gfx.git
+	branch = main
+	ignore = dirty

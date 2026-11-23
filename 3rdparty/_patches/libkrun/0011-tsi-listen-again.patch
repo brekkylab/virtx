@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: khj809 <onsealeatang@gmail.com>
+Date: Mon, 9 Nov 2026 18:14:33 +0900
+Subject: tsi-listen-again: a socket listened on again stays where its first listen put it
+
+## Why virtx needs it
+
+A program that listens on a socket twice -- nginx does, to set its backlog -- had its second listen sent to the policy, which, the port being held by the first, put it elsewhere; the host's socket stayed where it was, and the guest's port was reached at neither from then on.
+
+## When it can go
+
+With the TsiPolicy patch, which it corrects.
+---
+ src/devices/src/virtio/vsock/muxer.rs | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/devices/src/virtio/vsock/muxer.rs b/src/devices/src/virtio/vsock/muxer.rs
+index b4e258e9..1b3a3ec5 100644
+--- a/src/devices/src/virtio/vsock/muxer.rs
++++ b/src/devices/src/virtio/vsock/muxer.rs
+@@ -587,7 +587,18 @@ impl VsockMuxer {
+                 return;
+             }
+             debug!("DGRAM listen request: id={id}");
+-            if let Some(at) = inet(&req.addr)
++            // A socket listening already, listened on again -- as nginx does, to set its backlog
++            // -- stays where it is: the host's socket was bound where the policy said at its
++            // first `listen`, and is not bound again. Asked again, the policy would say where
++            // it is now (another port, the first being held), and be wrong from then on.
++            let listening = self.proxy_map.read().unwrap().get(&id).is_some_and(|proxy| {
++                matches!(
++                    proxy.lock().unwrap().status(),
++                    ProxyStatus::Listening | ProxyStatus::WaitingOnAccept
++                )
++            });
++            if !listening
++                && let Some(at) = inet(&req.addr)
+                 && let Some(policy) = &self.policy
+             {
+                 match policy.listen(at) {

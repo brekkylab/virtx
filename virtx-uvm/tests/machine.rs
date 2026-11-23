@@ -1801,6 +1801,7 @@ async fn a_sandbox_s_args_are_what_it_was_made_with_as_last_resized(home: Home) 
     assert_eq!(sandbox.args(), made);
 
     let resize = SandboxResizeArgs {
+        memory_mib: Some(1536),
         disk_gib: Some(2),
         ..SandboxResizeArgs::default()
     };

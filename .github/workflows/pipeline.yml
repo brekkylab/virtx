@@ -743,6 +743,10 @@ jobs:
     permissions:
       contents: read
       actions: read
+    env:
+      # abin is `guest (x86_64)`'s, put in place below: neither the compile step nor the
+      # fixture builds it.
+      XTASK_ABIN_BUILT: "1"
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -782,7 +786,14 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      # Everything `cargo xtask test` compiles, which needs no kernel.
+      # Before the compile step, which installs the bindings' packages with them.
+      - uses: astral-sh/setup-uv@v10.3.3
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+
+      # Everything `cargo xtask test` compiles and installs, which needs no kernel.
       - name: Compile the tests
         run: cargo xtask test --no-run
 
@@ -793,22 +804,17 @@ jobs:
           wait: true
           token: ${{ github.token }}
 
-      # And abin, which the fixture would build again otherwise (`XTASK_ABIN_BUILT`).
       - name: Put the kernel and abin in place
         run: |
           tar -xf guest-x86_64.tar
           mkdir -p build/krunfw target/release
           cp -v guest/kernel/libkrunfw.so.* build/krunfw/
           cp -R guest/abin target/release/abin
-          echo XTASK_ABIN_BUILT=1 >> "$GITHUB_ENV"
 
-      - uses: astral-sh/setup-uv@v10.3.3
-
-      - uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 22
-
+      # It fails if cargo compiles anything: the compile step built it all.
       - run: cargo xtask test
+        env:
+          XTASK_TESTS_COMPILED: "1"
 
   # The machine-booting crates' tests on Windows, over WHP, on a runner of our own: GitHub's
   # Windows runners have no hypervisor (see Runners). Any runner labelled `whp` takes it -- a
@@ -906,4 +912,7 @@ jobs:
           mkdir -p build/krunfw
           cp -v guest/kernel/libkrunfw.dll build/krunfw/
 
+      # It fails if cargo compiles anything: the compile step built it all.
       - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES -- --include-ignored
+        env:
+          XTASK_TESTS_COMPILED: "1"

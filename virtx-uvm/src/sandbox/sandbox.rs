@@ -161,6 +161,8 @@ pub struct Sandbox {
     id: String,
     /// The name it was made with, which a server finds it again by.
     name: Option<String>,
+    /// What it was made with, its image by digest, as large as it was last resized to.
+    args: Mutex<SandboxCreateArgs>,
     /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
     root: PathBuf,
     /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
@@ -233,6 +235,10 @@ impl Sandbox {
     /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
     /// nothing for `park_after`.
     ///
+    /// It is made under `id` where one is given -- letters, digits, `_` and `-`, the first a
+    /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
+    /// under `root` has, has made or keeps; under an id it picks otherwise.
+    ///
     /// With `keys`, the port each opens, it is kept past this process: its record is written
     /// once it has booted, and a making cut short before then leaves nothing. Without, it goes
     /// with this process.
@@ -249,6 +255,7 @@ impl Sandbox {
         args: &SandboxCreateArgs,
         vm: Vec<OsString>,
         park_after: Option<Duration>,
+        id: Option<&str>,
         keys: Option<HashMap<String, u16>>,
         backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
@@ -258,6 +265,18 @@ impl Sandbox {
                 "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
                  starting with '.' or '-', 128 at most"
             )));
+        }
+        if let Some(id) = id {
+            if !is_id(id) {
+                return Err(Error::Invalid(format!(
+                    "id: {id:?} is not a sandbox's id: letters, digits, '_' and '-', the first a \
+                     letter or digit, 64 at most"
+                )));
+            }
+            let dir = root.join(SANDBOX);
+            if dir.join(format!("{id}.ext4")).exists() || Record::path(&dir, id).exists() {
+                return Err(exists(id));
+            }
         }
         let mut given = HashSet::new();
         if let Some(spec) = args
@@ -380,10 +399,27 @@ impl Sandbox {
             args.clone(),
         );
         let backed = backing.clone();
+        let id = id.map(str::to_owned);
         let built = move || {
-            let given = (None, None);
+            // Its disk under the id given it, which the check above may have raced.
+            let upper = match id {
+                Some(id) => {
+                    let gib = made.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
+                    let upper = Upper::create(&root.join(SANDBOX), &id, gib)?;
+                    Some(upper.ok_or_else(|| exists(&id))?)
+                }
+                None => None,
+            };
             Sandbox::build(
-                &images, &root, &volumes, &made, digest, vm, park_after, given, backed,
+                &images,
+                &root,
+                &volumes,
+                &made,
+                digest,
+                vm,
+                park_after,
+                (upper, None),
+                backed,
             )
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
@@ -497,6 +533,7 @@ impl Sandbox {
         Ok(Sandbox {
             id: upper.id.clone(),
             name: args.name.clone(),
+            args: Mutex::new(args.clone()),
             root: root.to_owned(),
             up_since: Mutex::default(),
             dir,
@@ -554,6 +591,12 @@ impl Sandbox {
     /// The name it was made with, if any.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    /// What it was made with: its `image` the digest it boots, and its `vcpus`, `memory_mib` and
+    /// `disk_gib` as it was last [resized](Sandbox::resize) to, where it was.
+    pub fn args(&self) -> SandboxCreateArgs {
+        self.args.lock().unwrap().clone()
     }
 
     /// When its machine came up, while it is up; `None` while it is parked or has exited.
@@ -801,11 +844,13 @@ impl Sandbox {
         if (vcpus, memory_mib) != (spec.vcpus, spec.ram_mib) {
             self.park_under_turn(Some(Duration::ZERO)).await?;
         }
+        let mut resized_args = self.args.lock().unwrap().clone();
+        resized_args.vcpus = Some(vcpus);
+        resized_args.memory_mib = Some(memory_mib);
+        resized_args.disk_gib = Some(disk_gib);
         if let Some(record) = &mut *self.record.lock().unwrap() {
             let mut resized = record.clone();
-            resized.args.vcpus = Some(vcpus);
-            resized.args.memory_mib = Some(memory_mib);
-            resized.args.disk_gib = Some(disk_gib);
+            resized.args = resized_args.clone();
             resized
                 .write(&self.dir, &self.id)
                 .map_err(|source| Error::Io {
@@ -820,6 +865,7 @@ impl Sandbox {
             config.spec.ram_mib = memory_mib;
         }
         self.disk_gib.store(disk_gib, Ordering::Relaxed);
+        *self.args.lock().unwrap() = resized_args;
         Ok(SandboxResources {
             vcpus,
             memory_mib,
@@ -977,21 +1023,10 @@ impl Sandbox {
                 }
             }
         }
-        // What its disk is fetched from while its machine runs, if the embedder's disks say,
-        // held with the machine.
-        let mut config = config;
-        let served = crate::disks::disks()
-            .serve(&config.upper)
-            .map_err(|e| Error::Io {
-                context: format!("serving the disk of sandbox {}", self.id),
-                source: e,
-            })?;
-        let (source, held) = served.unzip();
-        *self.served.lock().unwrap() = Some(source.is_some());
-        config.sandbox_disk = Some(SandboxDisk { source });
         // Booting is blocking work, until the guest takes commands: its disk grown first to as
         // large as it was last resized to. A grow that fails leaves the disk as it was, which it
         // boots on, to be grown at a later boot.
+        let mut config = config;
         let vm = self.vm.clone();
         let (booting, gib) = (Arc::clone(self), self.disk_gib.load(Ordering::Relaxed));
         let machine = tokio::task::spawn_blocking(move || {
@@ -1000,9 +1035,20 @@ impl Sandbox {
             {
                 eprintln!("sandbox {}'s disk not grown to {gib} GiB: {e}", booting.id);
             }
-            Ok::<_, Error>(Machine::start(config, &vm)?)
+            // What its disk, as grown, is fetched from while its machine runs, if the
+            // embedder's disks say, held with the machine.
+            let served = crate::disks::disks()
+                .serve(&config.upper)
+                .map_err(|e| Error::Io {
+                    context: format!("serving the disk of sandbox {}", booting.id),
+                    source: e,
+                })?;
+            let (source, held) = served.unzip();
+            *booting.served.lock().unwrap() = Some(source.is_some());
+            config.sandbox_disk = Some(SandboxDisk { source });
+            Ok::<_, Error>((Machine::start(config, &vm)?, held))
         });
-        let machine = machine.await??;
+        let (machine, held) = machine.await??;
         let machine = Arc::new(machine.holding(held));
         *self.holding.lock().unwrap() = holding;
         let closed = {
@@ -1464,22 +1510,18 @@ impl Sandbox {
                 Sandbox::build(
                     images, root, volumes, &args, digest, vm, park_after, kept, backing,
                 )
-                .map_err(|e| e.to_string())
             });
             match known {
                 Ok(sandbox) => kept.known.push(Arc::new(sandbox)),
-                Err(why) => {
-                    eprintln!(
-                        "sandbox {id} under {} not known again: {why}",
-                        dir.display()
-                    );
+                Err(e) => {
+                    eprintln!("sandbox {id} under {} not known again: {e}", dir.display());
                     // Let go as the sandbox not made was dropped, kept; held again here.
                     if let Some(upper) = Upper::kept_one(&dir, &id) {
                         kept.unknown.push(Unknown {
                             id,
                             name,
                             image,
-                            why,
+                            why: e.told(),
                             upper,
                         });
                     }
@@ -1518,8 +1560,8 @@ impl Sandbox {
                 "no sandbox {id} is kept here, or another server has it"
             ))
         })?;
-        let record = Record::read(&dir, id).map_err(Error::Invalid)?;
-        let digest = record.image().map_err(Error::Invalid)?;
+        let record = Record::read(&dir, id)?;
+        let digest = record.image()?;
         if let Some(backend) = backing.get() {
             backend.want(Wanted::Image(&digest)).await.map_err(failed)?;
             for asked in &record.args.volumes {
@@ -1579,7 +1621,9 @@ impl Unknown {
         self.name.as_deref()
     }
 
-    /// Why it could not be known again.
+    /// Why it could not be known again, without this host's paths: a failure on this host's
+    /// files by its kind. The whole account, which can name them, went to this process's stderr
+    /// as [`Sandbox::kept`] found it.
     pub fn why(&self) -> &str {
         &self.why
     }
@@ -1657,6 +1701,21 @@ fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
 /// What a storage backend failed with, as making or booting a sandbox fails.
 fn failed(e: anyhow::Error) -> Error {
     Error::Backend(crate::backend::Refusal::Failed(e))
+}
+
+/// Whether `id` can be a sandbox's id given it: a file's name under `sandbox/` that no suffix
+/// there ends, letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
+fn is_id(id: &str) -> bool {
+    id.len() <= 64
+        && id.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// The refusal of a sandbox asked for under `id`, which one here has, has made or keeps.
+fn exists(id: &str) -> Error {
+    Error::Exists(format!("a sandbox here has the id {id}"))
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.

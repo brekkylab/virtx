@@ -83,7 +83,11 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Asked once for a disk, as it is made. One [resized](crate::Sandbox::resize) larger is
     /// grown past `size` as its machine boots, while it is [taken](Self::take), and is kept
-    /// larger once the machine is down, with no call to say so.
+    /// larger once the machine is down, with no call to the backend to say so. The
+    /// [`Disks`](crate::disks::Disks) an embedder [sets](crate::disks::set_disks) are asked
+    /// around the grow: before it, for the disk all in its file
+    /// ([`whole`](crate::disks::Disks::whole)), and to forget what they keep beside the disk
+    /// once the grown one is written ([`forget`](crate::disks::Disks::forget)).
     fn made<'a>(&'a self, what: Stored<'a>, size: u64) -> BoxFuture<'a, Result<(), Refusal>> {
         let _ = (what, size);
         Box::pin(async { Ok(()) })

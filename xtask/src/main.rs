@@ -487,7 +487,10 @@ fn apply_patches(tree: &str, patches: &str, force: bool) -> anyhow::Result<()> {
     let (was_made_of, were_changes) = patch_records(tree)?;
     let changes = changes_in(tree)?;
     let untouched = fs::read(&were_changes).is_ok_and(|were| were == changes);
-    if fs::read(&was_made_of).is_ok_and(|was| was == made_of) && (untouched || !force) {
+    let made = fs::read(&was_made_of).is_ok_and(|was| was == made_of);
+    // A tree that is its commit alone has none of the patches, whatever the records say.
+    let bare = changes.is_empty() && !files.is_empty();
+    if made && !bare && (untouched || !force) {
         return Ok(());
     }
     ensure!(
@@ -495,12 +498,23 @@ fn apply_patches(tree: &str, patches: &str, force: bool) -> anyhow::Result<()> {
         "{tree} has changes that are not {patches}'s -- `cargo xtask init --force` discards them"
     );
     eprintln!("Applying {patches} to {tree}");
+    // The records go before the tree changes, so a tree left half made is not taken as made.
+    for record in [&was_made_of, &were_changes] {
+        if record.exists() {
+            fs::remove_file(record)?;
+        }
+    }
     git(&root.join(tree), &["reset", "--hard", "--quiet"])?;
     git(&root.join(tree), &["clean", "-fdq"])?;
     git(&root, &["submodule", "update", "--init", "--", tree])?;
     for file in &files {
         let file = file.to_str().context("a patch's path is not UTF-8")?;
-        git(&root.join(tree), &["apply", "--index", file])?;
+        if let Err(failed) = git(&root.join(tree), &["apply", "--index", file]) {
+            // Back to the commit alone, which the next run may write over.
+            git(&root.join(tree), &["reset", "--hard", "--quiet"])?;
+            git(&root.join(tree), &["clean", "-fdq"])?;
+            return Err(failed);
+        }
     }
     fs::write(&was_made_of, made_of)?;
     fs::write(&were_changes, changes_in(tree)?)?;
@@ -517,10 +531,13 @@ fn servers_unready() -> anyhow::Result<Option<String>> {
     }
     for (tree, patches) in PATCHED {
         let (was_made_of, were_changes) = patch_records(tree)?;
-        if fs::read(&was_made_of).ok() != Some(patches_of(tree, patches)?.1) {
+        let (files, made_of) = patches_of(tree, patches)?;
+        let changes = changes_in(tree)?;
+        if fs::read(&was_made_of).ok() != Some(made_of) || (changes.is_empty() && !files.is_empty())
+        {
             return Ok(Some(format!("{tree} is not at {patches}")));
         }
-        if fs::read(&were_changes).ok() != Some(changes_in(tree)?) {
+        if fs::read(&were_changes).ok() != Some(changes) {
             eprintln!("xtask: {tree} has changes that are not {patches}'s, and is built with them");
         }
     }
@@ -811,6 +828,9 @@ fn build_servers(options: &Options) -> anyhow::Result<()> {
 /// The servers' cargo build alone, the GPU libraries first: what [`build_servers`] does before
 /// readying each, which takes the guest kernel.
 fn compile_servers(options: &Options) -> anyhow::Result<()> {
+    if let Some(why) = servers_unready()? {
+        bail!("{why} -- `cargo xtask init` readies the servers");
+    }
     build_gpu_deps()?;
 
     let mut cargo = cargo();
@@ -876,6 +896,26 @@ fn run_target(args: Vec<OsString>, test: bool, vars: &[(&str, OsString)]) -> any
         Some(at) => (&args[..at], &args[at + 1..]),
         None => (&args[..], &[][..]),
     };
+    // Anything but the client's packages, named each, may build the servers' patched trees.
+    let mut packages: Vec<String> = Vec::new();
+    let mut named = cargo_args.iter().map(|a| a.to_string_lossy().into_owned());
+    while let Some(arg) = named.next() {
+        if arg == "-p" || arg == "--package" {
+            packages.extend(named.next());
+        } else if let Some(name) = arg
+            .strip_prefix("--package=")
+            .or_else(|| arg.strip_prefix("-p"))
+        {
+            packages.push(name.trim_start_matches('=').to_owned());
+        }
+    }
+    let servers = packages.is_empty()
+        || packages
+            .iter()
+            .any(|p| !CLIENT_PACKAGES.contains(&p.as_str()));
+    if servers && let Some(why) = servers_unready()? {
+        bail!("{why} -- `cargo xtask init` readies the servers");
+    }
 
     let mut cargo = cargo();
     if test {

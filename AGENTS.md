@@ -53,21 +53,14 @@ export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, 
 
 ### Clients
 
-The Python and Node packages, and the Rust crate without its `embedded` feature, open one library, `libvirtx_core`, so build it first and point the package at it:
+The Python and Node packages, and the Rust crate without its `embedded` feature, open one library, `libvirtx_core`. Installed from the clone, each package builds it with cargo and keeps it beside its own files, so in your own project install the package for your language as you would any other:
 
-```bash
-cargo xtask build client
-cargo xtask install --prefix ~/.local
-export VIRTX_CORE_LIB=~/.local/bin/libvirtx_core.so   # .dylib on macOS, virtx_core.dll on Windows
-```
+- **Python:** `pip install path/to/virtx/virtx-py`, the library built in `release`; `pip install -e` (and `uv sync` in `virtx-py/`) builds it in `dev`, and `uv` builds it again when `virtx-core` changes (`virtx-py/hatch_build.py`).
+- **Node:** `npm install path/to/virtx/virtx-node`, the library built in `dev` by its `install` script, and by `pretest` before `npm test` (`virtx-node/build-lib.mjs`).
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in; with `--no-default-features` it opens one at run time instead, from `VIRTX_CORE_LIB`.
 
-Then, in your own project, install the package for your language from the clone:
-
-- **Python:** `pip install path/to/virtx/virtx-py`
-- **Node:** `npm install path/to/virtx/virtx-node`
-- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in and needs none of the above; with `--no-default-features` it opens the one above instead.
-
-- `load(path)` opens a library from the program itself, in place of `VIRTX_CORE_LIB`; a process opens one.
+- `virtx-core` builds an rlib alone, so the library for C is asked for with `cargo rustc -p virtx-core --lib --crate-type cdylib`, as the packages ask for it; `cargo xtask build client` builds it, and its static library, in `release`, and `cargo xtask install` copies them out.
+- `VIRTX_CORE_LIB` names a library to open in place of the one a package carries, and the one a Python wheel is built with; `load(path)` opens one from the program itself; a process opens one.
 - A module that takes a client from another opens the file `library_path()` answers, and takes the client from the pointer `client.clone().into_raw()` answers, with `Client.from_raw`. In Node, `libraryPath()`, `intoRaw()` and `fromRaw`.
 - A change to the client needs nothing of `init`, only those two submodules checked out, as every cargo command does. A change to the servers needs `init` and the guest kernel, and `init` again after a pull that changed their patches in `3rdparty/_patches/` or their pins: a server is not built from a tree `init` has not brought to them. It is `init` that moves those two to a new pin, not `git submodule update` or `git pull --recurse-submodules`, which git refuses over a tree with the patches applied.
 

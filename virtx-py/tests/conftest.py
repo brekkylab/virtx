@@ -1,22 +1,20 @@
-"""Builds ``libvirtx_core`` once and opens it, unless ``$VIRTX_CORE_LIB`` names one, and serves
-the fixture for the run: ``cargo xtask fixture --serve``, which builds the servers, serves them
-over a home of the run's own, and names them, unless the environment names them already, as
-``cargo xtask test`` does. They boot machines, so they need ``cargo xtask init`` and the guest
-kernel first."""
+"""Opens ``libvirtx_core`` as the package finds it -- ``$VIRTX_CORE_LIB``, else the one its install
+built beside it -- and serves the fixture for the run: ``cargo xtask fixture --serve``, which
+builds the servers, serves them over a home of the run's own, and names them, unless the
+environment names them already, as ``cargo xtask test`` does. They boot machines, so they need
+``cargo xtask init`` and the guest kernel first."""
 
 import itertools
 import os
 import subprocess
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-import virtx
 from virtx import BearerAuth, Client
+from virtx._library import library
 
 ROOT = Path(__file__).resolve().parents[2]
-TARGET = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
 
 ALPINE = "alpine:3.20"
 """The image every test that boots a sandbox pulls first."""
@@ -27,18 +25,7 @@ _fixture: subprocess.Popen[str] | None = None
 
 def pytest_configure(config: pytest.Config) -> None:
     global _fixture
-    library = os.environ.get(virtx.LIBRARY_ENV)
-    if not library:
-        subprocess.run(
-            ["cargo", "rustc", "-p", "virtx-core", "--lib", "--crate-type", "cdylib"],
-            cwd=ROOT,
-            check=True,
-        )
-        name = {"win32": "virtx_core.dll", "darwin": "libvirtx_core.dylib"}.get(
-            sys.platform, "libvirtx_core.so"
-        )
-        library = str(TARGET / "debug" / name)
-    virtx.load(library)
+    library()
 
     if "VIRTX_TEST_URL" in os.environ:
         return

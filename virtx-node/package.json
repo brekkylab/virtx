@@ -26,6 +26,8 @@
     "node": ">= 22"
   },
   "scripts": {
+    "install": "node build-lib.mjs",
+    "pretest": "node build-lib.mjs",
     "test": "cargo xtask fixture -- node --test --test-concurrency=1 '__test__/**/*.spec.mjs'"
   },
   "dependencies": {

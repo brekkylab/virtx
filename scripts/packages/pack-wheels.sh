@@ -6,8 +6,9 @@
 #
 # `<lib-dir>/<platform>/` holds each platform's library, as the `pipeline` workflow's platform
 # jobs lay it out; `--allow-missing` builds only the platforms that have one. Needs `build` and
-# `wheel`. hatchling builds a pure wheel, `py3-none-any`, so each is unpacked, retagged
-# `py3-none-<platform>` and not purelib, and packed again.
+# `wheel`. The build takes each library from `$VIRTX_CORE_LIB` (`virtx-py/hatch_build.py`) and
+# tags the wheel for this host, so each is unpacked, retagged `py3-none-<platform>`, and packed
+# again.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -15,9 +16,8 @@ libs=$(cd "$1" && pwd)
 mkdir -p "$2"
 out=$(cd "$2" && pwd)
 allow_missing=${3:-}
-package="$repo/virtx-py/src/virtx"
 work=$(mktemp -d)
-trap 'rm -rf "$work" "$package"/libvirtx_core.* "$package"/virtx_core.dll' EXIT
+trap 'rm -rf "$work"' EXIT
 
 for entry in \
   darwin-arm64:macosx_11_0_arm64:libvirtx_core.dylib \
@@ -31,15 +31,14 @@ for entry in \
     echo "skipping $platform: no $lib"
     continue
   fi
-  rm -rf "$package"/libvirtx_core.* "$package"/virtx_core.dll "$work"/*
-  cp "$lib" "$package/"
-  python -m build --wheel --outdir "$work/pure" "$repo/virtx-py"
-  python -m wheel unpack --dest "$work/unpacked" "$work"/pure/*.whl
+  rm -rf "${work:?}"/*
+  VIRTX_CORE_LIB="$lib" python -m build --wheel --outdir "$work/host" "$repo/virtx-py"
+  python -m wheel unpack --dest "$work/unpacked" "$work"/host/*.whl
   unpacked=$(echo "$work"/unpacked/*)
-  sed -e 's/^Root-Is-Purelib: true$/Root-Is-Purelib: false/' \
-    -e "s/^Tag: py3-none-any$/Tag: py3-none-$tag/" \
+  sed -e "s/^Tag: py3-none-.*$/Tag: py3-none-$tag/" \
     "$unpacked"/*.dist-info/WHEEL > "$work/WHEEL"
-  grep -qx "Tag: py3-none-$tag" "$work/WHEEL" || { echo "no py3-none-any tag to replace" >&2; exit 1; }
+  grep -qx "Tag: py3-none-$tag" "$work/WHEEL" || { echo "no py3-none tag to replace" >&2; exit 1; }
+  grep -qx "Root-Is-Purelib: false" "$work/WHEEL" || { echo "a pure wheel" >&2; exit 1; }
   mv "$work/WHEEL" "$unpacked"/*.dist-info/WHEEL
   python -m wheel pack --dest-dir "$out" "$unpacked"
 done

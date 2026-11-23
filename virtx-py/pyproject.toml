@@ -26,7 +26,7 @@ classifiers = [
 ]
 # What crosses the C ABI is JSON, and the C ABI itself is reached with ctypes, so the package
 # depends on nothing and has no extension module of its own: a wheel is the Python files and
-# `libvirtx_core` for its platform, which the release copies into `src/virtx/` beside them.
+# `libvirtx_core` for its platform, which `hatch_build.py` puts in `src/virtx/` beside them.
 dependencies = []
 
 [project.urls]
@@ -49,7 +49,24 @@ dev = ["pytest>=8", "pytest-asyncio>=1", "ruff==0.17.5"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/virtx"]
-artifacts = ["src/virtx/libvirtx_core.*", "src/virtx/virtx_core.dll"]
+
+# `hatch_build.py`: `libvirtx_core` put beside the Python files, built by cargo or taken from
+# `$VIRTX_CORE_LIB`. The copy an editable install keeps in `src/virtx/` is ignored by git, and so
+# left out of a wheel, which carries the one built for it.
+[tool.hatch.build.hooks.custom]
+
+[tool.uv]
+# An editable install carries the library built from the crate, so it is built again when the
+# crate changes.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "hatch_build.py" },
+    { file = "../Cargo.lock" },
+    { file = "../virtx-core/Cargo.toml" },
+    { file = "../virtx-core/build.rs" },
+    { file = "../virtx-core/src/**/*.rs" },
+    { env = "VIRTX_CORE_LIB" },
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,30 +1,16 @@
-// What every test file stands on, as Python's `conftest.py` is: `libvirtx_core`, built with
-// cargo and opened, unless `$VIRTX_CORE_LIB` names one; the servers `cargo xtask fixture`
-// serves, as it names them in the environment, which `npm test` runs the tests under; and the
-// steps tests share.
+// What every test file stands on, as Python's `conftest.py` is: `libvirtx_core`, opened as the
+// package finds it -- `$VIRTX_CORE_LIB`, else the one `npm test` built beside it; the servers
+// `cargo xtask fixture` serves, as it names them in the environment, which `npm test` runs the
+// tests under; and the steps tests share.
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import virtx from '../index.js'
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-const target = process.env.CARGO_TARGET_DIR || path.join(root, 'target')
-const library =
-  process.platform === 'win32'
-    ? 'virtx_core.dll'
-    : process.platform === 'darwin'
-      ? 'libvirtx_core.dylib'
-      : 'libvirtx_core.so'
-if (!process.env[virtx.LIBRARY_ENV]) {
-  execFileSync('cargo', ['rustc', '-p', 'virtx-core', '--lib', '--crate-type', 'cdylib'], {
-    cwd: root,
-    stdio: 'inherit',
-  })
-}
-virtx.load(process.env[virtx.LIBRARY_ENV] || path.join(target, 'debug', library))
+virtx._library()
 
 // What `cargo xtask fixture` names in the environment: `stdio`, the path of `virtx-stdio`;
 // `url`, `token` and `project`, the `virtx-server-tcp` it serves; and `users`, a token of each

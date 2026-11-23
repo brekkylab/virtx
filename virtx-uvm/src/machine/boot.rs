@@ -70,7 +70,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -131,11 +131,12 @@ const ALIB_HOST: &str = "alib";
 /// The log target libkrun gives what the guest's console prints.
 pub(super) const CONSOLE_TARGET: &str = "init_or_kernel";
 
-/// What a machine's process is spawned with, as one argument: the machine, and its ends of
-/// the control channel and the I/O channel.
+/// What a machine's process is spawned with, as one argument: the machine, its ends of the
+/// control channel and the I/O channel, and the directory its published ports' sockets go in.
 #[derive(Serialize, Deserialize)]
 pub(super) struct BootArgs {
     pub config: MachineConfig,
+    pub sockets: PathBuf,
     pub ctrlin: u64,
     pub ctrlout: u64,
     pub ioin: u64,
@@ -185,13 +186,19 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 
 /// Build `machine`, running the agent, and become it: load the guest kernel, lay the init over
 /// an empty root, attach the devices, pass `ctrlin` on to the agent and the agent on to
-/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, and run.
+/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, put the published ports'
+/// sockets in `sockets`, and run.
 ///
 /// **This does not return.** The VMM exits this process with the guest's own status, so what
 /// comes back is a machine that could not be built, or a failure of the event loop.
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
-pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
+pub(super) fn boot(
+    machine: MachineConfig,
+    sockets: &Path,
+    ctrlin: File,
+    io: (File, File),
+) -> Result<Infallible> {
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
@@ -428,7 +435,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 
     // The whole of what having neither is: no device -- see `net`.
     if machine.spec.network || !published.is_empty() {
-        devices.add(net::attach(machine.spec.network, published)?);
+        devices.add(net::attach(machine.spec.network, published, sockets)?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module

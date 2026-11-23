@@ -52,6 +52,7 @@ mod relay;
 mod resolver;
 
 use std::net::{Ipv4Addr, TcpListener};
+use std::path::Path;
 use std::sync::Arc;
 
 use krun::{TsiFlags, VsockDevice};
@@ -68,8 +69,13 @@ use super::{Error, Result};
 /// `network` is whether the guest's own connections reach the internet; `published` are the
 /// listeners on this host whose connections reach a port in the guest -- each one bound by
 /// the caller, which is the end that knows where it is and says so. Each gets a socket libkrun
-/// listens on, carried to the guest port's vsock port, and a thread that relays to it.
-pub(crate) fn attach(network: bool, published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
+/// listens on in `sockets`, carried to the guest port's vsock port, and a thread that relays
+/// to it.
+pub(crate) fn attach(
+    network: bool,
+    published: Vec<(u16, TcpListener)>,
+    sockets: &Path,
+) -> Result<VsockDevice> {
     let resolver = network
         .then(|| resolver::host_resolvers().first().copied())
         .flatten();
@@ -78,11 +84,7 @@ pub(crate) fn attach(network: bool, published: Vec<(u16, TcpListener)>) -> Resul
     device.set_policy(Arc::new(Policy::new(network, resolver)));
 
     for (port, listener) in published {
-        // In the temporary directory, which keeps the path short of the hundred-odd bytes a
-        // socket's path may take, and named for this process, which is this machine's alone.
-        let socket = std::env::temp_dir().join(format!("virtx-{}-{port}.sock", std::process::id()));
-        // One left by a process that had this one's number and ended without removing it.
-        let _ = std::fs::remove_file(&socket);
+        let socket = sockets.join(format!("{port}.sock"));
         device.add_unix_port(
             VSOCK_PORT_BASE + u32::from(port),
             utf8(&socket, &format!("guest port {port}'s socket"))?,

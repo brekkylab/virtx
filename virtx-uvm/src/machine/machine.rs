@@ -221,6 +221,9 @@ pub struct Machine {
     /// What the embedder serves its disk with ([`Disks::serve`](crate::disks::Disks::serve)),
     /// held until its process has been killed and waited for.
     held: Option<crate::disks::Held>,
+    /// The directory its published ports' sockets are in, removed once its process has been
+    /// killed and waited for.
+    _sockets: tempfile::TempDir,
 }
 
 impl Drop for Machine {
@@ -253,8 +256,16 @@ impl Machine {
             io::pipe().map_err(|e| Error::io("making ctrlout", e))?;
         let (their_ioin, ioin) = io::pipe().map_err(|e| Error::io("making ioin", e))?;
         let (ioout, their_ioout) = io::pipe().map_err(|e| Error::io("making ioout", e))?;
+        // This machine's own, which no one else can have made first or reach into: in the
+        // temporary directory, which keeps a socket's path short of the hundred-odd bytes it
+        // may take.
+        let sockets = tempfile::Builder::new()
+            .prefix("virtx-")
+            .tempdir()
+            .map_err(|e| Error::io("making the published ports' directory", e))?;
         let args = BootArgs {
             config,
+            sockets: sockets.path().to_owned(),
             ctrlin: raw(&their_ctrlin),
             ctrlout: raw(&their_ctrlout),
             ioin: raw(&their_ioin),
@@ -300,6 +311,7 @@ impl Machine {
                         io: files(ioin, ioout),
                         published,
                         held: None,
+                        _sockets: sockets,
                     });
                 }
                 Some(CtrlResp::Log {
@@ -624,7 +636,7 @@ pub fn enter() -> Result<Infallible> {
     let ctrlin = unsafe { boot::hold(args.ctrlin, args.ctrlout) };
     // SAFETY: as above.
     let io = unsafe { (boot::from_raw(args.ioin), boot::from_raw(args.ioout)) };
-    let entered = boot::boot(args.config, ctrlin, io);
+    let entered = boot::boot(args.config, &args.sockets, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
         log::error!(target: TOLD_TARGET, "{}", e.told());

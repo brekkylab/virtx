@@ -59,7 +59,7 @@ impl krun::TsiPolicy for Policy {
     fn connect(&self, to: SocketAddr) -> Option<SocketAddr> {
         let ip = to.ip().to_canonical();
         if ip == IpAddr::V4(NAMESERVER) {
-            return (to.port() == DNS_PORT)
+            return (self.network && to.port() == DNS_PORT)
                 .then_some(self.resolver)
                 .flatten()
                 .map(|resolver| SocketAddr::new(resolver.into(), DNS_PORT));

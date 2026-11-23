@@ -1706,51 +1706,41 @@ fn compiled_since(since: std::time::SystemTime) -> Vec<String> {
     compiled
 }
 
-/// The library virtx-rs's tests open, as they build it: `libvirtx_core` in the `dev` profile.
+/// The library the packages' tests open, as virtx-rs's tests build it: `libvirtx_core` in the
+/// `dev` profile. setuptools-rust's editable build of virtx-py is this build of it too.
 fn build_test_library() -> anyhow::Result<()> {
     cargo_in_root(
         &["build", "-p", LIBRARY_PACKAGE],
-        "the library virtx-rs's tests open",
+        "the library the packages' tests open",
     )
 }
 
-/// Each binding's install, as its directory, its command, the file the command leaves, and the
-/// manifests that file is to be newer than: what `uv run` and `npm test` run with, the library
-/// among it, which each binding's own install builds.
-const INSTALLS: &[(&str, &[&str], &str, &[&str])] = &[
-    (
-        "virtx-py",
-        &["uv", "sync"],
-        ".venv/pyvenv.cfg",
-        &["pyproject.toml", "uv.lock"],
-    ),
+/// Where [`build_test_library`] leaves it.
+fn test_library() -> PathBuf {
+    target_path().join("debug").join(client_library())
+}
+
+/// Each binding's install, as its directory and its command, each a no-op once done: what
+/// `uv run` and `npm test` run with. virtx-py's builds the library, as an editable install
+/// does; virtx-node's leaves it to [`PACKAGES`]' run, which opens [`test_library`].
+const INSTALLS: &[(&str, &[&str])] = &[
+    ("virtx-py", &["uv", "sync"]),
     (
         "virtx-node",
-        &[NPM, "install", "--no-audit", "--no-fund"],
-        "node_modules/.package-lock.json",
-        &["package.json", "package-lock.json"],
+        &[
+            NPM,
+            "install",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+        ],
     ),
 ];
 
-/// Whether `left`, in `dir`, is newer than each of `manifests`.
-fn installed(dir: &Path, left: &str, manifests: &[&str]) -> bool {
-    let modified = |name: &str| fs::metadata(dir.join(name)).and_then(|meta| meta.modified());
-    let Ok(left) = modified(left) else {
-        return false;
-    };
-    manifests
-        .iter()
-        .all(|manifest| modified(manifest).is_ok_and(|manifest| manifest <= left))
-}
-
-/// Install the packages of the binding in `dir`, if it is one: with `always` whatever is there,
-/// else only where they are older than its manifests.
-fn install_binding(dir: &str, always: bool) -> anyhow::Result<()> {
-    for (_, argv, left, manifests) in INSTALLS.iter().filter(|install| install.0 == dir) {
+/// Install the packages of the binding in `dir`, if it is one.
+fn install_binding(dir: &str) -> anyhow::Result<()> {
+    for (_, argv) in INSTALLS.iter().filter(|install| install.0 == dir) {
         let dir = root_path().join(dir);
-        if !always && installed(&dir, left, manifests) {
-            continue;
-        }
         eprintln!("xtask: {} in {}", argv.join(" "), dir.display());
         let status = Command::new(argv[0])
             .args(&argv[1..])
@@ -1824,8 +1814,10 @@ fn sign_in_args(args: &[OsString]) -> Option<Vec<OsString>> {
 
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
-/// pytest, and virtx-node's with Node's own runner. Each that opens the library builds it, as
-/// [`build_test_library`] does; the bindings run with what [`INSTALLS`] installs.
+/// pytest, and virtx-node's with Node's own runner; the bindings with what [`INSTALLS`] installs.
+/// virtx-rs's tests build and open [`test_library`], and virtx-node's open it in
+/// `$VIRTX_CORE_LIB`, its `pretest` not run: napi would build it again under `target/<triple>/`,
+/// every crate under it with it, since napi always names the target.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     (
         "virtx-rs",
@@ -1837,8 +1829,15 @@ const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     ),
     ("virtx-cli", ".", &[SIGN_IN_TESTS]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
-    ("virtx-node", "virtx-node", &[&[NPM, "test"]]),
+    (
+        "virtx-node",
+        "virtx-node",
+        &[&[NPM, "test", "--ignore-scripts"]],
+    ),
 ];
+
+/// The variable a package's client opens the library named in.
+const LIBRARY_ENV: &str = "VIRTX_CORE_LIB";
 
 /// How a suite of `test_all` ended.
 enum Outcome {
@@ -1897,7 +1896,7 @@ fn compile_tests() -> anyhow::Result<()> {
             eprintln!("xtask: {dir}'s packages left out: no {} on PATH", argv[0]);
             continue;
         }
-        install_binding(dir, true)?;
+        install_binding(dir)?;
     }
     eprintln!("xtask: compiled, nothing run");
     Ok(())
@@ -1950,23 +1949,29 @@ fn test_all() -> anyhow::Result<()> {
 
     let fixture = match &unready {
         Some(why) => Err(Outcome::Skipped(why.clone())),
-        None => Fixture::start().map_err(|e| Outcome::Failed(format!("the fixture: {e:#}"))),
+        None => build_test_library()
+            .and_then(|()| Fixture::start())
+            .map_err(|e| Outcome::Failed(format!("the fixture: {e:#}"))),
     };
     for (name, dir, commands) in PACKAGES {
         let outcome = match &fixture {
             Err(Outcome::Skipped(why)) => Outcome::Skipped(why.clone()),
             Err(Outcome::Failed(why)) => Outcome::Failed(why.clone()),
             Err(Outcome::Passed) => unreachable!("the fixture started"),
-            Ok(fixture) => match install_binding(dir, false) {
+            Ok(fixture) => match install_binding(dir) {
                 Err(e) => Outcome::Failed(format!("installing its packages: {e:#}")),
                 Ok(()) => {
                     let mut outcome = Outcome::Passed;
                     for argv in *commands {
-                        let ran = Command::new(argv[0])
+                        let mut command = Command::new(argv[0]);
+                        command
                             .args(&argv[1..])
                             .envs(fixture.vars())
-                            .current_dir(root_path().join(dir))
-                            .status();
+                            .current_dir(root_path().join(dir));
+                        if *name == "virtx-node" {
+                            command.env(LIBRARY_ENV, test_library());
+                        }
+                        let ran = command.status();
                         let why = match ran {
                             Ok(status) if status.success() => continue,
                             Ok(status) => format!("`{}` {status}", argv.join(" ")),

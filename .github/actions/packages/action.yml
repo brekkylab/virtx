@@ -23,9 +23,11 @@ inputs:
 runs:
   using: composite
   steps:
+    # npm 11's: npm 10 runs `prepare`, which builds the library from source, in `npm pack
+    # --ignore-scripts` too.
     - uses: actions/setup-node@v7.1.0
       with:
-        node-version: 22
+        node-version: 24
 
     - uses: actions/setup-python@v7.1.0
       with:

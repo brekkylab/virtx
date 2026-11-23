@@ -1,5 +1,5 @@
 [env]
-# virglrenderer built by xtask/scripts/build-deps.sh, needed by the server's `gpu` feature. Not
+# virglrenderer built by 3rdparty/_scripts/build-virglrenderer.sh, needed by the server's `gpu` feature. Not
 # forced, so an existing PKG_CONFIG_PATH in the environment wins.
 PKG_CONFIG_PATH = { value = "build/virglrenderer/lib/pkgconfig", relative = true }
 
@@ -21,6 +21,6 @@ rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
 # host without the Redistributable the Node addon fails to load at all, and a server release
 # would have to ship it or its installer. Linked statically, every artifact needs nothing
 # Windows does not ship. `cc-rs` builds the C dependencies to match by itself, and
-# `xtask/scripts/build-deps.ps1` builds libepoxy and virglrenderer with `b_vscrt=mt` to match.
+# `3rdparty/_scripts/build-virglrenderer.ps1` builds virglrenderer with `b_vscrt=mt` to match.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

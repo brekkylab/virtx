@@ -289,6 +289,8 @@ The job says why it ended where the process did not end by itself: its `reason`,
 | `oom` | Its memory ran out: it, or a process it started, was killed past the memory one command may take or the machine's, or for thrashing there. |
 | `restarted` | Its server restarted while it ran, keeping its sandbox. |
 
+A later version may add a reason. A package that does not know it keeps it as the string it was sent, so the job still reads.
+
 ## Signal or cancel a job
 
 A job's `signal` sends a signal such as `SIGTERM` to its process and every process it started, and `remove` kills them and forgets the job: a log being read then ends with the job's `end`, its `reason` `cancelled`. Removing the sandbox ends each job that runs in it so too, its `reason` `sandbox_deleted`.

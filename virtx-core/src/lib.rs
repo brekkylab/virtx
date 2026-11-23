@@ -23,6 +23,7 @@ mod error;
 #[cfg(feature = "ffi")]
 mod ffi;
 mod image;
+mod log_entry;
 mod project;
 mod sandbox;
 mod transport;
@@ -39,6 +40,7 @@ pub use error::Source;
 #[cfg(feature = "client")]
 pub use error::{Error, Members};
 pub use image::*;
+pub use log_entry::{LogEntry, UnknownEntry};
 pub use project::*;
 pub use sandbox::*;
 pub use transport::*;

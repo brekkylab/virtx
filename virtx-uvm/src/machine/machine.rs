@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::ffi::OsString;
+use std::fmt::Display;
 use std::fs::File;
 use std::io;
 use std::net::SocketAddr;
@@ -15,12 +16,16 @@ use serde::{Deserialize, Serialize};
 use crate::fstree::FsTree;
 use crate::machine::{
     Error, Network, Result,
-    boot::{self, BootArgs},
+    boot::{self, BootArgs, CONSOLE_TARGET},
     wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
 
 /// How many of the last lines the machine process logged a failure is told with.
 const TAIL: usize = 50;
+
+/// The log target [`enter`] tells the host why the machine could not be built under, as
+/// [`Error::told`] has it.
+const TOLD_TARGET: &str = "virtx_uvm::told";
 
 /// How long a machine told to shut down has to, before it is killed.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -281,6 +286,7 @@ impl Machine {
         drop((their_ctrlin, their_ctrlout, their_ioin, their_ioout));
 
         let mut tail = VecDeque::with_capacity(TAIL);
+        let mut told = None;
         loop {
             match wire::recv(&mut ctrlout).ok().flatten() {
                 Some(CtrlResp::Ready(published)) => {
@@ -293,22 +299,23 @@ impl Machine {
                         held: None,
                     });
                 }
-                Some(CtrlResp::Log { message, .. }) => {
+                Some(CtrlResp::Log {
+                    target, message, ..
+                }) if target == TOLD_TARGET => told = Some(message),
+                Some(CtrlResp::Log {
+                    target, message, ..
+                }) => {
                     if tail.len() == TAIL {
                         tail.pop_front();
                     }
-                    tail.push_back(message);
+                    tail.push_back((target, message));
                 }
                 Some(_) => {}
                 None => {
                     let status = process
                         .wait()
                         .map_err(|e| Error::io("waiting for the machine's process", e))?;
-                    let why = format!("the machine's process ended with {status} before it was up");
-                    return Err(Error::DidNotStart(match tail.is_empty() {
-                        true => why,
-                        false => format!("{why}; last logged:\n{}", Vec::from(tail).join("\n")),
-                    }));
+                    return Err(did_not_start(status, tail.make_contiguous(), told));
                 }
             }
         }
@@ -531,6 +538,24 @@ fn exchange(
     Ok((answer, read))
 }
 
+/// Why a machine whose process ended with `status` before it was up did not start, from the
+/// last records it `logged`, each a target and a message, and `told`, why as [`enter`] told it.
+/// The account has every record; what a caller elsewhere is told has the guest console's and
+/// `told`, since libkrun's records and this crate's can name this host's paths.
+fn did_not_start(status: impl Display, logged: &[(String, String)], told: Option<String>) -> Error {
+    let why = format!("the machine's process ended with {status} before it was up");
+    let said = |lines: Vec<String>| match lines.is_empty() {
+        true => why.clone(),
+        false => format!("{why}; last logged:\n{}", lines.join("\n")),
+    };
+    let line = |(target, message): &(String, String)| format!("{target}: {message}");
+    let console = logged.iter().filter(|(target, _)| target == CONSOLE_TARGET);
+    Error::DidNotStart {
+        account: said(logged.iter().map(line).collect()),
+        told: said(console.map(line).chain(told).collect()),
+    }
+}
+
 /// A pipe end as the command line names it.
 ///
 /// Neither std nor tokio hands a child anything past its stdin, stdout and stderr, so the
@@ -599,6 +624,7 @@ pub fn enter() -> Result<Infallible> {
     let entered = boot::boot(args.config, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
+        log::error!(target: TOLD_TARGET, "{}", e.told());
     }
     entered
 }
@@ -620,6 +646,53 @@ mod tests {
         assert_eq!(paths, [b"".to_vec(), b"lost+found".to_vec()]);
         assert!(matches!(create_upper(&path, 2), Err(Error::Io { .. })));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_machine_that_did_not_start_tells_its_console_and_why_and_no_more() {
+        let logged = [
+            (
+                "devices::virtio::block",
+                "opening /store/rootfs/a.vmdk: denied",
+            ),
+            (CONSOLE_TARGET, "[    0.100000] Booting"),
+            (
+                "virtx_uvm::machine::machine",
+                "attaching the root's image: boot error: /store/rootfs/a.vmdk",
+            ),
+        ]
+        .map(|(target, message)| (target.to_string(), message.to_string()));
+        let told = "attaching the root's image: boot error".to_string();
+        let Error::DidNotStart { account, told } =
+            did_not_start("exit status: 1", &logged, Some(told))
+        else {
+            unreachable!()
+        };
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        assert_eq!(
+            account,
+            format!(
+                "{why}; last logged:\n\
+                 devices::virtio::block: opening /store/rootfs/a.vmdk: denied\n\
+                 init_or_kernel: [    0.100000] Booting\n\
+                 virtx_uvm::machine::machine: attaching the root's image: boot error: \
+                 /store/rootfs/a.vmdk"
+            )
+        );
+        assert_eq!(
+            told,
+            format!(
+                "{why}; last logged:\n\
+                 init_or_kernel: [    0.100000] Booting\n\
+                 attaching the root's image: boot error"
+            )
+        );
+
+        let Error::DidNotStart { account, told } = did_not_start("signal: 9", &[], None) else {
+            unreachable!()
+        };
+        let why = "the machine's process ended with signal: 9 before it was up";
+        assert_eq!((account.as_str(), told.as_str()), (why, why));
     }
 
     #[test]

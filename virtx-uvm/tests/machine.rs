@@ -170,7 +170,7 @@ async fn run(
         match entry(&event) {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => lines.push(line),
             SandboxJobEntry::End(end) => return Ok((lines, end.code)),
-            SandboxJobEntry::Truncated {} => {}
+            _ => {}
         }
     }
     panic!("a job's log ends with its end")

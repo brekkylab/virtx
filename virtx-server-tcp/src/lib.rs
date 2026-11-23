@@ -21,6 +21,8 @@
 //! - [`endpoints::Home::take_in`] and [`let_go`](endpoints::Home::let_go): a sandbox taken into a
 //!   home whose record and disk were put there, and let go of with them left there, for moving a
 //!   sandbox between servers, or backing it up and restoring it.
+//! - [`endpoints::Home::make`]: a sandbox made under an id and port keys the server chose, as
+//!   one that names its sandboxes itself, or moves them between servers, does.
 //! - [`virtx_uvm::set_admission`]: room for its machines, every project's together. A sandbox
 //!   or a build there is none for is refused `503` `capacity`, nothing of it made. The binary
 //!   sets none, and every machine boots.

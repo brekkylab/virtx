@@ -62,7 +62,7 @@ The client starts the server as a child process, and the server's stdin and stdo
 - Neither side writes anything else there: the client MUST NOT to stdin, and the server MUST NOT to stdout.
 - The server MAY write UTF-8 text to stderr for a person to read. The client MAY capture, forward or ignore it.
 - The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin), and the client reaches every [project](#projects) it has.
-- The client ends it by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then [park](#parking) every sandbox, cancel every job, and exit, without waiting for requests in flight to finish. A client MAY kill a server that has not exited within a time it chooses.
+- The client ends it by closing the server's stdin, which the OS also does when the client's process ends. The server SHOULD then delete every sandbox and cancel every job, as `DELETE` does, and exit, without waiting for requests in flight to finish. A client MAY kill a server that has not exited within a time it chooses.
 
 ## Authentication
 
@@ -149,7 +149,7 @@ A request that fails is answered with an HTTP error status and a body:
 | `401 Unauthorized`, `403 Forbidden` | `unauthorized`, `forbidden` | See [Authentication](#authentication), [Projects](#projects) and [Origin](#origin). |
 | `404 Not Found` | `not_found` | What the path names does not exist. |
 | `405 Method Not Allowed` | `method_not_allowed` | The path takes no such method, such as a `PATCH` of a file, under [Files](#files). |
-| `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox or in use, or a job or a sandbox's VM that has ended. |
+| `409 Conflict` | `exists`, `in_use`, `ended` | A name already in use, something held by a sandbox, or a job or a sandbox's VM that has ended. |
 | `413 Content Too Large` | `too_large` | The body is over the server's limit, which is at least 2 MiB. A file's body, under [Files](#files), has none. |
 | `422 Unprocessable Content` | `not_started` | A job that cannot be started, such as a command not found. |
 | `429 Too Many Requests` | `quota` | The request is past a limit of the server's, which `reason` names. See [Refused for now](#refused-for-now). |
@@ -171,7 +171,7 @@ A job is something the server does for a while: an [image job](#image-jobs), suc
 Each is a resource of its own, under an id the server gives it, and every job is read as the others are:
 
 - As JSON it is an object with at least `id`, `kind`, such as `"build"` or `"exec"`, and `running`, whether it runs still. What it ended with is beside them once it has ended.
-- A `DELETE` of one that runs cancels it, as its kind says, which ends its log, and then removes it. A `DELETE` of one that has ended removes it.
+- A `DELETE` of one that runs cancels it, as its kind says, and then removes it. A `DELETE` of one that has ended removes it.
 - Its log is its [event stream](#events), at `{job}/events` under its path, and kept as long as the job is.
 
 A client that needs what a job did reads it from the job, or from its last event, not from the lines of its log.
@@ -189,7 +189,7 @@ data: {"end": {"code": 0}}
 ```
 
 - `id` is the entry's number in the log: `1` for the first, and one more for each after it.
-- `data` is the entry, one JSON object with one member, written on one line. What its member is named and holds is the job's kind's.
+- `data` is the entry, one JSON object with one member, written on one line. What its member is named and holds is the job's kind's. A later version of this protocol may add a kind of entry; a client passes over one it does not know, its `id` still counting for `Last-Event-ID`.
 - The server sets no other field, and MAY send comments, lines starting with `:`, to keep the connection open. A client ignores any other field, and any event with no `data`.
 
 Every reader gets the whole log, from its first entry, as the job writes it.
@@ -223,7 +223,7 @@ An image job copies an image between the server's [images](#images) and another 
 An image job is `{id, kind, reference, running, digest?, error?}`:
 
 - `kind` is `"pull"`, `"push"` or `"build"`, and `reference` the one it was started with.
-- `digest`, once it has succeeded, is the digest of the manifest it copied or built; for an image index, the index's own.
+- `digest`, once it has succeeded, is that of the image a pull or build left here, as the [images](#images) list it, or of the manifest a push put on the registry.
 - `error`, once it has failed, is why, for a person to read.
 
 Its log's entries are `{"log": "..."}`, a line of it, and `{"truncated": {}}`, then `{"end": {"digest": "..."}}` or `{"end": {"error": "..."}}`, as the job has them.
@@ -240,6 +240,7 @@ A server MAY refuse to connect to a registry, or to a host that registry sends i
 The job then fails, its `error` naming the host.
 
 A build builds an image from `recipe` into the server's images and tags it `reference`, as a push of it would.
+The image's config keeps `recipe`, as its JSON, in the label `sh.virtx.recipe`.
 
 Cancelling one stops it:
 
@@ -251,7 +252,7 @@ A cancel that comes once a build or a pull has begun to write its tag waits for 
 
 The server MAY remove an image job that has ended, once a time it chooses has passed.
 
-`POST /images/prune` deletes each image no reference points at and no [sandbox](#sandboxes) stands on, and what only such images held, such as their layers.
+`POST /images/prune` deletes each image no reference points at and no sandbox uses, and what only such images held, such as their layers.
 `images` is the digest of each image it deleted, and `reclaimed` how many bytes that freed.
 It MAY leave what is too new to tell from what a running image job will point a reference at.
 
@@ -297,32 +298,26 @@ The mount is a directory it creates, not the root and not inside another mount, 
 
 ### Sandboxes
 
-A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it, and a disk of its own: what its processes write to its root filesystem, over its image.
-Its disk lasts until the sandbox is deleted: the server MAY [park](#parking) its VM while nothing uses it, and boots it again, over that disk, for what next needs it.
+A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it.
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /sandboxes/` | | `200`, array of sandboxes |
+| `GET /sandboxes/` | | `200`, array of `{id, name?, image, running, ports?, abins?, error?}` |
 | `GET /sandboxes/?name={name}` | | `200`, array of the one named so, or of none |
-| `POST /sandboxes/` | `{image, name?, disk_gib?, network?, ports?, vcpus?, memory_mib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, the sandbox, with `ports` |
-| `GET /sandboxes/{id}` | | `200`, the sandbox |
+| `POST /sandboxes/` | `{image, name?, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, name?, image, running, ports?, abins?}` |
+| `GET /sandboxes/{id}` | | `200`, `{id, name?, image, running, ports?, abins?, error?}` |
 | `PATCH /sandboxes/{id}` | `{vcpus?, memory_mib?, disk_gib?}` | `200`, `{vcpus, memory_mib, disk_gib, up}` |
 | `DELETE /sandboxes/{id}` | | `204` |
 
-A sandbox is `{id, name?, image, running, ports?, abins?, error?}`, its `ports` with their `url`s in the answer to its `POST` alone:
-
 - `image` in the body is `{"type": "tag", "tag": "name:tag"}` or `{"type": "digest", "digest": "algorithm:hex"}`, an image in the server's [images](#images); in the answer, the digest of the image it booted.
 - `name`, if given, names it among the sandboxes a listing answers, so a client finds it again with `GET /sandboxes/?name={name}` rather than keeping its id; the answer names it as given. It is letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 characters, as a volume's, compared as written, so case counts; any other is refused with `400`, `invalid`. A name another sandbox has is refused with `409`, `exists`; once that one is deleted, the name is free.
-- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM is parked is `true`.
-- `disk_gib` is how much it may write to its root filesystem over its image, in GiB. Without it the server picks it, and `0` is refused.
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
-Its files are reached at [`/sandboxes/{id}/files/`](#files).
+- `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM the server stopped, as below, is `true`.
 
-A sandbox stands on the image it booted, by digest, for as long as it exists: booted again, it boots that image, whatever its tag points at by then.
-So the server keeps that image while the sandbox exists, as [Images](#images) says.
+Its files are reached at [`/sandboxes/{id}/files/`](#files).
 
 #### Resizing
 
@@ -333,31 +328,13 @@ Each member is held to what `POST` holds it to, and one left out stays as it is.
 - `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there. A VM that is up is neither stopped for it nor refused, in use or not: a request that changes `disk_gib` alone is answered at once with `up` `true`, and its VM keeps the disk it booted with until it next boots, after it is next stopped. A request that also changes `vcpus` or `memory_mib` is stopped or refused for those, and the disk grows at that same boot. A disk is grown, never shrunk: one smaller than the disk the VM last booted with is refused with `400`, `invalid`, and one down to that size is taken, so a grow not yet made can be taken back. A grow the server cannot make as the VM boots leaves the disk as it was, and the VM boots on it; the size asked for stays, and the grow is tried again at each boot.
 - The answer is its size as it is to be, each member as the server gives it, and `up`, whether its VM is up now: one that is, the size it booted with until it boots again.
 
-#### Use
-
-A sandbox is used while a [job](#sandbox-jobs) runs in it, a connection through one of its [ports](#ports) is open, or a request to its [files](#a-sandboxs-files) is answered by its VM, and when a job is started in it.
-A `GET`, a listing, a request it refuses, and a read of its files while it is parked do not use it.
-
-#### Parking
-
-The server MAY park a sandbox once it has been unused for a while of its choosing:
-
-- Every job in it ends as a cancellation does, and every connection through its ports is closed.
-- What its processes had written is put on its disk, and its VM is stopped. Its disk is kept with all of it.
-
-A parked sandbox is booted again for the next job started in it or request to its files -- a server MAY answer a read of them from its disk instead, as [A sandbox's files](#a-sandboxs-files) says -- which then takes as long as booting does:
-
-- Its VM boots again, from the image it stands on, over its disk as it was left.
-- Its files are as they were when it was parked. Its processes are not: nothing that ran in it before runs, until something starts it anew.
-- Its volumes are mounted again, and its ports opened again, at the same `url`s where the server can.
-
-A `GET`, a listing, and a connection to one of its ports do not boot it: a connection to a port of a parked sandbox is closed, as one nothing listens on is.
-
-#### Deleting
-
-A sandbox is deleted by its `DELETE`, or by the server, which MAY reclaim one unused for a while of its choosing.
-Either stops its VM if it is up, kills every job in it that runs, as its [reason](#sandbox-jobs) `sandbox_deleted` says, and closes its ports; its disk goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
+A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
+Either stops its VM, kills every job in it that runs, as its [reason](#sandbox-jobs) `sandbox_deleted` says, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
+
+A server MAY stop the VM of a sandbox in which no job runs and nothing is reached through its files or its ports, and boot it again for the next job or request to its files, which then take as long as booting does.
+Everything written to its root filesystem is kept across that, as it is for as long as the sandbox lives; what was left running in it, apart from a job, is not.
+A connection to one of its ports while its VM is stopped is closed, as one to a port nothing listens on is, and does not boot it.
 
 A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
 It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
@@ -368,19 +345,19 @@ One it kept and cannot know again, such as one whose image is gone, it MAY still
 `ports` in the body are ports in the sandbox to open, each a number, or `{port, label?, protocol?, inbound?}` to say what it is for, how it is reached and whom it lets in: `[5900, {"port": 5173, "label": "dev server", "protocol": "http"}]`.
 
 - `label` is what it is for, free text of up to 128 characters, answered with it.
-- `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP MUST refuse `http` with `400`, `invalid`.
+- `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP MUST refuse `http` with `400`, `invalid`. A later version of this protocol may add a protocol; a server refuses one it does not know with `400`, `invalid`, and a client keeps one it does not know in an answer as it was sent.
 - `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: whom it lets in. A server MAY keep them; one that keeps none MUST refuse `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out. Whom a port given none lets in is the server's to say; `[]` lets in no one.
 
-They are reserved when the sandbox is made, and kept through every park until it is deleted. `0` and a port given twice are refused.
+They are reserved when the sandbox is made, and kept until its `DELETE`. `0` and a port given twice are refused.
 
 The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given.
 A `GET` of the sandbox, and of them all, answers each as `{port, label?, protocol?, address?}`, in the same order, until the sandbox's `DELETE`, across a restart of the server that keeps it too: with no `url`, which the `POST` alone answers, since the URLs carry credentials. One with an `error` answers none, since none of its ports is open.
 
 - A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
 - A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.
-- A server reachable from other machines MAY answer a `tcp` port with an `address` too, `host:port`, such as `tcp.example.com:20001`, where any TCP client reaches it directly, with no WebSocket and no credentials. It is not secret, as the URL is: what listens on the port answers whoever connects there, and authenticates them itself. The server MAY give one to some `tcp` ports and not others; an `http` port has none, and nor does any on a server on the client's machine. A server that keeps no inbound rules MUST NOT answer one, since the client could not narrow whom it lets in.
+- A server reachable from other machines MAY answer a `tcp` port with an `address` too, `host:port`, such as `tcp.example.com:20001`, where any TCP client reaches it directly, with no WebSocket and no credentials. It is not secret, as the URL is: what listens on the port answers whoever connects there, and authenticates them itself. An `http` port has none, and nor does any on a server on the client's machine. A server that keeps no inbound rules MUST NOT answer one, since the client could not narrow whom it lets in.
 - The URL is the server's to form: a client MUST NOT build one or take it apart.
-- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; an `http` port's URL is an `https` one that a browser opens. A server that could not reach the port at all, such as while no VM runs, SHOULD close its WebSocket with a reason saying why, for a person.
+- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; a server that could not reach the port at all, such as while no VM runs, SHOULD close it with a reason saying why, for a person. An `http` port's URL is an `https` one that a browser opens.
 - Ports are the way in, and do not need `network`, which is the way out.
 - A server that keeps inbound rules MAY open a port whose rules it could not set, such as past a quota, with `inbound_error`, `{code, message, reason?}` in a refusal's shape, beside its `url`: it lets no one in, and is reached at no `address`, until they are. The sandbox is answered `201` as any is, since a refusal would read as nothing made.
 
@@ -406,7 +383,6 @@ A sandbox job is `{id, kind, pid, cmd, running, code?, reason?}`:
 - `code`, once it has ended, is its exit status, or `128 + signal` for one a signal ended.
 - `reason`, once it has ended, is why, where the process did not end by itself and the server says, as below.
 
-A job started in a sandbox whose VM is [parked](#parking) boots it first.
 A command that cannot be started, such as one not found, is refused with `422`, `not_started`, and makes no job.
 
 #### An exec answered with its log
@@ -446,14 +422,16 @@ It is killed so too, its `code` `137`, when its memory runs out: past what the s
 A server MAY say which, in its end and in its job, with `reason`:
 
 - `"timeout"`: its `timeout_ms` ran out.
-- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed, or by its sandbox [parked](#parking) under it. Its sandbox is still there.
-- `"sandbox_deleted"`: its sandbox was [deleted](#deleting) while it ran, by the sandbox's `DELETE` or by the server, which then ends its log with this end before the job goes with the sandbox.
+- `"cancelled"`: its job was cancelled, by its `DELETE` while it ran, which then ends its log with this end before the job is removed. Its sandbox is still there.
+- `"sandbox_deleted"`: its sandbox was deleted while it ran, by the sandbox's `DELETE` or by the server, which then ends its log with this end before the job goes with the sandbox.
 - `"vm_exited"`: its sandbox's VM exited on its own under it; the sandbox's `running` is then `false`.
 - `"oom"`: its memory ran out: it ended `137`, killed, or a process it started killed, for want of memory. A server that holds a command to a memory limit SHOULD say it, so that one is told apart from a `SIGKILL` sent.
 - `"restarted"`: its server ended, keeping its sandbox, while it ran, as below.
 
+A later version of this protocol may add a reason. A client keeps one it does not know as it was sent, and reads the job and its end as it would otherwise.
+
 A process that exits, or that a `signal` sent it ends -- `SIGKILL` too, its `code` `137` -- ended by itself, and has no `reason`; without one, a `code` of `137` does not say which.
-The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed: a sandbox parked ends its jobs and keeps them.
+The job, and its log, are kept until its `DELETE` or its sandbox's, or until its sandbox is reclaimed.
 A server MAY keep a number of a sandbox's ended jobs of its choosing, and no more: past it, the one that ended first is removed as another starts, and one that runs never is.
 A sandbox [kept](#sandboxes) across its server's end keeps its jobs, as many as the server keeps: started again, the server knows each that had ended as it ended, and each that ran as killed then, its `code` `137` and its `reason` `"restarted"`. A job so kept has its `end` alone for its log.
 
@@ -492,7 +470,7 @@ Images are listed, tagged and removed with the specification's requests:
 | List images | `GET /images/oci/v2/_catalog`, then `GET /images/oci/v2/{name}/tags/list` |
 | Tag an image | `PUT /images/oci/v2/{name}/manifests/{tag}` with its manifest |
 | Untag a reference | `DELETE /images/oci/v2/{name}/manifests/{tag}` |
-| Remove an image | `DELETE /images/oci/v2/{name}/manifests/{digest}`, which also removes every tag pointing at it; refused with `409 Conflict` and the code `DENIED` for one a sandbox stands on |
+| Remove an image | `DELETE /images/oci/v2/{name}/manifests/{digest}`, which also removes every tag pointing at it |
 | Export an image | `GET` its manifest, and each blob it names |
 | Import an image | Push each blob, then `PUT` its manifest by tag |
 
@@ -536,11 +514,11 @@ The server MUST support WebDAV class 1, and MAY support class 2 (locking).
 
 ### A sandbox's files
 
-A sandbox's files are its root filesystem as its processes see it, the volumes mounted into it among them: what a process writes is read here at once, and what is written here a process reads.
+A sandbox's files are its root filesystem as its processes see it, the volumes mounted into it among them, while its VM runs: what a process writes is read here at once, and what is written here a process reads.
 
 - The server MAY leave out what is not a file to read or write, such as `/proc`, `/sys` and `/dev`, and what is neither a file nor a directory, such as a link or a device: it is not listed, and a request naming it is answered as if nothing were there.
 - A file a `PUT` makes is owned as one a process in the sandbox makes is; one it replaces keeps its mode and owner.
 - A write to a volume mounted `readonly` is refused with `403 Forbidden`.
-- A read of a sandbox whose VM is [parked](#parking) -- `PROPFIND`, `GET`, `HEAD` or `OPTIONS` -- MAY be answered from its disk as it was left, and its image, without booting it; if it is, it is answered as its VM would answer it, with the same listings, the same `getcontentlength`, `getlastmodified` and `getetag`, the same bytes and the same `404`s, and its volumes at their paths as they are now. A file's `getetag` is its length and modification time either way, so a park or a boot that leaves a file as it was leaves its tag as it was. Any other request boots it first, and is answered by its VM. A sandbox whose VM has never booted reads as its image, with its volumes. A request to a sandbox whose VM has exited is refused with `409 Conflict`, `ended`.
+- A request to a sandbox whose VM has exited is refused with `409 Conflict`, `ended`.
 
 In a volume, a remote source [mounted](#mounts) at a path is reached at that path, and a request under it goes to the source. It fails, with the status the server chooses, where the source cannot do it, such as a `MOVE` the source does not support.

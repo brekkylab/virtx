@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 use crate::Client;
 use crate::cli::{
     build::{self, BuildArgs},
-    cloud::CloudArgs,
     inspect::{self, InspectArgs},
     job::Interrupted,
     load::{self, LoadArgs},
@@ -24,7 +23,7 @@ use crate::cli::{
 #[command(
     name = "virtx",
     version,
-    about = "Build and manage a virtx server's images, and sign in to its provider or virtx cloud"
+    about = "Build and manage a virtx server's images, and sign in to its provider"
 )]
 pub(crate) struct Cli {
     #[command(flatten)]
@@ -32,9 +31,6 @@ pub(crate) struct Cli {
 
     #[command(flatten)]
     provider: ProviderArgs,
-
-    #[command(flatten)]
-    cloud: CloudArgs,
 
     #[command(subcommand)]
     command: Command,
@@ -114,7 +110,7 @@ impl Command {
 /// command of signing in, of the provider `ProviderArgs` names.
 pub(crate) enum Asked {
     Images(ServerArgs, ImageCommand),
-    SignIn(ProviderArgs, CloudArgs, SignInCommand),
+    SignIn(ProviderArgs, SignInCommand),
 }
 
 /// Read the command line `argv` spells, the program name first; or, printing why, answer clap's
@@ -128,7 +124,7 @@ pub(crate) fn parse(
     })?;
     Ok(match cli.command.into_image() {
         Ok(command) => Asked::Images(cli.server, command),
-        Err(command) => Asked::SignIn(cli.provider, cli.cloud, command),
+        Err(command) => Asked::SignIn(cli.provider, command),
     })
 }
 

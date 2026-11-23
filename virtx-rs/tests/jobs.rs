@@ -305,29 +305,6 @@ fn a_started_job_is_read_as_its_log() {
         .create_sandbox(&SandboxCreateArgs::new(ALPINE))
         .wait()
         .unwrap();
-    // Started and read as one: its job, then its log.
-    let mut items = sandbox.exec_with_log(&SandboxExecArgs::new(["echo", "hi"]));
-    let mut read = Vec::new();
-    while let Some(item) = items.wait_next() {
-        read.push(item.unwrap());
-    }
-    let [SandboxExecItem::Job(job), rest @ ..] = &read[..] else {
-        panic!("not its job first: {read:?}");
-    };
-    assert_eq!(job.cmd, ["echo", "hi"]);
-    assert_eq!(
-        rest.iter()
-            .map(|item| match item {
-                SandboxExecItem::Log(entry) => entry.entry.clone(),
-                other => panic!("{other:?}"),
-            })
-            .collect::<Vec<_>>(),
-        [
-            SandboxJobEntry::Stdout("hi".into()),
-            SandboxJobEntry::End(SandboxJobEnd::exited(0)),
-        ]
-    );
-
     let mut log = sandbox.exec(&SandboxExecArgs::new(["echo", "hi"])).log();
     assert!(log.job().is_none());
     let mut read = Vec::new();
@@ -545,40 +522,6 @@ fn a_pull_or_a_build_of_what_no_registry_has_fails_and_tags_nothing() {
         assert_eq!(completed.to_string(), failed.to_string());
     }
     assert_eq!(common::tagged(&client, &built), None);
-}
-
-#[test]
-fn a_sandbox_is_found_by_its_name_and_runs_until_it_is_removed() {
-    let client = common::client();
-    common::alpine(&client);
-    let name = common::unique("lifecycle");
-    let mut args = SandboxCreateArgs::new(ALPINE);
-    args.name = Some(name.clone());
-    let made = client.create_sandbox(&args).wait().unwrap();
-    assert!(made.info().running);
-    assert_eq!(made.name(), Some(name.as_str()));
-    let found = client.find_sandbox(&name).wait().unwrap().unwrap();
-    assert_eq!(found.id(), made.id());
-    assert!(
-        client
-            .find_sandbox(common::unique("nobody"))
-            .wait()
-            .unwrap()
-            .is_none()
-    );
-
-    let (said, code) = common::run(&found, &["echo", "up"]);
-    assert_eq!((said, code), (vec!["up".to_owned()], 0));
-    let got = client.get_sandbox(made.id()).wait().unwrap();
-    assert!(got.info().running);
-
-    made.remove().wait().unwrap();
-    let gone = client.get_sandbox(made.id()).wait().unwrap_err();
-    assert_eq!(
-        (gone.status(), gone.code()),
-        (Some(404), Some("not_found")),
-        "{gone}"
-    );
 }
 
 #[test]

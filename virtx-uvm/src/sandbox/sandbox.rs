@@ -1,48 +1,69 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
+use std::fs::{self, File};
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest as _, Sha256};
 
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{
-    SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
-    SandboxResizeArgs, SandboxResources,
+    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+    SandboxPort, SandboxResizeArgs, SandboxResources,
 };
 
-use super::hooks::{Held, Hooks, Written};
-use super::record::{Record, Resized};
+use super::job::Written;
+use super::record::Record;
+use super::upper::Upper;
 use super::{Error, Job};
+use crate::backend::{Backing, Held, Stored, Wanted};
 use crate::machine::wire::{CtrlResp, Taken};
 use crate::{
-    ImageStore, Machine, MachineConfig, MachineSpec, Network, Ports, SandboxDisk, SnapshotError,
-    SnapshotLock, SnapshotStore, VolumeMount, VolumeStore,
+    Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
+    Ports, Reference, Room, SandboxDisk, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
 pub const DEFAULT_VCPUS: u8 = 4;
 pub const DEFAULT_MEMORY_MIB: u32 = 4096;
-/// The most `disk_gib` a sandbox may ask for. Formatting a disk keeps 64 KiB of its bitmaps in
-/// memory for each GiB.
-pub const MAX_DISK_GIB: u32 = 1024;
+pub const DEFAULT_DISK_GIB: u32 = 2;
 /// The least memory a sandbox is given: the kernel alone takes about 21 MiB.
 const MIN_MEMORY_MIB: u32 = 64;
+
+/// The most `disk_gib` a sandbox may ask for. Formatting a disk keeps 64 KiB of its bitmaps in
+/// memory for each GiB.
+const MAX_DISK_GIB: u32 = 1024;
+
+/// The directory under a server's root its sandboxes keep what they make on the host in.
+const SANDBOX: &str = "sandbox";
+
+/// The directory beside the server's program its own programs for `/abin` are in, and where each
+/// one's `SKILL.md` is in that.
+const ABIN_HOST: &str = "abin";
+const SKILLS: &str = "skills";
+const SKILL: &str = "SKILL.md";
+
+/// The most characters a port's label has.
+const LABEL_MOST: usize = 128;
+/// How long a guest has to say it has synced ([`Sandbox::sync`]).
+const SYNC_WAIT: Duration = Duration::from_secs(5);
 
 /// How many entries a job's log keeps before its end.
 pub const LOG_LIMIT: usize = 100_000;
 
 /// How many ended jobs a sandbox keeps, each with its log, for a client to read: past them, the
-/// one that ended first is removed as another starts, as if its client had removed it. One
-/// running is never removed so.
+/// one that ended first is removed as another starts, as if its client had removed it. One that
+/// runs is never removed so.
 pub const KEEP_ENDED: usize = 100;
 
-/// `jobs`, with room for one more under [`KEEP_ENDED`]: the ones that ended first removed.
+/// Remove from `jobs` the ones that ended first, leaving room for one more under `keep` ended.
 fn keep_ended(jobs: &mut BTreeMap<String, Arc<Job>>, keep: usize) {
-    let mut ended: Vec<(std::time::Instant, String)> = jobs
+    let mut ended: Vec<(Instant, String)> = jobs
         .iter()
         .filter_map(|(id, job)| job.ended_at().map(|at| (at, id.clone())))
         .collect();
@@ -57,23 +78,12 @@ fn keep_ended(jobs: &mut BTreeMap<String, Arc<Job>>, keep: usize) {
     }
 }
 
-/// The most a port's label is, in characters.
-pub const LABEL_MOST: usize = 128;
+/// How long a sandbox is in use by nothing before its machine is stopped, where
+/// `VIRTX_PARK_AFTER_MS` does not say: in milliseconds, `0` for never.
+const PARK_AFTER: Duration = Duration::from_secs(5 * 60);
 
-/// How long a sandbox booting waits for its disk to be let go of: by what keeps it, as it was
-/// parked, or by a process spawned as it was held.
-pub(super) const DISK_WAIT: Duration = Duration::from_secs(10);
-
-/// How long a sandbox is unused before its machine is parked, where `VIRTX_PARK_AFTER_MS` does
-/// not say: not at all, its machine parked as nothing uses it any more.
-const PARK_AFTER: Duration = Duration::ZERO;
-
-/// How often a sandbox in use is looked at again, to park it once it is not: what bounds how
-/// soon after it is it parked.
-const LOOK_EVERY: Duration = Duration::from_millis(100);
-
-/// How long a sandbox is unused before its machine is parked, `None` for never:
-/// `VIRTX_PARK_AFTER_MS`, in milliseconds, `0` for never; or at once.
+/// How long a sandbox is in use by nothing before its machine is stopped, `None` for never:
+/// `VIRTX_PARK_AFTER_MS`, in milliseconds, or five minutes.
 pub fn park_after() -> Option<Duration> {
     match std::env::var("VIRTX_PARK_AFTER_MS").map(|ms| ms.parse::<u64>()) {
         Ok(Ok(0)) => None,
@@ -124,711 +134,559 @@ pub fn signal_number(name: &str) -> Option<i32> {
     Some(index as i32 + 1)
 }
 
-/// The directory beside the program machines run as that virtx's own programs for `/abin` are
-/// in, and where each one's `SKILL.md` is in that.
-pub(super) const ABIN_HOST: &str = "abin";
-const SKILLS: &str = "skills";
-const SKILL: &str = "SKILL.md";
-
-/// What every sandbox of a server boots from and keeps itself in.
-pub(super) struct Shared {
-    pub(super) images: ImageStore,
-    pub(super) snapshots: SnapshotStore,
-    pub(super) volumes: VolumeStore,
-    /// The process each machine runs as.
-    pub(super) vm: Vec<OsString>,
-    pub(super) hooks: Arc<dyn Hooks>,
-    /// Where each record is kept, `<id>.json`.
-    pub(super) kept: PathBuf,
-    /// How long each sandbox is unused before its machine is parked, `None` for never.
-    pub(super) park_after: Option<Duration>,
-}
+/// A command sent to the machine and not yet answered, whether it was started with a stdin,
+/// and who waits for its job.
+type Starting = (Vec<String>, bool, oneshot::Sender<Result<Arc<Job>, String>>);
 
 /// Where a sandbox's machine is.
 enum State {
-    Up(Arc<Run>),
-    /// Stopped while nothing used it, its disk kept: booted again for what next needs it.
+    /// Up, with the room it was given ([`Admission`](crate::Admission)), held until it is down.
+    Up(Arc<Machine>, Option<Room>),
+    /// Stopped while the sandbox was in use by nothing, and booted again for what next needs
+    /// it.
     Parked,
-    /// Ended on its own: nothing boots it again.
+    /// Ended on its own, or with the sandbox: nothing boots it again.
     Exited,
-    Deleted,
 }
 
-/// A command sent to a sandbox's machine, not yet answered: what it is, whether it was started
-/// with a stdin, and who waits for its job.
-struct Starting {
-    cmd: Vec<String>,
-    /// Whether it was started with a stdin.
-    stdin: bool,
-    waiter: oneshot::Sender<Result<Arc<Job>, String>>,
-}
-
-/// A sandbox's run: the machine it booted, up until it stops, and what is asked of it.
-pub(super) struct Run {
-    pub(super) machine: Arc<Machine>,
-    /// Its sandbox's id, the root it was made under -- which tells apart two sandboxes of one
-    /// id under different roots -- and when its machine came up, by the wall clock and by one no
-    /// one sets: what [`runs`](super::runs) is told as it comes up and as it goes down.
-    sandbox: String,
-    root: PathBuf,
-    started: SystemTime,
-    since: Instant,
-    /// Its disk's lock, and what the hooks hold for it, until it has stopped.
-    held: Mutex<Option<(SnapshotLock, Vec<Held>)>>,
-    /// What it may write: its disk, and the volumes it mounts to write.
-    pub(super) writes: Vec<Written>,
-    /// Whether its machine runs still.
-    pub(super) up: AtomicBool,
-    /// Each command sent to the machine and not yet answered, in the order sent.
-    starting: Mutex<VecDeque<Starting>>,
-    /// Who waits for the guest to say it has synced.
-    pub(super) synced: Mutex<Option<oneshot::Sender<()>>>,
-}
-
-impl Run {
-    /// What it held let go of: its machine has ended, its run told as ended, once.
-    fn release(&self) {
-        if let Some(held) = self.held.lock().unwrap().take() {
-            drop(held);
-            super::runs::down(&self.sandbox, &self.root, self.started, self.since);
-        }
-    }
-}
-
-/// A sandbox: a machine booted from an image over a disk of its own, with volumes mounted
-/// into it, and the processes run in it as [jobs](Job), each with its log. It lasts from its
-/// making until it is deleted. Its machine is parked once it has been unused for a while, and
-/// booted again for the next job or write to its files: what it wrote is on its
-/// disk across that, and what ran in it is not.
+/// A sandbox: a machine booted as it was made, again whenever it is needed after it was
+/// [parked](Sandbox::idle) for want of use, and the processes run in it.
+///
+/// What it wrote is kept across its machine's stops, on the upper disk it made for itself, until
+/// it is closed; what ran in it is not. One made with keys is kept past its process too, with a
+/// record beside its disk: [let go](Sandbox::leave) of as its server ends, it is known again,
+/// parked, by the next server over its root ([`Sandbox::kept`]).
 pub struct Sandbox {
-    pub(super) record: Record,
-    pub(super) shared: Arc<Shared>,
+    /// Its upper disk's name, and so its own.
+    id: String,
+    /// The name it was made with, which a server finds it again by.
+    name: Option<String>,
+    /// What it was made with, its image by digest, as large as it was last resized to.
+    args: Mutex<SandboxCreateArgs>,
+    /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
+    root: PathBuf,
+    /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
+    up_since: Mutex<Option<(SystemTime, Instant)>>,
+    /// Where its upper disk and its record are.
+    dir: PathBuf,
+    /// What is kept of it past its process, for one made so: `None` for one that goes with its
+    /// process, and once it is closed.
+    record: Mutex<Option<Record>>,
+    /// The image it was made from, as the store names it, and held there for as long as the
+    /// sandbox is.
+    image: Digest,
+    _held: ImageHold,
+    /// The upper disk it made for itself, until it is closed.
+    upper: Mutex<Option<Upper>>,
+    /// The ports it was made with, as asked for again: what each is for and how it is reached,
+    /// with no `url`, which is its server's.
+    ports_opened: Vec<SandboxPort>,
+    /// The programs it was made with, by name, and the directory its machines show them from,
+    /// until it is closed.
+    abins: Vec<String>,
+    abin: Mutex<Option<Abin>>,
+    /// Its volumes, held against removal for each of its machines and between them, until it
+    /// is closed.
+    volume_holds: Mutex<Vec<VolumeHold>>,
+    /// Each volume it mounts, by name, and whether read-only.
+    mounted: Vec<(String, bool)>,
+    /// Where its disk and volumes are kept beyond this machine, if anywhere, and what that holds
+    /// for its machine while it is up.
+    backing: Backing,
+    holding: Mutex<Vec<Held>>,
+    /// What each of its machines boots, as large as it was last [resized](Sandbox::resize) to,
+    /// and the process each runs as.
+    config: Mutex<MachineConfig>,
+    vm: Vec<OsString>,
+    /// How large its upper disk is to be, in GiB: grown to it as its machine next boots.
+    disk_gib: AtomicU32,
     state: Mutex<State>,
-    /// Held while its machine boots or is parked, or it is resized or deleted, so one does at a
-    /// time.
-    pub(super) turn: tokio::sync::Mutex<()>,
-    /// Its jobs, by id, until each is removed or it is deleted: a park ends them, and keeps
-    /// them.
+    /// Why a job that runs as it ends is ended, once it is closed or let go of.
+    ended_for: Mutex<Option<SandboxJobEndReason>>,
+    /// Held while its machine boots or stops, so one does at a time.
+    turn: tokio::sync::Mutex<()>,
+    /// Its jobs, by id, until each is removed.
     jobs: Mutex<BTreeMap<String, Arc<Job>>>,
-    /// Where its machine's ports are reached, whichever machine runs.
+    /// Each command sent to the machine and not yet answered, in the order sent, and who waits
+    /// for its job.
+    starting: Mutex<VecDeque<Starting>>,
+    /// Who waits for its guest to say it has synced.
+    synced: Mutex<Option<oneshot::Sender<()>>>,
+    /// Whether the embedder's disks served its disk to its last machine: `None` until one has
+    /// booted in this process.
+    served: Mutex<Option<bool>>,
+    /// Where its machine's ports are reached.
     ports: Ports,
-    /// What answers each port, by port, where [`Hooks::listen`] gave something to.
-    listening: Mutex<HashMap<u16, Held>>,
+    /// How long it is in use by nothing before its machine is parked, `None` for never, and
+    /// whether that is watched for, from its first boot on.
+    park_after: Option<Duration>,
+    watching: AtomicBool,
+    /// When it was made, or a job in it or an [`Activity`] on it last ended.
+    used: Mutex<Instant>,
     /// How many [`Activity`]s are under way.
     active: AtomicUsize,
-    /// What a conditional write to its files holds first as it lands (see
-    /// [`Files`](crate::Files)).
+    /// What a conditional write to its files holds as it lands (see [`Files`](crate::Files)).
     writing: Arc<tokio::sync::Mutex<()>>,
-    /// Whether the embedder's disks served its disk to its last machine
-    /// ([`Disks::serve`](crate::disks::Disks::serve)): `None` until one has booted here.
-    pub(super) served: Mutex<Option<bool>>,
-    /// Room asked for its first machine as it was made, before anything of it was: what its
-    /// first boot runs in, rather than asking again.
-    pub(super) room: Mutex<Option<Option<crate::Room>>>,
 }
 
 impl Sandbox {
-    pub(super) fn new(record: Record, shared: Arc<Shared>) -> Arc<Sandbox> {
-        let state = match *record.exited.lock().unwrap() {
-            true => State::Exited,
-            false => State::Parked,
-        };
-        // Its jobs as it was last kept, by a server before this one: each ended.
-        let jobs = std::mem::take(&mut *record.jobs.lock().unwrap());
-        let jobs = jobs.into_iter().map(|job| (job.id.clone(), Job::kept(job)));
-        Arc::new(Sandbox {
-            record,
-            shared,
-            state: Mutex::new(state),
-            turn: tokio::sync::Mutex::new(()),
-            jobs: Mutex::new(jobs.collect()),
-            ports: Ports::default(),
-            listening: Mutex::default(),
-            active: AtomicUsize::new(0),
-            writing: Arc::default(),
-            served: Mutex::default(),
-            room: Mutex::default(),
-        })
-    }
-
-    /// What a conditional write to its files holds first as it lands (see
-    /// [`Files`](crate::Files)).
-    pub(crate) fn writing(&self) -> &Arc<tokio::sync::Mutex<()>> {
-        &self.writing
-    }
-
-    /// Each volume it mounts writable: where in the guest, spelled as the guest is given it,
-    /// and the volume's own directory.
-    pub(crate) fn mounts(&self) -> Vec<(String, std::path::PathBuf)> {
-        self.record
-            .args
-            .volumes
-            .iter()
-            .filter(|asked| !asked.readonly)
-            .filter_map(|asked| {
-                let dir = self
-                    .shared
-                    .volumes
-                    .open(&asked.volume)
-                    .ok()?
-                    .path()
-                    .to_owned();
-                Some((crate::mount_point(&asked.path).ok()?, dir))
-            })
-            .collect()
-    }
-
-    pub fn id(&self) -> &str {
-        &self.record.id
-    }
-
-    /// Whether a sandbox lives under the home `root`, its machine up or not, of this process or
-    /// another: a record of one kept there, or a disk there a machine holds.
-    pub fn lives_under(root: &std::path::Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(root.join("sandbox")) else {
-            return false;
-        };
-        entries.flatten().any(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".json") {
-                return true;
+    /// Boot a sandbox as `args` asks, of what `images` and `volumes` hold, writing over its
+    /// image to an upper disk it makes under `root`, by running `vm` as its machine's process
+    /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
+    /// nothing for `park_after`.
+    ///
+    /// It is made under `id` where one is given -- letters, digits, `_` and `-`, the first a
+    /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
+    /// under `root` has, has made or keeps; under an id it picks otherwise.
+    ///
+    /// With `keys`, the port each opens, it is kept past this process: its record is written
+    /// once it has booted, and a making cut short before then leaves nothing. Without, it goes
+    /// with this process.
+    ///
+    /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
+    /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
+    /// [made](crate::StorageBackend::made) there before its machine first boots -- and removed
+    /// from there again where its making fails after.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        args: &SandboxCreateArgs,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        id: Option<&str>,
+        keys: Option<HashMap<String, u16>>,
+        backing: &Backing,
+    ) -> Result<Arc<Sandbox>, Error> {
+        // What can be refused without starting anything, first.
+        if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
+            return Err(Error::Invalid(format!(
+                "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
+                 starting with '.' or '-', 128 at most"
+            )));
+        }
+        if let Some(id) = id {
+            if !is_id(id) {
+                return Err(Error::Invalid(format!(
+                    "id: {id:?} is not a sandbox's id: letters, digits, '_' and '-', the first a \
+                     letter or digit, 64 at most"
+                )));
             }
-            name.ends_with(".ext4.lock")
-                && std::fs::File::open(entry.path()).is_ok_and(|file| {
-                    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
-                })
-        })
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        self.record.name.as_deref()
-    }
-
-    /// What it was made with: its `image` the digest it stands on.
-    pub fn args(&self) -> &SandboxCreateArgs {
-        &self.record.args
-    }
-
-    /// Whether its machine is up now: not parked, nor exited.
-    pub fn is_up(&self) -> bool {
-        self.run().is_some()
-    }
-
-    /// When its machine came up, if it is up now.
-    pub fn up_since(&self) -> Option<SystemTime> {
-        self.run().map(|run| run.started)
-    }
-
-    /// It, as the protocol answers a sandbox: its ports' `url`s only given `urls`, as its
-    /// making answers them.
-    pub fn answer(&self, urls: bool) -> virtx_core::Sandbox {
-        self.record.answer(urls)
-    }
-
-    /// Its run, while its machine runs.
-    pub(super) fn run(&self) -> Option<Arc<Run>> {
-        match &*self.state.lock().unwrap() {
-            State::Up(run) if run.up.load(Ordering::Relaxed) => Some(Arc::clone(run)),
-            _ => None,
+            let dir = root.join(SANDBOX);
+            if dir.join(format!("{id}.ext4")).exists() || Record::path(&dir, id).exists() {
+                return Err(exists(id));
+            }
         }
-    }
-
-    /// Whether `run` is its machine's run now.
-    fn is(&self, run: &Arc<Run>) -> bool {
-        matches!(&*self.state.lock().unwrap(), State::Up(up) if Arc::ptr_eq(up, run))
-    }
-
-    /// Whether its machine is parked: not up, nor exited, nor it deleted.
-    pub(super) fn is_parked(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), State::Parked)
-    }
-
-    fn is_deleted(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), State::Deleted)
-    }
-
-    fn gone(&self) -> Error {
-        Error::NotFound(format!("no sandbox here has the id {}", self.record.id))
-    }
-
-    /// Used now: what parking it, and reclaiming it, count from.
-    pub(super) fn used(&self) {
-        *self.record.used.lock().unwrap() = SystemTime::now();
-    }
-
-    /// When it was made, or last used: a job started, run or ended in it, a connection through
-    /// its ports, a request to its files its machine answered.
-    pub fn last_used(&self) -> SystemTime {
-        *self.record.used.lock().unwrap()
-    }
-
-    /// How long it has been unused: nothing in use now ([`busy`](Self::busy)), and last used
-    /// that long ago. `None` while it is in use.
-    pub(super) fn idle(&self) -> Option<Duration> {
-        if self.busy() {
-            return None;
+        let mut given = HashSet::new();
+        if let Some(spec) = args
+            .ports
+            .iter()
+            .find(|spec| spec.port == 0 || !given.insert(spec.port))
+        {
+            return Err(Error::Invalid(format!(
+                "ports: {} is not a port, or is given twice",
+                spec.port
+            )));
         }
-        Some(
-            SystemTime::now()
-                .duration_since(self.last_used())
-                .unwrap_or_default(),
-        )
-    }
-
-    /// Its record written where it is kept, as it is now -- its jobs with it -- unless it is
-    /// deleted.
-    pub(super) fn keep(&self) {
-        if self.is_deleted() {
-            return;
+        if let Some(spec) = args.ports.iter().find(|spec| {
+            spec.label
+                .as_ref()
+                .is_some_and(|label| label.chars().count() > LABEL_MOST)
+        }) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s label is past {LABEL_MOST} characters",
+                spec.port
+            )));
         }
-        let path = self.shared.kept.join(format!("{}.json", self.record.id));
-        let mut kept = self.record.kept();
-        kept.jobs = self.jobs();
-        let written = serde_json::to_vec_pretty(&kept)
-            .map_err(io::Error::other)
-            .and_then(|json| std::fs::write(&path, json));
-        if let Err(e) = written {
-            eprintln!(
-                "sandbox {} not kept at {}: {e}",
-                self.record.id,
-                path.display()
+        let mut at = HashSet::new();
+        for volume in &args.volumes {
+            let why = match crate::mount_point(&volume.path) {
+                Err(why) => why,
+                Ok(path) => match at.insert(path) {
+                    false => "another volume is there",
+                    true => continue,
+                },
+            };
+            return Err(Error::Invalid(format!(
+                "volumes: {} at {}: {why}",
+                volume.volume, volume.path
+            )));
+        }
+        check_size(args.vcpus, args.memory_mib, args.disk_gib)?;
+        if args.gpu_memory_mib == Some(0) {
+            return Err(Error::Invalid(
+                "gpu_memory_mib: 0 is a machine nothing runs on".into(),
+            ));
+        }
+        let gpu = args.gpu.unwrap_or(false);
+        if gpu && !cfg!(feature = "gpu") {
+            return Err(Error::Unsupported(
+                "this server was built without a GPU".into(),
+            ));
+        }
+        if args.gpu_memory_mib.is_some() && !gpu {
+            return Err(Error::Invalid(
+                "gpu_memory_mib: a size is of a GPU, and this sandbox has none".into(),
+            ));
+        }
+        // The programs are those beside the one its machines run as, as `cargo xtask install`
+        // and a release put them there.
+        let programs = vm.first().and_then(|program| Path::new(program).parent());
+        let programs = programs.map(|dir| dir.join(ABIN_HOST)).unwrap_or_default();
+        // Every name for being given twice before any for being here, so that a list refused
+        // for itself is refused whatever this server has.
+        let mut given = HashSet::new();
+        if let Some(name) = args.abins.iter().find(|name| !given.insert(*name)) {
+            return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
+        }
+        for name in &args.abins {
+            let mut parts = Path::new(name).components();
+            let plain = matches!(
+                (parts.next(), parts.next()),
+                (Some(Component::Normal(part)), None) if part == name.as_str()
             );
+            if name.starts_with('.') || !plain || !programs.join(name).is_file() {
+                return Err(Error::Invalid(format!(
+                    "abins: this server has no program called `{name}`"
+                )));
+            }
         }
-    }
 
-    /// Its machine booted if it is parked, over its disk as it was left: answered with its
-    /// ports. Refused once it has exited.
-    pub async fn start(self: &Arc<Self>) -> Result<virtx_core::Sandbox, Error> {
-        self.wake().await?;
-        Ok(self.record.answer(true))
-    }
-
-    /// Its run: its machine booted first if it is parked.
-    pub(super) async fn wake(self: &Arc<Self>) -> Result<Arc<Run>, Error> {
-        if let Some(run) = self.run() {
-            return Ok(run);
-        }
-        let run = {
-            let _turn = self.turn.lock().await;
-            self.boot().await?
-        };
-        self.listen().await;
-        Ok(run)
-    }
-
-    /// Its machine booted, over its disk as it was left -- held here, and by the hooks as they
-    /// hold it -- with its volumes mounted and its ports published, to be parked once it has
-    /// been unused for its server's `park_after`; or the one that runs already. Refused once it
-    /// has exited. Called under its turn.
-    async fn boot(self: &Arc<Self>) -> Result<Arc<Run>, Error> {
-        match &*self.state.lock().unwrap() {
-            State::Up(run) if run.up.load(Ordering::Relaxed) => return Ok(Arc::clone(run)),
-            State::Deleted => return Err(self.gone()),
-            State::Exited => return Err(Error::Ended),
-            State::Up(_) | State::Parked => {}
-        }
-        let shared = &self.shared;
-        let id = self.record.id.clone();
-        let spec = spec_of(&self.record.args_now())?;
-        let (image, layers) = shared
-            .images
-            .get_image(&self.record.image)?
-            .ok_or_else(|| Error::NotFound(format!("no image here is {}", self.record.image)))?;
-        let began = Instant::now();
-        // Room for it first, as the embedder's admission says, held while it runs: a machine
-        // there is none for is never started. Its first was asked for as it was made.
-        let given = self.room.lock().unwrap().take();
-        let room = match given {
-            Some(room) => room,
-            None => crate::admit(&spec)?,
-        };
-        let mut held = shared.hooks.booting(self, &spec).await?;
-        held.extend(room);
-
-        let disk = shared.snapshots.open(&id)?;
-        // Held from here until its machine has ended, against every other machine, removal
-        // and copy of it, in this process or another: taken once, as a lock let go of is held
-        // on by a process spawned meanwhile until it execs. Held a moment, waited for; held
-        // longer, as by a machine another server runs it in, refused.
-        let locking = disk.clone();
-        let mut lock =
-            tokio::task::spawn_blocking(move || locking.lock_within(DISK_WAIT)).await??;
-        // Grown since it last booted: made whole, which holds it itself, and its filesystem
-        // written again as large. A grow that fails leaves the disk as it was, which it boots
-        // on, to be grown at a later boot.
-        let wanted = self.record.disk_size();
-        if disk.capacity()? < wanted {
-            drop(lock);
-            shared.hooks.materialize(&id, &disk.path).await?;
-            let (growing, named) = (disk.clone(), id.clone());
-            lock = tokio::task::spawn_blocking(move || {
-                let lock = growing.lock_within(DISK_WAIT)?;
-                if let Err(e) = growing.grow(wanted, &lock) {
-                    eprintln!("sandbox {named}'s disk not grown to {wanted} bytes: {e}");
+        // Room for its machine before anything of it is made, held for its first boot.
+        let room = crate::admit(&machine_spec(args))?;
+        let backend = backing.get();
+        let digest = match &args.image {
+            ImageName::Tag { tag } => {
+                let reference: Reference = tag
+                    .parse()
+                    .map_err(|e| Error::Invalid(format!("{tag}: {e}")))?;
+                if let Some(backend) = backend {
+                    backend
+                        .want(Wanted::Tag(&reference))
+                        .await
+                        .map_err(failed)?;
                 }
-                Ok::<_, Error>(lock)
-            })
-            .await??;
+                images.get_tag(&reference)?.ok_or_else(|| {
+                    Error::NotFound(format!("no image here is tagged {tag}: pull it first"))
+                })?
+            }
+            ImageName::Digest { digest } => {
+                let digest = digest
+                    .parse::<Digest>()
+                    .map_err(|e| Error::Invalid(format!("{digest}: {e}")))?;
+                if let Some(backend) = backend {
+                    backend.want(Wanted::Image(&digest)).await.map_err(failed)?;
+                }
+                // A registry's digest names the image pulled or pushed as it.
+                images.get_image_origin(&digest)?.unwrap_or(digest)
+            }
+        };
+        if let Some(backend) = backend {
+            for asked in &args.volumes {
+                backend.bring_up(Stored::Volume(&asked.volume)).await?;
+            }
         }
-        let volumes = self
-            .record
-            .args
+        // What it boots as every time: the image by the digest it boots now.
+        let mut args = args.clone();
+        args.image = ImageName::Digest {
+            digest: digest.to_string(),
+        };
+        let (images, root, volumes, made) = (
+            images.clone(),
+            root.to_owned(),
+            volumes.clone(),
+            args.clone(),
+        );
+        let backed = backing.clone();
+        let id = id.map(str::to_owned);
+        let built = move || {
+            // Its disk under the id given it, which the check above may have raced.
+            let upper = match id {
+                Some(id) => {
+                    let gib = made.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
+                    let upper = Upper::create(&root.join(SANDBOX), &id, gib)?;
+                    Some(upper.ok_or_else(|| exists(&id))?)
+                }
+                None => None,
+            };
+            Sandbox::build(
+                &images,
+                &root,
+                &volumes,
+                &made,
+                digest,
+                vm,
+                park_after,
+                (upper, None),
+                backed,
+            )
+        };
+        let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
+        if let Some(backend) = backend {
+            let size = u64::from(args.disk_gib.unwrap_or(DEFAULT_DISK_GIB)) << 30;
+            if let Err(e) = backend.made(Stored::Disk(&sandbox.id), size).await {
+                let closed = Arc::clone(&sandbox);
+                tokio::task::spawn_blocking(move || closed.close()).await?;
+                return Err(e.into());
+            }
+        }
+        let made = async {
+            sandbox.wake_in(Some(room)).await?;
+            match keys {
+                Some(keys) => sandbox.keep(Record {
+                    args,
+                    keys,
+                    exited: false,
+                    jobs: Vec::new(),
+                }),
+                None => Ok(()),
+            }
+        };
+        if let Err(e) = made.await {
+            let closed = Arc::clone(&sandbox);
+            tokio::task::spawn_blocking(move || closed.close()).await?;
+            if let Some(backend) = backend {
+                let _ = backend.remove(Stored::Disk(&sandbox.id)).await;
+            }
+            return Err(e);
+        }
+        Ok(sandbox)
+    }
+
+    /// The sandbox `args` makes, of image `digest`, parked: over the upper disk `kept` gives,
+    /// where it gives one, and otherwise over one it makes; exited where the record `kept`
+    /// gives says so. Blocking work: merging the image's layers' metadata, and formatting an
+    /// upper disk.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        args: &SandboxCreateArgs,
+        digest: Digest,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        kept: (Option<Upper>, Option<Record>),
+        backing: Backing,
+    ) -> Result<Sandbox, Error> {
+        let (upper, record) = kept;
+        let missing = || Error::NotFound(format!("no image here is {digest}"));
+        let held_image = images.hold_image(&digest).map_err(|e| match e {
+            ImageStoreError::Missing(_) => missing(),
+            e => e.into(),
+        })?;
+        let (image, layers) = images.get_image(&digest)?.ok_or_else(missing)?;
+
+        let mut volume_holds = Vec::new();
+        let volumes = args
             .volumes
             .iter()
             .map(|asked| {
+                let volume = volumes.open(&asked.volume)?;
+                volume_holds.push(volume.hold()?);
                 Ok(VolumeMount {
-                    path: shared.volumes.open(&asked.volume)?.path().to_owned(),
+                    path: volume.path().to_owned(),
                     at: asked.path.clone(),
                     read_only: asked.readonly,
                 })
             })
             .collect::<Result<_, Error>>()?;
-        let writes: Vec<_> = std::iter::once(Written::Disk(id.clone()))
-            .chain(
-                self.record
-                    .args
-                    .volumes
-                    .iter()
-                    .filter(|asked| !asked.readonly)
-                    .map(|asked| Written::Volume(asked.volume.clone())),
-            )
-            .collect();
-        shared.hooks.changed(&writes)?;
 
-        // Merging the layers' metadata is blocking work.
-        let images = shared.images.clone();
-        let rootfs = tokio::task::spawn_blocking(move || images.insert_rootfs(&layers)).await??;
-        let ports = (self.record.opened.lock().unwrap().iter())
-            .map(|open| open.port)
-            .collect();
-        // What its disk is fetched from while its machine runs, if the embedder's disks say:
-        // what serves it held until the machine's process has ended.
-        let (chunks, served) = crate::disks::disks()
-            .serve(&disk.path)
-            .map_err(|e| Error::Failed(format!("serving the disk of sandbox {id}: {e}")))?
-            .unzip();
-        let lazily = chunks.is_some();
-        *self.served.lock().unwrap() = Some(lazily);
-        // The programs it was made with, as `/abin`: the same directory for every sandbox here
-        // made with the same, which none writes to.
-        let abin = match self.record.args.abins.is_empty() {
-            true => None,
-            false => {
-                let programs = abin_programs(&shared.vm);
-                let under = shared.kept.join(ABIN_HOST);
-                let names = self.record.args.abins.clone();
-                let made = move || abin_of(&under, &programs, &names);
-                Some(tokio::task::spawn_blocking(made).await??)
+        let rootfs = images.insert_rootfs(&layers)?;
+        let dir = root.join(SANDBOX);
+        let upper = match upper {
+            Some(upper) => upper,
+            None => {
+                let gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
+                loop {
+                    if let Some(upper) = Upper::create(&dir, &pick(|_| false), gib)? {
+                        break upper;
+                    }
+                }
             }
         };
+        let abin = match args.abins.is_empty() {
+            true => None,
+            false => {
+                let programs = vm.first().and_then(|program| Path::new(program).parent());
+                let programs = programs.map(|dir| dir.join(ABIN_HOST)).unwrap_or_default();
+                Some(Abin::create(&Abin::dir(root), &programs, &args.abins)?)
+            }
+        };
+
         let config = MachineConfig {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
-            snapshot: Some(disk),
-            snapshot_held: true,
-            spec,
+            upper: upper.path.clone(),
+            spec: machine_spec(args),
             volumes,
-            abin,
-            ports,
-            sandbox_disk: Some(SandboxDisk { source: chunks }),
+            abin: abin.as_ref().map(|abin| abin.dir.clone()),
+            ports: args.ports.iter().map(|spec| spec.port).collect(),
+            // Set as each of its machines boots ([`Sandbox::wake`]).
+            sandbox_disk: None,
         };
-
-        // Booting is blocking work, until the guest takes commands.
-        let vm = shared.vm.clone();
-        let machine = tokio::task::spawn_blocking(move || Machine::start(config, &vm)).await??;
-        let machine = machine.holding(served);
-        shared.hooks.booted(&id, began.elapsed(), lazily);
-        let run = Arc::new(Run {
-            machine: Arc::new(machine),
-            sandbox: id.to_string(),
-            root: shared.kept.parent().unwrap_or(&shared.kept).to_owned(),
-            started: SystemTime::now(),
-            since: Instant::now(),
-            held: Mutex::new(Some((lock, held))),
-            writes,
-            up: AtomicBool::new(true),
+        let disk_gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
+        let exited = record.as_ref().is_some_and(|record| record.exited);
+        let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());
+        let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
+        Ok(Sandbox {
+            id: upper.id.clone(),
+            name: args.name.clone(),
+            args: Mutex::new(args.clone()),
+            root: root.to_owned(),
+            up_since: Mutex::default(),
+            dir,
+            record: Mutex::new(record),
+            image: digest,
+            _held: held_image,
+            ports_opened: args
+                .ports
+                .iter()
+                .map(|spec| SandboxPort {
+                    port: spec.port,
+                    url: None,
+                    label: spec.label.clone(),
+                    protocol: spec.protocol.clone(),
+                    address: None,
+                    inbound_error: None,
+                })
+                .collect(),
+            abins: args.abins.clone(),
+            upper: Mutex::new(Some(upper)),
+            abin: Mutex::new(abin),
+            volume_holds: Mutex::new(volume_holds),
+            mounted: (args.volumes.iter())
+                .map(|asked| (asked.volume.clone(), asked.readonly))
+                .collect(),
+            backing,
+            holding: Mutex::default(),
+            config: Mutex::new(config),
+            vm,
+            disk_gib: AtomicU32::new(disk_gib),
+            state: Mutex::new(match exited {
+                true => State::Exited,
+                false => State::Parked,
+            }),
+            ended_for: Mutex::new(None),
+            turn: tokio::sync::Mutex::new(()),
+            jobs: Mutex::new(jobs),
             starting: Mutex::default(),
             synced: Mutex::default(),
-        });
-        *self.state.lock().unwrap() = State::Up(Arc::clone(&run));
-        super::runs::up(&run.sandbox, &run.root, run.started);
-        self.used();
-        let (reading, read) = (Arc::clone(self), Arc::clone(&run));
-        std::thread::spawn(move || reading.read(&read));
-        if let Some(after) = shared.park_after {
-            let (sandbox, parked) = (Arc::downgrade(self), Arc::downgrade(&run));
-            tokio::spawn(park_when_idle(sandbox, parked, after));
-        }
-        self.keep();
-        Ok(run)
+            served: Mutex::default(),
+            ports: Ports::default(),
+            park_after,
+            watching: AtomicBool::new(false),
+            used: Mutex::new(Instant::now()),
+            active: AtomicUsize::new(0),
+            writing: Arc::default(),
+        })
     }
 
-    /// Each of its ports that nothing answers yet given to [`Hooks::listen`].
-    async fn listen(self: &Arc<Self>) {
-        let opened = self.record.opened.lock().unwrap().clone();
-        let mut changed = false;
-        for port in opened {
-            if self.listening.lock().unwrap().contains_key(&port.port) {
-                continue;
-            }
-            match self.shared.hooks.listen(self, &port).await {
-                Ok(Some((url, held))) => {
-                    self.listening.lock().unwrap().insert(port.port, held);
-                    let mut opened = self.record.opened.lock().unwrap();
-                    if let Some(open) = opened.iter_mut().find(|open| open.port == port.port) {
-                        open.url = Some(url);
-                        changed = true;
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => eprintln!(
-                    "port {} of sandbox {} not answered: {e}",
-                    port.port, self.record.id
-                ),
-            }
-        }
-        if changed {
-            self.keep();
-        }
+    /// What it is named by, which no other sandbox over the same root has while it is there.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
-    /// Its machine parked now, unless it is in use ([`busy`](Self::busy)): refused
-    /// [`InUse`](Error::InUse) then. Its machine stopped with what the guest wrote on its disk,
-    /// and its disk kept, to boot again for what next needs it. Nothing is done to one whose
-    /// machine is not up.
-    pub async fn park(self: &Arc<Self>) -> Result<(), Error> {
-        let _turn = self.turn.lock().await;
-        if self.is_deleted() {
-            return Err(self.gone());
-        }
-        if !self.is_up() {
-            return Ok(());
-        }
-        if self.busy() {
-            return Err(Error::InUse(format!(
-                "sandbox {} is in use: a job runs in it, or it is reached",
-                self.record.id
-            )));
-        }
-        self.halt_turned(SandboxJobEndReason::Cancelled).await
+    /// The name it was made with, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
-    /// Its machine parked now, whatever uses it: its jobs ended, as cancelling each does -- what an
-    /// embedder does for a sandbox whose owner may use it no more. Nothing is done to one whose
-    /// machine is not up, or that is deleted.
-    pub async fn park_anyway(self: &Arc<Self>) {
-        let _turn = self.turn.lock().await;
-        if let Err(e) = self.halt_turned(SandboxJobEndReason::Cancelled).await {
-            eprintln!("sandbox {} not parked: {e}", self.record.id);
+    /// What it was made with: its `image` the digest it boots, and its `vcpus`, `memory_mib` and
+    /// `disk_gib` as it was last [resized](Sandbox::resize) to, where it was.
+    pub fn args(&self) -> SandboxCreateArgs {
+        self.args.lock().unwrap().clone()
+    }
+
+    /// When its machine came up, while it is up; `None` while it is parked or has exited.
+    pub fn up_since(&self) -> Option<SystemTime> {
+        self.up_since.lock().unwrap().map(|(at, _)| at)
+    }
+
+    /// The sandbox as the server answers it, each port with what it is for and how it is
+    /// reached but no `url`: only its making answers those, which its server forms.
+    pub fn answer(&self) -> virtx_core::Sandbox {
+        virtx_core::Sandbox {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            image: self.image.to_string(),
+            running: !matches!(*self.state.lock().unwrap(), State::Exited),
+            ports: self.ports_opened.clone(),
+            abins: self.abins.clone(),
+            error: None,
         }
     }
 
-    /// Its machine parked if it has been unused for `after`, while `run` is its run.
-    async fn park_idle(self: &Arc<Self>, run: &Arc<Run>, after: Duration) {
-        let _turn = self.turn.lock().await;
-        if !self.is(run) || self.idle().is_none_or(|idle| idle < after) {
-            return;
-        }
-        if let Err(e) = self.halt_turned(SandboxJobEndReason::Cancelled).await {
-            eprintln!("sandbox {}, unused, not parked: {e}", self.record.id);
-        }
+    /// The port each of its keys opens, as it was made with them: none for one not kept past
+    /// its process.
+    pub fn keys(&self) -> HashMap<String, u16> {
+        let record = self.record.lock().unwrap();
+        record
+            .as_ref()
+            .map(|record| record.keys.clone())
+            .unwrap_or_default()
     }
 
-    /// Its machine stopped if it is up, under its turn: each job that runs ended for `reason`,
-    /// what the guest wrote put on its disk, and its disk kept.
-    async fn halt_turned(self: &Arc<Self>, reason: SandboxJobEndReason) -> Result<(), Error> {
-        let Some(run) = self.take_run()? else {
-            return Ok(());
-        };
-        let stopping = Arc::clone(self);
-        tokio::task::spawn_blocking(move || stopping.halt_for(&run, reason)).await?;
-        self.keep();
+    /// Keep it past this process as `record` says: written beside its upper disk, which is
+    /// left for the next process over its root from now on.
+    fn keep(&self, record: Record) -> Result<(), Error> {
+        let mut kept = self.record.lock().unwrap();
+        let mut upper = self.upper.lock().unwrap();
+        let upper = upper.as_mut().ok_or(Error::Ended)?;
+        record
+            .write(&self.dir, &self.id)
+            .map_err(|source| Error::Io {
+                context: format!("writing sandbox {}'s record", self.id),
+                source,
+            })?;
+        upper.kept = true;
+        *kept = Some(record);
         Ok(())
     }
 
-    /// Its run, taken out for its machine to be stopped, the sandbox parked: what it may write
-    /// marked changed first, so that it is kept once its machine has ended, not let go of
-    /// meanwhile.
-    fn take_run(&self) -> Result<Option<Arc<Run>>, Error> {
-        let run = {
-            let mut state = self.state.lock().unwrap();
-            match &*state {
-                State::Deleted => return Err(self.gone()),
-                State::Parked | State::Exited => return Ok(None),
-                // Ended on its own already: what reads it makes it exited.
-                State::Up(run) if !run.up.load(Ordering::Relaxed) => return Ok(None),
-                State::Up(run) => {
-                    let run = Arc::clone(run);
-                    *state = State::Parked;
-                    run
-                }
+    /// Write its jobs as they are now into its record, for one kept past its process: a server
+    /// started again over its root knows each, and each that runs now as ended by the restart.
+    fn keep_jobs(&self) {
+        let jobs = self.jobs();
+        if let Some(record) = &mut *self.record.lock().unwrap() {
+            record.jobs = jobs;
+            if let Err(e) = record.write(&self.dir, &self.id) {
+                eprintln!("sandbox {}'s jobs not kept: {e}", self.id);
             }
-        };
-        if let Err(e) = self.shared.hooks.changed(&run.writes) {
-            eprintln!("sandbox {}, parked, not to be kept: {e}", self.record.id);
-        }
-        Ok(Some(run))
-    }
-
-    /// `run`'s machine stopped, and every job in it ended as cancelling it does: the jobs stay.
-    /// Blocks while the guest puts what it wrote on its disk.
-    fn halt(&self, run: &Run) {
-        self.halt_for(run, SandboxJobEndReason::Cancelled);
-    }
-
-    /// As [`halt`](Self::halt), each job that runs ended for `reason`: said before its machine
-    /// stops, so that whatever sees a job end first ends it so.
-    fn halt_for(&self, run: &Run, reason: SandboxJobEndReason) {
-        for job in self.jobs.lock().unwrap().values() {
-            job.killing(reason);
-        }
-        run.machine.stop();
-        for job in self.jobs.lock().unwrap().values() {
-            job.cut(reason);
-        }
-        run.release();
-    }
-
-    /// As [`park_anyway`](Self::park_anyway), blocking: not on an async runtime's thread. Its
-    /// server is ending ([`Sandboxes::close_all`]): each job that runs ends `restarted`, and is
-    /// kept so for the server started again.
-    ///
-    /// [`Sandboxes::close_all`]: super::Sandboxes::close_all
-    pub(super) fn park_blocking(&self) {
-        let _turn = self.turn.blocking_lock();
-        if let Ok(Some(run)) = self.take_run() {
-            self.halt_for(&run, SandboxJobEndReason::Restarted);
-            self.keep();
         }
     }
 
-    /// Its machine stopped, if it runs, and it forgotten here with nothing of it kept -- no record
-    /// written, its disk left to whoever undoes its making ([`Sandboxes::create`]): what a
-    /// making whose caller went away ends with. What the guest wrote is marked changed, so a
-    /// disk kept elsewhere still keeps it.
-    ///
-    /// [`Sandboxes::create`]: super::Sandboxes::create
-    pub(super) async fn abandon(self: &Arc<Self>) {
-        let _turn = self.turn.lock().await;
-        if let Ok(Some(run)) = self.take_run() {
-            let stopping = Arc::clone(self);
-            let _ = tokio::task::spawn_blocking(move || stopping.halt(&run)).await;
-        }
-        self.forgotten();
-    }
-
-    /// Deleted: its machine stopped first if it is up, each job that runs ended
-    /// `sandbox_deleted`, its disk removed -- from wherever else it is kept first -- and its jobs
-    /// and its record with it. Its volumes stay.
-    pub(super) async fn delete(self: &Arc<Self>) -> Result<(), Error> {
-        let _turn = self.turn.lock().await;
-        self.halt_turned(SandboxJobEndReason::SandboxDeleted)
-            .await?;
-        let id = &self.record.id;
-        self.shared.hooks.deleting(id).await?;
-        match self.shared.snapshots.remove(id) {
-            Ok(()) | Err(SnapshotError::Unknown(_)) => {}
-            Err(e) => return Err(e.into()),
-        }
-        self.forgotten();
-        Ok(())
-    }
-
-    /// Let go of here, its disk left as it is: its record and its jobs gone, as a delete does,
-    /// nothing removed from where its disk is kept. Refused while its machine is up.
-    pub(super) async fn forget(&self) -> Result<(), Error> {
-        let _turn = self.turn.lock().await;
-        match &*self.state.lock().unwrap() {
-            State::Deleted => return Err(self.gone()),
-            State::Up(_) => {
-                return Err(Error::InUse(format!(
-                    "sandbox {}'s machine is up here: park it first",
-                    self.record.id
-                )));
-            }
-            State::Parked | State::Exited => {}
-        }
-        self.forgotten();
-        Ok(())
-    }
-
-    /// Gone from here: its record, its jobs and its ports.
-    fn forgotten(&self) {
-        self.left();
-        let _ = std::fs::remove_file(self.shared.kept.join(format!("{}.json", self.record.id)));
-    }
-
-    /// Gone from here, its record and disk left where they are: its jobs and its ports.
-    fn left(&self) {
-        *self.state.lock().unwrap() = State::Deleted;
-        for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
-            job.remove();
-        }
-        self.listening.lock().unwrap().clear();
-    }
-
-    /// Let go of here, as a server lets go of it as it ends: its machine stopped if it is up,
-    /// as parking stops it, its record written as it is now, and it and its disk left where they
-    /// are, for a server to take in ([`Sandboxes::take_in`](super::Sandboxes::take_in)).
-    /// Refused while it is in use: a job runs in it, or something reaches it.
-    pub(super) async fn let_go(self: &Arc<Self>) -> Result<(), Error> {
-        let in_use = || {
-            Error::InUse(format!(
-                "sandbox {} is in use: a job runs in it, or it is reached",
-                self.record.id
-            ))
-        };
-        if self.busy() {
-            return Err(in_use());
-        }
-        let _turn = self.turn.lock().await;
-        if self.is_deleted() {
-            return Err(self.gone());
-        }
-        if self.busy() {
-            return Err(in_use());
-        }
-        self.halt_turned(SandboxJobEndReason::Cancelled).await?;
-        self.keep();
-        self.left();
-        Ok(())
-    }
-
-    /// Start `cmd` in it, beside whatever else runs there -- its machine booted first if it is
-    /// parked --
-    /// with a stdin to write to if `stdin`, and kill it after `timeout`.
+    /// Start `cmd` in it, beside whatever else runs there, with a stdin to
+    /// [write](Sandbox::write_stdin) if `stdin`, and kill it after `timeout`.
     pub async fn exec(
         self: &Arc<Self>,
         cmd: Vec<String>,
         stdin: bool,
         timeout: Option<Duration>,
     ) -> Result<Arc<Job>, Error> {
-        if cmd.is_empty() {
-            return Err(Error::Invalid("cmd: an exec names a command".into()));
-        }
         // In use until the job runs, which keeps it in use from there.
         let _activity = self.activity();
-        let run = self.wake().await?;
+        let machine = self.wake().await?;
         let (waiter, started) = oneshot::channel();
         {
-            let mut starting = run.starting.lock().unwrap();
-            if !run.up.load(Ordering::Relaxed) {
+            let mut starting = self.starting.lock().unwrap();
+            if !self.is(&machine) {
                 return Err(Error::Ended);
             }
-            run.machine.exec(cmd.clone(), stdin)?;
-            starting.push_back(Starting { cmd, stdin, waiter });
+            machine.exec(cmd.clone(), stdin)?;
+            starting.push_back((cmd, stdin, waiter));
         }
         let job = started
             .await
             .map_err(|_| Error::Ended)?
             .map_err(Error::NotStarted)?;
         if let Some(timeout) = timeout {
-            let (run, job) = (Arc::downgrade(&run), Arc::clone(&job));
+            let (sandbox, job) = (Arc::downgrade(self), Arc::clone(&job));
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
-                if let Some(run) = run.upgrade() {
-                    kill(&run, &job, SandboxJobEndReason::Timeout);
+                if let Some(sandbox) = sandbox.upgrade() {
+                    let _ = sandbox.kill(&job, SandboxJobEndReason::Timeout);
                 }
             });
         }
@@ -853,21 +711,20 @@ impl Sandbox {
     pub fn remove_job(&self, id: &str) -> Result<(), Error> {
         let removed = self.jobs.lock().unwrap().remove(id);
         let job = removed.ok_or_else(|| Error::NotFound(format!("no job here has the id {id}")))?;
-        if let Some(run) = self.run() {
-            kill(&run, &job, SandboxJobEndReason::Cancelled);
-        }
+        self.kill(&job, SandboxJobEndReason::Cancelled)?;
         job.cut(SandboxJobEndReason::Cancelled);
         job.remove();
-        self.keep();
+        self.keep_jobs();
         Ok(())
     }
 
     /// Send the job `id` `signal`, as [`signal_number`] numbers it.
     pub fn signal(&self, id: &str, signal: i32) -> Result<(), Error> {
         let (pid, running) = self.job(id)?.pid();
-        let run = self.run().filter(|_| running);
-        let run = run.ok_or(Error::JobEnded("the job has ended"))?;
-        run.machine.signal(pid, signal)?;
+        // A job that runs keeps the machine it runs in up.
+        let machine = self.up().filter(|_| running);
+        let machine = machine.ok_or(Error::JobEnded("the job has ended"))?;
+        machine.signal(pid, signal)?;
         Ok(())
     }
 
@@ -887,205 +744,455 @@ impl Sandbox {
         let job = self.job(id)?;
         let (pid, running) = job.pid();
         // A job that runs keeps the machine it runs in up.
-        let run = self.run().filter(|_| running).ok_or_else(ended)?;
+        let machine = self.up().filter(|_| running).ok_or_else(ended)?;
         let of = data.len() as u64;
-        let send = |seq| Ok(run.machine.write_stdin(pid, seq, data, eof)?);
+        let send = |seq| Ok(machine.write_stdin(pid, seq, data, eof)?);
         match job.write_stdin(eof, send).await? {
-            Some(super::job::Written {
+            Some(Written {
                 taken: Taken::Whole,
                 ..
             }) => Ok(()),
-            Some(super::job::Written {
+            Some(Written {
                 taken: Taken::Full, ..
             }) => Err(Error::StdinFull),
-            Some(super::job::Written { bytes, .. }) if bytes > 0 => {
-                Err(Error::StdinCut { bytes, of })
-            }
+            Some(Written { bytes, .. }) if bytes > 0 => Err(Error::StdinCut { bytes, of }),
             _ => Err(ended()),
         }
     }
 
-    /// The port key `key` names, if it is one of its own.
-    pub(super) fn keyed(&self, key: &str) -> Option<u16> {
-        self.record.keys.lock().unwrap().get(key).copied()
-    }
-
-    /// Its machine, booted first if it is parked, to ask of its files. The caller holds an
-    /// [`Activity`] for as long as it asks, so it is not parked under it.
+    /// Its machine, booted again if it was parked, to ask of its files. The caller holds an
+    /// [`Activity`] for as long as it asks, so the machine is not parked under it.
     pub async fn machine(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
-        Ok(Arc::clone(&self.wake().await?.machine))
+        self.wake().await
     }
 
-    /// A connection to `port` in its machine. Refused while its machine is not up, as a port
-    /// nothing listens on is: a parked one is not booted for it.
+    /// A connection to `port` in its machine. Refused while no machine runs, as a port nothing
+    /// listens on is: a parked one is not booted for it, since nothing would listen there.
     pub async fn connect(&self, port: u16) -> io::Result<TcpStream> {
         self.ports.connect(port).await
     }
 
     /// Something done with it from outside, such as a connection through a port or a request
-    /// to its files: it is in use until it drops.
+    /// to its files: the sandbox is in use until it drops.
     pub fn activity(self: &Arc<Self>) -> Activity {
         self.active.fetch_add(1, Ordering::Relaxed);
-        Activity {
-            sandbox: Arc::clone(self),
-            used: true,
+        Activity(Arc::clone(self))
+    }
+
+    /// What a conditional write to its files holds first as it lands (see
+    /// [`Files`](crate::Files)).
+    pub(crate) fn writing(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.writing
+    }
+
+    /// Each volume it mounts writable: where in the guest, spelled as the guest is given it,
+    /// and the volume's own directory.
+    pub(crate) fn mounts(&self) -> Vec<(String, PathBuf)> {
+        self.config
+            .lock()
+            .unwrap()
+            .volumes
+            .iter()
+            .filter(|mount| !mount.read_only)
+            .filter_map(|mount| Some((crate::mount_point(&mount.at).ok()?, mount.path.clone())))
+            .collect()
+    }
+
+    /// How long it has been in use by nothing: no job running and no [`Activity`] under way.
+    /// `None` while it is in use.
+    pub fn idle(&self) -> Option<Duration> {
+        let running = self.jobs.lock().unwrap().values().any(|job| job.pid().1);
+        if running || self.active.load(Ordering::Relaxed) > 0 {
+            return None;
         }
-    }
-
-    /// Whether it is in use now: an [`Activity`] under way, or a job running.
-    pub(super) fn busy(&self) -> bool {
-        if self.active.load(Ordering::Relaxed) > 0 {
-            return true;
-        }
-        let jobs = self.jobs.lock().unwrap();
-        jobs.values().any(|job| job.pid().1)
-    }
-
-    /// How many of its jobs run now.
-    pub(super) fn running_jobs(&self) -> usize {
-        let jobs = self.jobs.lock().unwrap();
-        jobs.values().filter(|job| job.pid().1).count()
-    }
-
-    /// What its machine may write while it runs.
-    pub(super) fn writes(&self) -> Vec<Written> {
-        self.run().map(|run| run.writes.clone()).unwrap_or_default()
-    }
-
-    /// Its disk to grow to `gib` GiB as it next boots -- never shrunk: smaller than it is on the
-    /// host, refused, and down to it taken, so a grow not yet done can be taken back. Whether
-    /// its machine is up, its disk to be grown once it boots again.
-    pub fn grow_disk(&self, gib: u32) -> Result<bool, Error> {
-        let wanted = u64::from(gib) << 30;
-        let now = self.disk_on_host();
-        if wanted < now {
-            return Err(Error::Invalid(format!(
-                "disk_gib: a disk is grown, never shrunk -- it is {} GiB",
-                now.div_ceil(1 << 30)
-            )));
-        }
-        *self.record.disk_gib.lock().unwrap() = Some(gib);
-        self.keep();
-        Ok(self.is_up())
-    }
-
-    /// The bytes its disk is on the host: what it was made or last grown to, or, where it is
-    /// not here to read, what it is to be.
-    fn disk_on_host(&self) -> u64 {
-        (self.shared.snapshots.open(&self.record.id).ok())
-            .and_then(|disk| disk.capacity().ok())
-            .unwrap_or_else(|| self.record.disk_size())
+        Some(self.used.lock().unwrap().elapsed())
     }
 
     /// Resize it as `args` says, answered as it is to be: its vCPUs and memory those its
-    /// machine boots with from its next boot on, and its disk grown as its machine next boots.
-    /// A disk is never shrunk: a size under what it is on the host is refused, and one down to
-    /// it taken, so a grow asked for and not yet done can be taken back. A machine is the size
-    /// it booted with: one up whose vCPUs or memory change is parked now if nothing uses it,
-    /// and refused [`InUse`](Error::InUse) if something does; one whose disk alone grows is
-    /// left up, and boots with it after its next park.
+    /// machine boots with from its next boot on, and its upper disk grown as its machine next
+    /// boots. A disk is never shrunk: a size under what it is on the host is refused, and one
+    /// down to it taken, so a grow asked for and not yet done can be taken back. A machine is
+    /// the size it booted with: one up whose vCPUs or memory change is parked now if nothing
+    /// uses it, and refused [`InUse`](Error::InUse) if something does; one whose disk alone
+    /// grows is left up, and boots with it after its next park. One kept past its process keeps
+    /// its size in its record.
     pub async fn resize(
         self: &Arc<Self>,
         args: &SandboxResizeArgs,
     ) -> Result<SandboxResources, Error> {
-        let resized = self
-            .resized(args.vcpus, args.memory_mib, args.disk_gib)
-            .await?;
-        Ok(SandboxResources {
-            vcpus: resized.vcpus,
-            memory_mib: resized.memory_mib,
-            disk_gib: resized.disk_gib,
-            up: resized.up,
-        })
-    }
-
-    /// Cloud only: resized as [`resize`](Sandbox::resize) is, answered as its
-    /// [`Resources`] -- what the cloud's `PUT /sandboxes/{id}/resources` answers.
-    pub async fn resize_resources(
-        self: &Arc<Self>,
-        vcpus: Option<u8>,
-        memory_mib: Option<u32>,
-        disk_gib: Option<u32>,
-    ) -> Result<Resources, Error> {
-        self.resized(vcpus, memory_mib, disk_gib).await
-    }
-
-    /// Its machine resized, and its disk grown, as it next boots, as [`resize`](Sandbox::resize)
-    /// says.
-    async fn resized(
-        self: &Arc<Self>,
-        vcpus: Option<u8>,
-        memory_mib: Option<u32>,
-        disk_gib: Option<u32>,
-    ) -> Result<Resources, Error> {
-        check_size(vcpus, memory_mib, disk_gib)?;
+        check_size(args.vcpus, args.memory_mib, args.disk_gib)?;
         // Not booted meanwhile, nor parked.
         let _turn = self.turn.lock().await;
-        if self.is_deleted() {
-            return Err(self.gone());
+        if matches!(*self.state.lock().unwrap(), State::Exited) {
+            return Err(Error::Ended);
         }
-        let now = self.record.args_now();
-        let changes = |asked: Option<u32>, is: Option<u32>| asked.is_some_and(|a| Some(a) != is);
-        let machine_changes = changes(vcpus.map(u32::from), now.vcpus.map(u32::from))
-            || changes(memory_mib, now.memory_mib);
-        let resized = Resized {
-            vcpus: vcpus.or(now.vcpus),
-            memory_mib: memory_mib.or(now.memory_mib),
+        let spec = self.config.lock().unwrap().spec.clone();
+        let disk_gib = self.disk_gib.load(Ordering::Relaxed);
+        let on_host = match &*self.upper.lock().unwrap() {
+            Some(upper) => upper.gib()?,
+            None => disk_gib,
         };
-        spec_of(&SandboxCreateArgs {
-            vcpus: resized.vcpus,
-            memory_mib: resized.memory_mib,
-            ..now.clone()
-        })?;
-        let on_host = self.disk_on_host();
-        if let Some(gib) = disk_gib
-            && (u64::from(gib) << 30) < on_host
-        {
+        if args.disk_gib.is_some_and(|gib| gib < on_host) {
             return Err(Error::Invalid(format!(
-                "disk_gib: a disk is grown, never shrunk -- it is {} GiB",
-                on_host.div_ceil(1 << 30)
+                "disk_gib: a disk is grown, never shrunk -- it is {on_host} GiB"
             )));
         }
+        let vcpus = args.vcpus.unwrap_or(spec.vcpus);
+        let memory_mib = args.memory_mib.unwrap_or(spec.ram_mib);
+        let disk_gib = args.disk_gib.unwrap_or(disk_gib);
         // A disk alone is grown at its next boot, whenever that is, and so parks nothing.
-        if machine_changes && self.is_up() {
-            if self.busy() {
-                return Err(Error::InUse(format!(
-                    "sandbox {} is in use: its size changes once nothing uses it",
-                    self.record.id
-                )));
-            }
-            self.halt_turned(SandboxJobEndReason::Cancelled).await?;
+        if (vcpus, memory_mib) != (spec.vcpus, spec.ram_mib) {
+            self.park_under_turn(Some(Duration::ZERO)).await?;
         }
-        if let Some(gib) = disk_gib {
-            *self.record.disk_gib.lock().unwrap() = Some(gib);
+        let mut resized_args = self.args.lock().unwrap().clone();
+        resized_args.vcpus = Some(vcpus);
+        resized_args.memory_mib = Some(memory_mib);
+        resized_args.disk_gib = Some(disk_gib);
+        if let Some(record) = &mut *self.record.lock().unwrap() {
+            let mut resized = record.clone();
+            resized.args = resized_args.clone();
+            resized
+                .write(&self.dir, &self.id)
+                .map_err(|source| Error::Io {
+                    context: format!("writing sandbox {}'s record", self.id),
+                    source,
+                })?;
+            *record = resized;
         }
-        *self.record.resized.lock().unwrap() = resized;
-        self.keep();
-        let now = self.record.args_now();
-        Ok(Resources {
-            vcpus: now.vcpus.unwrap_or(DEFAULT_VCPUS),
-            memory_mib: now.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
-            disk_gib: self.record.disk_size().div_ceil(1 << 30) as u32,
-            up: self.is_up(),
+        {
+            let mut config = self.config.lock().unwrap();
+            config.spec.vcpus = vcpus;
+            config.spec.ram_mib = memory_mib;
+        }
+        self.disk_gib.store(disk_gib, Ordering::Relaxed);
+        *self.args.lock().unwrap() = resized_args;
+        Ok(SandboxResources {
+            vcpus,
+            memory_mib,
+            disk_gib,
+            up: self.up().is_some(),
         })
     }
 
-    /// What `run`'s machine says, until it ends: each command's pid, as the job its waiter
-    /// gets, each job's output and end, and the answers to what was asked of it.
-    fn read(&self, run: &Arc<Run>) {
-        let machine = &run.machine;
+    /// Have its guest put what it has written on its disk, so that the disk's file holds it:
+    /// `true` once the guest says it has, `false` if it has not within 5 s. A parked machine's
+    /// disk holds what it wrote already. Refused once its machine has exited or it is closed.
+    pub async fn sync(&self) -> Result<bool, Error> {
+        // Its machine neither boots nor stops meanwhile.
+        let _turn = self.turn.lock().await;
+        let machine = match &*self.state.lock().unwrap() {
+            State::Up(machine, _) => Arc::clone(machine),
+            State::Parked => return Ok(true),
+            State::Exited => return Err(Error::Ended),
+        };
+        self.synced_by(&machine).await
+    }
+
+    /// `machine`, its own, synced as [`sync`](Self::sync) says, its turn held.
+    async fn synced_by(&self, machine: &Machine) -> Result<bool, Error> {
+        let (told, synced) = oneshot::channel();
+        *self.synced.lock().unwrap() = Some(told);
+        machine.sync()?;
+        let synced = tokio::time::timeout(SYNC_WAIT, synced).await;
+        Ok(matches!(synced, Ok(Ok(()))))
+    }
+
+    /// A copy of its disk at `to`, whole, replacing what is there: [synced](Self::sync) first
+    /// if its machine runs, and the machine paused while the disk is copied -- at once where the
+    /// host's filesystem clones files (APFS, Btrfs, XFS made with reflink), else for as long as
+    /// reading and writing it takes. A guest that has not synced within 5 s is copied as it is,
+    /// which its journal makes whole. A parked machine's disk is copied as it was left.
+    ///
+    /// For a disk that is its file alone: one the embedder's disks serve its machine
+    /// ([`Disks::serve`](crate::disks::Disks::serve)) is theirs to copy, and refused here, as is
+    /// one of an embedder's not yet booted in this process. Refused once its machine has exited
+    /// or it is closed.
+    pub async fn copy_disk(&self, to: &Path) -> Result<(), Error> {
+        // Its machine neither boots nor stops meanwhile, nor its disk goes.
+        let _turn = self.turn.lock().await;
+        let machine = match &*self.state.lock().unwrap() {
+            State::Up(machine, _) => Some(Arc::clone(machine)),
+            State::Parked => None,
+            State::Exited => return Err(Error::Ended),
+        };
+        let from = match &*self.upper.lock().unwrap() {
+            Some(upper) => upper.path.clone(),
+            None => return Err(Error::Ended),
+        };
+        let served = *self.served.lock().unwrap();
+        if served.unwrap_or_else(crate::disks::embedded) {
+            return Err(Error::Unsupported(format!(
+                "sandbox {}'s disk is the embedder's to copy, not a file alone",
+                self.id
+            )));
+        }
+        if let Some(machine) = &machine {
+            self.synced_by(machine).await?;
+        }
+        let to = to.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _paused = machine.as_deref().map(Machine::pause).transpose()?;
+            super::upper::copy(&from, &to).map_err(|source| Error::Io {
+                context: format!("copying {} to {}", from.display(), to.display()),
+                source,
+            })
+        })
+        .await?
+    }
+
+    /// Stop its machine for good, end and remove every job in it, as cancelling each does, and
+    /// delete its upper disk, with its record if it is kept. Blocks while the guest shuts down,
+    /// and so must not be called on an async runtime's thread.
+    pub fn close(&self) {
+        self.end(false);
+    }
+
+    /// Let go of it as its server ends: its machine stopped as parking stops it, every job in
+    /// it ended, and nothing booting it again in this process. One kept past its process is
+    /// left with what it wrote for the next server over its root ([`Sandbox::kept`]), its jobs
+    /// that ran ended `restarted`; one not kept is deleted, as [`close`](Sandbox::close)
+    /// deletes it. Blocks as `close` does.
+    pub fn leave(&self) {
+        self.end(true);
+    }
+
+    /// Stop its machine for good, and end and remove every job in it; its upper disk deleted,
+    /// or left where it is kept and `leaving`. A job that runs ends as `restarted` where the
+    /// sandbox is kept past its server, and as `sandbox_deleted` where it is deleted.
+    fn end(&self, leaving: bool) {
+        let reason = match leaving && self.record.lock().unwrap().is_some() {
+            true => SandboxJobEndReason::Restarted,
+            false => SandboxJobEndReason::SandboxDeleted,
+        };
+        *self.ended_for.lock().unwrap() = Some(reason.clone());
+        let state = std::mem::replace(&mut *self.state.lock().unwrap(), State::Exited);
+        // A park or a boot under way finishes first, so its machine is down by the time this
+        // returns: one being parked has synced, and one booting is stopped by `wake`, which
+        // finds the sandbox closed.
+        let _turn = self.turn.blocking_lock();
+        // Taken first, so that nothing its machine's stopping ends -- its exit, a job killed
+        // with it -- is written into it: a job that runs now is kept as one that ran.
+        let record = self.record.lock().unwrap().take();
+        if let State::Up(machine, _room) = state {
+            machine.stop();
+            self.went_down();
+        }
+        // Its machine down, and its disk and volumes still here: the backend's to keep now.
+        self.holding.lock().unwrap().clear();
+        self.volume_holds.lock().unwrap().clear();
+        if let Some(mut upper) = self.upper.lock().unwrap().take() {
+            upper.kept = leaving && record.is_some();
+        }
+        drop(self.abin.lock().unwrap().take());
+        for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
+            job.cut(reason.clone());
+            job.remove();
+        }
+    }
+
+    /// Its machine, booting one if it is parked.
+    async fn wake(self: &Arc<Self>) -> Result<Arc<Machine>, Error> {
+        self.wake_in(None).await
+    }
+
+    /// Its machine, booting one if it is parked in the room `given`, where it is given --
+    /// asked for as its sandbox is made -- and otherwise in room asked for now.
+    async fn wake_in(self: &Arc<Self>, given: Option<Option<Room>>) -> Result<Arc<Machine>, Error> {
+        let _turn = self.turn.lock().await;
+        match &*self.state.lock().unwrap() {
+            State::Up(machine, _) => return Ok(Arc::clone(machine)),
+            State::Exited => return Err(Error::Ended),
+            State::Parked => {}
+        }
+        // Room for it first, so a machine there is none for is never started.
+        let config = self.config.lock().unwrap().clone();
+        let mut room = match given {
+            Some(room) => room,
+            None => crate::admit(&config.spec)?,
+        };
+        // Its disk and each volume it writes held here, brought up to what is kept, and each
+        // volume it only reads brought up, where they are kept beyond this machine: what is
+        // held, held until its machine is down.
+        let mut holding = Vec::new();
+        if let Some(backend) = self.backing.get() {
+            holding.push(backend.take(Stored::Disk(&self.id)).await?);
+            for (volume, readonly) in &self.mounted {
+                match readonly {
+                    true => backend.bring_up(Stored::Volume(volume)).await?,
+                    false => holding.push(backend.take(Stored::Volume(volume)).await?),
+                }
+            }
+        }
+        // Booting is blocking work, until the guest takes commands: its disk grown first to as
+        // large as it was last resized to. A grow that fails leaves the disk as it was, which it
+        // boots on, to be grown at a later boot.
+        let mut config = config;
+        let vm = self.vm.clone();
+        let (booting, gib) = (Arc::clone(self), self.disk_gib.load(Ordering::Relaxed));
+        let machine = tokio::task::spawn_blocking(move || {
+            if let Some(upper) = &*booting.upper.lock().unwrap()
+                && let Err(e) = upper.grow(gib)
+            {
+                eprintln!("sandbox {}'s disk not grown to {gib} GiB: {e}", booting.id);
+            }
+            // What its disk, as grown, is fetched from while its machine runs, if the
+            // embedder's disks say, held with the machine.
+            let served = crate::disks::disks()
+                .serve(&config.upper)
+                .map_err(|e| Error::Io {
+                    context: format!("serving the disk of sandbox {}", booting.id),
+                    source: e,
+                })?;
+            let (source, held) = served.unzip();
+            *booting.served.lock().unwrap() = Some(source.is_some());
+            config.sandbox_disk = Some(SandboxDisk { source });
+            Ok::<_, Error>((Machine::start(config, &vm)?, held))
+        });
+        let (machine, held) = machine.await??;
+        let machine = Arc::new(machine.holding(held));
+        *self.holding.lock().unwrap() = holding;
+        let closed = {
+            let mut state = self.state.lock().unwrap();
+            let closed = matches!(*state, State::Exited);
+            if !closed {
+                *state = State::Up(Arc::clone(&machine), room.take());
+                // Told while the state is held, so its going down, however soon, is told after.
+                let at = SystemTime::now();
+                *self.up_since.lock().unwrap() = Some((at, Instant::now()));
+                super::runs::up(&self.id, &self.root, at);
+            }
+            closed
+        };
+        // Closed while it booted: what booted goes with it, and then its room.
+        if closed {
+            tokio::task::spawn_blocking(move || machine.stop()).await?;
+            drop(room);
+            return Err(Error::Ended);
+        }
+        let (reading, read) = (Arc::clone(self), Arc::clone(&machine));
+        std::thread::spawn(move || reading.read(&read));
+        if let Some(after) = self.park_after
+            && !self.watching.swap(true, Ordering::Relaxed)
+        {
+            tokio::spawn(park_when_idle(Arc::downgrade(self), after));
+        }
+        Ok(machine)
+    }
+
+    /// Its machine parked now, unless it is in use: refused [`InUse`](Error::InUse) then, and
+    /// [`Ended`](Error::Ended) once it is closed. Its machine stopped with what the guest wrote
+    /// on its upper disk, to boot again for what next needs it. Nothing is done to one whose
+    /// machine is not up.
+    pub async fn park(&self) -> Result<(), Error> {
+        self.park_if(Some(Duration::ZERO)).await
+    }
+
+    /// Its machine parked now, whatever uses it: what runs in it ends, as cancelling each job
+    /// does, and what reaches it is cut off -- for a server whose sandbox may run no more.
+    pub async fn park_anyway(&self) {
+        let _ = self.park_if(None).await;
+    }
+
+    /// Whether its machine is up now.
+    pub fn is_up(&self) -> bool {
+        self.up().is_some()
+    }
+
+    /// When it was made, or a job in it or an [`Activity`] on it last ended.
+    pub fn last_used(&self) -> SystemTime {
+        SystemTime::now() - self.used.lock().unwrap().elapsed()
+    }
+
+    /// Stop its machine if it has been in use by nothing for `unused_for`, or at once,
+    /// whatever uses it, for `None`: to boot again when it is next needed. Answered under its
+    /// turn, from what was done: [`InUse`](Error::InUse) where it was in use and left up,
+    /// [`Ended`](Error::Ended) where it is closed, and `Ok` where it was parked, is not up, or
+    /// has been unused for less than `unused_for`.
+    async fn park_if(&self, unused_for: Option<Duration>) -> Result<(), Error> {
+        let _turn = self.turn.lock().await;
+        self.park_under_turn(unused_for).await
+    }
+
+    /// [`park_if`](Self::park_if), called under its turn.
+    async fn park_under_turn(&self, unused_for: Option<Duration>) -> Result<(), Error> {
+        let idle = self.idle();
+        let (machine, room) = {
+            let mut state = self.state.lock().unwrap();
+            match &*state {
+                State::Up(..) => {}
+                State::Parked => return Ok(()),
+                State::Exited => return Err(Error::Ended),
+            }
+            if let Some(after) = unused_for {
+                match idle {
+                    None => {
+                        return Err(Error::InUse(format!(
+                            "sandbox {} is in use: a job runs in it, or it is reached",
+                            self.id
+                        )));
+                    }
+                    Some(idle) if idle < after => return Ok(()),
+                    Some(_) => {}
+                }
+            }
+            let State::Up(machine, room) = std::mem::replace(&mut *state, State::Parked) else {
+                unreachable!("up, as matched under the same lock")
+            };
+            (machine, room)
+        };
+        // Its room is given back once it is down.
+        let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
+        self.holding.lock().unwrap().clear();
+        drop(room);
+        self.went_down();
+        Ok(())
+    }
+
+    /// Its machine told down, once it is, if it was told up: called by whatever took it out of
+    /// [`State::Up`], once, and before another can boot -- a park and a close hold the turn
+    /// while they do -- so that each machine's going down is told once and in its order.
+    fn went_down(&self) {
+        if let Some((started, since)) = self.up_since.lock().unwrap().take() {
+            super::runs::down(&self.id, &self.root, started, since);
+        }
+    }
+
+    /// Its machine while one runs.
+    fn up(&self) -> Option<Arc<Machine>> {
+        match &*self.state.lock().unwrap() {
+            State::Up(machine, _) => Some(Arc::clone(machine)),
+            _ => None,
+        }
+    }
+
+    /// Whether `machine` is its machine now.
+    fn is(&self, machine: &Arc<Machine>) -> bool {
+        matches!(&*self.state.lock().unwrap(), State::Up(up, _) if Arc::ptr_eq(up, machine))
+    }
+
+    /// Kill `job` if it runs, for `reason`.
+    fn kill(&self, job: &Job, reason: SandboxJobEndReason) -> Result<(), Error> {
+        let (pid, running) = job.pid();
+        if let Some(machine) = self.up().filter(|_| running) {
+            job.killing(reason);
+            machine.signal(pid, SIGKILL)?;
+        }
+        Ok(())
+    }
+
+    /// What `machine` says, until it ends: each command's pid, as the job its waiter gets, and
+    /// each job's output and end.
+    fn read(&self, machine: &Arc<Machine>) {
         let _published = self.ports.publish(machine.published.clone());
         let mut running = HashMap::new();
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some(Starting { cmd, stdin, waiter }) =
-                        run.starting.lock().unwrap().pop_front()
+                    let Some((cmd, stdin, waiter)) = self.starting.lock().unwrap().pop_front()
                     else {
                         continue;
                     };
                     let started = started.map(|pid| {
-                        self.used();
                         let mut jobs = self.jobs.lock().unwrap();
                         keep_ended(&mut jobs, KEEP_ENDED);
                         let id = pick(|id| jobs.contains_key(id));
@@ -1105,11 +1212,7 @@ impl Sandbox {
                         running.insert(pid, Arc::clone(&job));
                         job
                     });
-                    // Kept with it: a server started again after this one ended under it knows
-                    // the job, ended by that.
-                    if started.is_ok() {
-                        self.keep();
-                    }
+                    self.keep_jobs();
                     let _ = waiter.send(started);
                 }
                 CtrlResp::Stdout { id, line } => {
@@ -1124,17 +1227,9 @@ impl Sandbox {
                 }
                 CtrlResp::Exited { id, code, oom } => {
                     if let Some(job) = running.remove(&id) {
-                        self.used();
                         job.end(code, oom);
-                        self.keep();
-                    }
-                }
-                CtrlResp::Log { level, message } => {
-                    self.shared.hooks.said(&self.record.id, &level, &message)
-                }
-                CtrlResp::Synced => {
-                    if let Some(told) = run.synced.lock().unwrap().take() {
-                        let _ = told.send(());
+                        *self.used.lock().unwrap() = Instant::now();
+                        self.keep_jobs();
                     }
                 }
                 CtrlResp::Written {
@@ -1144,171 +1239,415 @@ impl Sandbox {
                     taken,
                 } => {
                     if let Some(job) = running.get(&id) {
-                        job.written(seq, super::job::Written { bytes, taken });
+                        job.written(seq, Written { bytes, taken });
                     }
                 }
-                CtrlResp::Ready(_) | CtrlResp::Pong => {}
+                CtrlResp::Synced => {
+                    if let Some(told) = self.synced.lock().unwrap().take() {
+                        let _ = told.send(());
+                    }
+                }
+                CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
-        // Gone, and what ran in it with it: killed, as far as anything in it can tell.
-        let mut starting = run.starting.lock().unwrap();
-        run.up.store(false, Ordering::Relaxed);
-        starting.clear();
-        drop(starting);
-        // Ended on its own, not parked: exited, for good, its disk kept as it was left.
-        let ended = {
+        // Nothing waits for a sync it will not say.
+        self.synced.lock().unwrap().take();
+        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Closed or
+        // let go of, it was stopped under them, for the reason `end` gave; otherwise it ended on
+        // its own, and nothing boots it again.
+        let mut starting = self.starting.lock().unwrap();
+        let exited = {
             let mut state = self.state.lock().unwrap();
-            let ended = matches!(&*state, State::Up(up) if Arc::ptr_eq(up, run));
-            if ended {
+            // Its room with it, since it is down.
+            let exited = matches!(&*state, State::Up(up, _) if Arc::ptr_eq(up, machine));
+            if exited {
                 *state = State::Exited;
+                self.went_down();
             }
-            ended
+            exited
         };
-        let reason = match ended {
+        if exited {
+            self.holding.lock().unwrap().clear();
+        }
+        // Kept so, past its process, before any job is seen to end: a server started again
+        // knows it exited.
+        if exited && let Some(record) = &mut *self.record.lock().unwrap() {
+            record.exited = true;
+            if let Err(e) = record.write(&self.dir, &self.id) {
+                eprintln!("sandbox {}'s exit not kept: {e}", self.id);
+            }
+        }
+        starting.clear();
+        let reason = match exited {
             true => SandboxJobEndReason::VmExited,
-            false => SandboxJobEndReason::Cancelled,
+            false => self
+                .ended_for
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(SandboxJobEndReason::SandboxDeleted),
         };
         for job in running.into_values() {
-            job.cut(reason);
+            job.cut(reason.clone());
         }
-        if ended {
-            *self.record.exited.lock().unwrap() = true;
-            if let Err(e) = self.shared.hooks.changed(&run.writes) {
-                eprintln!("sandbox {}, ended, not to be kept: {e}", self.record.id);
-            }
-            eprintln!("sandbox {}'s machine ended on its own", self.record.id);
-            self.keep();
-        }
-        run.release();
+        drop(starting);
+        self.keep_jobs();
     }
 }
 
-/// What a sandbox's machine is, as resized: what [`Sandbox::resize`] answers. `up`, whether
-/// its machine is up now, the size it booted as until it boots again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct Resources {
-    pub vcpus: u8,
-    pub memory_mib: u32,
-    pub disk_gib: u32,
-    pub up: bool,
-}
-
-/// Park `sandbox` once it has been unused for `after`, for as long as `run` is its run.
-async fn park_when_idle(sandbox: Weak<Sandbox>, run: Weak<Run>, after: Duration) {
+/// Park `sandbox`'s machine each time it has been in use by nothing for `after`, until the
+/// sandbox goes or its machine has exited.
+async fn park_when_idle(sandbox: std::sync::Weak<Sandbox>, after: Duration) {
     let mut wait = after;
     loop {
         tokio::time::sleep(wait).await;
-        let (Some(sandbox), Some(run)) = (sandbox.upgrade(), run.upgrade()) else {
+        let Some(sandbox) = sandbox.upgrade() else {
             return;
         };
-        if !sandbox.is(&run) {
+        if matches!(*sandbox.state.lock().unwrap(), State::Exited) {
             return;
         }
         wait = match sandbox.idle() {
             Some(idle) if idle >= after => {
-                sandbox.park_idle(&run, after).await;
+                let _ = sandbox.park_if(Some(after)).await;
                 after
             }
             Some(idle) => after - idle,
             None => after,
-        }
-        .max(LOOK_EVERY);
-    }
-}
-
-/// Kill `job` if it runs, in `run`'s machine, for `reason`.
-fn kill(run: &Run, job: &Job, reason: SandboxJobEndReason) {
-    let (pid, running) = job.pid();
-    if running && run.up.load(Ordering::Relaxed) {
-        job.killing(reason);
-        let _ = run.machine.signal(pid, SIGKILL);
-    }
-}
-
-/// What `args` boots: its machine's size and network, refused for what no machine is.
-pub(super) fn spec_of(args: &SandboxCreateArgs) -> Result<MachineSpec, Error> {
-    let mut at = std::collections::HashSet::new();
-    for volume in &args.volumes {
-        let why = match crate::mount_point(&volume.path) {
-            Err(why) => why,
-            Ok(path) => match at.insert(path) {
-                false => "another volume is there",
-                true => continue,
-            },
         };
-        return Err(Error::Invalid(format!(
-            "volumes: {} at {}: {why}",
-            volume.volume, volume.path
-        )));
     }
-    for (what, given) in [
-        ("vcpus", args.vcpus.map(u32::from)),
-        ("gpu_memory_mib", args.gpu_memory_mib),
-    ] {
-        if given == Some(0) {
-            return Err(Error::Invalid(format!(
-                "{what}: 0 is a machine nothing runs on"
-            )));
-        }
-    }
-    if let Some(mib) = args.memory_mib.filter(|mib| *mib < MIN_MEMORY_MIB) {
-        return Err(Error::Invalid(format!(
-            "memory_mib: {mib} is under the {MIN_MEMORY_MIB} a machine boots in"
-        )));
-    }
-    let gpu = args.gpu.unwrap_or(false);
-    if gpu && !cfg!(feature = "gpu") {
-        return Err(Error::Unsupported(
-            "this server was built without a GPU".into(),
-        ));
-    }
-    if args.gpu_memory_mib.is_some() && !gpu {
-        return Err(Error::Invalid(
-            "gpu_memory_mib: a size is of a GPU, and this sandbox has none".into(),
-        ));
-    }
-    Ok(MachineSpec {
-        vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
-        ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
-        gpu,
-        gpu_memory_mib: args.gpu_memory_mib,
-        network: match args.network {
-            true => Network::Public,
-            false => Network::None,
-        },
-    })
-}
-
-pub(super) fn label_fits(label: Option<&str>) -> bool {
-    label.is_none_or(|label| label.chars().count() <= LABEL_MOST)
 }
 
 /// Something done with a sandbox from outside, counted until it drops: a sandbox with one is
-/// in use, whatever its jobs do -- and, as it drops, used then, unless it came to nothing
-/// ([`Activity::unused`]).
-pub struct Activity {
-    sandbox: Arc<Sandbox>,
-    used: bool,
-}
+/// in use, whatever its jobs do.
+pub struct Activity(Arc<Sandbox>);
 
 impl Activity {
     pub fn sandbox(&self) -> &Arc<Sandbox> {
-        &self.sandbox
-    }
-
-    /// Ended as nothing done: refused, the sandbox's machine not up. It is not used by it, so a
-    /// request it refused keeps the sandbox no longer from being reclaimed.
-    pub fn unused(mut self) {
-        self.used = false;
+        &self.0
     }
 }
 
 impl Drop for Activity {
     fn drop(&mut self) {
-        if self.used {
-            self.sandbox.used();
+        *self.0.used.lock().unwrap() = Instant::now();
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The directory a sandbox made with [`abins`](SandboxCreateArgs::abins) shows at `/abin`: each
+/// program it named, and its `SKILL.md` under `skills/`, linked from the server's own.
+///
+/// One is shared, read-only, by every sandbox made with the same programs as they stand: `<key>/`
+/// in `<root>/sandbox/abin/`, keyed by the programs' names, sizes and times, so that only the
+/// first copies them where a link cannot be made. Each sandbox holds `<key>.lock` shared for as
+/// long as it shows one, and [`Abin::sweep`] deletes those none holds.
+struct Abin {
+    dir: PathBuf,
+    _held: File,
+}
+
+impl Abin {
+    fn dir(root: &Path) -> PathBuf {
+        root.join(SANDBOX).join(ABIN_HOST)
+    }
+
+    /// The one in `dir` of `names`, each a program in `programs`, and the `SKILL.md` of each
+    /// that has one: made, when no sandbox has made it yet.
+    fn create(dir: &Path, programs: &Path, names: &[String]) -> Result<Abin, Error> {
+        let io = |context: String| move |source| Error::Io { context, source };
+        let mut files = Vec::new();
+        for program in names {
+            files.push(PathBuf::from(program));
+            let skill = Path::new(SKILLS).join(program).join(SKILL);
+            if programs.join(&skill).is_file() {
+                files.push(skill);
+            }
         }
-        self.sandbox.active.fetch_sub(1, Ordering::Relaxed);
+        files.sort();
+        let mut key = Sha256::new();
+        key.update(programs.as_os_str().as_encoded_bytes());
+        for file in &files {
+            let from = programs.join(file);
+            let meta = fs::metadata(&from).map_err(io(format!("reading {}", from.display())))?;
+            let time = meta.modified().ok();
+            let time = time.and_then(|time| time.duration_since(UNIX_EPOCH).ok());
+            key.update([0]);
+            key.update(file.as_os_str().as_encoded_bytes());
+            key.update(meta.len().to_le_bytes());
+            key.update(time.unwrap_or_default().as_nanos().to_le_bytes());
+        }
+        let key = format!("{:x}", key.finalize())[..16].to_owned();
+
+        fs::create_dir_all(dir).map_err(io(format!("making {}", dir.display())))?;
+        let lock = dir.join(format!("{key}.lock"));
+        let held = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock)
+            .map_err(io(format!("opening {}", lock.display())))?;
+        // Waited for: a sweep holds it alone only while it deletes.
+        held.lock_shared()
+            .map_err(io(format!("locking {}", lock.display())))?;
+        let made = dir.join(&key);
+        if !made.is_dir() {
+            // Filled under a name of its own, so that no sandbox shows one half made.
+            let name = pick(|name| dir.join(format!("{key}.{name}")).exists());
+            let part = dir.join(format!("{key}.{name}"));
+            let filled = files
+                .iter()
+                .try_for_each(|file| link(&programs.join(file), &part.join(file)))
+                .and_then(|()| {
+                    fs::rename(&part, &made).map_err(|source| Error::Io {
+                        context: format!("placing {}", made.display()),
+                        source,
+                    })
+                });
+            // Placed by another sandbox meanwhile, where the rename failed for that.
+            if filled.is_err() {
+                let _ = fs::remove_dir_all(&part);
+                if !made.is_dir() {
+                    filled?;
+                }
+            }
+        }
+        Ok(Abin {
+            dir: made,
+            _held: held,
+        })
+    }
+
+    /// Delete each one in `dir` no sandbox holds, with what was being filled for it.
+    fn sweep(dir: &Path) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for lock in entries.flatten().map(|entry| entry.path()) {
+            if lock.extension().is_none_or(|e| e != "lock") {
+                continue;
+            }
+            let (Ok(file), Some(key)) = (File::open(&lock), lock.file_stem()) else {
+                continue;
+            };
+            if file.try_lock().is_err() {
+                continue;
+            }
+            let key = key.to_string_lossy();
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for made in entries.flatten().map(|entry| entry.path()) {
+                let name = made.file_name().unwrap_or_default().to_string_lossy();
+                let ours =
+                    name == *key || name.strip_prefix(&*key).is_some_and(|n| n.starts_with('.'));
+                if ours && made.is_dir() {
+                    let _ = fs::remove_dir_all(&made);
+                }
+            }
+            // The lock itself stays: one waiting for it holds what it opened, not a new one.
+        }
+    }
+}
+
+/// `from` at `to`, making its directory: a hard link, or a copy where `to` cannot be one, such
+/// as on another filesystem.
+fn link(from: &Path, to: &Path) -> Result<(), Error> {
+    let io = |context: String| move |source| Error::Io { context, source };
+    let parent = to.parent().unwrap_or(to);
+    fs::create_dir_all(parent).map_err(io(format!("making {}", parent.display())))?;
+    if fs::hard_link(from, to).is_err() {
+        fs::copy(from, to).map_err(io(format!("copying {}", from.display())))?;
+    }
+    Ok(())
+}
+
+impl Sandbox {
+    /// Delete what sandboxes made under `root` by processes that have since ended left, but
+    /// those kept past their process: a server that was killed closed none of its own.
+    pub fn sweep(root: &Path) {
+        Upper::sweep(&root.join(SANDBOX));
+        Abin::sweep(&Abin::dir(root));
+    }
+
+    /// Each sandbox kept under `root` past the process that made it or last knew it, that no
+    /// other process knows now, known again here: parked, or exited where its machine ended
+    /// on its own, with its jobs, each that ran then ended `restarted`, and booted again as [`create`](Sandbox::create) says
+    /// for the next that needs it. What sandboxes not kept left is deleted first, as
+    /// [`sweep`](Sandbox::sweep) deletes it. One that cannot be known again -- its record not
+    /// read, or its image, a volume or an abin of it gone -- is [`Unknown`], its disk and
+    /// record held where they are until it is removed. Each takes what `backing` has as it next
+    /// needs it. Blocking work, as making one is.
+    pub fn kept(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        backing: &Backing,
+    ) -> Kept {
+        let dir = root.join(SANDBOX);
+        Upper::sweep(&dir);
+        let mut kept = Kept::default();
+        for upper in Upper::kept(&dir) {
+            let id = upper.id.clone();
+            let read = Record::read(&dir, &id);
+            let image = read
+                .as_ref()
+                .ok()
+                .and_then(|record| match &record.args.image {
+                    ImageName::Digest { digest } => Some(digest.clone()),
+                    ImageName::Tag { .. } => None,
+                });
+            let name = read
+                .as_ref()
+                .ok()
+                .and_then(|record| record.args.name.clone());
+            let known = read.and_then(|record| {
+                let digest = record.image()?;
+                let (args, kept) = (record.args.clone(), (Some(upper), Some(record)));
+                let (vm, backing) = (vm.clone(), backing.clone());
+                Sandbox::build(
+                    images, root, volumes, &args, digest, vm, park_after, kept, backing,
+                )
+            });
+            match known {
+                Ok(sandbox) => kept.known.push(Arc::new(sandbox)),
+                Err(e) => {
+                    eprintln!("sandbox {id} under {} not known again: {e}", dir.display());
+                    // Let go as the sandbox not made was dropped, kept; held again here.
+                    if let Some(upper) = Upper::kept_one(&dir, &id) {
+                        kept.unknown.push(Unknown {
+                            id,
+                            name,
+                            image,
+                            why: e.told(),
+                            upper,
+                        });
+                    }
+                }
+            }
+        }
+        Abin::sweep(&Abin::dir(root));
+        kept
+    }
+
+    /// Sandbox `id`, kept under `root` with its record and its disk as a server leaves them --
+    /// one that [let it go](Sandbox::leave), on this machine or another, or a backup's -- known
+    /// here as [`kept`](Sandbox::kept) knows each: parked, or exited where its record says so,
+    /// with its jobs, each that ran then ended `restarted`. Where `backing` has a backend, its
+    /// image is [wanted](crate::StorageBackend::want) and its volumes
+    /// [brought up](crate::StorageBackend::bring_up) first. Refused
+    /// [`NotFound`](Error::NotFound) where no sandbox `id` is kept there or another process has
+    /// it, and as making it is where it cannot be known: its disk and record are left as they
+    /// are then.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn take_in(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        backing: &Backing,
+        id: &str,
+    ) -> Result<Arc<Sandbox>, Error> {
+        if !crate::is_name(id) {
+            return Err(Error::Invalid(format!("{id:?} is not a sandbox's id")));
+        }
+        let dir = root.join(SANDBOX);
+        let upper = Upper::kept_one(&dir, id).ok_or_else(|| {
+            Error::NotFound(format!(
+                "no sandbox {id} is kept here, or another server has it"
+            ))
+        })?;
+        let record = Record::read(&dir, id)?;
+        let digest = record.image()?;
+        if let Some(backend) = backing.get() {
+            backend.want(Wanted::Image(&digest)).await.map_err(failed)?;
+            for asked in &record.args.volumes {
+                backend.bring_up(Stored::Volume(&asked.volume)).await?;
+            }
+        }
+        let (images, root, volumes) = (images.clone(), root.to_owned(), volumes.clone());
+        let backing = backing.clone();
+        let built = move || {
+            let args = record.args.clone();
+            let kept = (Some(upper), Some(record));
+            Sandbox::build(
+                &images, &root, &volumes, &args, digest, vm, park_after, kept, backing,
+            )
+        };
+        Ok(Arc::new(tokio::task::spawn_blocking(built).await??))
+    }
+
+    /// Whether a sandbox, of this process or another, lives under `root`: one holds an upper
+    /// disk there from before its machine boots until it is closed, and one kept past its
+    /// process lives there until it is closed.
+    pub fn lives_under(root: &Path) -> bool {
+        Upper::lives(&root.join(SANDBOX))
+    }
+}
+
+/// What a server started again over a root knows of the sandboxes kept there
+/// ([`Sandbox::kept`]).
+#[derive(Default)]
+pub struct Kept {
+    /// Each known again, parked or exited.
+    pub known: Vec<Arc<Sandbox>>,
+    /// Each that could not be.
+    pub unknown: Vec<Unknown>,
+}
+
+/// A sandbox kept under a root that a server started again over it could not know again: its
+/// record not read, or its image, a volume or an abin of it gone. Its disk and record stay
+/// held, and its root counted as lived in ([`Sandbox::lives_under`]), until it is
+/// [removed](Unknown::remove); dropped, they are let go and kept for the next server.
+#[derive(Debug)]
+pub struct Unknown {
+    id: String,
+    name: Option<String>,
+    image: Option<String>,
+    why: String,
+    upper: Upper,
+}
+
+impl Unknown {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The name it was made with, as its record says, if it reads.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Why it could not be known again, without this host's paths: a failure on this host's
+    /// files by its kind. The whole account, which can name them, went to this process's stderr
+    /// as [`Sandbox::kept`] found it.
+    pub fn why(&self) -> &str {
+        &self.why
+    }
+
+    /// It as a sandbox is answered: its image as its record names it, empty where that is not
+    /// read, not `running`, with no ports, since none is open, and why in `error`.
+    pub fn answer(&self) -> virtx_core::Sandbox {
+        virtx_core::Sandbox {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            image: self.image.clone().unwrap_or_default(),
+            running: false,
+            ports: Vec::new(),
+            abins: Vec::new(),
+            error: Some(format!(
+                "not known again since its server restarted: {}",
+                self.why
+            )),
+        }
+    }
+
+    /// Delete its disk and record. Blocking work.
+    pub fn remove(mut self) {
+        self.upper.kept = false;
     }
 }
 
@@ -1345,8 +1684,42 @@ fn check_size(
     Ok(())
 }
 
+/// The machine a sandbox made as `args` asks boots as, each time.
+fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
+    MachineSpec {
+        vcpus: args.vcpus.unwrap_or(DEFAULT_VCPUS),
+        ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
+        gpu: args.gpu.unwrap_or(false),
+        gpu_memory_mib: args.gpu_memory_mib,
+        network: match args.network {
+            true => Network::Public,
+            false => Network::None,
+        },
+    }
+}
+
+/// What a storage backend failed with, as making or booting a sandbox fails.
+fn failed(e: anyhow::Error) -> Error {
+    Error::Backend(crate::backend::Refusal::Failed(e))
+}
+
+/// Whether `id` can be a sandbox's id given it: a file's name under `sandbox/` that no suffix
+/// there ends, letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
+fn is_id(id: &str) -> bool {
+    id.len() <= 64
+        && id.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// The refusal of a sandbox asked for under `id`, which one here has, has made or keeps.
+fn exists(id: &str) -> Error {
+    Error::Exists(format!("a sandbox here has the id {id}"))
+}
+
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.
-pub(super) fn pick(taken: impl Fn(&str) -> bool) -> String {
+fn pick(taken: impl Fn(&str) -> bool) -> String {
     loop {
         let name = format!("{:08x}", RandomState::new().build_hasher().finish() as u32);
         if !taken(&name) {
@@ -1356,218 +1729,82 @@ pub(super) fn pick(taken: impl Fn(&str) -> bool) -> String {
 }
 
 #[cfg(test)]
-mod keeping_ended {
+mod tests {
     use super::*;
 
-    fn job(id: &str, ended: bool) -> (String, Arc<Job>) {
-        let job = Job::new(
-            SandboxJob {
-                id: id.into(),
-                kind: SandboxJobKind::Exec,
-                pid: 1,
-                cmd: vec!["true".into()],
-                running: true,
-                code: None,
-                reason: None,
-            },
-            false,
-        );
-        if ended {
-            job.end(0, false);
-        }
-        (id.into(), job)
-    }
-
     #[test]
-    fn the_ended_jobs_past_the_limit_go_the_first_ended_first_and_none_running() {
+    fn the_ended_jobs_past_the_limit_go_the_first_ended_first_and_none_that_runs() {
+        let job = |id: &str, ended: bool| {
+            let job = Job::new(
+                SandboxJob {
+                    id: id.into(),
+                    kind: SandboxJobKind::Exec,
+                    pid: 1,
+                    cmd: vec!["true".into()],
+                    running: true,
+                    code: None,
+                    reason: None,
+                },
+                false,
+            );
+            if ended {
+                job.end(0, false);
+            }
+            (id.to_owned(), job)
+        };
         let mut jobs = BTreeMap::new();
-        for i in 0..5 {
+        // Ended in the reverse of their ids' order, so that the order kept is the ends'.
+        for i in (0..5).rev() {
             let (id, job) = job(&format!("e{i}"), true);
             jobs.insert(id, job);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(2));
         }
         let (id, running) = job("r", false);
         jobs.insert(id, running);
         // Room for one more under three ended: the three that ended first go.
         keep_ended(&mut jobs, 3);
-        let mut left: Vec<&str> = jobs.keys().map(String::as_str).collect();
-        left.sort();
-        assert_eq!(left, ["e3", "e4", "r"]);
-        // Under the limit: nothing goes.
+        assert_eq!(jobs.keys().collect::<Vec<_>>(), ["e0", "e1", "r"]);
         keep_ended(&mut jobs, 10);
-        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs.len(), 3, "under the limit, none goes");
     }
-}
-
-/// Where a server's own programs for `/abin` are: `abin/` beside the program its machines run
-/// as, as `cargo xtask install` and a release put them there.
-pub(super) fn abin_programs(vm: &[OsString]) -> PathBuf {
-    let dir = vm.first().and_then(|program| Path::new(program).parent());
-    dir.map(|dir| dir.join(ABIN_HOST)).unwrap_or_default()
-}
-
-/// `abins` refused, as a sandbox is made with them, unless each is a program in `programs`,
-/// given once.
-pub(super) fn abins_refused(abins: &[String], programs: &Path) -> Result<(), Error> {
-    // Every name given twice first, so what is said of a request does not hang on what this
-    // server has.
-    let mut given = HashSet::new();
-    if let Some(name) = abins.iter().find(|name| !given.insert(*name)) {
-        return Err(Error::Invalid(format!("abins: `{name}` is given twice")));
-    }
-    for name in abins {
-        let mut parts = Path::new(name).components();
-        let plain = matches!(
-            (parts.next(), parts.next()),
-            (Some(Component::Normal(part)), None) if part == name.as_str()
-        );
-        if name.starts_with('.') || !plain || !programs.join(name).is_file() {
-            return Err(Error::Invalid(format!(
-                "abins: this server has no program called `{name}`"
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// The directory a machine of a sandbox made with `names` shows at `/abin`: each program in
-/// `programs` it names, and its `SKILL.md` under `skills/` where it has one, linked -- or copied,
-/// where a link cannot be, as across filesystems -- into a directory under `under`.
-///
-/// One for each set of names and the programs as they are, made the first time one is asked
-/// for and kept: every machine shows it read-only, so the sandboxes made with the same share
-/// it, and a boot after the first links and copies nothing. Programs replaced since are another
-/// set, of their sizes and times.
-pub(super) fn abin_of(under: &Path, programs: &Path, names: &[String]) -> Result<PathBuf, Error> {
-    let io = |context: String| move |source| SnapshotError::Io { context, source };
-    let mut sorted: Vec<&String> = names.iter().collect();
-    sorted.sort();
-    let mut hasher = std::hash::DefaultHasher::new();
-    for name in &sorted {
-        let path = programs.join(name);
-        let meta = fs_err(std::fs::metadata(&path), &path)?;
-        hasher.write(name.as_bytes());
-        hasher.write_u64(meta.len());
-        if let Ok(modified) = meta.modified() {
-            let since = modified
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default();
-            hasher.write_u128(since.as_nanos());
-        }
-    }
-    let set = sorted
-        .iter()
-        .map(|name| name.as_str())
-        .collect::<Vec<_>>()
-        .join("+");
-    let dir = under.join(format!("{set}.{:016x}", hasher.finish()));
-    if dir.is_dir() {
-        return Ok(dir);
-    }
-    std::fs::create_dir_all(under).map_err(io(format!("making {}", under.display())))?;
-    // Made aside, then put in place whole, so a boot never shows one half made.
-    let making = under.join(format!(".{set}.{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&making);
-    let made = (|| {
-        for program in &sorted {
-            link(&programs.join(program), &making.join(program))?;
-            let skill = Path::new(SKILLS).join(program).join(SKILL);
-            if programs.join(&skill).is_file() {
-                link(&programs.join(&skill), &making.join(&skill))?;
-            }
-        }
-        Ok::<_, Error>(())
-    })();
-    if let Err(e) = made {
-        let _ = std::fs::remove_dir_all(&making);
-        return Err(e);
-    }
-    if std::fs::rename(&making, &dir).is_err() {
-        // Another boot put the same in place first.
-        let _ = std::fs::remove_dir_all(&making);
-        if !dir.is_dir() {
-            return Err(SnapshotError::Io {
-                context: format!("putting {} in place", dir.display()),
-                source: io::Error::other("it is not there"),
-            }
-            .into());
-        }
-    }
-    Ok(dir)
-}
-
-fn fs_err<T>(result: io::Result<T>, path: &Path) -> Result<T, Error> {
-    result.map_err(|source| {
-        SnapshotError::Io {
-            context: format!("reading {}", path.display()),
-            source,
-        }
-        .into()
-    })
-}
-
-/// `from` at `to`, making its directory: a hard link, or a copy where `to` cannot be one.
-fn link(from: &Path, to: &Path) -> Result<(), Error> {
-    let io = |context: String| move |source| SnapshotError::Io { context, source };
-    let parent = to.parent().unwrap_or(to);
-    std::fs::create_dir_all(parent).map_err(io(format!("making {}", parent.display())))?;
-    if std::fs::hard_link(from, to).is_err() {
-        std::fs::copy(from, to).map_err(io(format!("copying {}", from.display())))?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod abin_tests {
-    use super::*;
 
     #[test]
-    fn a_set_of_programs_is_made_once_and_shared_by_those_named_alike() {
+    fn an_abin_holds_the_programs_named_with_their_skills_shared_until_swept() {
         let host = tempfile::tempdir().unwrap();
         let programs = host.path().join(ABIN_HOST);
-        std::fs::create_dir_all(programs.join(SKILLS).join("index")).unwrap();
+        fs::create_dir_all(programs.join(SKILLS).join("index")).unwrap();
         for program in ["index", "docread", "display"] {
-            std::fs::write(programs.join(program), program).unwrap();
+            fs::write(programs.join(program), program).unwrap();
         }
-        std::fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
-        let under = host.path().join("kept").join(ABIN_HOST);
+        fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
 
+        let dir = host.path().join("sandbox").join(ABIN_HOST);
         let names = ["index".to_string(), "display".to_string()];
-        let dir = abin_of(&under, &programs, &names).unwrap();
-        assert_eq!(std::fs::read(dir.join("index")).unwrap(), b"index");
-        assert_eq!(std::fs::read(dir.join("display")).unwrap(), b"display");
-        assert!(!dir.join("docread").exists());
+        let abin = Abin::create(&dir, &programs, &names).unwrap();
+        assert_eq!(fs::read(abin.dir.join("index")).unwrap(), b"index");
+        assert_eq!(fs::read(abin.dir.join("display")).unwrap(), b"display");
+        assert!(!abin.dir.join("docread").exists());
+        let skills = abin.dir.join(SKILLS);
         assert_eq!(
-            std::fs::read(dir.join(SKILLS).join("index").join(SKILL)).unwrap(),
+            fs::read(skills.join("index").join(SKILL)).unwrap(),
             b"skill"
         );
-        assert!(!dir.join(SKILLS).join("display").exists());
+        assert!(!skills.join("display").exists());
 
-        let again = ["display".to_string(), "index".to_string()];
-        assert_eq!(
-            abin_of(&under, &programs, &again).unwrap(),
-            dir,
-            "in any order"
-        );
-        let other = abin_of(&under, &programs, &["docread".to_string()]).unwrap();
-        assert_ne!(other, dir);
-        assert_eq!(
-            std::fs::read_dir(&under).unwrap().count(),
-            2,
-            "nothing half made left"
-        );
+        let reversed = ["display".to_string(), "index".to_string()];
+        let same = Abin::create(&dir, &programs, &reversed).unwrap();
+        assert_eq!(same.dir, abin.dir, "the same programs share one");
+        let other = Abin::create(&dir, &programs, &names[..1]).unwrap();
+        assert_ne!(other.dir, abin.dir);
 
-        assert!(abins_refused(&names, &programs).is_ok());
-        for refused in [
-            vec!["index".to_string(), "index".to_string()],
-            vec!["nope".to_string()],
-            vec!["skills".to_string()],
-            vec!["../abin".to_string()],
-        ] {
-            assert!(
-                matches!(abins_refused(&refused, &programs), Err(Error::Invalid(_))),
-                "{refused:?}"
-            );
-        }
+        let (made, other_made) = (abin.dir.clone(), other.dir.clone());
+        drop((abin, other));
+        Abin::sweep(&dir);
+        assert!(made.is_dir(), "one a sandbox still holds stays");
+        assert!(!other_made.exists());
+        drop(same);
+        Abin::sweep(&dir);
+        assert!(!made.exists());
+        assert!(programs.join("index").is_file(), "the server's own stay");
     }
 }

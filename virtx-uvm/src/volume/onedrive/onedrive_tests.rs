@@ -210,9 +210,8 @@ async fn a_throttle_is_waited_out_as_asked_bounded_and_then_respected() {
     let e = fs.list(Path::new("/busy")).await.err().unwrap();
     assert_ne!(e.kind(), io::ErrorKind::NotFound, "not an absence: {e}");
     assert_eq!(by_path(&mock), 1, "asked once: {:?}", mock.targets());
-    // Not slept through: its 900 s, against which a minute is nothing.
     assert!(
-        started.elapsed() < Duration::from_secs(60),
+        started.elapsed() < Duration::from_secs(5),
         "not slept through"
     );
 

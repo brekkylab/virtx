@@ -28,9 +28,11 @@ A project is answered as a ``Project``, carrying its client the same way: its me
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
 A sandbox's port, a number or a ``PortSpec``, is reached at the ``url`` ``create_sandbox``
-answered for it: a TCP one through a ``PortForwarder`` opened over a client with it, an address
-on this machine's loopback; an HTTP one by a browser. What the library warns of, such as a
-forwarded connection that reached nothing, the ``virtx`` logger logs.
+answered for it, the one place it is given: a TCP one through a ``PortForwarder`` opened over a
+client with the port ``create_sandbox`` answered, or its ``url``, an address on this machine's
+loopback; an HTTP one by a browser. A port of a sandbox got again carries no ``url``, and a
+forwarder refuses it. What the library warns of, such as a forwarded connection that reached
+nothing, the ``virtx`` logger logs.
 """
 
 from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load

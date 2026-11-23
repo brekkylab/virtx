@@ -87,8 +87,12 @@ pub struct ImagePushArgs {
 }
 
 /// One entry of an image job's log. As JSON, an object of one member, as `{"log": "..."}`.
+///
+/// An entry of a kind a later version of the protocol adds is read as
+/// [`Other`](Self::Other), for a reader to pass over, so a log with one still reads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", remote = "Self")]
+#[non_exhaustive]
 pub enum ImageJobEntry {
     /// A line of its log.
     Log(String),
@@ -98,7 +102,13 @@ pub enum ImageJobEntry {
 
     /// How it ended, last.
     End(ImageJobEnd),
+
+    /// One of a kind this version does not know.
+    #[serde(skip)]
+    Other(crate::UnknownEntry),
 }
+
+crate::log_entry::open_entry!(ImageJobEntry);
 
 /// How an image job ended: with a digest if it succeeded, an error if not.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +158,27 @@ mod tests {
         let value = json!({"end": {"error": "no image"}});
         assert_eq!(serde_json::to_value(&end).unwrap(), value);
         assert_eq!(serde_json::from_value::<ImageJobEntry>(value).unwrap(), end);
+    }
+
+    #[test]
+    fn an_entry_of_a_kind_this_version_does_not_know_is_read_to_be_passed_over() {
+        let read: crate::LogEntry<ImageJobEntry> =
+            serde_json::from_value(json!({"id": 2, "layer": {"pulled": 1}})).unwrap();
+        assert_eq!(
+            read.entry,
+            ImageJobEntry::Other(crate::UnknownEntry {
+                kind: "layer".into()
+            })
+        );
+        assert_eq!(read.id, 2);
+        for malformed in [
+            json!({"id": 2, "log": 5}),
+            json!({"id": 2, "truncated": 1}),
+            json!({"id": 2, "end": 1}),
+        ] {
+            let read = serde_json::from_value::<crate::LogEntry<ImageJobEntry>>(malformed.clone());
+            assert!(read.is_err(), "{malformed} read as {read:?}");
+        }
     }
 
     #[test]

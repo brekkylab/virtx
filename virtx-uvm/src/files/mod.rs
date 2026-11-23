@@ -44,6 +44,7 @@ use futures_util::future::BoxFuture;
 use http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 
+use crate::HostPaths;
 use crate::backend::{self, Backing, Stored};
 use crate::machine::Machine;
 use crate::sandbox::Activity;
@@ -58,15 +59,17 @@ pub struct Files {
     serial: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Where the volumes are kept beyond this machine, if anywhere.
     backing: Backing,
+    host_paths: HostPaths,
 }
 
 impl Files {
-    /// The endpoints over `volumes`.
+    /// The endpoints over `volumes`, naming none of this host's paths.
     pub fn new(volumes: VolumeStore) -> Files {
         Files {
             volumes,
             serial: Mutex::default(),
             backing: Backing::default(),
+            host_paths: HostPaths::Hidden,
         }
     }
 
@@ -75,6 +78,12 @@ impl Files {
     /// [taken](crate::StorageBackend::take) before one writes it, until that is answered.
     pub fn backed_by(mut self, backing: Backing) -> Files {
         self.backing = backing;
+        self
+    }
+
+    /// These endpoints, naming this host's paths as `host_paths` says.
+    pub fn with_host_paths(mut self, host_paths: HostPaths) -> Files {
+        self.host_paths = host_paths;
         self
     }
 
@@ -111,7 +120,11 @@ impl Files {
                     VolumeError::Unknown(_) => StatusCode::NOT_FOUND,
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 };
-                return refused(status, e).into_response();
+                let said = match &e {
+                    VolumeError::Io { source, .. } => self.host_paths.told(source.kind(), &e),
+                    _ => e.to_string(),
+                };
+                return refused(status, said).into_response();
             }
         };
         if request.method() == Method::PATCH {
@@ -970,6 +983,27 @@ mod tests {
                 Err(StatusCode::BAD_REQUEST),
                 "MOVE onto {out}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_volume_that_does_not_open_is_refused_by_the_kind_of_its_failure() {
+        let scratch = tempfile::tempdir().unwrap();
+        let volumes = VolumeStore::new(scratch.path()).unwrap();
+        let table = volumes.create("v").unwrap().path().join("mounts.json");
+        std::fs::write(&table, "not a table").unwrap();
+        let account = format!("reading {}", table.display());
+        for (host_paths, named) in [(HostPaths::Hidden, false), (HostPaths::Named, true)] {
+            let files = Files::new(volumes.clone()).with_host_paths(host_paths);
+            let got = files.volume("v", Request::get(PREFIX).body(Body::empty()).unwrap());
+            let response = got.await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(body.starts_with(&account), named, "{host_paths:?}: {body}");
+            if !named {
+                assert_eq!(body, "the server's files: other error");
+            }
         }
     }
 }

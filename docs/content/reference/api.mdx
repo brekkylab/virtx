@@ -90,7 +90,7 @@ In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image
 
 A port in `create_sandbox`'s `ports` is a number, for TCP, or a `PortSpec(port, label, protocol, inbound)`; in Node.js, `{ port, label?, protocol?, inbound? }`.
 Each comes back as a `SandboxPort`: its `port` and `url`, its `label` and `protocol` as given, an `address` where the server gives a TCP port one, and an `inbound_error` where it opened one whose rules it could not set.
-`list_sandbox`, `get_sandbox` and `find_sandbox` answer each port with its `port`, `label`, `protocol` and `address`, and no `url`: `create_sandbox` alone answers that, since it carries the port's credentials.
+`list_sandbox` and `get_sandbox` answer each port with its `port`, `label`, `protocol` and `address`, and no `url`: `create_sandbox` alone answers that, since it carries the port's credentials. A `protocol` this version does not know is kept as the server's string: a `str` in Python, `PortProtocol::Other` in Rust.
 An `InboundRule(source, description)` lets in `source`, an IPv4 or IPv6 CIDR or one address; a server that keeps no rules, as `virtx-stdio` and `virtx-server-tcp` do not, refuses `inbound` with `400`.
 
 A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.
@@ -101,13 +101,13 @@ A job is a sandbox's process, from `exec`, or an image's build, pull or push.
 
 ### Sandbox jobs
 
-A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Set a timeout](/docs/guides/running-commands/#set-a-timeout) in Running commands says, or `restarted`, for one that ran when its server restarted, keeping its sandbox.
+A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Set a timeout](/docs/guides/running-commands/#set-a-timeout) in Running commands says, or `restarted`, for one that ran when its server restarted, keeping its sandbox. A reason this version does not know is kept as the server's string: a `str` in Python, `SandboxJobEndReason::Other` in Rust.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `get()` | `SandboxJob` | The job as the server has it now. |
 | `complete(print)` | `int` | Follows it to its end, printing its output if `print`, and answers its exit code. |
-| `log(after)` | a `LogEntry` at a time | Its output, from its start or after entry `after`, until its end. |
+| `log(after)` | a `LogEntry` at a time | Its output, from its start or after entry `after`, until its end. An entry of a kind this version does not know is passed over in Python and Node, and is `SandboxJobEntry::Other` in Rust, which `complete` passes over. |
 | `signal(signal)` | `None` | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
 | `write_stdin(data, eof)` | `None` | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next. A write its process closed its stdin under part-way raises `409`, `ended`, its `written` how many bytes went in. One the server has no room for yet, after writes given up on while the process did not read, is turned away for now as `503` `capacity`, nothing of it taken, and, if its request is at most 1 MiB, sent again as below. |
 | `remove()` | `None` | Kills its process if it runs, and forgets the job. |
@@ -128,7 +128,7 @@ It has its `id`, its `kind`, the `reference` it points or pushes, whether it is 
 | --- | --- | --- |
 | `get()` | `ImageJob` | The job as the server has it now. |
 | `complete(print)` | `str` | Follows it to its end, printing its log if `print`, and answers the digest it made. Raises the error it failed with. |
-| `log(after)` | a `LogEntry` at a time | Its log, from its start or after entry `after`, until its end, or the error it failed with in place of its end. |
+| `log(after)` | a `LogEntry` at a time | Its log, from its start or after entry `after`, until its end, or the error it failed with in place of its end. An entry of a kind this version does not know is passed over in Python and Node, and is `ImageJobEntry::Other` in Rust, which `complete` passes over. |
 | `remove()` | `None` | Cancels it if it runs, and forgets the job. |
 
 In Rust, `ImageJob` answers `id()` and `info()`.
@@ -214,6 +214,5 @@ See [Networks and ports](/docs/guides/networks-ports/).
 | `VIRTX_PROJECT` | CLI | The project the requests belong to, when `--project` is not given. |
 | `VIRTX_OIDC_ISSUER`, `VIRTX_OIDC_CLIENT_ID` | CLI | The provider `virtx login` signs in to and the client it signs in as, when `--issuer` and `--client-id` are not given. See [Signing in](/docs/reference/cli/#signing-in). |
 | `VIRTX_OIDC_CLIENT_SECRET` | CLI | That client's secret, for a provider that gives its public clients one, when `--client-secret` is not given. |
-| `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. At once by default. |
-| `VIRTX_RECLAIM_AFTER_MS` | Server | How long a sandbox is unused before it is deleted, in milliseconds; `0` for never. 30 days by default. |
+| `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox is unused before its VM is stopped, in milliseconds; `0` for never. Five minutes by default. |
 | `VIRTX_GUEST_SILENCE` | Server | How long a sandbox's guest may answer nothing before its VM is ended, as one that powered off, in seconds, and no less than ten; `0` for never: a guest that halts, as `halt -f` leaves it, or stops answering. A minute by default. |

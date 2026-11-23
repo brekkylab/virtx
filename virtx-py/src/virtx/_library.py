@@ -128,6 +128,8 @@ def _release(key: int | None) -> None:
     _pending.pop(key or 0, None)
 
 
+_HANDLE = ctypes.c_void_p
+_OUT = ctypes.POINTER(_Bytes)
 _WARN = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
 
 #: What logs the library's warnings.
@@ -138,9 +140,6 @@ logger = logging.getLogger("virtx")
 def _warn(message: bytes | None) -> None:
     logger.warning("%s", (message or b"").decode("utf-8", "replace"))
 
-
-_HANDLE = ctypes.c_void_p
-_OUT = ctypes.POINTER(_Bytes)
 
 # Each function's argument and result types, as `virtx.h` declares them. A request takes the
 # client and, unless it is a list, its arguments as `(bytes, len)`.
@@ -227,8 +226,8 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_list_sandbox": _PLAIN,
     "virtx_client_create_sandbox": _WITH_ARGS,
     "virtx_client_get_sandbox": _WITH_ARGS,
-    "virtx_client_find_sandbox": _WITH_ARGS,
     "virtx_client_resize_sandbox": _WITH_ARGS,
+    "virtx_client_find_sandbox": _WITH_ARGS,
     "virtx_client_remove_sandbox": _WITH_ARGS,
     "virtx_client_list_sandbox_job": _WITH_ARGS,
     "virtx_client_exec_sandbox": _WITH_ARGS,

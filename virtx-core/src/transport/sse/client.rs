@@ -5,7 +5,7 @@ use http::header;
 use serde::de::DeserializeOwned;
 use sse_stream::SseStream;
 
-use super::LogEntry;
+use crate::LogEntry;
 use crate::{
     Error,
     transport::{Body, TransportClient, full, http::refused},

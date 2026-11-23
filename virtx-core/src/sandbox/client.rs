@@ -9,8 +9,8 @@ use super::{
     SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
 };
 use crate::{
-    Error,
-    transport::{LogEntry, TransportClient, full, http, segment, sse},
+    Error, LogEntry,
+    transport::{TransportClient, full, http, segment, sse},
 };
 
 /// The path of the sandbox `id`.
@@ -168,9 +168,6 @@ pub(crate) fn exec_log<'a>(
                 Some(Ok((entry, end))) => {
                     (after, ended) = (Some(entry.id), end);
                     yield SandboxExecItem::Log(entry);
-                    if end {
-                        return;
-                    }
                 }
                 Some(Err(Error::Transport(_))) => break,
                 Some(Err(e)) => Err(e)?,

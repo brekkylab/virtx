@@ -902,11 +902,4 @@ jobs:
           mkdir -p build/krunfw
           cp -v guest/kernel/libkrunfw.dll build/krunfw/
 
-      # A machine holds all its RAM from the start here, 4 GiB unless a test asks otherwise: as many
-      # tests at once as half the runner's RAM holds, the rest left to Windows and the servers.
-      - name: Tests at once
-        run: |
-          threads=$(powershell -NoProfile -Command '[math]::Max(1, [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 8GB))' | tr -d '\r')
-          echo "RUST_TEST_THREADS=$threads" | tee -a "$GITHUB_ENV"
-
       - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES -- --include-ignored

@@ -50,17 +50,6 @@ def test_a_streamed_event_reads_back() -> None:
     assert _event({"output": {"code": 0}}, dict) == virtx.Output({"code": 0})
 
 
-async def test_a_command_is_run_for_the_token_before_a_request_is_sent() -> None:
-    failing = virtx.CommandAuth("sh", ("-c", "echo 'not signed in' >&2; exit 1"))
-    with pytest.raises(VirtxError, match="in the clear"):
-        Client.connect("http://example.com/", failing)
-    with (
-        Client.connect("http://127.0.0.1:9/", failing) as client,
-        pytest.raises(VirtxError, match="not signed in"),
-    ):
-        await client.list_sandbox()
-
-
 async def test_a_client_over_http_sends_its_token_and_project(tcp_client: Client) -> None:
     volume = await tcp_client.create_volume(unique("over-http"))
     assert volume in await tcp_client.list_volume()

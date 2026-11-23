@@ -156,6 +156,5 @@ The tag is checked before the content is written, and again once all of it has a
 
 ## Reading while the sandbox is stopped
 
-A sandbox stopped for being unused is not booted again to read its files: listing a directory, reading a file and its `etag` are answered from its disk as it left it, with its volumes' files at their paths, the same as its VM would answer them.
-Reading does not count as using it, so it neither keeps the sandbox from being stopped nor from being reclaimed.
-Writing a file, or removing, moving or copying one, boots its VM again first.
+A sandbox's files are read through its VM, which is booted again if it had been stopped for being unused.
+To read the output of a task that is done with no VM at all, have the task write it to a volume and read it from there instead; see [Mounting volumes](/docs/guides/mounting-volumes/).

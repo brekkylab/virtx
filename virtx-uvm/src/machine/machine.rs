@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::ffi::OsString;
+use std::fmt::Display;
+use std::fs::File;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -11,17 +13,19 @@ use std::time::{Duration, Instant};
 use oci_spec::image::Config;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    machine::{
-        Error, Network, Result,
-        boot::{self, BootArgs},
-        wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
-    },
-    snapshot::Snapshot,
+use crate::fstree::FsTree;
+use crate::machine::{
+    Error, Network, Result,
+    boot::{self, BootArgs, CONSOLE_TARGET},
+    wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
 
 /// How many of the last lines the machine process logged a failure is told with.
 const TAIL: usize = 50;
+
+/// The log target [`enter`] tells the host why the machine could not be built under, as
+/// [`Error::told`] has it.
+const TOLD_TARGET: &str = "virtx_uvm::told";
 
 /// How long a machine told to shut down has to, before it is killed.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -42,14 +46,9 @@ pub struct MachineConfig {
     /// command it runs, is given. Its entrypoint and command are not run.
     pub config: Config,
 
-    /// Where the machine's writes go. `None` is a temporary one, gone with the machine.
-    pub snapshot: Option<Snapshot>,
-
-    /// Whether whoever starts the machine holds [`snapshot`](MachineConfig::snapshot)'s lock
-    /// for it, for as long as the machine runs and past it; else the machine takes the lock
-    /// itself, and lets go of it as it ends.
-    #[serde(default)]
-    pub snapshot_held: bool,
+    /// The disk its writes go to, the overlay's upper layer: one [`create_upper`] made, which no
+    /// other machine runs over while this one does.
+    pub upper: PathBuf,
 
     /// How big it is, and where it may connect to.
     pub spec: MachineSpec,
@@ -83,6 +82,86 @@ pub struct SandboxDisk {
     /// [`Disks::serve`](crate::disks::Disks::serve) answered: `None` for a disk all in its
     /// file.
     pub source: Option<PathBuf>,
+}
+
+/// Make an empty upper disk at `path`, where nothing is yet, that may grow to `gib` GiB: a
+/// ceiling and not an allocation, since the file is sparse. An ext4, since overlayfs takes
+/// nothing else as an upper layer, formatted here rather than in the guest so that it works
+/// over an image nobody prepared. One that fails to format is removed.
+pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
+    let file =
+        File::create_new(path).map_err(|e| Error::io(format!("creating {}", path.display()), e))?;
+    if let Err(e) = FsTree::new().to_ext4(sparse(file), u64::from(gib) << 30) {
+        let _ = std::fs::remove_file(path);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// Grow the upper disk at `path`, which no machine runs over, to `gib` GiB, with what is on it
+/// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
+/// no room to grow in place, which a kernel will not grow either -- is read whole and written
+/// again at the new size: at `part`, moved over it once whole and `before_move` has answered,
+/// so a failure, `before_move`'s too, leaves it as it was. Each file is read whole, its holes
+/// too, so a file larger than the disk could hold is refused, and the new disk takes on the host
+/// what its files are long, not `gib`.
+pub(crate) fn grow_upper(
+    path: &Path,
+    part: &Path,
+    gib: u32,
+    before_move: impl FnOnce() -> io::Result<()>,
+) -> Result<()> {
+    let size = u64::from(gib) << 30;
+    let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);
+    if std::fs::metadata(path).map_err(read)?.len() >= size {
+        return Ok(());
+    }
+    let tree = FsTree::from_ext4(io::BufReader::new(File::open(path).map_err(read)?))?;
+    let _ = std::fs::remove_file(part);
+    let grown = File::create_new(part)
+        .map_err(|e| Error::io(format!("creating {}", part.display()), e))
+        .and_then(|file| Ok(tree.to_ext4(sparse(file), size)?))
+        .and_then(|()| {
+            before_move().map_err(|e| Error::io(format!("growing {}", path.display()), e))
+        })
+        .and_then(|()| {
+            std::fs::rename(part, path)
+                .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
+        });
+    if grown.is_err() {
+        let _ = std::fs::remove_file(part);
+    }
+    grown
+}
+
+/// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not an
+/// allocation.
+///
+/// Unix keeps every file so. NTFS keeps one so only once it is marked: unmarked, a write past
+/// the end fills the gap with zeros first, which is seconds for each GiB, so formatting a 2 GiB
+/// disk -- whose last group's bitmaps are at its end -- writes it whole. A volume that cannot
+/// mark it (FAT) still takes the disk, at that cost.
+fn sparse(file: File) -> File {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+        let mut returned = 0;
+        // SAFETY: the handle is `file`'s, open for the call, and nothing goes in or out.
+        unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_SPARSE,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+    file
 }
 
 /// How big a machine is and where it may connect to, whatever it boots and runs.
@@ -207,6 +286,7 @@ impl Machine {
         drop((their_ctrlin, their_ctrlout, their_ioin, their_ioout));
 
         let mut tail = VecDeque::with_capacity(TAIL);
+        let mut told = None;
         loop {
             match wire::recv(&mut ctrlout).ok().flatten() {
                 Some(CtrlResp::Ready(published)) => {
@@ -219,22 +299,23 @@ impl Machine {
                         held: None,
                     });
                 }
-                Some(CtrlResp::Log { message, .. }) => {
+                Some(CtrlResp::Log {
+                    target, message, ..
+                }) if target == TOLD_TARGET => told = Some(message),
+                Some(CtrlResp::Log {
+                    target, message, ..
+                }) => {
                     if tail.len() == TAIL {
                         tail.pop_front();
                     }
-                    tail.push_back(message);
+                    tail.push_back((target, message));
                 }
                 Some(_) => {}
                 None => {
                     let status = process
                         .wait()
                         .map_err(|e| Error::io("waiting for the machine's process", e))?;
-                    let why = format!("the machine's process ended with {status} before it was up");
-                    return Err(Error::DidNotStart(match tail.is_empty() {
-                        true => why,
-                        false => format!("{why}; last logged:\n{}", Vec::from(tail).join("\n")),
-                    }));
+                    return Err(did_not_start(status, tail.make_contiguous(), told));
                 }
             }
         }
@@ -457,6 +538,24 @@ fn exchange(
     Ok((answer, read))
 }
 
+/// Why a machine whose process ended with `status` before it was up did not start, from the
+/// last records it `logged`, each a target and a message, and `told`, why as [`enter`] told it.
+/// The account has every record; what a caller elsewhere is told has the guest console's and
+/// `told`, since libkrun's records and this crate's can name this host's paths.
+fn did_not_start(status: impl Display, logged: &[(String, String)], told: Option<String>) -> Error {
+    let why = format!("the machine's process ended with {status} before it was up");
+    let said = |lines: Vec<String>| match lines.is_empty() {
+        true => why.clone(),
+        false => format!("{why}; last logged:\n{}", lines.join("\n")),
+    };
+    let line = |(target, message): &(String, String)| format!("{target}: {message}");
+    let console = logged.iter().filter(|(target, _)| target == CONSOLE_TARGET);
+    Error::DidNotStart {
+        account: said(logged.iter().map(line).collect()),
+        told: said(console.map(line).chain(told).collect()),
+    }
+}
+
 /// A pipe end as the command line names it.
 ///
 /// Neither std nor tokio hands a child anything past its stdin, stdout and stderr, so the
@@ -525,6 +624,7 @@ pub fn enter() -> Result<Infallible> {
     let entered = boot::boot(args.config, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
+        log::error!(target: TOLD_TARGET, "{}", e.told());
     }
     entered
 }
@@ -532,6 +632,104 @@ pub fn enter() -> Result<Infallible> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_upper_is_an_empty_filesystem_made_once() {
+        let dir = std::env::temp_dir().join(format!("virtx-uvm-upper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("work.ext4");
+        create_upper(&path, 2).unwrap();
+
+        let read = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+        let paths: Vec<_> = read.walk().into_iter().map(|(path, ..)| path).collect();
+        assert_eq!(paths, [b"".to_vec(), b"lost+found".to_vec()]);
+        assert!(matches!(create_upper(&path, 2), Err(Error::Io { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_machine_that_did_not_start_tells_its_console_and_why_and_no_more() {
+        let logged = [
+            (
+                "devices::virtio::block",
+                "opening /store/rootfs/a.vmdk: denied",
+            ),
+            (CONSOLE_TARGET, "[    0.100000] Booting"),
+            (
+                "virtx_uvm::machine::machine",
+                "attaching the root's image: boot error: /store/rootfs/a.vmdk",
+            ),
+        ]
+        .map(|(target, message)| (target.to_string(), message.to_string()));
+        let told = "attaching the root's image: boot error".to_string();
+        let Error::DidNotStart { account, told } =
+            did_not_start("exit status: 1", &logged, Some(told))
+        else {
+            unreachable!()
+        };
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        assert_eq!(
+            account,
+            format!(
+                "{why}; last logged:\n\
+                 devices::virtio::block: opening /store/rootfs/a.vmdk: denied\n\
+                 init_or_kernel: [    0.100000] Booting\n\
+                 virtx_uvm::machine::machine: attaching the root's image: boot error: \
+                 /store/rootfs/a.vmdk"
+            )
+        );
+        assert_eq!(
+            told,
+            format!(
+                "{why}; last logged:\n\
+                 init_or_kernel: [    0.100000] Booting\n\
+                 attaching the root's image: boot error"
+            )
+        );
+
+        let Error::DidNotStart { account, told } = did_not_start("signal: 9", &[], None) else {
+            unreachable!()
+        };
+        let why = "the machine's process ended with signal: 9 before it was up";
+        assert_eq!((account.as_str(), told.as_str()), (why, why));
+    }
+
+    #[test]
+    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks_and_told_once_written() {
+        use crate::fstree::{Entry, Meta};
+        let dir = tempfile::tempdir().unwrap();
+        let (path, part) = (dir.path().join("w.ext4"), dir.path().join("w.ext4.part"));
+        let mut tree = FsTree::new();
+        let meta = Meta {
+            mode: 0o700,
+            ..Meta::default()
+        };
+        let data = b"kept\n".to_vec();
+        tree.insert(b"kept", Entry::File { meta, data }).unwrap();
+        tree.to_ext4(File::create_new(&path).unwrap(), 1 << 30)
+            .unwrap();
+        let before = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+
+        // Told once it is written, and left as it was where that fails.
+        let failed = grow_upper(&path, &part, 3, || {
+            assert_eq!(std::fs::metadata(&part).unwrap().len(), 3 << 30);
+            Err(io::Error::other("refused"))
+        });
+        assert!(matches!(failed, Err(Error::Io { .. })), "{failed:?}");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1 << 30);
+        assert!(!part.exists());
+
+        grow_upper(&path, &part, 3, || Ok(())).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
+        let after = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
+        assert_eq!(after.digest(), before.digest());
+        assert!(!part.exists());
+
+        let told = || panic!("told of a disk not grown");
+        grow_upper(&path, &part, 2, told).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
+    }
 
     /// What the machine's process is handed is what the parent wrote.
     #[test]
@@ -541,11 +739,7 @@ mod tests {
         let sent = MachineConfig {
             rootfs: PathBuf::from("/store/rootfs/sha256/abc.vmdk"),
             config,
-            snapshot: Some(Snapshot {
-                name: "work".to_string(),
-                path: PathBuf::from("/snapshot/work.ext4"),
-            }),
-            snapshot_held: true,
+            upper: PathBuf::from("/sandbox/work.ext4"),
             spec: MachineSpec {
                 vcpus: 2,
                 ram_mib: 2048,
@@ -558,7 +752,7 @@ mod tests {
                 at: "/data".to_string(),
                 read_only: true,
             }],
-            abin: Some(PathBuf::from("/snapshot/sandbox/work.abin")),
+            abin: Some(PathBuf::from("/sandbox/abin/work")),
             ports: vec![3000],
             sandbox_disk: Some(SandboxDisk {
                 source: Some(PathBuf::from("/run/disk.sock")),
@@ -568,7 +762,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
         assert_eq!(read.rootfs, sent.rootfs);
         assert_eq!(read.config, sent.config);
-        assert_eq!(read.snapshot, sent.snapshot);
+        assert_eq!(read.upper, sent.upper);
         assert_eq!(read.volumes, sent.volumes);
         assert_eq!(read.abin, sent.abin);
         assert_eq!(read.spec.network, sent.spec.network);

@@ -289,6 +289,19 @@ impl PortForwarder {
     }
 }
 
+/// The protocol's code `refusal` said, as `not_found` of `not_found: ...`, where it said one.
+fn code(refusal: &Error) -> Option<String> {
+    let Error::Status(_, said, _) = refusal else {
+        return None;
+    };
+    let (code, _) = said.split_once(": ")?;
+    let protocol = !code.is_empty()
+        && code
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    protocol.then(|| code.to_owned())
+}
+
 /// `error` and each error under it, as `a: b: c`.
 fn chain(error: &dyn std::error::Error) -> String {
     let mut said = error.to_string();
@@ -333,7 +346,7 @@ async fn open(
             message: format!("its WebSocket was refused: {refusal}"),
             source: refusal.source_kind(),
             status: refusal.status(),
-            code: refusal.code().map(str::to_owned),
+            code: code(&refusal),
         });
     }
     let accepted = response

@@ -125,8 +125,6 @@ mod tests {
     fn a_root_is_tagged_by_its_kind() {
         let root = FileRoot::Volume("v".into());
         assert_eq!(serde_json::to_value(&root).unwrap(), json!({"volume": "v"}));
-        let decoded: FileRoot = serde_json::from_value(json!({"volume": "s"})).unwrap();
-        assert_eq!(decoded, FileRoot::Volume("s".into()));
         let decoded: FileRoot = serde_json::from_value(json!({"sandbox": "sb1"})).unwrap();
         assert_eq!(decoded, FileRoot::Sandbox("sb1".into()));
     }

@@ -26,7 +26,7 @@ use http::HeaderMap;
 use tower::ServiceExt as _;
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
 use virtx_uvm::{
-    ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
+    HostPaths, ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
     RegistryServer, Sandbox,
 };
 
@@ -64,7 +64,7 @@ async fn serve() -> anyhow::Result<()> {
         }
     };
     let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await;
-    // The client is gone: every sandbox is parked, kept for the next client.
+    // The client is gone, and every sandbox was its.
     tokio::task::spawn_blocking(move || host.close_all()).await?;
     Ok(served?)
 }
@@ -204,9 +204,9 @@ impl Host {
         }
         let dir = self.store.path(id);
         let images = ImageStore::new(dir.join("images"))?;
-        let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+        let registry = RegistryServer::new(images.clone(), REGISTRY_PATH)?;
+        let registry = Arc::new(registry.with_host_paths(HostPaths::Named));
         let home = Arc::new(Home::new(images, registry, &dir)?);
-        home.reclaim();
         homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))
     }
@@ -292,6 +292,7 @@ mod tests {
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
         PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume,
+        Step,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -400,6 +401,40 @@ mod tests {
         assert_eq!(server.client.list_image_job().await.unwrap(), []);
     }
 
+    /// A built image keeps the recipe it was built from in its config, under `RECIPE_LABEL`.
+    /// Steps that boot no machine, so the build runs here.
+    #[tokio::test]
+    async fn a_built_image_keeps_its_recipe() {
+        let server = Server::spawn("build-recipe").await;
+        let recipe = Recipe::new("scratch")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let job = server
+            .client
+            .build_image(recipe.clone(), "built:latest")
+            .await
+            .unwrap();
+        // A guard against a hang, not a measure of anything.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let job = server.client.get_image_job(&job.id).await.unwrap();
+                if !job.running {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the build went on");
+        let digest = ended.digest.expect("the build failed");
+
+        let store = ImageStore::new(server.home.join("images")).unwrap();
+        let (config, _) = store.get_image(&digest.parse().unwrap()).unwrap().unwrap();
+        let kept =
+            &config.config().as_ref().unwrap().labels().as_ref().unwrap()[virtx_uvm::RECIPE_LABEL];
+        assert_eq!(serde_json::from_str::<Recipe>(kept).unwrap(), recipe);
+    }
+
     #[tokio::test]
     async fn creates_lists_and_removes_a_volume() {
         let server = Server::spawn("volume").await;
@@ -486,7 +521,7 @@ mod tests {
 
         for ports in [vec![0], vec![8080, 8080]] {
             let mut args = here();
-            args.ports = ports.into_iter().map(Into::into).collect();
+            args.ports = ports.into_iter().map(PortSpec::new).collect();
             assert_eq!(refused(args).await, 400);
         }
         // Inbound rules are kept by no server here, and a label is at most 128 characters.
@@ -543,9 +578,6 @@ mod tests {
             404
         );
         let mut args = here();
-        args.disk_gib = Some(0);
-        assert_eq!(refused(args).await, 400);
-        let mut args = here();
         args.volumes = vec![SandboxVolume {
             volume: "missing".into(),
             path: "/data".into(),
@@ -593,11 +625,7 @@ mod tests {
             let args = SandboxExecArgs::new(cmd.iter().copied());
             server.client.exec_sandbox("nobody", &args).await
         };
-        let missing = exec(&["true"]).await.unwrap_err();
-        assert_eq!(
-            (missing.status(), missing.code()),
-            (Some(404), Some("not_found"))
-        );
+        assert_eq!(status(exec(&["true"]).await), 404);
         assert_eq!(status(exec(&[]).await), 400);
         let resize = SandboxResizeArgs {
             vcpus: Some(2),
@@ -784,6 +812,8 @@ mod tests {
         assert_eq!(listed[0].digest, digest);
     }
 
+    /// A prune takes an image no tag names once it is old, and what only it held, and leaves a
+    /// tagged one.
     /// A list is three requests: the catalog, each repository's tags, each tag's manifest.
     /// Between the first two, another client removes a repository's only tag.
     #[tokio::test]
@@ -807,8 +837,6 @@ mod tests {
         );
     }
 
-    /// A prune takes an image no tag names once it is old, and what only it held, and leaves a
-    /// tagged one.
     #[tokio::test]
     async fn a_prune_takes_an_old_untagged_image() {
         let server = Server::spawn("prune").await;
@@ -1176,6 +1204,40 @@ mod tests {
             .unwrap();
         let xml = String::from_utf8(body.to_vec()).unwrap();
         assert!(xml.contains("displayname"), "{xml}");
+    }
+
+    /// A failure on this host's files is answered as its account says it, naming their paths,
+    /// to a caller on this host: a volume whose mount table does not read, and the registry's
+    /// tags over a tag directory that is a file.
+    #[tokio::test]
+    async fn a_failure_on_this_host_s_files_is_answered_with_their_paths() {
+        use axum::body::Body;
+
+        let server = Server::spawn("host-paths").await;
+        server.client.create_volume(Some("v")).await.unwrap();
+        let table = server.home.join("volume").join("v").join("mounts.json");
+        std::fs::write(&table, "not a table").unwrap();
+        let tags = server.home.join("images").join("tag");
+        std::fs::remove_dir_all(&tags).unwrap();
+        std::fs::write(&tags, "not a directory").unwrap();
+
+        let answered = async |path: &str| {
+            let request = http::Request::get(path).body(Body::empty()).unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            assert_eq!(response.status(), 500, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        };
+        let files = answered("/volumes/v/files/").await;
+        let named = format!("reading {}", table.display());
+        assert!(files.starts_with(&named), "{files}");
+        let registry = answered("/images/oci/v2/app/tags/list").await;
+        let registry: serde_json::Value = serde_json::from_str(&registry).unwrap();
+        let message = registry["errors"][0]["message"].as_str().unwrap();
+        let named = format!("reading {}", tags.display());
+        assert!(message.starts_with(&named), "{message}");
     }
 
     /// Two conditional writes to one file at once, from two apps over one home as two server

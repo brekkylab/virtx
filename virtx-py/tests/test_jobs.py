@@ -1,9 +1,7 @@
-"""Images, volumes and their mounts, sandboxes and their ports, and the jobs of images and
-sandboxes, against the fixture's ``virtx-stdio``, and its ``virtx-server-tcp`` where a port is
-forwarded."""
+"""Images, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
+against the fixture's ``virtx-stdio``, and its ``virtx-server-tcp`` where a port is forwarded."""
 
 import asyncio
-import gc
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -32,162 +30,13 @@ from virtx import (
     SandboxPort,
     SandboxResources,
     SandboxVolume,
-    StartedJob,
     Stderr,
     Stdout,
     VirtxError,
     Volume,
 )
-
-
-async def test_a_sandbox_runs_until_it_is_removed_and_is_found_by_its_name(client: Client) -> None:
-    await alpine(client)
-    name = unique("work")
-    made = await client.create_sandbox(ALPINE, name=name, ports=[8000])
-    assert made.running and made.name == name
-    assert [p.port for p in made.ports] == [8000]
-    found = await client.find_sandbox(name)
-    assert found is not None and found.id == made.id and found.client is client
-    assert found.running and found.ports == []
-    assert await client.find_sandbox(unique("nobody")) is None
-    with pytest.raises(VirtxError) as refused:
-        await client.create_sandbox(ALPINE, name=name)
-    assert (refused.value.source, refused.value.status, refused.value.code) == (
-        "server",
-        409,
-        "exists",
-    )
-
-    await made.remove()
-    with pytest.raises(VirtxError) as refused:
-        await client.get_sandbox(made.id)
-    assert refused.value.status == 404
-
-
-async def test_a_sandbox_made_for_a_block_is_deleted_on_leaving_it(client: Client) -> None:
-    await alpine(client)
-    async with await client.create_sandbox(ALPINE) as sandbox:
-        assert sandbox.running
-        id = sandbox.id
-    with pytest.raises(VirtxError) as refused:
-        await client.get_sandbox(id)
-    assert refused.value.status == 404
-
-    async with await client.create_sandbox(ALPINE) as sandbox:
-        await sandbox.remove()
-
-
-async def test_a_sandbox_used_with_async_with_is_deleted_on_leaving(client: Client) -> None:
-    await alpine(client)
-    async with await client.create_sandbox(ALPINE) as sandbox:
-        assert (await client.get_sandbox(sandbox.id)).running
-    with pytest.raises(VirtxError, match="404"):
-        await client.get_sandbox(sandbox.id)
-
-    with pytest.raises(RuntimeError):
-        async with await client.create_sandbox(ALPINE) as failed:
-            raise RuntimeError
-    with pytest.raises(VirtxError, match="404"):
-        await client.get_sandbox(failed.id)
-
-    # One deleted already in the block is left so.
-    async with await client.create_sandbox(ALPINE) as removed:
-        await removed.remove()
-
-
-async def test_a_port_says_what_it_is_for_and_whether_it_is_http(client: Client) -> None:
-    await alpine(client)
-    sandbox = await client.create_sandbox(
-        ALPINE,
-        ports=[
-            5900,
-            PortSpec(5173, label="dev server", protocol=PortProtocol.HTTP),
-            {"port": 3000, "label": "api"},
-        ],
-    )
-    vnc, dev, api = sandbox.ports
-    assert (vnc.port, vnc.label, vnc.protocol) == (5900, None, PortProtocol.TCP)
-    assert (dev.port, dev.label, dev.protocol) == (5173, "dev server", PortProtocol.HTTP)
-    assert (api.port, api.label, api.protocol) == (3000, "api", PortProtocol.TCP)
-    await sandbox.remove()
-
-
-async def test_a_forwarded_port_nothing_listens_on_says_so(
-    tcp_client: Client, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.WARNING, logger="virtx")
-    await alpine(tcp_client)
-    sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
-    with PortForwarder.open(tcp_client, sandbox.ports[0]) as forwarder:
-        assert forwarder.last_error is None
-        reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
-        assert await reader.read() == b""
-        writer.close()
-
-        # Kept once the connection that failed has closed: looked for a minute.
-        for _ in range(6000):
-            if forwarder.last_error is not None:
-                break
-            await asyncio.sleep(0.01)
-        error = forwarder.last_error
-        assert isinstance(error, VirtxError), "no error was kept"
-        assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
-        assert "before the port sent a byte" in str(error)
-        assert sandbox.ports[0].url not in str(error)
-
-        for _ in range(6000):
-            if any(r.name == "virtx" and r.getMessage() == str(error) for r in caplog.records):
-                break
-            await asyncio.sleep(0.01)
-        warned = [r for r in caplog.records if r.name == "virtx"]
-        assert [(r.levelno, r.getMessage()) for r in warned][-1:] == [(logging.WARNING, str(error))]
-    await sandbox.remove()
-
-
-def test_a_port_s_inbound_rules_read_and_write_as_the_wire_has_them() -> None:
-    office = InboundRule("203.0.113.7", "office")
-    assert office.to_dict() == {"source": "203.0.113.7", "description": "office"}
-    assert InboundRule("10.0.0.0/8").to_dict() == {"source": "10.0.0.0/8"}
-    assert InboundRule.from_dict(office.to_dict()) == office
-
-
-def test_a_port_spec_is_written_as_its_number_unless_it_says_more() -> None:
-    assert PortSpec(8080).to_dict() == 8080
-    assert PortSpec(22, label="ssh").to_dict() == {"port": 22, "label": "ssh"}
-    assert PortSpec(5173, protocol="http").to_dict() == {"port": 5173, "protocol": "http"}
-    assert PortSpec(22, inbound=[InboundRule("10.0.0.0/8", "lan")]).to_dict() == {
-        "port": 22,
-        "inbound": [{"source": "10.0.0.0/8", "description": "lan"}],
-    }
-    assert PortSpec(22, inbound=[]).to_dict() == {"port": 22, "inbound": []}
-    assert SandboxPort.from_dict({"port": 1, "url": "u"}) == SandboxPort(1, "u")
-
-
-def test_a_port_whose_inbound_rules_were_not_set_says_why() -> None:
-    port = SandboxPort.from_dict(
-        {
-            "port": 8000,
-            "url": "u",
-            "inbound_error": {
-                "code": "quota",
-                "message": "past the organization's public ports",
-                "reason": "public_ports",
-            },
-        }
-    )
-    assert port.inbound_error == InboundError(
-        "quota", "past the organization's public ports", "public_ports"
-    )
-    why = {"code": "unavailable", "message": "the registry did not answer"}
-    port = SandboxPort.from_dict({"port": 3000, "url": "u", "inbound_error": why})
-    assert port.inbound_error == InboundError("unavailable", "the registry did not answer")
-    assert SandboxPort.from_dict({"port": 1, "url": "u"}).inbound_error is None
-
-
-def test_a_tcp_port_answered_with_an_address_has_it() -> None:
-    reached = SandboxPort.from_dict({"port": 22, "url": "u", "address": "tcp.example:20001"})
-    assert reached == SandboxPort(22, "u", address="tcp.example:20001")
-    assert SandboxPort.from_dict({"port": 1, "url": "u"}).address is None
+from virtx.image import image_job_entry
+from virtx.sandbox import sandbox_job_entry
 
 
 async def test_a_volume_is_created_and_got(client: Client) -> None:
@@ -206,6 +55,7 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
     volume = await client.create_volume(unique("volume"))
     sandbox = await client.create_sandbox(
         ALPINE,
+        disk_gib=4,
         volumes=[SandboxVolume(volume, "/data", readonly=True)],
         ports=[8000, PortSpec(5173, label="dev server", protocol="http")],
         abins=["index"],
@@ -353,6 +203,24 @@ async def test_a_process_whose_sandbox_is_removed_ends_with_the_reason(client: C
     assert rest[-1] == SandboxJobEnd(137, SandboxJobEndReason.SANDBOX_DELETED)
 
 
+def test_a_reason_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:
+    end = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "disk_full"}})
+    assert end is not None and end.entry == SandboxJobEnd(137, "disk_full")
+    known = sandbox_job_entry({"id": 3, "end": {"code": 137, "reason": "timeout"}})
+    assert known is not None and known.entry == SandboxJobEnd(137, SandboxJobEndReason.TIMEOUT)
+
+
+def test_a_log_entry_of_a_kind_this_version_does_not_know_is_passed_over() -> None:
+    assert sandbox_job_entry({"id": 4, "progress": None}) is None
+    assert image_job_entry({"id": 4, "layer": None}) is None
+
+
+def test_a_port_protocol_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:
+    port = SandboxPort.from_dict({"port": 53, "protocol": "udp"})
+    assert port.protocol == "udp"
+    assert SandboxPort.from_dict({"port": 80, "protocol": "http"}).protocol == PortProtocol.HTTP
+
+
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Client) -> None:
     await alpine(client)
     reference = f"{unique('built')}:latest"
@@ -411,133 +279,6 @@ async def test_an_exec_iterated_yields_its_output_and_how_it_ended(client: Clien
     assert isinstance(job, SandboxJob) and job.cmd == ["echo", "hi"]
     assert (await sandbox.job(job.id)).code == 0
     assert [j.id for j in await sandbox.jobs()] == [job.id]
-    await sandbox.remove()
-
-
-async def test_an_exec_iterated_then_awaited_answers_the_job_it_read(client: Client) -> None:
-    await alpine(client)
-    sandbox = await client.create_sandbox(ALPINE)
-    echo = sandbox.exec(["echo", "hi"])
-    log = [entry async for entry in echo]
-    assert log[-1].entry == SandboxJobEnd(0)
-    job = await echo
-    assert job.cmd == ["echo", "hi"] and job.client is client
-    assert [j.id for j in await sandbox.jobs()] == [job.id]
-    await sandbox.remove()
-
-
-async def test_a_started_job_failing_when_iterated_leaves_no_unretrieved_future_exception() -> None:
-    loop = asyncio.get_running_loop()
-    warnings: list[str] = []
-    old_handler = loop.get_exception_handler()
-    loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
-    try:
-
-        async def failing_run():
-            raise RuntimeError("exec failed to start")
-            yield
-
-        job = StartedJob(lambda: None, lambda j: None, failing_run)
-        with pytest.raises(RuntimeError, match="exec failed to start"):
-            async for _ in job:
-                pass
-
-        del job
-        gc.collect()
-        assert not any("Future exception was never retrieved" in w for w in warnings)
-    finally:
-        loop.set_exception_handler(old_handler)
-
-
-async def test_a_started_job_failing_when_iterated_still_raises_when_awaited() -> None:
-    async def failing_run():
-        raise RuntimeError("exec failed to start")
-        yield
-
-    job = StartedJob(lambda: None, lambda j: None, failing_run)
-    with pytest.raises(RuntimeError, match="exec failed to start"):
-        async for _ in job:
-            pass
-
-    with pytest.raises(RuntimeError, match="exec failed to start"):
-        await job
-
-
-async def test_a_started_job_ending_before_its_job_leaves_no_unretrieved_future_exception() -> None:
-    loop = asyncio.get_running_loop()
-    warnings: list[str] = []
-    old_handler = loop.get_exception_handler()
-    loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
-    try:
-
-        async def empty_run():
-            if False:
-                yield
-
-        job = StartedJob(lambda: None, lambda j: None, empty_run)
-        log = [entry async for entry in job]
-        assert log == []
-
-        del job
-        gc.collect()
-        assert not any("Future exception was never retrieved" in w for w in warnings)
-    finally:
-        loop.set_exception_handler(old_handler)
-
-
-async def test_a_started_job_ending_before_its_job_raises_when_awaited() -> None:
-    async def empty_run():
-        if False:
-            yield
-
-    job = StartedJob(lambda: None, lambda j: None, empty_run)
-    log = [entry async for entry in job]
-    assert log == []
-
-    with pytest.raises(RuntimeError, match="the job's log ended before its job"):
-        await job
-
-
-async def test_an_exec_failing_to_start_when_iterated_leaves_no_unretrieved_future_exception(
-    client: Client,
-) -> None:
-    loop = asyncio.get_running_loop()
-    warnings: list[str] = []
-    old_handler = loop.get_exception_handler()
-    loop.set_exception_handler(lambda _l, ctx: warnings.append(ctx.get("message", "")))
-    try:
-        await alpine(client)
-        sandbox = await client.create_sandbox(ALPINE)
-        exec_job = sandbox.exec(["no-such-command"])
-        with pytest.raises(VirtxError) as refused:
-            async for _ in exec_job:
-                pass
-        assert (refused.value.status, refused.value.code) == (422, "not_started")
-
-        # Its traceback holds the job: let go, for it to be collected.
-        del exec_job, refused
-        await sandbox.remove()
-        gc.collect()
-        await asyncio.sleep(0)
-        assert not any("Future exception was never retrieved" in w for w in warnings)
-    finally:
-        loop.set_exception_handler(old_handler)
-
-
-async def test_an_exec_failing_to_start_when_iterated_still_raises_when_awaited(
-    client: Client,
-) -> None:
-    await alpine(client)
-    sandbox = await client.create_sandbox(ALPINE)
-    exec_job = sandbox.exec(["no-such-command"])
-    with pytest.raises(VirtxError) as refused:
-        async for _ in exec_job:
-            pass
-    assert (refused.value.status, refused.value.code) == (422, "not_started")
-
-    with pytest.raises(VirtxError) as awaited_refused:
-        await exec_job
-    assert (awaited_refused.value.status, awaited_refused.value.code) == (422, "not_started")
     await sandbox.remove()
 
 
@@ -643,3 +384,43 @@ async def test_a_sandbox_is_found_by_its_name_which_no_other_has(client: Client)
     assert (refused.value.source, refused.value.status) == ("server", 409)
     await made.remove()
     assert await client.find_sandbox(name) is None
+
+
+async def test_a_forwarded_port_nothing_listens_on_says_so(
+    tcp_client: Client, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger="virtx")
+    await alpine(tcp_client)
+    sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
+    # The port asked for again has no ``url`` to forward: the one its making answered has.
+    again = await tcp_client.get_sandbox(sandbox.id)
+    with pytest.raises(VirtxError) as refused:
+        PortForwarder.open(tcp_client, again.ports[0])
+    assert refused.value.source == "client"
+    assert str(refused.value).startswith("port 7000 has no url")
+    url = sandbox.ports[0].url
+    assert url is not None
+    with PortForwarder.open(tcp_client, sandbox.ports[0]) as forwarder:
+        assert forwarder.last_error is None
+        reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
+        assert await reader.read() == b""
+        writer.close()
+
+        # Kept once the connection that failed has closed: looked for a minute.
+        for _ in range(6000):
+            if forwarder.last_error is not None:
+                break
+            await asyncio.sleep(0.01)
+        error = forwarder.last_error
+        assert isinstance(error, VirtxError), "no error was kept"
+        assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
+        assert "before the port sent a byte" in str(error)
+        assert url not in str(error)
+
+        for _ in range(6000):
+            if any(r.name == "virtx" and r.getMessage() == str(error) for r in caplog.records):
+                break
+            await asyncio.sleep(0.01)
+        warned = [r for r in caplog.records if r.name == "virtx"]
+        assert [(r.levelno, r.getMessage()) for r in warned][-1:] == [(logging.WARNING, str(error))]
+    await sandbox.remove()

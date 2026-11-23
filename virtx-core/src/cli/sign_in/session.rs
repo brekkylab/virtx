@@ -1,5 +1,5 @@
-//! What signing in keeps between runs, under `~/.config/virtx/`: what was signed in to last, a
-//! provider or virtx cloud (`signed-in.json`), and for each client of a provider signed in as, the session's refresh
+//! What signing in keeps between runs, under `~/.config/virtx/`: which provider was signed in
+//! to (`oidc.json`), and for each client of a provider signed in as, the session's refresh
 //! token (`<client_id>@<issuer>.token`) and the ID token last issued (`<client_id>@<issuer>.id`). The directory is its owner's
 //! alone, each of those files is written readable by its owner alone, and one the directory's
 //! owner does not own is not read: another user who could write the directory could put a
@@ -45,23 +45,13 @@ pub fn dir() -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-/// What was signed in to last: virtx cloud at its domain, as `cloud.rs` keeps it
-/// (`{"domain": ...}`), or a provider.
-#[derive(Deserialize)]
-#[serde(untagged)]
-pub enum SignedIn {
-    Cloud { domain: String },
-    Provider(SignIn),
+/// The provider last signed in to, as kept in `dir`.
+pub fn signed_in(dir: &Path) -> Option<SignIn> {
+    serde_json::from_slice(&read_ours(&dir.join("oidc.json")).ok()??).ok()
 }
 
-/// What was signed in to last, as kept in `dir`: none from a file its owner does not own.
-pub fn signed_in(dir: &Path) -> Option<SignedIn> {
-    serde_json::from_slice(&read_ours(&dir.join("signed-in.json")).ok()??).ok()
-}
-
-/// Keep `sign_in` as what was signed in to last.
 pub fn keep_sign_in(dir: &Path, sign_in: &SignIn) -> anyhow::Result<()> {
-    write_private(&dir.join("signed-in.json"), &serde_json::to_vec(sign_in)?)
+    write_private(&dir.join("oidc.json"), &serde_json::to_vec(sign_in)?)
 }
 
 impl Session {

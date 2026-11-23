@@ -17,7 +17,7 @@ use http::{HeaderMap, StatusCode, header};
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
 use virtx_uvm::{
     ImageStore, ProjectError, ProjectId, ProjectStore, PublicImages, PublicRegistries,
-    RegistryProxy, Sandbox,
+    RegistryProxy, RegistryServer, Sandbox,
 };
 
 use crate::config::Config;
@@ -71,7 +71,9 @@ impl Homes for ProjectStore {
         Box::pin(async move {
             let dir = self.path(id);
             let images = ImageStore::new(dir.join("images"))?;
-            Ok(Some(Home::new(images, &dir)?))
+            let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+            let made = move || Home::new(images, registry, &dir);
+            Ok(Some(tokio::task::spawn_blocking(made).await??))
         })
     }
 }
@@ -260,9 +262,11 @@ impl Access {
         Ok((who, home.ok_or(StatusCode::FORBIDDEN)?))
     }
 
-    /// Project `id`'s home, made as it is first reached: `None` once it is being removed, or
-    /// where it is to have none.
-    async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
+    /// Project `id`'s home, made as it is first reached, by a request or by this: `None` once it
+    /// is being removed, or where it is to have none. It asks no one whether `id` is a project's:
+    /// that is the caller's to know, or its [`Homes`]' to refuse. A `Homes` that makes a home for
+    /// any id, as `ProjectStore` does, makes one, and its directory, for an id no project has.
+    pub async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         if let Some(home) = self.homes.lock().unwrap().get(id) {
             return Ok(home.clone());
         }
@@ -302,10 +306,22 @@ impl Access {
         true
     }
 
-    /// Take project `id`'s home away for good, whatever runs in it, as an embedder removing the
-    /// project elsewhere does: no request reaches it again. The home it had, if one was made.
-    pub fn forget(&self, id: &ProjectId) -> Option<Arc<Home>> {
-        self.homes.lock().unwrap().insert(*id, None).flatten()
+    /// Take project `id`'s home away for good, whatever lives in it, for the caller to delete
+    /// its directory: no request reaches it from now on, one already in it starts no sandbox or
+    /// image job, every image job in it is cancelled and every sandbox in it closed, as
+    /// [`Home::close_all`] does -- one kept there and not known again ([`UnknownSandbox`]) has
+    /// its disk and record deleted too. Blocks until each machine has stopped. Left to the
+    /// caller: the directory and what else is in it, its images and volumes; what a backend
+    /// keeps of it; and a sandbox another process holds there ([`Sandbox::lives_under`]).
+    /// [`release`](Access::release) lets requests reach it again.
+    ///
+    /// [`UnknownSandbox`]: virtx_uvm::UnknownSandbox
+    pub fn forget(&self, id: &ProjectId) {
+        let taken = self.homes.lock().unwrap().insert(*id, None).flatten();
+        if let Some(home) = taken {
+            home.close_anyway();
+            home.close_all();
+        }
     }
 
     /// Let requests reach project `id` again, once its removal has failed.
@@ -540,6 +556,50 @@ mod tests {
         assert!(access.home_of(&demo).await.unwrap().is_none());
     }
 
+    /// A project is forgotten whatever its home holds: a sandbox kept in it and not known again,
+    /// which keeps it from being closed, is removed, and its home leaves the homes made and is
+    /// reached by no request again.
+    #[tokio::test]
+    async fn a_project_is_forgotten_with_a_sandbox_not_known_again_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let alice = Principal::new("alice");
+        let demo = projects.create(&alice, "demo").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(store.clone()),
+        );
+        // A sandbox kept by a server before, its record not read.
+        let sandbox = store.path(&demo).join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(sandbox.join("lost.ext4"), b"").unwrap();
+        std::fs::write(sandbox.join("lost.json"), b"not a record").unwrap();
+        let (_, home) = access
+            .home(&headers(Some("alice"), Some("demo"), None))
+            .await
+            .unwrap();
+        assert_eq!(home.sandboxes().counts().unknown, 1);
+        assert!(!access.close(&demo));
+
+        access.forget(&demo);
+        assert!(access.homes().is_empty());
+        assert!(access.home_of(&demo).await.unwrap().is_none());
+        assert!(!Sandbox::lives_under(&store.path(&demo)));
+        assert!(!sandbox.join("lost.ext4").exists());
+        assert!(!sandbox.join("lost.json").exists());
+        let pull = http::Request::post("/images/jobs/pull/")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"reference": "alpine:3.20"}"#))
+            .unwrap();
+        let in_home = crate::endpoints::router().layer(axum::Extension(home));
+        let Ok(refused) = tower::ServiceExt::oneshot(in_home, pull).await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+
     /// Homes made only for the projects listed, none for any other.
     struct Only(ProjectStore, Vec<ProjectId>);
 
@@ -582,5 +642,42 @@ mod tests {
         assert_eq!(access.homes().len(), 1);
         assert_eq!(home("gone").await.err(), Some(StatusCode::FORBIDDEN));
         assert!(!store.path(&gone).join("images").exists());
+    }
+
+    /// A project's home is reached by its id as a request reaches it, made by whichever comes
+    /// first, and none for a project being removed or one its homes make none of.
+    #[tokio::test]
+    async fn a_project_s_home_is_reached_by_its_id_as_by_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let alice = Principal::new("alice");
+        let first = projects.create(&alice, "first").await.unwrap().id;
+        let second = projects.create(&alice, "second").await.unwrap().id;
+        let none = projects.create(&alice, "none").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(Only(store.clone(), vec![first, second])),
+        );
+        let requested = async |project| {
+            let headers = headers(Some("alice"), Some(project), None);
+            access.home(&headers).await.unwrap().1
+        };
+
+        // By its id first, then by a request: the one home.
+        let home = access.home_of(&first).await.unwrap().unwrap();
+        assert_eq!(home.root, store.path(&first));
+        assert!(Arc::ptr_eq(&requested("first").await, &home));
+        // By a request first, then by its id: the one home.
+        let home = requested("second").await;
+        let by_id = access.home_of(&second).await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&by_id, &home));
+
+        assert!(access.home_of(&none).await.unwrap().is_none());
+        assert!(access.close(&first));
+        assert!(access.home_of(&first).await.unwrap().is_none());
     }
 }

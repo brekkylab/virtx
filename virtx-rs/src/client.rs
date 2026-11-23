@@ -421,8 +421,7 @@ impl Client {
         )
     }
 
-    /// Delete each image no tag points at and no sandbox stands on, and what only such images
-    /// held.
+    /// Delete each image no tag points at and no sandbox uses, and what only such images held.
     pub fn prune_image(&self) -> Call<ImagePruneOutput> {
         Call::new(self.api, unsafe {
             (self.api.virtx_client_prune_image)(self.raw)
@@ -773,8 +772,8 @@ impl Client {
         self.call(self.api.virtx_client_resize_sandbox, args)
     }
 
-    /// Delete the sandbox `id`: its VM stopped if it is up, and its disk removed. Its volumes
-    /// stay.
+    /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
+    /// its volumes.
     pub(crate) fn remove_sandbox(&self, id: impl AsRef<str>) -> Call<()> {
         let args = json!({ "id": id.as_ref() });
         self.call(self.api.virtx_client_remove_sandbox, args)

@@ -40,8 +40,7 @@ fn a_cancelled_build_takes_its_machine_with_it() {
     assert!(running());
 
     job.remove().wait().unwrap();
-    // Looked for a minute: what is tried is that it goes, not how soon.
-    for _ in 0..600 {
+    for _ in 0..50 {
         if !running() {
             return;
         }

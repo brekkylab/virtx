@@ -102,7 +102,7 @@ let resized = sandbox.resize(&args).await?;
 
 `list_sandbox` lists every sandbox on the server, `get_sandbox` finds one by its id, and `find_sandbox` one by the `name` it was made with, answering none when no sandbox has it. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `name`, its `image`, and whether it is `running`. This is how to find one a program left behind.
 
-A [server you run](/docs/guides/self-hosting/) keeps its sandboxes when it is stopped, as the one `Client.spawn()` starts does when your program ends: started again, it lists each with what it wrote, and boots it again for its next command. Their jobs are kept, each that ran then ended with code `137` and `reason` `restarted`, its log only that end. One it cannot start again, such as one whose image was deleted meanwhile, is listed with `running` false and an `error` saying why, and takes nothing but `remove`.
+A [server you run](/docs/guides/self-hosting/) keeps its sandboxes when it is stopped: started again, it lists each with what it wrote, and boots it again for its next command. Their jobs are kept, each that ran then ended with code `137` and `reason` `restarted`, its log only that end. One it cannot start again, such as one whose image was deleted meanwhile, is listed with `running` false and an `error` saying why, and takes nothing but `remove`. The server `Client.spawn()` starts removes its sandboxes as your program ends.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -195,7 +195,7 @@ let sandbox = match client.find_sandbox("task-42").await? {
 </TabItem>
 </Tabs>
 
-A sandbox found so comes with its ports but not their `url`s; see [Networks and ports](/docs/guides/networks-ports/).
+A sandbox found so has each port without its `url`, which only `create_sandbox` answers; see [Networks and ports](/docs/guides/networks-ports/).
 
 ## Remove a sandbox
 

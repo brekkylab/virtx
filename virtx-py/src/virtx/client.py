@@ -462,39 +462,46 @@ class Client:
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
         abins: Iterable[str] = (),
     ) -> Sandbox:
-        """Make a sandbox of ``image``, running, with ``volumes`` mounted into it, each a
-        ``SandboxVolume``. It is kept, with what it wrote, until ``Sandbox.remove``: the server
-        may stop its VM while nothing uses it, and boots it again for the next job or write to
-        its files; its files are read from its disk meanwhile. ``name`` finds it again with
-        ``find_sandbox``: letters, digits, ``.``, ``_`` and ``-``, not starting with ``.`` or ``-``,
-        at most 128, or it is refused with ``400``; one another sandbox has is refused with
-        ``409``. ``ports`` are ports in it to open -- a number for TCP, or a ``PortSpec`` to say
-        what it is for, whether it is HTTP and whom it lets in -- each answered here only with
-        the ``url`` it is reached by. ``abins`` names virtx's programs it gets at ``/abin``, each
-        with its ``SKILL.md`` at ``/abin/skills/{name}/``. Whatever is left out the server picks.
+        """Make a sandbox of ``image``, with ``volumes`` mounted into it, each a ``SandboxVolume``,
+        and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
+        ``/abin/skills/{name}/``. ``ports`` are ports in it to open, each a number for TCP or a
+        ``PortSpec`` to say what it is for, whether it is HTTP and whom it lets in, reserved as
+        it is made, each answered a ``SandboxPort`` with the ``url`` it is reached by, here only.
+        Whatever is left out the server picks. ``disk_gib`` is how much it may write over its
+        image, in GiB, at most 1024, which goes with it. ``name`` finds it again with
+        ``find_sandbox``, rather than keeping its id: letters, digits, ``.``, ``_`` and ``-``, not
+        starting with ``.`` or ``-``, at most 128, or it is refused with ``400``; one another
+        sandbox has is refused with ``409``.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
-        args = _args(
-            image=image_name(image).to_dict(),
-            name=name,
-            disk_gib=disk_gib,
-            network=network,
-            ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
-            vcpus=vcpus,
-            memory_mib=memory_mib,
-            gpu=gpu,
-            gpu_memory_mib=gpu_memory_mib,
-            volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
-            abins=list(abins) or None,
+        return Sandbox.from_dict(
+            self,
+            await self._call(
+                "virtx_client_create_sandbox",
+                _args(
+                    image=image_name(image).to_dict(),
+                    name=name,
+                    network=network,
+                    ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
+                    vcpus=vcpus,
+                    memory_mib=memory_mib,
+                    disk_gib=disk_gib,
+                    gpu=gpu,
+                    gpu_memory_mib=gpu_memory_mib,
+                    volumes=[
+                        v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes
+                    ],
+                    abins=list(abins),
+                ),
+            ),
         )
-        return Sandbox.from_dict(self, await self._call("virtx_client_create_sandbox", args))
 
     async def get_sandbox(self, id: str) -> Sandbox:
         """The sandbox ``id``, each port without its ``url``."""
         return Sandbox.from_dict(self, await self._call("virtx_client_get_sandbox", _args(id=id)))
 
     async def find_sandbox(self, name: str) -> Sandbox | None:
-        """The sandbox named ``name``, each port without its ``url``, if one is."""
+        """The sandbox named ``name``, each port without its ``url``, or ``None`` if none is."""
         found = await self._call("virtx_client_find_sandbox", _args(name=name))
-        return None if found is None else Sandbox.from_dict(self, found)
+        return Sandbox.from_dict(self, found) if found is not None else None

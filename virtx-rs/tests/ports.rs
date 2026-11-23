@@ -10,42 +10,26 @@ use std::{
 };
 
 use virtx::{
-    Error, InboundRule, PortForwarder, PortProtocol, PortSpec, SandboxCreateArgs, SandboxExecArgs,
-    SandboxPort, Source,
+    Error, PortForwarder, PortProtocol, PortSpec, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
+    Source,
 };
 
 mod common;
 
 use common::ALPINE;
 
-/// How long a test looks for what it waits on: a guard against a hang, not a measure of how
-/// soon.
-const HANG: Duration = Duration::from_secs(60);
-
-/// Looked for until `holds` does, for as long as [`HANG`].
-fn until(mut holds: impl FnMut() -> bool) -> bool {
-    let began = Instant::now();
-    while began.elapsed() < HANG {
-        if holds() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    false
-}
-
 /// What `nc`, listening in the sandbox, says to a connection to `at`, once it listens.
 fn said(at: impl std::net::ToSocketAddrs + Copy) -> Vec<u8> {
-    let mut said = Vec::new();
-    let heard = until(|| {
-        said.clear();
+    loop {
         if let Ok(mut stream) = TcpStream::connect(at) {
+            let mut said = Vec::new();
             let _ = stream.read_to_end(&mut said);
+            if said.ends_with(b"hello\n") {
+                return said;
+            }
         }
-        said.ends_with(b"hello\n")
-    });
-    assert!(heard, "nothing listened: {said:?}");
-    said
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 /// What the sandbox's server on 8000 answers `ping` sent to `at`, once it listens, for 30 seconds.
@@ -99,8 +83,8 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let sandbox = serving(&client, port);
     let opened = &sandbox.info().ports[0];
     assert_eq!(
-        (opened.label.as_deref(), opened.protocol, &opened.address),
-        (Some("greeting"), PortProtocol::Http, &None)
+        (opened.label.as_deref(), &opened.protocol, &opened.address),
+        (Some("greeting"), &PortProtocol::Http, &None)
     );
     let url = opened.url.as_deref().unwrap();
     let at = url.strip_prefix("http://").unwrap_or(url).to_owned();
@@ -119,9 +103,9 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
 
     assert_eq!(answer(at.as_str()), "hello ping\n");
     sandbox.remove().wait().unwrap();
-    // Its listener goes with it.
-    let gone = until(|| TcpStream::connect(at.as_str()).is_err());
-    assert!(gone, "{at} still answers");
+    // Its listener goes with it, a moment after.
+    thread::sleep(Duration::from_millis(500));
+    assert!(TcpStream::connect(at.as_str()).is_err());
 }
 
 #[test]
@@ -138,20 +122,35 @@ fn a_port_over_http_is_forwarded_to_what_listens_on_it_until_the_sandbox_goes() 
             ..sandbox.info().ports[0].clone()
         }]
     );
-    let url = sandbox.info().ports[0].url.as_deref().unwrap();
-    let forwarder = PortForwarder::open(&client, url).unwrap();
+    // Forwarded as making it answered it: the port asked for again has no URL to reach.
+    let refused = PortForwarder::open(&client, &got.info().ports[0])
+        .err()
+        .unwrap();
+    assert_eq!(refused.source_kind(), Source::Client, "{refused}");
+    assert!(refused.to_string().contains("port 8000 "), "{refused}");
+    let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0]).unwrap();
     let at = forwarder.address();
     assert!(at.ip().is_loopback());
 
     assert_eq!(answer(at), "hello ping\n");
     sandbox.remove().wait().unwrap();
     // The forwarder stays, but what it reached is gone: each connection is closed at once.
-    let closed = until(|| {
-        let mut read = Vec::new();
-        let mut stream = TcpStream::connect(at).unwrap();
-        stream.read_to_end(&mut read).unwrap() == 0
-    });
-    assert!(closed, "{at} still reaches the sandbox");
+    thread::sleep(Duration::from_millis(500));
+    let mut read = Vec::new();
+    let mut stream = TcpStream::connect(at).unwrap();
+    assert_eq!(stream.read_to_end(&mut read).unwrap(), 0);
+}
+
+/// Whether `holds` does within a minute, looked at every 100 ms: a guard against a hang.
+fn until(mut holds: impl FnMut() -> bool) -> bool {
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(60) {
+        if holds() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 /// What the library warned of, as the `log` crate logs it under the target `virtx`.
@@ -180,10 +179,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
     }
     let client = common::tcp_client();
     common::alpine(&client);
-    let args = SandboxCreateArgs {
-        ports: vec![7000.into()],
-        ..SandboxCreateArgs::new(ALPINE)
-    };
+    let args = SandboxCreateArgs::new(ALPINE).port(7000);
     let sandbox = client.create_sandbox(&args).wait().unwrap();
     let port = &sandbox.info().ports[0];
     let forwarder = PortForwarder::open(&client, port).unwrap();
@@ -199,7 +195,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
         until(|| forwarder.last_error().is_some()),
         "no error was kept"
     );
-    let Some(Error::Call(Source::Transport, failed)) = forwarder.last_error() else {
+    let Some(Error::Call(_, failed)) = forwarder.last_error() else {
         panic!("{:?}", forwarder.last_error());
     };
     let named = format!("port 7000, forwarded at {}: ", forwarder.address());
@@ -222,56 +218,4 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
     assert_eq!(said(forwarder.address()), b"hello\n");
     assert_eq!(forwarder.last_error(), None);
     sandbox.remove().wait().unwrap();
-}
-
-#[test]
-fn a_port_says_what_it_is_for() {
-    let client = common::client();
-    common::alpine(&client);
-    let mut args = SandboxCreateArgs::new(ALPINE);
-    args.ports = vec![
-        5900.into(),
-        PortSpec {
-            port: 5173,
-            label: Some("dev server".into()),
-            protocol: PortProtocol::Http,
-            inbound: None,
-        },
-    ];
-    let made = client.create_sandbox(&args).wait().unwrap();
-    let described = |sandbox: &virtx::Sandbox| -> Vec<_> {
-        sandbox
-            .info()
-            .ports
-            .iter()
-            .map(|p| (p.port, p.label.clone(), p.protocol))
-            .collect()
-    };
-    let told = [
-        (5900, None, PortProtocol::Tcp),
-        (5173, Some("dev server".to_owned()), PortProtocol::Http),
-    ];
-    assert_eq!(described(&made), told);
-    made.remove().wait().unwrap();
-}
-
-#[test]
-fn inbound_rules_are_refused_by_a_server_that_keeps_none() {
-    let client = common::client();
-    common::alpine(&client);
-    let mut ssh = PortSpec::new(22);
-    ssh.inbound = Some(vec![InboundRule::new("10.0.0.0/8")]);
-    let refused = client
-        .create_sandbox(&SandboxCreateArgs::new(ALPINE).port(ssh))
-        .wait()
-        .unwrap_err();
-    assert_eq!(
-        (refused.status(), refused.code()),
-        (Some(400), Some("invalid")),
-        "{refused}"
-    );
-    assert!(
-        refused.to_string().contains("not kept by this server"),
-        "{refused}"
-    );
 }

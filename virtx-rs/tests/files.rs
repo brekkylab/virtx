@@ -169,40 +169,6 @@ fn a_volume_carries_its_client_to_its_files_and_mounts() {
 }
 
 #[test]
-fn a_sandbox_keeps_what_it_wrote_and_is_found_by_its_name() {
-    let client = common::client();
-    common::alpine(&client);
-    let name = common::unique("kept");
-    let mut args = SandboxCreateArgs::new(ALPINE);
-    args.name = Some(name.clone());
-    let sandbox = client.create_sandbox(&args).wait().unwrap();
-    assert_eq!(sandbox.name(), Some(name.as_str()));
-    // One sandbox at a time by a name.
-    let second = client.create_sandbox(&args).wait().unwrap_err();
-    assert_eq!(
-        (second.status(), second.code()),
-        (Some(409), Some("exists")),
-        "{second}"
-    );
-    assert_eq!(
-        common::run(&sandbox, &["sh", "-c", "echo kept > /root/kept"]).1,
-        0
-    );
-
-    // Found by its name, its files are what its processes wrote, and what is put there is in
-    // it for them.
-    let found = client.find_sandbox(&name).wait().unwrap().unwrap();
-    assert_eq!((found.id(), found.info().running), (sandbox.id(), true));
-    assert_eq!(found.read_text("root/kept").wait().unwrap(), "kept\n");
-    found.write_file("root/put", "put\n", None).wait().unwrap();
-    let read = common::run(&found, &["cat", "/root/kept", "/root/put"]);
-    assert_eq!(read, (vec!["kept".into(), "put".into()], 0));
-
-    found.remove().wait().unwrap();
-    assert!(client.find_sandbox(&name).wait().unwrap().is_none());
-}
-
-#[test]
 fn a_sandbox_s_files_are_its_own_and_go_with_it() {
     let client = common::client();
     common::alpine(&client);

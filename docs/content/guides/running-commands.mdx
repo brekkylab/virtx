@@ -246,7 +246,7 @@ Stdout(line='tick 4')
 SandboxJobEnd(code=0)
 ```
 
-A job left in the background runs until it ends or is removed; stopping or removing the sandbox ends every job in it. An ended job is kept, with its log, for its output to be read: a sandbox keeps its last 100, and as another starts past them the one that ended first is removed. A job that runs is never removed so.
+A job left in the background runs until it ends or is removed; removing the sandbox stops every job in it. An ended job is kept, with its log, for its output to be read: a sandbox keeps its last 100, and as another starts past them the one that ended first is removed. A job that runs is never removed so.
 
 ## Set a timeout
 
@@ -283,11 +283,13 @@ The job says why it ended where the process did not end by itself: its `reason`,
 | `reason` | Why the process ended, killed with its code `137` |
 | --- | --- |
 | `timeout` | Its `timeout_ms` ran out. |
-| `cancelled` | Its job was removed while it ran, or its sandbox was stopped under it. Its sandbox is still there, and the command can be run again. |
+| `cancelled` | Its job was removed while it ran. Its sandbox is still there, and the command can be run again. |
 | `sandbox_deleted` | Its sandbox was removed under it, and everything it had with it. |
 | `vm_exited` | Its sandbox's machine exited on its own under it. |
 | `oom` | Its memory ran out: it, or a process it started, was killed past the memory one command may take or the machine's, or for thrashing there. |
-| `restarted` | Its server ended while it ran, keeping its sandbox: the server started again knows the job ended so. |
+| `restarted` | Its server restarted while it ran, keeping its sandbox. |
+
+A later version may add a reason. A package that does not know it keeps it as the string it was sent, so the job still reads.
 
 ## Signal or cancel a job
 

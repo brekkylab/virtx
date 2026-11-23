@@ -7,12 +7,12 @@ use virtx_core::{
 
 use crate::{Call, Client, Error, Events, JobEnd, StartedJob, files, job::sealed::Ends};
 
-/// A sandbox the server holds, as making, finding or asking for it answered, and the client
-/// that reaches it: what is needed to run processes in it, and reach its files, through
+/// A sandbox the server holds, as making it or asking for it answered, and the client that
+/// reaches it: what is needed to run processes in it, and its files, through
 /// [`Files`](crate::Files).
 ///
-/// Cloning holds the same client once more. Dropping it leaves the sandbox as it is; it is kept
-/// until [`remove`](Self::remove).
+/// Cloning holds the same client once more. Dropping it leaves the sandbox as it is; it goes
+/// with [`remove`](Self::remove).
 #[derive(Clone)]
 pub struct Sandbox {
     client: Client,
@@ -38,9 +38,8 @@ impl Sandbox {
         self.info.name.as_deref()
     }
 
-    /// What the server answered about it, as it was then: its image, whether it takes
-    /// processes, and its ports, each with the `url` it is reached at only where making it
-    /// answered.
+    /// What the server answered about it: its image, whether it runs, and its ports, each
+    /// with the `url` it is reached at only where making it answered.
     pub fn info(&self) -> &SandboxInfo {
         &self.info
     }
@@ -82,7 +81,7 @@ impl Sandbox {
         self.client.resize_sandbox(&self.info.id, args)
     }
 
-    /// Delete it: its VM stopped if it is up, and its disk removed. Its volumes stay.
+    /// Stop it, end its jobs, and forget it, with everything it wrote outside its volumes.
     pub fn remove(&self) -> Call<()> {
         self.client.remove_sandbox(&self.info.id)
     }
@@ -207,6 +206,8 @@ impl Ends for SandboxJob {
                 None
             }
             SandboxJobEntry::End(end) => Some(Ok(end.code)),
+            // A kind of entry this version does not know: passed over.
+            _ => None,
         }
     }
 }

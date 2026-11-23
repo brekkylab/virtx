@@ -2,15 +2,12 @@
 # too, after each merge, and in full: built, packed and tried as a release would be (see
 # `pipeline`), and that run is what saves the Rust caches every other ref reads. A run started
 # by hand is in full too. The docs are `docs`'s.
-#
-# A push to `cloud` -- virtx's server and client as virtx cloud builds on them -- is linted and
-# tested as a pull request is, not built in full.
 name: ci
 
 # Markdown and `docs/` are left out.
 on:
   push:
-    branches: [main, cloud]
+    branches: [main]
     paths: &paths
       - "**"
       - "!**/*.md"
@@ -19,12 +16,12 @@ on:
     paths: *paths
   workflow_dispatch:
 
-# A newer push to the pull request, or to `cloud`, makes an older run moot. A run on `main` finishes once
+# A newer push to the pull request makes an older run moot. A run on `main` finishes once
 # started, or a merge after a merge would leave no run to save the caches; of the runs waiting
 # behind it, only the newest is kept.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/cloud' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -35,7 +32,7 @@ jobs:
     name: ci
     uses: ./.github/workflows/pipeline.yml
     with:
-      full: ${{ github.event_name != 'pull_request' && github.ref != 'refs/heads/cloud' }}
+      full: ${{ github.event_name != 'pull_request' }}
     # `actions` read, for the tests jobs to see whether `guest` failed while they wait for it.
     permissions:
       contents: read

@@ -26,9 +26,7 @@
     "node": ">= 22"
   },
   "scripts": {
-    "test": "cargo xtask fixture -- node --test --test-concurrency=1 '__test__/**/*.spec.mjs'",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "test": "cargo xtask fixture -- node --test --test-concurrency=1 '__test__/**/*.spec.mjs'"
   },
   "dependencies": {
     "koffi": "^3.3.3"

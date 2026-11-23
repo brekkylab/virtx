@@ -42,9 +42,8 @@ export function fixture() {
   return named
 }
 
-// The image every test that boots a sandbox pulls first: Docker Hub's alpine, from Google's
-// mirror of its official images, as Docker Hub refuses anonymous pulls past a few an hour.
-export const ALPINE = 'mirror.gcr.io/library/alpine:3.20'
+// The image every test that boots a sandbox pulls first.
+export const ALPINE = 'alpine:3.20'
 
 let names = 0
 // A name no other test gives, of this file or another: each file runs as a process of its own.

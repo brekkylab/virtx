@@ -82,6 +82,8 @@ let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
 
 A build stores its image under the supplied tag. `create_sandbox` boots it by that tag, or by its digest to select exactly that build.
 
+The image keeps the recipe it was built from, as JSON, in its config's `sh.virtx.recipe` label, so it travels with the image when pushed.
+
 A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec`.
 
 A build, like a pull or a push, is a job.

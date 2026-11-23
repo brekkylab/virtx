@@ -106,9 +106,6 @@ pub enum CtrlResp {
     Stdout { id: u32, line: String },
     /// A line the process `id` wrote to its stderr, without its newline.
     Stderr { id: u32, line: String },
-    /// What the guest had written is on its disks, as the last [`Sync`](CtrlReq::Sync)
-    /// asked.
-    Synced,
     /// The process `id` ended with `code`; `128 + signal` for one a signal ended. `oom` where
     /// it ended `137` and its memory ran out: the kernel's OOM killer killed a process of its
     /// command's cgroup, or the agent killed the cgroup, out of memory and thrashing at its
@@ -119,12 +116,20 @@ pub enum CtrlResp {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         oom: bool,
     },
+    /// What the guest had written is on its disks, as the last [`Sync`](CtrlReq::Sync) asked.
+    Synced,
     /// A record of the machine process's `log`: whatever any Rust code in it -- libkrun, or
-    /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`. Among it
-    /// are the guest's console, which libkrun logs under `init_or_kernel`, and why the machine
-    /// could not be built or broke, logged as an error as the process's last word -- so a
-    /// process that ends before [`Ready`](CtrlResp::Ready) has said why here.
-    Log { level: String, message: String },
+    /// this crate -- logs through the `log` facade, which `boot` points at `ctrlout`, under the
+    /// `target` it was logged under, empty in a record that carries none. Among it are the
+    /// guest's console, which libkrun logs under `init_or_kernel`, and why the machine could not
+    /// be built or broke, logged as an error as the process's last words -- so a process that
+    /// ends before [`Ready`](CtrlResp::Ready) has said why here.
+    Log {
+        level: String,
+        #[serde(default)]
+        target: String,
+        message: String,
+    },
     /// The answer to the [`Stdin`](CtrlReq::Stdin) `seq` to the process `id`: how many `bytes`
     /// of its `data` went in, and what became of it.
     Written {
@@ -299,6 +304,7 @@ mod tests {
             },
             CtrlResp::Log {
                 level: "ERROR".into(),
+                target: "virtx_uvm".into(),
                 message: "no".into(),
             },
         ];
@@ -314,6 +320,17 @@ mod tests {
             );
         }
         assert_eq!(recv::<CtrlResp>(&mut input).unwrap(), None);
+    }
+
+    #[test]
+    fn a_log_record_without_a_target_is_read_under_none() {
+        let record = br#"{"Log":{"level":"ERROR","message":"no"}}"#;
+        let expected = CtrlResp::Log {
+            level: "ERROR".into(),
+            target: String::new(),
+            message: "no".into(),
+        };
+        assert_eq!(decode::<CtrlResp>(record).unwrap(), expected);
     }
 
     #[test]

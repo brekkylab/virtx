@@ -1,9 +1,8 @@
-//! What a sandbox's disk is past its file, and how its machine reads and writes it: here, a
-//! file and nothing else, which libkrun reads and writes itself. An embedder that keeps more --
-//! a disk whose data is fetched from elsewhere only as the guest first reads it (virtx cloud's
-//! lazy disks), what each part of it was restored from -- says so with [`set_disks`], once,
-//! before anything here runs: in the server's process and in each machine's, which is the same
-//! binary ([`enter_machine`](crate::enter_machine)).
+//! What a sandbox's upper disk is past its file, and how its machine reads and writes it: here,
+//! a file and nothing else, which libkrun reads and writes itself. An embedder that keeps more --
+//! a disk whose data is fetched from elsewhere only as the guest first reads it, say -- says so
+//! with [`set_disks`], once, before anything here runs: in the server's process and in each
+//! machine's, which is the same binary ([`enter_machine`](crate::enter_machine)).
 //!
 //! A build's own disk, made and thrown away with its step, is a file whatever is set.
 
@@ -21,34 +20,46 @@ pub use krun::DynStorage;
 /// Anything the server's process holds for a machine's disk until the machine is down.
 pub type Held = Box<dyn Send + Sync>;
 
-/// What a sandbox's disk is, past its file.
+/// What a sandbox's upper disk is, past its file.
 pub trait Disks: Send + Sync {
-    /// In the server's process, as a sandbox's machine is about to boot over the disk at `disk`:
-    /// what the machine fetches the disk's data from while it runs -- a path it is given, such
-    /// as a socket -- and what answers there, held until the machine is down. `None` for a disk
-    /// all in its file.
+    /// In the server's process, as a sandbox's machine is about to boot over the disk at `disk`,
+    /// grown first where it was to be ([`whole`](Disks::whole)): what the machine fetches the
+    /// disk's data from while it runs -- a path it is given, such as a socket -- and what
+    /// answers there, held until the machine is down. `None` for a disk all in its file.
     fn serve(&self, disk: &Path) -> io::Result<Option<(PathBuf, Held)>> {
         let _ = disk;
         Ok(None)
     }
 
-    /// In the server's process: the disk at `disk` written again whole, or removed with its
-    /// sandbox, or as one left over: whatever beside it says what it is goes with it.
-    fn forget(&self, disk: &Path) -> io::Result<()> {
-        let _ = disk;
-        Ok(())
-    }
-
     /// In the machine's process: the disk at `disk` opened as its block device is to read and
-    /// write it, `source` being what [`serve`](Disks::serve) answered. `None` for its file as it
-    /// is.
+    /// write it, `source` being what [`serve`](Disks::serve) answered. `None` for its file as
+    /// it is.
     fn open(&self, disk: &Path, source: Option<&Path>) -> io::Result<Option<Arc<dyn MachineDisk>>> {
         let _ = (disk, source);
         Ok(None)
     }
+
+    /// In the server's process, its machine down: the disk at `disk` all in its file, about to
+    /// be read whole and written again there -- grown, as a sandbox's disk is at the boot after
+    /// it was resized larger. A failure leaves the disk as it was, not grown.
+    fn whole(&self, disk: &Path) -> io::Result<()> {
+        let _ = disk;
+        Ok(())
+    }
+
+    /// In the server's process: whatever beside the disk at `disk` says what it is goes with it.
+    /// For a disk removed with its sandbox, or as one left over, called once its file is gone,
+    /// where there is no one to answer to: a failure is logged and nothing more, and what the
+    /// embedder kept for the disk is its own to remove. For a disk grown, called once it is all
+    /// in its file ([`whole`](Disks::whole)) and the grown disk is written, before that replaces
+    /// it: a failure leaves the disk as it was, not grown, to be grown at a later boot.
+    fn forget(&self, disk: &Path) -> io::Result<()> {
+        let _ = disk;
+        Ok(())
+    }
 }
 
-/// A sandbox's disk as its machine has it open ([`Disks::open`]).
+/// A sandbox's upper disk as its machine has it open ([`Disks::open`]).
 pub trait MachineDisk: Send + Sync {
     /// What its block device reads and writes through.
     fn storage(&self) -> Box<dyn DynStorage>;
@@ -86,7 +97,7 @@ pub(crate) fn embedded() -> bool {
     EMBEDDED.load(Ordering::Relaxed)
 }
 
-/// What sandboxes' disks are in this process.
+/// What sandboxes' upper disks are in this process.
 pub(crate) fn disks() -> &'static dyn Disks {
     DISKS.get_or_init(|| Arc::new(Files)).as_ref()
 }

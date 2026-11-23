@@ -18,9 +18,8 @@ from virtx import BearerAuth, Client
 ROOT = Path(__file__).resolve().parents[2]
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
 
-ALPINE = "mirror.gcr.io/library/alpine:3.20"
-"""The image every test that boots a sandbox pulls first: Docker Hub's alpine, from Google's
-mirror of its official images, as Docker Hub refuses anonymous pulls past a few an hour."""
+ALPINE = "alpine:3.20"
+"""The image every test that boots a sandbox pulls first."""
 
 
 _fixture: subprocess.Popen[str] | None = None

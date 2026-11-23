@@ -3,85 +3,57 @@
 //! [`access`](crate::access) puts in its extensions; and those of the projects themselves
 //! ([`projects`]), answered from the [`Access`] there.
 //!
-//! Beside the protocol, what virtx cloud's node needs of a home ([`Home`]'s `pub` methods): its
-//! storage kept past this server ([`Keeping`]), its
-//! sandboxes themselves -- to count, park, move to another node or copy the disk of
-//! ([`Home::sandboxes`]) -- a sandbox resized or its disk grown as it next boots
-//! (`PUT /sandboxes/{id}/resources`, `/disk`), and the volumes listed a page at a time,
-//! `?limit=&after=` -- the cloud's extension, which a client that sends neither does not see.
-//!
-//! A home's sandboxes are [`virtx_uvm::Sandboxes`], their disks snapshots of its store named
-//! by their ids; what the home adds to them -- its keeping, its ports' capabilities -- it plugs
-//! in as their [`Hooks`]. Room for their machines is `virtx-uvm`'s
-//! ([`virtx_uvm::set_admission`]).
+//! A home keeps its project's data in its own stores, and beyond this machine too where it is
+//! given a [`StorageBackend`] ([`Home::backed_by`]), whose cache its stores are then.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::io::{self, Write as _};
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, FromRequest, FromRequestParts, Request};
+use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
-use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortProtocol, PortSpec, ProjectCreateArgs,
-    ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
-    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs,
-    SandboxStdinArgs, Step, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListOutputItem, accepts_event_stream, described_type, from_body,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
+    ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    accepts_event_stream, described_type, from_body,
 };
-use virtx_uvm::backend::{
-    Backing, Refusal as BackendRefusal, Stored, TagError, Wanted as BackendWanted,
-};
-use virtx_uvm::sandbox::{Activity, Held, Hooks, Sandbox, Wanted};
+use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
-    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, ImageConfiguration,
-    ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, NoRoom,
-    Os, PublicImages, PublicRegistries, Reference, RegistryClient, RegistryError, RegistryProxy,
-    RegistryServer, SandboxError, Sandboxes as SandboxStore, SnapshotError, SnapshotStore,
-    StorageBackend, VolumeError, VolumeStore, build_step, signal_number,
+    Activity, BuildError, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
+    HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
+    MachineSpec, Network, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
+    RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
+    UnknownSandbox, VolumeError, VolumeStore, build_step, park_after, recipe_kept, signal_number,
 };
 
 use virtx_uvm::ProjectError;
 
-use crate::access::{Access, Principal};
+use crate::access::Access;
+use crate::access::Principal;
 use crate::project::Project;
 
-pub use virtx_uvm::sandbox::cloned;
-
-/// A registry client for this server's pulls and pushes: anonymous pulls of Docker Hub's images
-/// from its mirror at `mirror` first, given one, and shared through `public`, given one;
-/// through `registries`.
-fn registry(
-    images: ImageStore,
-    auth: Option<virtx_core::RegistryAuth>,
-    mirror: Option<&str>,
-    public: Option<Arc<dyn PublicImages>>,
-    registries: &dyn RegistryProxy,
-) -> Result<RegistryClient, RegistryError> {
-    RegistryClient::new(images, auth)
-        .with_mirror(mirror)
-        .with_public(public)
-        .through(Some(registries))
-}
+/// An image job, with the entries its log carries.
+type ImageJobOf = Job<ImageJob, ImageJobEntry>;
 
 /// How old what nothing needs has to be before a prune takes it: a pull, push or build in
 /// flight has put it there and not yet pointed a reference at it.
@@ -90,46 +62,34 @@ pub const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// How long an image job that has ended is kept, for its end to be read, before it is removed.
 const IMAGE_JOB_KEPT: Duration = Duration::from_secs(60);
 
-/// An image job, with the entries its log carries.
-type ImageJobOf = Job<ImageJob, ImageJobEntry>;
-
 /// What one project's requests reach: the stores, and the sandboxes and jobs its members made
-/// from them, which are theirs together. A handle: cloned, it is the same home.
-#[derive(Clone)]
-pub struct Home(Arc<HomeInner>);
-
-impl Deref for Home {
-    type Target = HomeInner;
-
-    fn deref(&self) -> &HomeInner {
-        &self.0
-    }
-}
-
-/// What a [`Home`] holds.
-pub struct HomeInner {
+/// from them, which are theirs together.
+pub struct Home {
     images: ImageStore,
-    /// Its images as an OCI registry, at `/images/oci/v2/`, for a tenant's home: its own.
     registry: Arc<RegistryServer>,
-    pub snapshots: SnapshotStore,
-    pub volumes: VolumeStore,
-    /// The home: its sandboxes' records and disks are under its `sandbox/`.
-    /// What its image jobs -- a pull, a push, a build's base -- connect to registries through, as
-    /// the [`Access`] it is made for says ([`Home::through`]); [`PublicRegistries`] with none
-    /// named until it does.
-    registries: OnceLock<Arc<dyn RegistryProxy>>,
-    /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first, as the
-    /// [`Access`] it is made for says ([`Home::through`]).
-    mirror: OnceLock<Arc<str>>,
+    /// What its image jobs -- a pull, a push, a build's base -- connect to registries through.
+    registries: Arc<dyn RegistryProxy>,
+    /// Docker Hub's mirror, which its anonymous pulls of Docker Hub's images go to first.
+    mirror: Option<Arc<str>>,
     /// Where its anonymous pulls are shared with other homes', if anywhere ([`Home::sharing`]).
-    public: OnceLock<Arc<dyn PublicImages>>,
+    public: Option<Arc<dyn PublicImages>>,
+    /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     pub root: PathBuf,
-    /// The files of the volumes, over WebDAV, and of the sandboxes, through their machines.
+    volumes: VolumeStore,
+    /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
-    /// Every sandbox, its machine up or not, until it is deleted.
-    sandboxes: SandboxStore,
+    /// The sandboxes, by id, until each is removed.
+    sandboxes: Mutex<HashMap<String, Held>>,
+    /// The names sandboxes being made have taken, each until it is made or is not.
+    naming: Mutex<HashSet<String>>,
+    /// The port keys sandboxes being made by [`Home::make`] have taken, each until it is made
+    /// or is not.
+    keying: Mutex<HashSet<String>>,
+    /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
+    /// with why, and refused all but its `DELETE`.
+    unknown: Mutex<HashMap<String, UnknownSandbox>>,
     /// The image jobs, by id, and what cancels each, until each is removed or a while after
     /// it ends.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, Stop)>>,
@@ -141,77 +101,64 @@ pub struct HomeInner {
 }
 
 impl Home {
-    /// The images in `images` -- its own, or shared with other projects -- and the snapshots,
-    /// volumes and sandboxes under `root`, kept beyond this machine by a backend once it is
-    /// given one ([`backed_by`](Home::backed_by)). Its image jobs connect to registries on public
+    /// The images in `images`, which `registry` answers for, and the volumes and the
+    /// sandboxes' upper disks under `root`, with each sandbox a server before it kept there
+    /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
-    /// is made for says otherwise ([`Access::through`]).
-    pub fn new(images: ImageStore, root: &Path) -> anyhow::Result<Home> {
-        let snapshots = SnapshotStore::new(root)?;
+    /// is made for says otherwise ([`Access::through`]). `registry` is this home's alone: it is
+    /// backed as the home is ([`backed_by`](Home::backed_by)). Blocking work, as knowing each
+    /// sandbox again is.
+    pub fn new(
+        images: ImageStore,
+        registry: Arc<RegistryServer>,
+        root: &Path,
+    ) -> anyhow::Result<Home> {
         let volumes = VolumeStore::new(root)?;
-        // The disks no sandbox was made of gone before anything counts what is here.
-        virtx_uvm::sandbox::forget_unrecorded(&snapshots, root);
-        let registry = RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH)?;
-        // Shared by the registry, the files, the sandboxes and the home.
-        let backing = registry.backing().clone();
         let vm: Vec<OsString> = vec![
             std::env::current_exe()?.into(),
             crate::serve::MACHINE_SUBCOMMAND.into(),
         ];
-        let hooks = Arc::new(HomeHooks {
-            backing: backing.clone(),
-            home: OnceLock::new(),
-        });
-        let sandboxes = SandboxStore::new(
-            images.clone(),
-            snapshots.clone(),
-            volumes.clone(),
-            root,
-            vm.clone(),
-            Arc::clone(&hooks) as Arc<dyn Hooks>,
-            virtx_uvm::park_after(),
-        )?;
-        let home = Home(Arc::new(HomeInner {
-            registry: Arc::new(registry),
+        // One with the registry's: its images are kept where the rest of the home is.
+        let backing = registry.backing().clone();
+        let kept = Sandbox::kept(&images, root, &volumes, vm.clone(), park_after(), &backing);
+        let unknown = kept
+            .unknown
+            .into_iter()
+            .map(|unknown| (unknown.id().to_owned(), unknown))
+            .collect();
+        let sandboxes = kept
+            .known
+            .into_iter()
+            .map(|sandbox| {
+                let capabilities = sandbox.keys();
+                let id = sandbox.id().to_owned();
+                (
+                    id,
+                    Held {
+                        sandbox,
+                        capabilities,
+                    },
+                )
+            })
+            .collect();
+        Ok(Home {
             images,
-            registries: OnceLock::new(),
-            mirror: OnceLock::new(),
-            public: OnceLock::new(),
+            registry,
+            registries: Arc::new(PublicRegistries::default()),
+            mirror: None,
+            public: None,
             files: Files::new(volumes.clone()).backed_by(backing.clone()),
-            snapshots,
             root: root.to_owned(),
             volumes,
             vm,
-            sandboxes,
+            sandboxes: Mutex::new(sandboxes),
+            unknown: Mutex::new(unknown),
+            naming: Mutex::default(),
+            keying: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
             backing,
-        }));
-        let _ = hooks.home.set(Arc::downgrade(&home.0));
-        Ok(home)
-    }
-
-    /// Park every sandbox, in a thread of its own: what they wrote is on their disks once each
-    /// machine has ended, and each is kept, parked, for a server started again.
-    pub fn close_all(&self) {
-        self.sandboxes.close_all();
-    }
-
-    /// As [`close_all`](Self::close_all), blocking until each machine has stopped: not on an
-    /// async runtime's thread.
-    pub fn close_all_blocking(&self) {
-        self.sandboxes.close_all_blocking();
-    }
-
-    /// Where the project's anonymous pulls are shared, as it was made to share them
-    /// ([`Home::sharing`]).
-    fn public(&self) -> Option<Arc<dyn PublicImages>> {
-        self.public.get().cloned()
-    }
-
-    /// Its images, as an OCI registry.
-    pub fn registry(&self) -> Arc<RegistryServer> {
-        Arc::clone(&self.registry)
+        })
     }
 
     /// This, its project's data kept beyond this machine by `backend` as well, its own stores
@@ -251,33 +198,122 @@ impl Home {
     ///
     /// [`let_go`]: Home::let_go
     pub async fn take_in(&self, id: &str) -> Result<virtx_core::Sandbox, Refused> {
-        if self.closed.load(Ordering::SeqCst) {
+        let here = self.sandboxes.lock().unwrap().contains_key(id)
+            || self.unknown.lock().unwrap().contains_key(id);
+        if here {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                format!("a sandbox here has the id {id}"),
+            ));
+        }
+        let sandbox = Sandbox::take_in(
+            &self.images,
+            &self.root,
+            &self.volumes,
+            self.vm.clone(),
+            park_after(),
+            &self.backing,
+            id,
+        )
+        .await?;
+        let held = Held {
+            capabilities: sandbox.keys(),
+            sandbox: Arc::clone(&sandbox),
+        };
+        let closed = {
+            let mut sandboxes = self.sandboxes.lock().unwrap();
+            let closed = self.closed.load(Ordering::SeqCst);
+            if !closed {
+                sandboxes.insert(id.to_owned(), held);
+            }
+            closed
+        };
+        if closed {
+            tokio::task::spawn_blocking(move || sandbox.leave()).await?;
             return Err(forbidden("this project is being removed"));
         }
-        let sandbox = self.sandboxes.take_in(id).await?;
-        if let Some(backend) = self.backing.get() {
-            for volume in &sandbox.args().volumes {
-                backend.bring_up(Stored::Volume(&volume.volume)).await?;
-            }
-        }
-        Ok(sandbox.answer(true))
+        Ok(sandbox.answer())
     }
 
-    /// Cloud only: a sandbox made of `args` under the id `id`, its ports behind `keys` (port
-    /// by key); booted unless not `booted`. Made `again`, as one made elsewhere was -- what its
-    /// client holds naming it here too -- over the disk here under that id if there is one,
-    /// else a new one: for one kept nowhere to [take in](Home::take_in) from, made elsewhere
-    /// and lost before it was kept. Not `again`, a new sandbox under the id its placer picked.
-    pub async fn make_as(
+    /// A sandbox made of `args` under the id and port keys `given` it, rather than ones picked
+    /// here: for a server built on this one that names its sandboxes itself, as one that moves
+    /// them between servers does, each keeping the id and port URLs its client holds. Made and
+    /// answered as `POST /sandboxes/` makes and answers one, each port's URL `ports/<key>`,
+    /// relative; but a port may be asked for over HTTP and carry inbound rules, which serving
+    /// and keeping are the embedder's. Refused `400` for an id that cannot be one, or keys that
+    /// are not one for each port; `409` `exists` for an id a sandbox here has, has made or keeps
+    /// -- one let go of here is [taken in](Home::take_in) instead -- or a key one opens a port
+    /// by or is being made with; and as `POST /sandboxes/` is otherwise. See [`Given::keys`]
+    /// for what keeps a key one port's across the server's homes, which this does not check.
+    pub async fn make(
         &self,
         args: SandboxCreateArgs,
-        id: String,
-        keys: HashMap<String, u16>,
-        booted: bool,
-        again: bool,
+        given: Given,
     ) -> Result<virtx_core::Sandbox, Refused> {
-        let given = virtx_uvm::sandbox::Given { id, keys, again };
-        Ok(self.sandboxes.create(args, Some(given), booted).await?)
+        let Given { id, keys } = given;
+        if let Some(key) = keys.keys().find(|key| !is_key(key)) {
+            return Err(invalid(format!(
+                "keys: {key:?} is not a key: letters and digits, 128 at most"
+            )));
+        }
+        let ports: HashSet<u16> = args.ports.iter().map(|spec| spec.port).collect();
+        let opened: HashSet<u16> = keys.values().copied().collect();
+        if opened != ports || keys.len() != ports.len() {
+            return Err(invalid("keys: not one for each of its ports"));
+        }
+        let _keying = self.keying(&keys)?;
+        self.create(args, Some(&id), keys).await
+    }
+
+    /// A sandbox made of `args`, under `id` where it is given, each port behind its key in
+    /// `keys`, and answered with each port's URL `ports/<key>`.
+    async fn create(
+        &self,
+        args: SandboxCreateArgs,
+        id: Option<&str>,
+        keys: HashMap<String, u16>,
+    ) -> Result<virtx_core::Sandbox, Refused> {
+        let _naming = self.naming(args.name.as_deref())?;
+        let sandbox = Sandbox::create(
+            &self.images,
+            &self.root,
+            &self.volumes,
+            &args,
+            self.vm.clone(),
+            park_after(),
+            id,
+            Some(keys.clone()),
+            &self.backing,
+        )
+        .await?;
+
+        let id = sandbox.id().to_owned();
+        let mut answer = sandbox.answer();
+        for port in &mut answer.ports {
+            let key = keys.iter().find(|(_, opens)| **opens == port.port);
+            port.url = key.map(|(key, _)| format!("ports/{key}"));
+        }
+        let held = Held {
+            sandbox: Arc::clone(&sandbox),
+            capabilities: keys,
+        };
+        let closed = {
+            let mut sandboxes = self.sandboxes.lock().unwrap();
+            let closed = self.closed.load(Ordering::SeqCst);
+            if !closed {
+                sandboxes.insert(id.clone(), held);
+            }
+            closed
+        };
+        if closed {
+            tokio::task::spawn_blocking(move || sandbox.close()).await?;
+            if let Some(backend) = self.backing.get() {
+                let _ = backend.remove(Stored::Disk(&id)).await;
+            }
+            return Err(forbidden("this project is being removed"));
+        }
+        Ok(answer)
     }
 
     /// Let go of sandbox `id` here, as this server lets go of each as it ends
@@ -290,20 +326,38 @@ impl Home {
     /// `404` for an id no sandbox here has. One kept here and not known again is let go of as
     /// it is. Blocks until its machine has stopped.
     pub async fn let_go(&self, id: &str) -> Result<(), Refused> {
-        Ok(self.sandboxes.let_go(id).await?)
+        if self.unknown.lock().unwrap().remove(id).is_some() {
+            return Ok(());
+        }
+        let left = {
+            let mut sandboxes = self.sandboxes.lock().unwrap();
+            let held = sandboxes
+                .get(id)
+                .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
+            if held.sandbox.idle().is_none() {
+                return Err(refused(
+                    StatusCode::CONFLICT,
+                    "in_use",
+                    format!("sandbox {id} is in use: a job runs in it, or it is reached"),
+                ));
+            }
+            sandboxes.remove(id).map(|held| held.sandbox)
+        };
+        if let Some(sandbox) = left {
+            tokio::task::spawn_blocking(move || sandbox.leave()).await?;
+        }
+        Ok(())
     }
 
     /// This, its image jobs connecting to registries through `registries`, and its anonymous
-    /// pulls of Docker Hub's images going to `mirror` first: said once, as it is made.
+    /// pulls of Docker Hub's images going to `mirror` first.
     pub(crate) fn through(
-        self,
+        mut self,
         registries: Arc<dyn RegistryProxy>,
         mirror: Option<Arc<str>>,
     ) -> Home {
-        let _ = self.registries.set(registries);
-        if let Some(mirror) = mirror {
-            let _ = self.mirror.set(mirror);
-        }
+        self.registries = registries;
+        self.mirror = mirror;
         self
     }
 
@@ -312,81 +366,118 @@ impl Home {
     /// shared, as a home has by default. A [`Homes`](crate::access::Homes) that makes homes for
     /// many projects shares public images between them so. See
     /// [`RegistryClient::with_public`].
-    pub fn sharing(self, public: Option<Arc<dyn PublicImages>>) -> Home {
-        if let Some(public) = public {
-            let _ = self.public.set(public);
-        }
+    pub fn sharing(mut self, public: Option<Arc<dyn PublicImages>>) -> Home {
+        self.public = public;
         self
     }
 
-    /// Docker Hub's mirror its anonymous pulls go to first, as its access says.
-    fn mirror(&self) -> Option<Arc<str>> {
-        self.mirror.get().cloned()
-    }
-
-    /// What its image jobs connect to registries through.
-    fn registries(&self) -> Arc<dyn RegistryProxy> {
-        match self.registries.get() {
-            Some(registries) => Arc::clone(registries),
-            None => Arc::new(PublicRegistries::default()),
-        }
-    }
-
-    /// Its images.
     pub fn images(&self) -> &ImageStore {
         &self.images
     }
 
-    /// The bytes its snapshots, volumes and images take here.
-    pub async fn storage(&self) -> Option<Storage> {
-        let (snapshots, volumes, images) = (
-            self.snapshots.clone(),
-            self.volumes.clone(),
-            self.images.clone(),
-        );
-        tokio::task::spawn_blocking(move || {
-            let snapshots = snapshots
-                .list()
-                .ok()?
-                .iter()
-                .map(|s| s.size().unwrap_or(0))
-                .sum();
-            let volumes = volumes
-                .list()
-                .ok()?
-                .iter()
-                .filter_map(|name| volumes.open(name).ok())
-                .map(|v| v.size())
-                .sum();
-            Some(Storage {
-                snapshots,
-                volumes,
-                images: size_of(images.root()),
+    /// What answers this home's `/images/oci/v2/`.
+    pub fn registry(&self) -> &Arc<RegistryServer> {
+        &self.registry
+    }
+
+    /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
+    /// one of.
+    pub fn tunnel(&self, capability: &str) -> Option<Tunnel> {
+        let sandboxes = self.sandboxes.lock().unwrap();
+        sandboxes.values().find_map(|held| {
+            let port = *held.capabilities.get(capability)?;
+            Some(Tunnel {
+                activity: held.sandbox.activity(),
+                port,
             })
         })
-        .await
-        .ok()?
     }
 
-    /// Volume `name` made here just now: kept beyond this machine too, where the home is --
-    /// refused, and removed here, where one of its name is kept already.
-    async fn made_volume(&self, name: &str) -> Result<(), Refused> {
-        let Some(backend) = self.backing.get() else {
-            return Ok(());
+    /// Close it to every sandbox and image job from now on, for its project to be removed:
+    /// `false`, and left open, while a sandbox of this process or another lives here. Decided
+    /// under the sandboxes' lock, which a sandbox is added under once it holds its upper disk:
+    /// one made meanwhile is either seen here or sees it closed.
+    pub fn close(&self) -> bool {
+        let _sandboxes = self.sandboxes.lock().unwrap();
+        if Sandbox::lives_under(&self.root) {
+            return false;
+        }
+        self.closed.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// Close it as [`close`](Home::close) does, whatever lives here.
+    pub(crate) fn close_anyway(&self) {
+        let _sandboxes = self.sandboxes.lock().unwrap();
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// Cancel every image job here, and close every sandbox, as removing each does, side by
+    /// side, those kept here and not known again among them: blocks until each machine has
+    /// stopped and synced what it wrote.
+    pub fn close_all(&self) {
+        for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
+            cancel_now(&job, &stop);
+        }
+        for (_, unknown) in self.unknown.lock().unwrap().drain() {
+            unknown.remove();
+        }
+        let closed: Vec<_> = self
+            .sandboxes
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, held)| held.sandbox)
+            .collect();
+        std::thread::scope(|scope| {
+            for sandbox in &closed {
+                scope.spawn(|| sandbox.close());
+            }
+        });
+    }
+
+    /// Take `name` for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here has it, or one being made has taken it.
+    fn naming(&self, name: Option<&str>) -> Result<Naming<'_>, Refused> {
+        let Some(name) = name else {
+            return Ok(Naming(self, None));
         };
-        if let Err(e) = backend.made(Stored::Volume(name), 0).await {
-            let _ = self.volumes.remove(name);
-            return Err(e.into());
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut naming = self.naming.lock().unwrap();
+        let held = sandboxes
+            .values()
+            .any(|held| held.sandbox.name() == Some(name))
+            || (self.unknown.lock().unwrap().values()).any(|kept| kept.name() == Some(name));
+        if held || !naming.insert(name.to_owned()) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                format!("a sandbox here is named {name} already"),
+            ));
         }
-        Ok(())
+        Ok(Naming(self, Some(name.to_owned())))
     }
 
-    /// Delete each sandbox unused for [`reclaim_after`](virtx_uvm::reclaim_after), if that is
-    /// ever ([`SandboxStore::reclaim`]).
-    pub fn reclaim(&self) {
-        if let Some(after) = virtx_uvm::reclaim_after() {
-            self.sandboxes.reclaim(after);
+    /// `keys` taken for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here, or one being made, opens a port by one of them.
+    fn keying(&self, keys: &HashMap<String, u16>) -> Result<Keying<'_>, Refused> {
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut keying = self.keying.lock().unwrap();
+        let taken = |key: &String| {
+            keying.contains(key)
+                || sandboxes
+                    .values()
+                    .any(|held| held.capabilities.contains_key(key))
+        };
+        if keys.keys().any(taken) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                "keys: a sandbox here opens a port by one of them",
+            ));
         }
+        keying.extend(keys.keys().cloned());
+        Ok(Keying(self, keys.keys().cloned().collect()))
     }
 
     /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
@@ -401,46 +492,70 @@ impl Home {
     /// as it is called: one made meanwhile is left up, so a server that drains its host stops
     /// sending it work first.
     pub async fn park_unused(&self) {
-        self.sandboxes.park_unused().await;
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                let _ = sandbox.park().await;
+            });
+        futures_util::future::join_all(parked).await;
     }
 
     /// Park every sandbox here, in use or not ([`Sandbox::park_anyway`]), side by side: what
     /// runs in each ends, as cancelling it does, and each is kept, to boot again when it is next
     /// used. As [`park_unused`](Home::park_unused), the sandboxes here as it is called.
     pub async fn park_all(&self) {
-        self.sandboxes.park_all().await;
+        let parked = self
+            .sandboxes()
+            .list()
+            .into_iter()
+            .map(|sandbox| async move {
+                sandbox.park_anyway().await;
+            });
+        futures_util::future::join_all(parked).await;
     }
 
-    /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
-    /// one of, its machine up or not: a connection through it to a parked sandbox's port is
-    /// refused, and does not boot it.
-    pub fn tunnel(&self, capability: &str) -> Option<Tunnel> {
-        let (sandbox, port) = self.sandboxes.find_port(capability)?;
-        Some(Tunnel {
-            activity: sandbox.activity(),
-            port,
-        })
-    }
-
-    /// Close it to every sandbox and image job from now on, for its project to be removed:
-    /// `false`, and left open, while a sandbox lives here -- its machine up or not, of this
-    /// process or another.
-    pub fn close(&self) -> bool {
-        if !self.sandboxes.list(None).is_empty() || virtx_uvm::Sandbox::lives_under(&self.root) {
-            return false;
+    /// Cancel every image job here, and let go of every sandbox as this server ends, side by
+    /// side, each kept for the next server over this home ([`Sandbox::leave`]): blocks until
+    /// each machine has stopped and synced what it wrote.
+    pub fn leave_all(&self) {
+        for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
+            cancel_now(&job, &stop);
         }
-        self.closed.store(true, Ordering::SeqCst);
-        true
+        let left: Vec<_> = self
+            .sandboxes
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, held)| held.sandbox)
+            .collect();
+        std::thread::scope(|scope| {
+            for sandbox in &left {
+                scope.spawn(|| sandbox.leave());
+            }
+        });
     }
 
-    /// Whether a sandbox whose machine is up here has the disk `name`, and so holds it.
-    pub fn holds(&self, name: &str) -> bool {
-        self.sandboxes.running_on(name).is_some()
-    }
-
-    /// The sandbox `id`, its machine up or not.
+    /// The sandbox `id`: refused `409`, `ended`, for one not known again, which takes only its
+    /// `DELETE`.
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
-        Ok(self.sandboxes.get(id)?)
+        let sandboxes = self.sandboxes.lock().unwrap();
+        if let Some(held) = sandboxes.get(id) {
+            return Ok(Arc::clone(&held.sandbox));
+        }
+        if let Some(unknown) = self.unknown.lock().unwrap().get(id) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "ended",
+                format!(
+                    "sandbox {id} was not known again since its server restarted, and takes only \
+                     its DELETE: {}",
+                    unknown.why()
+                ),
+            ));
+        }
+        Err(not_found(format!("no sandbox here has the id {id}")))
     }
 }
 
@@ -464,36 +579,36 @@ pub struct Counts {
 impl Sandboxes<'_> {
     /// Each of them, in no set order.
     pub fn list(&self) -> Vec<Arc<Sandbox>> {
-        let store = &self.0.sandboxes;
-        let listed = store.list(None).into_iter();
-        listed
-            .filter_map(|answer| store.get(&answer.id).ok())
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes
+            .values()
+            .map(|held| Arc::clone(&held.sandbox))
             .collect()
     }
 
     /// The sandbox `id`, if it is one of them.
     pub fn get(&self, id: &str) -> Option<Arc<Sandbox>> {
-        self.0.sandboxes.get(id).ok()
+        let sandboxes = self.0.sandboxes.lock().unwrap();
+        sandboxes.get(id).map(|held| Arc::clone(&held.sandbox))
     }
 
     /// How many there are, how many of those have their machine up now, and how many more the
     /// home holds and does not know.
     pub fn counts(&self) -> Counts {
-        let all = self.list();
-        let up = all.iter().filter(|sandbox| sandbox.is_up()).count();
-        let unknown = self.0.sandboxes.unknown();
-        Counts {
-            known: all.len(),
-            up,
-            unknown,
-        }
+        let (known, up) = {
+            let sandboxes = self.0.sandboxes.lock().unwrap();
+            let up = sandboxes.values().filter(|held| held.sandbox.is_up());
+            (sandboxes.len(), up.count())
+        };
+        let unknown = self.0.unknown.lock().unwrap().len();
+        Counts { known, up, unknown }
     }
 
     /// The sandbox `id`, if it is one of them and its machine is up now: what writes its disk
     /// at the moment it is asked. Nothing holds it up after, and a park or a boot may change
     /// the answer as soon as it is given.
     pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
-        self.0.sandboxes.running_on(id)
+        self.get(id).filter(|sandbox| sandbox.is_up())
     }
 }
 
@@ -505,168 +620,60 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// The port, in the sandbox's machine while it is up.
+    /// The port, in the sandbox's machine while it runs.
     pub async fn connect(&self) -> io::Result<TcpStream> {
         self.activity.sandbox().connect(self.port).await
     }
+}
 
-    /// Ended as nothing done, where its sandbox's machine is not up: not a use of it
-    /// ([`Activity::unused`]).
-    pub fn refused(self) {
-        if !self.activity.sandbox().is_up() {
-            self.activity.unused();
+/// A name a sandbox being made has taken, given back as this drops: once the sandbox is among
+/// [`Home`]'s, which holds it from there, or once its making failed.
+struct Naming<'a>(&'a Home, Option<String>);
+
+impl Drop for Naming<'_> {
+    fn drop(&mut self) {
+        if let Some(name) = &self.1 {
+            self.0.naming.lock().unwrap().remove(name);
         }
     }
 }
 
-/// What a home plugs into its sandboxes: their disks and volumes kept beyond this machine by its
-/// backend, once it has one ([`Home::backed_by`]), and their ports named by capabilities.
-struct HomeHooks {
-    backing: Backing,
-    /// The home, once it is made.
-    home: OnceLock<Weak<HomeInner>>,
-}
+/// Port keys a sandbox being made has taken, given back as this drops: once the sandbox is
+/// among [`Home`]'s, which holds them from there, or once its making failed.
+struct Keying<'a>(&'a Home, Vec<String>);
 
-impl HomeHooks {
-    fn backend(&self) -> Option<&Arc<dyn StorageBackend>> {
-        self.backing.get()
+impl Drop for Keying<'_> {
+    fn drop(&mut self) {
+        let mut keying = self.0.keying.lock().unwrap();
+        for key in &self.1 {
+            keying.remove(key);
+        }
     }
 }
 
-/// What a home refused, as its sandboxes refuse it.
-fn hooked(e: impl Into<Refused>) -> SandboxError {
-    let Refused(status, code, message, ..) = e.into();
-    SandboxError::Refused {
-        status: status.as_u16(),
-        code,
-        message,
-    }
+/// The id a sandbox is made under and the port each of its keys opens, by key, chosen by a
+/// server built on this one rather than picked here ([`Home::make`]).
+pub struct Given {
+    /// Letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
+    pub id: String,
+    /// One for each port it is made with, each letters and digits, 128 at most: its URL is
+    /// `ports/<key>`, which asks for no token, so whoever has the URL reaches the port. Each key
+    /// is to be as hard to guess as one `POST /sandboxes/` picks (64 hex digits), and to open
+    /// one port across every home of the server: [`Home::make`] refuses a key only where a
+    /// sandbox of its own home has it or is being made with it, and `ports/<key>` reaches the
+    /// first sandbox of any home that has it.
+    pub keys: HashMap<String, u16>,
 }
 
-impl Hooks for HomeHooks {
-    fn want<'a>(&'a self, wanted: Wanted<'a>) -> BoxFuture<'a, Result<(), SandboxError>> {
-        Box::pin(async move {
-            let Some(backend) = self.backend() else {
-                return Ok(());
-            };
-            let fetched = match wanted {
-                Wanted::Tag(tag) => match tag.parse::<Reference>() {
-                    Ok(tag) => backend.want(BackendWanted::Tag(&tag)).await,
-                    // Refused as the store refuses it, once it is looked for here.
-                    Err(_) => Ok(()),
-                },
-                Wanted::Image(digest) => backend.want(BackendWanted::Image(digest)).await,
-            };
-            fetched.map_err(|e| hooked(internal(format!("{e:#}"))))
-        })
-    }
-
-    /// Each port behind a capability of its own, which only the answers that open it carry:
-    /// who has the URL reaches the port, and nothing else. Relative, to the URL the request
-    /// came to, since what reaches this server from outside is not this server's to know.
-    fn port(&self, spec: &PortSpec, kept: Option<String>) -> (Option<String>, String) {
-        let capability = kept.unwrap_or_else(|| capability_for(spec.protocol));
-        let url = format!("ports/{capability}");
-        (Some(capability), url)
-    }
-
-    /// Kept beyond this machine from now on, where the home is: refused where one of its id is
-    /// kept already, and the store removes what it made.
-    fn made<'a>(&'a self, id: &'a str, size: u64) -> BoxFuture<'a, Result<(), SandboxError>> {
-        Box::pin(async move {
-            match self.backend() {
-                Some(backend) => backend.made(Stored::Disk(id), size).await.map_err(hooked),
-                None => Ok(()),
-            }
-        })
-    }
-
-    /// Its disk taken where it is kept, and each volume it writes; each it only reads brought
-    /// up: what is held while its machine runs. Refused while another server holds either.
-    fn booting<'a>(
-        &'a self,
-        sandbox: &'a Sandbox,
-        _spec: &'a MachineSpec,
-    ) -> BoxFuture<'a, Result<Vec<Held>, SandboxError>> {
-        Box::pin(async move {
-            let Some(backend) = self.backend() else {
-                return Ok(Vec::new());
-            };
-            let mut held = vec![
-                backend
-                    .take(Stored::Disk(sandbox.id()))
-                    .await
-                    .map_err(hooked)?,
-            ];
-            for asked in &sandbox.args().volumes {
-                let volume = Stored::Volume(&asked.volume);
-                match asked.readonly {
-                    true => backend.bring_up(volume).await.map_err(hooked)?,
-                    false => held.push(backend.take(volume).await.map_err(hooked)?),
-                }
-            }
-            Ok(held)
-        })
-    }
-
-    fn booted(&self, id: &str, took: Duration, lazily: bool) {
-        eprintln!(
-            "booted {id} in {} ms{}",
-            took.as_millis(),
-            if lazily { ", lazily" } else { "" }
-        );
-    }
-
-    fn said(&self, id: &str, level: &str, line: &str) {
-        machine_said(id, level, line);
-    }
-
-    fn materialize<'a>(
-        &'a self,
-        id: &'a str,
-        disk: &'a Path,
-    ) -> BoxFuture<'a, Result<(), SandboxError>> {
-        Box::pin(async move {
-            match self.backend() {
-                Some(backend) => backend
-                    .materialize(Stored::Disk(id), disk)
-                    .await
-                    .map_err(hooked),
-                None => Ok(()),
-            }
-        })
-    }
-
-    /// Its disk removed from where it is kept first, where the home is -- one never kept there,
-    /// made and deleted before it was, is nothing to remove.
-    fn deleting<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), SandboxError>> {
-        Box::pin(async move {
-            match self
-                .backend()
-                .map(|backend| backend.remove(Stored::Disk(id)))
-            {
-                Some(removing) => match removing.await {
-                    Ok(()) | Err(BackendRefusal::Unknown(_)) => Ok(()),
-                    Err(e) => Err(hooked(e)),
-                },
-                None => Ok(()),
-            }
-        })
-    }
+/// Whether `key` can be a port's key given it: a URL's segment, letters and digits, 128 at most.
+fn is_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 128 && key.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-/// A capability for a port reached as `protocol`: an `http` one's is a host name's first label
-/// as a gateway forms its URL -- 32 hex digits, of the 63 a label may have -- and a `tcp` one's
-/// twice as long.
-fn capability_for(protocol: PortProtocol) -> String {
-    match protocol {
-        PortProtocol::Http => uuid::Uuid::new_v4().simple().to_string(),
-        PortProtocol::Tcp => format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        ),
-    }
+/// A sandbox, and the port each capability its making answered opens.
+struct Held {
+    sandbox: Arc<Sandbox>,
+    capabilities: HashMap<String, u16>,
 }
 
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
@@ -744,6 +751,9 @@ pub fn router() -> Router {
         .route("/volumes/{name}/files", any(volume_files))
         .route("/volumes/{name}/files/", any(volume_files))
         .route("/volumes/{name}/files/{*path}", any(volume_files))
+        .route("/sandboxes/{id}/files", any(sandbox_files))
+        .route("/sandboxes/{id}/files/", any(sandbox_files))
+        .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/", get(sandbox_list).post(sandbox_create))
         .route(
             "/sandboxes/{id}",
@@ -751,11 +761,6 @@ pub fn router() -> Router {
                 .patch(sandbox_resize)
                 .delete(sandbox_remove),
         )
-        .route("/sandboxes/{id}/disk", put(sandbox_disk))
-        .route("/sandboxes/{id}/resources", put(sandbox_resources))
-        .route("/sandboxes/{id}/files", any(sandbox_files))
-        .route("/sandboxes/{id}/files/", any(sandbox_files))
-        .route("/sandboxes/{id}/files/{*path}", any(sandbox_files))
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
         .route(
@@ -1045,7 +1050,7 @@ where
                 },
                 Err(e) => ImageJobEnd {
                     digest: None,
-                    error: Some(e.to_string()),
+                    error: Some(failed(e)),
                 },
             };
             ending.end(
@@ -1077,24 +1082,58 @@ where
     ))
 }
 
+/// Why an image job failed with `e`, as the job says it: a failure on the server's files by its
+/// kind, and a machine that did not start as its process told it, with the account of either,
+/// which can name the server's paths, on the server's stderr; the rest as it says itself.
+fn failed(e: Failure) -> String {
+    let e = match e.downcast::<BuildError>() {
+        Ok(e) => {
+            if let BuildError::Io { source, .. }
+            | BuildError::Fstree(FstreeError::Io { source, .. }) = &*e
+            {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                BuildError::Store(e) => Refused::from(e).2,
+                BuildError::Machine(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    let e = match e.downcast::<RegistryError>() {
+        Ok(e) => {
+            if let RegistryError::Fstree(FstreeError::Io { source, .. }) = &*e {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                RegistryError::Store(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    match e.downcast::<ImageStoreError>() {
+        Ok(e) => Refused::from(*e).2,
+        Err(e) => e.to_string(),
+    }
+}
+
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePullArgs = body(&request)?;
     let reference = reference(&args.reference)?;
-    let (images, public, registries) = (home.images.clone(), home.public(), home.registries());
-    let mirror = home.mirror();
+    let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
+    let (mirror, public) = (home.mirror.clone(), home.public.clone());
     image_job(
         &home,
         ImageJobKind::Pull,
         args.reference,
         Some(reference.clone()),
         move |report| async move {
-            let registry = registry(
-                images.clone(),
-                args.auth,
-                mirror.as_deref(),
-                public,
-                &*registries,
-            )?;
+            let registry = RegistryClient::new(images.clone(), args.auth)
+                .with_mirror(mirror.as_deref())
+                .with_public(public)
+                .through(Some(&*registries))?;
             let (_, image) = registry.pull(&reference, report).await?;
             Ok(image)
         },
@@ -1104,14 +1143,14 @@ async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole
 async fn image_push(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: ImagePushArgs = body(&request)?;
     let reference = reference(&args.reference)?;
-    let (images, registries) = (home.images.clone(), home.registries());
+    let (images, registries) = (home.images.clone(), Arc::clone(&home.registries));
     image_job(
         &home,
         ImageJobKind::Push,
         args.reference,
         None,
         move |report| async move {
-            let registry = registry(images, args.auth, None, None, &*registries)?;
+            let registry = RegistryClient::new(images, args.auth).through(Some(&*registries))?;
             Ok(registry.push(&reference, report).await?)
         },
     )
@@ -1132,9 +1171,9 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
     if args.recipe.base != "scratch" {
         self::reference(&args.recipe.base)?;
     }
-    let (images, vm, public) = (home.images.clone(), home.vm.clone(), home.public());
-    let registries = home.registries();
-    let mirror = home.mirror();
+    let (images, vm) = (home.images.clone(), home.vm.clone());
+    let (registries, mirror) = (Arc::clone(&home.registries), home.mirror.clone());
+    let public = home.public.clone();
     let recipe = args.recipe;
     // Room for one machine as the build is asked for, if a step of it boots one -- its steps
     // boot one at a time -- so a build there is none for is refused `503` as a sandbox is,
@@ -1165,7 +1204,6 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
-                let before = layers.len();
                 build_step(
                     &images,
                     &mut image,
@@ -1176,10 +1214,8 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                     &mut report,
                 )
                 .await?;
-                let layered = layers.len() > before;
-                virtx_uvm::history_kept(&mut image, step.to_string(), layered, layers.len());
             }
-            virtx_uvm::recipe_kept(&mut image, &recipe);
+            recipe_kept(&mut image, &recipe);
             let store = images.clone();
             let digest =
                 tokio::task::spawn_blocking(move || store.insert_image(&image, &layers)).await??;
@@ -1228,7 +1264,10 @@ async fn base(
     let image = match images.get_tag(&reference)? {
         Some(digest) if images.get_image(&digest)?.is_some() => digest,
         _ => {
-            registry(images.clone(), None, mirror, public, registries)?
+            RegistryClient::new(images.clone(), None)
+                .with_mirror(mirror)
+                .with_public(public)
+                .through(Some(registries))?
                 .pull(&reference, report)
                 .await?
                 .1
@@ -1279,6 +1318,15 @@ async fn cancel(job: &ImageJobOf, stop: &Stop) {
     end_cancelled(job);
 }
 
+/// [`cancel`], as its home closes: a tag's change under way goes on, not waited for.
+fn cancel_now(job: &ImageJobOf, stop: &Stop) {
+    stop.task.abort();
+    if let Ok(mut gate) = stop.gate.try_lock() {
+        *gate = true;
+    }
+    end_cancelled(job);
+}
+
 /// End `job` as cancelled, if it has not ended, and remove its log.
 fn end_cancelled(job: &ImageJobOf) {
     job.end(
@@ -1324,17 +1372,20 @@ fn volume(home: &Home, name: String) -> Result<VolumeListOutputItem, Refused> {
     })
 }
 
-async fn volume_list(Extension(home): Extension<Arc<Home>>, Query(page): Query<Page>) -> Answer {
-    if let Some(backend) = home.backing.get()
-        && let Some(kept) = backend
-            .volumes()
-            .await
-            .map_err(|e| internal(format!("{e:#}")))?
-    {
-        return Ok(json(&page.of(kept, |v| &v.name)));
+/// The volumes kept beyond this machine, where the home's backend lists them.
+async fn kept_volumes(home: &Home) -> Result<Option<Vec<VolumeListOutputItem>>, Refused> {
+    match home.backing.get() {
+        Some(backend) => backend.volumes().await.map_err(storage_failed),
+        None => Ok(None),
+    }
+}
+
+async fn volume_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+    if let Some(kept) = kept_volumes(&home).await? {
+        return Ok(json(&kept));
     }
     let mut listed = Vec::new();
-    for name in page.of(home.volumes.list()?, |n| n) {
+    for name in home.volumes.list()? {
         listed.push(volume(&home, name)?);
     }
     Ok(json(&listed))
@@ -1346,7 +1397,14 @@ async fn volume_create(Extension(home): Extension<Arc<Home>>, Whole(request): Wh
         .name
         .unwrap_or_else(|| pick(|name| home.volumes.open(name).is_ok()));
     let name = home.volumes.create(&name)?.name().to_owned();
-    home.made_volume(&name).await?;
+    // Kept beyond this machine from now on: one of its name kept already is refused, and this
+    // one removed.
+    if let Some(backend) = home.backing.get()
+        && let Err(e) = backend.made(Stored::Volume(&name), 0).await
+    {
+        let _ = home.volumes.remove(&name);
+        return Err(e.into());
+    }
     Ok(created(format!("/volumes/{name}"), &volume(&home, name)?))
 }
 
@@ -1354,14 +1412,9 @@ async fn volume_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    if let Some(backend) = home.backing.get()
-        && let Some(kept) = backend
-            .volumes()
-            .await
-            .map_err(|e| internal(format!("{e:#}")))?
-    {
-        let kept = kept.into_iter().find(|v| v.name == name);
-        return Ok(json(&kept.ok_or(VolumeError::Unknown(name))?));
+    if let Some(kept) = kept_volumes(&home).await? {
+        let found = kept.into_iter().find(|volume| volume.name == name);
+        return Ok(json(&found.ok_or(VolumeError::Unknown(name))?));
     }
     Ok(json(&volume(&home, name)?))
 }
@@ -1384,7 +1437,7 @@ async fn volume_remove(
     };
     match backend.remove(Stored::Volume(&name)).await {
         Ok(()) => {}
-        Err(virtx_uvm::backend::Refusal::Unknown(_)) if alone.is_some() => {}
+        Err(Refusal::Unknown(_)) if alone.is_some() => {}
         Err(e) => return Err(e.into()),
     }
     if let Some(alone) = alone {
@@ -1434,7 +1487,6 @@ async fn volume_mount_create(
 ) -> Answer {
     let args: VolumeMountCreateArgs = body(&request)?;
     let mount_type = args.source.mount_type();
-    // Held, and kept again after: its mounts go with it to the next node that takes it.
     let _taken = take(&home, &name).await?;
     home.volumes.open(&name)?.mount(path.clone(), args.source)?;
     let location = format!("/volumes/{name}/mounts/{path}");
@@ -1462,60 +1514,8 @@ async fn volume_files(
     home.files.volume(&segments["name"], request).await
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DiskArgs {
-    disk_gib: u32,
-}
-
-/// `PUT /sandboxes/{id}/disk`, `{"disk_gib": n}`: its disk grown to `n` GiB -- never shrunk:
-/// smaller than it is, refused `400`. Grown as it next boots, what is on it kept
-/// ([`virtx_uvm::Snapshot::grow`]). Answered `{disk_gib, up}`: `up`, its machine is up now, and
-/// its disk is grown once it boots again.
-async fn sandbox_disk(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(id): Segments<String>,
-    request: Bytes,
-) -> Answer {
-    let args: DiskArgs = body(&request)?;
-    let up = home.sandbox(&id)?.grow_disk(args.disk_gib)?;
-    Ok(json(&serde_json::json!({
-        "disk_gib": args.disk_gib,
-        "up": up,
-    })))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResourcesArgs {
-    #[serde(default)]
-    vcpus: Option<u8>,
-    #[serde(default)]
-    memory_mib: Option<u32>,
-    #[serde(default)]
-    disk_gib: Option<u32>,
-}
-
-/// `PUT /sandboxes/{id}/resources`, `{"vcpus", "memory_mib", "disk_gib"}`, each optional: its
-/// machine resized, and its disk grown -- as it next boots. A machine is the size it booted as:
-/// one up whose vCPUs or memory change is parked now if nothing uses it, and refused `409`,
-/// `in_use`, if something does. Its disk never shrunk, refused `400`. Answered
-/// `{vcpus, memory_mib, disk_gib, up}`, as it is to be, `up` whether its machine is up now.
-async fn sandbox_resources(
-    Extension(home): Extension<Arc<Home>>,
-    Segments(id): Segments<String>,
-    request: Bytes,
-) -> Answer {
-    let args: ResourcesArgs = body(&request)?;
-    let sandbox = home.sandbox(&id)?;
-    let resized = sandbox
-        .resize_resources(args.vcpus, args.memory_mib, args.disk_gib)
-        .await?;
-    Ok(json(&resized))
-}
-
-/// A request to the files of a sandbox, over WebDAV, asked of its machine, booted first if it is
-/// parked. One whose machine has exited answers `409`, `ended`.
+/// A request to the files of a sandbox, over WebDAV, asked of its machine, booted again if it
+/// was parked: one whose machine has exited answers `409`.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
@@ -1523,35 +1523,44 @@ async fn sandbox_files(
 ) -> Answer {
     let id = &segments["id"];
     let sandbox = home.sandbox(id)?;
-    // In use from here until the answer has been sent -- taken first, so that it is not parked
-    // unused in between. Refused, it is not used: an exited sandbox is not kept longer for it.
+    // In use from here until the answer has been sent, booting it again if it was parked.
     let activity = sandbox.activity();
-    let machine = match sandbox.machine().await {
-        Ok(machine) => machine,
-        Err(e) => {
-            activity.unused();
-            return Err(e.into());
-        }
-    };
+    let machine = sandbox.machine().await?;
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
-#[derive(Deserialize)]
-struct Named {
-    name: Option<String>,
-}
-
-impl Params for Named {
-    const TAKES: &[(&str, &str)] = &[("name", "a sandbox's name")];
-}
-
-/// Every sandbox; `?name=` those named so, one at most.
-async fn sandbox_list(Extension(home): Extension<Arc<Home>>, Query(named): Query<Named>) -> Answer {
-    Ok(json(&home.sandboxes.list(named.name.as_deref())))
+/// Every sandbox; with `?name=`, the one named so, if any.
+async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
+    let name = query.as_deref().and_then(|query| {
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "name")
+            .map(|(_, name)| name.into_owned())
+    });
+    let sandboxes = home.sandboxes.lock().unwrap();
+    let mut listed: Vec<_> = sandboxes
+        .values()
+        .filter(|held| name.is_none() || held.sandbox.name() == name.as_deref())
+        .map(|held| held.sandbox.answer())
+        .collect();
+    let unknown = home.unknown.lock().unwrap();
+    listed.extend(
+        unknown
+            .values()
+            .filter(|kept| name.is_none() || kept.name() == name.as_deref())
+            .map(UnknownSandbox::answer),
+    );
+    Ok(json(&listed))
 }
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
+    // A port's URL here is a tunnel for TCP, which a browser does not open.
+    if let Some(spec) = args.ports.iter().find(|spec| !spec.protocol.is_tcp()) {
+        return Err(invalid(format!(
+            "ports: {} is asked for over HTTP, which this server does not serve a port over",
+            spec.port
+        )));
+    }
     // No inbound rules are kept here, so a port given some is refused rather than opened to
     // whoever they were meant to keep out.
     if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
@@ -1560,10 +1569,22 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             spec.port
         )));
     }
-    if home.closed.load(Ordering::SeqCst) {
-        return Err(forbidden("this project is being removed"));
-    }
-    let answer = home.sandboxes.create(args, None, true).await?;
+
+    // Each port behind a capability of its own, which only this answer carries: who has the
+    // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
+    // what reaches this server from outside is not this server's to know. Kept with the
+    // sandbox, so that its URLs reach it across this server's restart.
+    let capabilities = (args.ports.iter())
+        .map(|spec| {
+            let capability = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            (capability, spec.port)
+        })
+        .collect();
+    let answer = home.create(args, None, capabilities).await?;
     Ok(created(format!("/sandboxes/{}", answer.id), &answer))
 }
 
@@ -1571,7 +1592,10 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandboxes.answer(&id)?))
+    if let Some(unknown) = home.unknown.lock().unwrap().get(&id) {
+        return Ok(json(&unknown.answer()));
+    }
+    Ok(json(&home.sandbox(&id)?.answer()))
 }
 
 /// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
@@ -1592,7 +1616,25 @@ async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    home.sandboxes.delete(&id).await?;
+    let here = home.sandboxes.lock().unwrap().contains_key(&id)
+        || home.unknown.lock().unwrap().contains_key(&id);
+    if !here {
+        return Err(not_found(format!("no sandbox here has the id {id}")));
+    }
+    if let Some(backend) = home.backing.get() {
+        match backend.remove(Stored::Disk(&id)).await {
+            Ok(()) | Err(Refusal::Unknown(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let unknown = home.unknown.lock().unwrap().remove(&id);
+    if let Some(unknown) = unknown {
+        tokio::task::spawn_blocking(move || unknown.remove()).await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let removed = home.sandboxes.lock().unwrap().remove(&id);
+    let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
+    tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1618,7 +1660,6 @@ async fn sandbox_exec(
     }
     let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
-    // A job started in a parked sandbox boots it first.
     let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
     let answered = job.get();
     let location = format!("/sandboxes/{id}/jobs/{}", answered.id);
@@ -1694,75 +1735,6 @@ async fn sandbox_job_events(
     headers: HeaderMap,
 ) -> Answer {
     Ok(events(home.sandbox(&id)?.job(&job)?.log(), &headers))
-}
-
-/// What a sandbox's machine logged: a warning or an error, or everything with
-/// `VIRTX_MACHINE_LOG` set.
-///
-/// Written where it can be, and dropped where it can't: this is said on the thread that reads
-/// the machine's reports, and `eprintln!` panics on a stderr nobody reads any more -- which would
-/// end that thread, and with it every port the machine publishes.
-fn machine_said(sandbox: &str, level: &str, line: &str) {
-    use std::io::Write as _;
-    static ALL: OnceLock<bool> = OnceLock::new();
-    let all = *ALL.get_or_init(|| std::env::var_os("VIRTX_MACHINE_LOG").is_some());
-    if all || matches!(level, "WARN" | "ERROR") {
-        let _ = writeln!(io::stderr().lock(), "sandbox {sandbox}: {level}: {line}");
-    }
-}
-
-/// What a project's snapshots, volumes and images take on this server, in bytes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Storage {
-    pub snapshots: u64,
-    pub volumes: u64,
-    pub images: u64,
-}
-
-/// The bytes the files under `dir` take, links not followed.
-fn size_of(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| match entry.file_type() {
-            Ok(kind) if kind.is_dir() => size_of(&entry.path()),
-            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
-            _ => 0,
-        })
-        .sum()
-}
-
-/// A page of a listing, the cloud's extension: those after `after` by name, `limit` at most.
-/// Neither, and the whole listing.
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Page {
-    after: Option<String>,
-    limit: Option<u32>,
-}
-
-impl Params for Page {
-    const TAKES: &[(&str, &str)] = &[
-        ("after", "a name"),
-        ("limit", "a whole number up to 4294967295"),
-    ];
-}
-
-impl Page {
-    /// `items`, in order by name as `name` reads it, cut to this page.
-    fn of<T>(&self, mut items: Vec<T>, name: impl Fn(&T) -> &str) -> Vec<T> {
-        items.sort_by(|a, b| name(a).cmp(name(b)));
-        let after = self.after.as_deref();
-        let items = items
-            .into_iter()
-            .filter(|item| after.is_none_or(|after| name(item) > after));
-        match self.limit {
-            Some(limit) => items.take(limit as usize).collect(),
-            None => items.collect(),
-        }
-    }
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.
@@ -1854,59 +1826,6 @@ where
     }
 }
 
-/// A query read as a `T`: refused `400` `invalid` when it does not read as one, naming the
-/// parameter and what it takes ([`Params`]).
-struct Query<T>(T);
-
-/// The parameters a query takes, as a client is told them when it does not read.
-trait Params {
-    /// Each parameter, and what it takes: `("limit", "a whole number")`.
-    const TAKES: &[(&str, &str)];
-}
-
-impl<T, S> FromRequestParts<S> for Query<T>
-where
-    T: DeserializeOwned + Params,
-    S: Send + Sync,
-{
-    type Rejection = Refused;
-
-    async fn from_request_parts(parts: &mut http::request::Parts, _: &S) -> Result<Self, Refused> {
-        let query = parts.uri.query().unwrap_or_default();
-        serde_urlencoded::from_str(query)
-            .map(Query)
-            .map_err(|_| invalid(unread_query::<T>(query)))
-    }
-}
-
-/// Why `query` does not read as a `T`: the first parameter that does not read alone, or one
-/// given twice.
-fn unread_query<T: DeserializeOwned + Params>(query: &str) -> String {
-    let Ok(pairs) = serde_urlencoded::from_str::<Vec<(String, String)>>(query) else {
-        return "the query does not read".to_owned();
-    };
-    for (i, (key, value)) in pairs.iter().enumerate() {
-        if pairs[..i].iter().any(|(earlier, _)| earlier == key) {
-            return format!("{key}: given twice");
-        }
-        let alone = serde_urlencoded::to_string([(key, value)]).unwrap_or_default();
-        if serde_urlencoded::from_str::<T>(&alone).is_ok() {
-            continue;
-        }
-        return match T::TAKES.iter().find(|(param, _)| param == key) {
-            Some((_, takes)) => format!("{key}: {takes}, not {value:?}"),
-            None => {
-                let params: Vec<_> = T::TAKES.iter().map(|(param, _)| *param).collect();
-                format!(
-                    "{key}: not a parameter; the parameters are {}",
-                    params.join(", ")
-                )
-            }
-        };
-    }
-    "the query does not read".to_owned()
-}
-
 /// Why a path's segments did not read, naming the segment and what it takes.
 fn unread_path(rejection: &axum::extract::rejection::PathRejection) -> String {
     use axum::extract::path::ErrorKind;
@@ -1992,6 +1911,11 @@ impl Refused {
         self.4 = Some(seconds);
         self
     }
+
+    /// The status it is answered with.
+    pub fn status(&self) -> StatusCode {
+        self.0
+    }
 }
 
 fn invalid(message: impl Display) -> Refused {
@@ -2020,13 +1944,6 @@ fn internal(message: impl Display) -> Refused {
     refused(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
 }
 
-impl Refused {
-    /// What it is answered with.
-    pub fn status(&self) -> StatusCode {
-        self.0
-    }
-}
-
 /// How long a client is told to wait before it asks again for what found no room.
 const CAPACITY_RETRY_AFTER: &str = "5";
 
@@ -2050,11 +1967,10 @@ impl IntoResponse for Refused {
 }
 
 /// What a refusal says of an operation on the host's files that failed with `e`: `e`'s kind.
-/// `message` can name the server's own paths, so it goes to the server's stderr instead, and the
-/// refusal is answered even when stderr cannot take it, as on a disk that is full.
+/// `message` can name the server's own paths, so it goes to the server's stderr instead
+/// ([`HostPaths::Hidden`]).
 fn io_failure(e: &std::io::Error, message: impl Display) -> String {
-    let _ = writeln!(io::stderr(), "{message}");
-    format!("the server's files: {}", e.kind())
+    HostPaths::Hidden.told(e.kind(), message)
 }
 
 /// The refusal an operation on the host's files that failed with `e` is.
@@ -2064,37 +1980,6 @@ fn io_refused(e: &std::io::Error, message: impl Display) -> Refused {
         std::io::ErrorKind::NotFound => not_found(said),
         std::io::ErrorKind::AlreadyExists => refused(StatusCode::CONFLICT, "exists", said),
         _ => internal(said),
-    }
-}
-
-impl From<BackendRefusal> for Refused {
-    fn from(e: BackendRefusal) -> Refused {
-        match e {
-            BackendRefusal::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            BackendRefusal::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
-            BackendRefusal::Unknown(_) => not_found(e),
-            BackendRefusal::Failed(e) => storage_failed(e),
-        }
-    }
-}
-
-/// What a storage backend failed with: said on the server's stderr, and answered `500` with no
-/// word of why, which can name what the backend runs on.
-fn storage_failed(e: anyhow::Error) -> Refused {
-    let _ = writeln!(io::stderr(), "the storage backend failed: {e:#}");
-    internal("the server's storage failed")
-}
-
-impl From<SnapshotError> for Refused {
-    fn from(e: SnapshotError) -> Refused {
-        match &e {
-            SnapshotError::InvalidName(_) => invalid(e),
-            SnapshotError::Unknown(_) => not_found(e),
-            SnapshotError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
-            SnapshotError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            SnapshotError::Io { source, .. } => io_refused(source, &e),
-            SnapshotError::Fstree(_) => internal(e),
-        }
     }
 }
 
@@ -2147,22 +2032,24 @@ impl From<ImageStoreError> for Refused {
     }
 }
 
-/// What booting a sandbox's machine, or sending it a command or a signal, fails with.
+/// What booting a sandbox's machine, or sending it a command or a signal, fails with. A machine
+/// that did not start is answered with why as its process told it, and its whole account, which
+/// can name the server's paths, goes to the server's stderr.
 impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
-                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
+            MachineError::DidNotStart { account, told } => {
+                let _ = writeln!(io::stderr(), "{account}");
+                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", told)
+            }
+            MachineError::Io { source, .. }
+            | MachineError::Fstree(FstreeError::Io { source, .. })
+            | MachineError::Volume(VolumeError::Io { source, .. }) => {
+                internal(io_failure(source, &e))
             }
             _ => internal(e),
         }
-    }
-}
-
-impl From<tokio::task::JoinError> for Refused {
-    fn from(e: tokio::task::JoinError) -> Refused {
-        internal(e)
     }
 }
 
@@ -2171,27 +2058,16 @@ impl From<SandboxError> for Refused {
         match e {
             SandboxError::Invalid(_) => invalid(e),
             SandboxError::NotFound(_) => not_found(e),
+            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::Unsupported(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "unsupported", e)
             }
-            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::NotStarted(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "not_started", e)
             }
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
-            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            SandboxError::Refused {
-                status,
-                code,
-                message,
-            } => refused(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                code,
-                message,
-            ),
-            SandboxError::Failed(_) | SandboxError::Build(_) => internal(e),
             SandboxError::StdinCut { bytes, .. } => {
                 refused(StatusCode::CONFLICT, "ended", e).with("written", bytes)
             }
@@ -2201,12 +2077,30 @@ impl From<SandboxError> for Refused {
                 refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e).after(STDIN_FULL_RETRY)
             }
             SandboxError::Image(e) => e.into(),
-            SandboxError::Snapshot(e) => e.into(),
+            SandboxError::Io { ref source, .. } => internal(io_failure(source, &e)),
             SandboxError::Volume(e) => e.into(),
             SandboxError::Backend(e) => e.into(),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
             SandboxError::NoRoom(e) => e.into(),
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
+        }
+    }
+}
+
+/// A storage backend's failure, which can name what it runs on: logged, and answered without it.
+fn storage_failed(e: anyhow::Error) -> Refused {
+    let _ = writeln!(io::stderr(), "the storage backend failed: {e:#}");
+    internal("the server's storage failed")
+}
+
+impl From<Refusal> for Refused {
+    fn from(e: Refusal) -> Refused {
+        match e {
+            Refusal::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
+            Refusal::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
+            Refusal::Unknown(_) => not_found(e),
+            Refusal::Failed(e) => storage_failed(e),
         }
     }
 }
@@ -2219,38 +2113,41 @@ impl From<NoRoom> for Refused {
     }
 }
 
+impl From<tokio::task::JoinError> for Refused {
+    fn from(e: tokio::task::JoinError) -> Refused {
+        internal(e)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_page_is_those_after_a_name_in_order_up_to_its_limit() {
-        let names = || vec!["c", "a", "d", "b"];
-        let page = |after: Option<&str>, limit| Page {
-            after: after.map(str::to_owned),
-            limit,
-        };
-        assert_eq!(Page::default().of(names(), |n| n), ["a", "b", "c", "d"]);
-        assert_eq!(page(None, Some(2)).of(names(), |n| n), ["a", "b"]);
-        assert_eq!(page(Some("b"), Some(1)).of(names(), |n| n), ["c"]);
-        assert_eq!(page(Some("d"), None).of(names(), |n| n), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn a_port_s_capability_is_hex_32_digits_for_http_and_64_for_tcp() {
-        let hex = |c: &str| c.bytes().all(|b| b.is_ascii_hexdigit());
-        let (http, tcp) = (
-            capability_for(PortProtocol::Http),
-            capability_for(PortProtocol::Tcp),
+    fn a_refusal_s_status_is_the_one_it_is_answered_with() {
+        let refusals: [Refused; 4] = [
+            refused(StatusCode::CONFLICT, "in_use", "in use").after(5),
+            refusal(StatusCode::FORBIDDEN),
+            refusal(StatusCode::BAD_GATEWAY),
+            SandboxError::NotFound("no sandbox".into()).into(),
+        ];
+        let statuses = refusals.map(|refused| {
+            let status = refused.status();
+            (status, refused.into_response().status())
+        });
+        assert_eq!(
+            statuses.map(|(status, _)| status),
+            [
+                StatusCode::CONFLICT,
+                StatusCode::FORBIDDEN,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::NOT_FOUND,
+            ]
         );
-        assert!(hex(&http) && http.len() == 32, "{http}");
-        assert!(hex(&tcp) && tcp.len() == 64, "{tcp}");
+        for (status, answered) in statuses {
+            assert_eq!(status, answered);
+        }
     }
-}
-
-#[cfg(test)]
-mod failures {
-    use super::*;
 
     #[tokio::test]
     async fn a_failure_on_the_server_s_files_is_answered_without_their_paths() {
@@ -2270,9 +2167,25 @@ mod failures {
                 context: CONTEXT.into(),
                 source: source(),
             };
-            let internal: [Refused; 2] = [
+            let internal: [Refused; 6] = [
                 ImageStoreError::Fstree(tree()).into(),
+                MachineError::Fstree(tree()).into(),
+                MachineError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+                MachineError::Volume(VolumeError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                })
+                .into(),
                 ProjectError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+                SandboxError::Io {
                     context: CONTEXT.into(),
                     source: source(),
                 }
@@ -2313,6 +2226,113 @@ mod failures {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["message"], "the server's projects failed");
+    }
+
+    #[tokio::test]
+    async fn a_machine_that_did_not_start_is_answered_as_it_tells_it() {
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let told = format!("{why}; last logged:\nattaching the root's image: boot error");
+        let refusal: Refused = MachineError::DidNotStart {
+            account: format!(
+                "{why}; last logged:\nvirtx_uvm::machine::machine: attaching the root's image: \
+                 boot error: /home/virtx/project/a/images/rootfs/sha256/a.vmdk"
+            ),
+            told: told.clone(),
+        }
+        .into();
+        let response = refusal.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "boot_failed");
+        assert_eq!(body["error"]["message"], told.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_failed_image_job_says_why_without_the_server_s_paths() {
+        const CONTEXT: &str = "opening /home/virtx/project/a/images/rootfs/sha256/a.vmdk";
+        let source = || io::Error::new(io::ErrorKind::PermissionDenied, "under /home/virtx");
+        let store = move || ImageStoreError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let tree = move || FstreeError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let on_files: [Failure; 6] = [
+            Box::new(BuildError::Io {
+                context: CONTEXT.into(),
+                source: source(),
+            }),
+            Box::new(BuildError::Store(store())),
+            Box::new(BuildError::Fstree(tree())),
+            Box::new(RegistryError::Store(store())),
+            Box::new(RegistryError::Fstree(tree())),
+            Box::new(store()),
+        ];
+        for e in on_files {
+            assert_eq!(failed(e), "the server's files: permission denied");
+        }
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        cancelled.abort();
+        let elsewhere: [Failure; 2] = [
+            Box::new(BuildError::Join(cancelled.await.unwrap_err())),
+            Box::new(RegistryError::Io {
+                context: "making a registry client".into(),
+                source: io::Error::other("no proxy"),
+            }),
+        ];
+        for e in elsewhere {
+            let said = e.to_string();
+            assert_eq!(failed(e), said);
+        }
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let machine = BuildError::Machine(MachineError::DidNotStart {
+            account: format!("{why}; last logged:\n{CONTEXT}"),
+            told: why.into(),
+        });
+        assert_eq!(failed(Box::new(machine)), why);
+        let base = "base alpine:3.20: no image here is tagged alpine:3.20";
+        assert_eq!(failed(base.into()), base);
+
+        let root = std::env::temp_dir().join(format!("virtx-tcp-image-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let images = ImageStore::new(root.join("images")).unwrap();
+        let registry = Arc::new(RegistryServer::new(images.clone(), "/images").unwrap());
+        let home = Arc::new(Home::new(images, registry, &root).unwrap());
+        let started = image_job(
+            &home,
+            ImageJobKind::Build,
+            "app".into(),
+            None,
+            move |_| async move { Err(Failure::from(store())) },
+        );
+        assert!(started.is_ok());
+        let job = Arc::clone(&home.image_jobs.lock().unwrap().values().next().unwrap().0);
+        let ended = async {
+            loop {
+                if let ImageJob {
+                    running: false,
+                    error,
+                    ..
+                } = &*job.job.lock().unwrap()
+                {
+                    break error.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let error = tokio::time::timeout(Duration::from_secs(10), ended)
+            .await
+            .unwrap();
+        assert_eq!(
+            error.as_deref(),
+            Some("the server's files: permission denied")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A write its process closed its stdin under part-way is `409`, `ended`, with how much of

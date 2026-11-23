@@ -1,6 +1,5 @@
-"""Sandboxes: a VM booted from an image, with volumes mounted into it and a disk of its own that
-outlives the VM -- it stops when unused or told to, and starts again as it was left, under the
-same id, until it is deleted; and the processes run in one, each a job whose log is its output."""
+"""Sandboxes: a VM booted from an image, with volumes mounted into it; and the processes run in
+one, each a job whose log is its output."""
 
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ._library import VirtxError, args
 from .files import Files
@@ -21,8 +20,12 @@ if TYPE_CHECKING:
     from .client import Client
 
 
+E = TypeVar("E", bound=Enum)
+
+
 class PortProtocol(str, Enum):
-    """How a sandbox's port is reached from outside it."""
+    """How a sandbox's port is reached from outside it. A protocol this version does not know is
+    read as the server's string itself."""
 
     TCP = "tcp"
     """TCP: at a loopback address, or through a ``PortForwarder`` opened with its ``url``."""
@@ -64,7 +67,8 @@ class SandboxPort:
     label: str | None = None
     """What it is for, as it was opened with."""
 
-    protocol: PortProtocol = PortProtocol.TCP
+    protocol: PortProtocol | str = PortProtocol.TCP
+    """A ``str`` for a protocol this version does not know."""
 
     address: str | None = None
     """A ``host:port`` any TCP client reaches a TCP port at directly, from a server that gives it
@@ -81,7 +85,7 @@ class SandboxPort:
             value["port"],
             value.get("url"),
             value.get("label"),
-            PortProtocol(value.get("protocol", "tcp")),
+            _known(PortProtocol, value.get("protocol", "tcp")),
             value.get("address"),
             InboundError.from_dict(why) if why is not None else None,
         )
@@ -103,10 +107,6 @@ class InboundRule:
         if self.description is not None:
             rule["description"] = self.description
         return rule
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> InboundRule:
-        return cls(value["source"], value.get("description"))
 
 
 @dataclass(frozen=True)
@@ -176,9 +176,7 @@ class SandboxResources:
 @dataclass(frozen=True)
 class Sandbox(Files):
     """One sandbox the server holds, and the client that reaches it: what runs processes in it
-    and reads and writes its files.
-    Dropping it leaves the sandbox; ``remove`` deletes it, as leaving ``async with`` does:
-    ``async with await client.create_sandbox(...) as sandbox:`` makes one for a block."""
+    and reads and writes its files. Dropping it leaves the sandbox; ``remove`` removes it."""
 
     client: Client = field(repr=False, compare=False)
     """The client its requests go through."""
@@ -189,12 +187,9 @@ class Sandbox(Files):
     """The name it was made with, which ``find_sandbox`` finds it by."""
 
     image: str
-    """The digest of the image it stands on, as ``algorithm:hex``: what its VM boots every
-    time, whatever its tag points at by then."""
+    """The digest of the image it booted, as ``algorithm:hex``."""
 
     running: bool
-    """Whether it takes processes: ``False`` once its VM has exited on its own. One whose VM the
-    server stopped for want of use is booted again by the next job, and is ``True``."""
 
     ports: list[SandboxPort] = field(default_factory=list)
     """Its opened ports, each with its ``url`` where ``create_sandbox`` answered it only."""
@@ -242,8 +237,8 @@ class Sandbox(Files):
             async for item in self.client._items("virtx_client_exec_sandbox_log", request):
                 if "job" in item:
                     yield SandboxJob.from_dict(self.client, self.id, item["job"])
-                else:
-                    yield sandbox_job_entry(item)
+                elif (entry := sandbox_job_entry(item)) is not None:
+                    yield entry
 
         return StartedJob(start, lambda job: job.log(), run)
 
@@ -275,19 +270,8 @@ class Sandbox(Files):
         return SandboxResources.from_dict(output)
 
     async def remove(self) -> None:
-        """Delete it: its VM stopped if it is up, and its disk removed. Its volumes stay."""
+        """Stop it, end its jobs, and forget it, with everything it wrote outside its volumes."""
         await self.client._call("virtx_client_remove_sandbox", args(id=self.id))
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        """Delete it, as ``remove`` does; one deleted already is left so."""
-        try:
-            await self.remove()
-        except VirtxError as error:
-            if error.status != 404:
-                raise
 
 
 class SandboxJobKind(str, Enum):
@@ -298,14 +282,14 @@ class SandboxJobKind(str, Enum):
 
 class SandboxJobEndReason(str, Enum):
     """Why a process did not end by itself: the server, or the kernel, killed it, as ``SIGKILL``
-    does, its code ``137``."""
+    does, its code ``137``. A reason this version does not know is read as the server's string
+    itself."""
 
     TIMEOUT = "timeout"
     """Its ``timeout_ms`` ran out."""
 
     CANCELLED = "cancelled"
-    """Its job was removed while it ran, or its sandbox parked under it; its sandbox is still
-    there."""
+    """Its job was removed while it ran; its sandbox is still there."""
 
     SANDBOX_DELETED = "sandbox_deleted"
     """Its sandbox was removed under it, and everything it had with it."""
@@ -348,8 +332,9 @@ class SandboxJob:
     code: int | None = None
     """Once it has ended, its exit code."""
 
-    reason: SandboxJobEndReason | None = None
-    """Once it has ended, why, if it did not end by itself."""
+    reason: SandboxJobEndReason | str | None = None
+    """Once it has ended, why, if it did not end by itself: a ``str`` for a reason this version
+    does not know."""
 
     @classmethod
     def from_dict(cls, client: Client, sandbox_id: str, value: Mapping[str, Any]) -> SandboxJob:
@@ -391,7 +376,8 @@ class SandboxJob:
         async for item in self.client._items(
             "virtx_client_sandbox_job_log", self._args(after=after)
         ):
-            yield sandbox_job_entry(item)
+            if (entry := sandbox_job_entry(item)) is not None:
+                yield entry
 
     async def complete(self, print: bool = False) -> int:
         """Follow it to its end, printing what its process writes to stdout and stderr as it
@@ -437,23 +423,32 @@ class SandboxJobEnd:
 
     code: int
 
-    reason: SandboxJobEndReason | None = None
-    """Why, if it did not end by itself."""
+    reason: SandboxJobEndReason | str | None = None
+    """Why, if it did not end by itself: a ``str`` for a reason this version does not know."""
 
 
-def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | None:
+def _known(kind: type[E], value: str) -> E | str:
+    """``value`` as a member of ``kind``, or as the server said it where this version does not
+    know it."""
+    try:
+        return kind(value)
+    except ValueError:
+        return value
+
+
+def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | str | None:
     """A job's, or its end's, ``reason``, if it has one."""
     reason = value.get("reason")
-    return None if reason is None else SandboxJobEndReason(reason)
+    return None if reason is None else _known(SandboxJobEndReason, reason)
 
 
 SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd
 """An entry of a sandbox job's log."""
 
 
-def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
+def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry] | None:
     """An item of ``SandboxJob.log``'s stream, as ``{"id": n, "stdout": "..."}`` and the
-    like."""
+    like; ``None`` for an entry of a kind this version does not know, to be passed over."""
     entry: SandboxJobEntry
     if "stdout" in item:
         entry = Stdout(item["stdout"])
@@ -461,6 +456,8 @@ def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
         entry = Stderr(item["stderr"])
     elif "truncated" in item:
         entry = Truncated()
-    else:
+    elif "end" in item:
         entry = SandboxJobEnd(item["end"]["code"], _reason(item["end"]))
+    else:
+        return None
     return LogEntry(item["id"], entry)

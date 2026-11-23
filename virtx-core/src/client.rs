@@ -11,7 +11,7 @@ use http::HeaderMap;
 use tokio::process::Command;
 
 use crate::{
-    Auth, Error,
+    Auth, Error, LogEntry,
     image::{
         self, Event, ImageBuildArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
@@ -25,7 +25,7 @@ use crate::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
         SandboxJobEntry, SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
     },
-    transport::{DirEntry, FileRoot, LogEntry, Metadata, TransportClient, webdav},
+    transport::{DirEntry, FileRoot, Metadata, TransportClient, webdav},
     volume::{
         self, MountSource, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
         VolumeMountListOutputItem,
@@ -269,8 +269,7 @@ impl Client {
         Box::pin(oci::upload(&self.inner, path.into(), reference.into()))
     }
 
-    /// Delete each image no tag points at and no sandbox stands on, and what only such images
-    /// held.
+    /// Delete each image no tag points at and no sandbox uses, and what only such images held.
     pub async fn prune_image(&self) -> Result<ImagePruneOutput, Error> {
         image::client::prune(&self.inner).await
     }
@@ -466,8 +465,8 @@ impl Client {
         sandbox::client::resize(&self.inner, id.as_ref(), args).await
     }
 
-    /// Delete the sandbox `id`: its VM stopped if it is up, and its disk removed. Its volumes
-    /// stay.
+    /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
+    /// its volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
         sandbox::client::remove(&self.inner, id.as_ref()).await
     }
@@ -597,7 +596,7 @@ pub(crate) mod ffi {
         volume::{MountSource, VolumeCreateArgs},
     };
 
-    /// What names a project, a volume or a sandbox: `{"name": "..."}`.
+    /// What names a project or a volume: `{"name": "..."}`.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Name {
@@ -1212,8 +1211,8 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Deletes each image no tag points at and no sandbox stands on, and what only such images
-    /// held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
+    /// Deletes each image no tag points at and no sandbox uses, and what only such images held.
+    /// Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
     /// and the bytes freed.
     ///
     /// # Safety
@@ -1779,13 +1778,12 @@ pub(crate) mod ffi {
     }
 
     /// Answers with the sandboxes, as
-    /// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool,
-    /// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`, `name` only for one that
-    /// has one, and `running` `false` once its VM has exited on its own.
+    /// `[{"id": "...", "image": "algorithm:hex", "running": bool,
+    /// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`.
     ///
     /// # Safety
     ///
-    /// `client` is as in `virtx_client_list_volume`.
+    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_list_sandbox(
         client: *mut VirtxClient,
@@ -1798,8 +1796,7 @@ pub(crate) mod ffi {
     /// "ports": [n | {"port": n, "label": "...", "protocol": "tcp" | "http", "inbound": [...]}],
     /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
-    /// the image as
-    /// `{"type": "tag", "tag": "name:tag"}` or
+    /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
     /// sandbox as `virtx_client_list_sandbox` answers each, its
     /// `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
@@ -1881,8 +1878,8 @@ pub(crate) mod ffi {
         })
     }
 
-    /// Deletes the sandbox `id`, given `{"id": "..."}`: its VM stopped if it is up, and its
-    /// disk removed. Answers with `null`.
+    /// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
+    /// with `null`.
     ///
     /// # Safety
     ///

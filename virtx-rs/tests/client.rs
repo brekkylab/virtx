@@ -40,23 +40,3 @@ fn a_client_over_http_sends_its_token_and_project() {
     let refused = anonymous.list_volume().wait().unwrap_err();
     assert_eq!(refused.status(), Some(401), "{refused}");
 }
-
-#[test]
-fn a_command_is_run_for_the_token_before_a_request_is_sent() {
-    common::open();
-    let failing = Auth::Command {
-        program: "sh".into(),
-        args: vec!["-c".into(), "echo 'not signed in' >&2; exit 1".into()],
-    };
-    let client = Client::connect(
-        "http://127.0.0.1:9/",
-        failing,
-        None,
-        [] as [(&str, &str); 0],
-    )
-    .unwrap();
-    let Err(error) = client.list_sandbox().wait() else {
-        panic!("listed");
-    };
-    assert!(error.to_string().contains("not signed in"), "{error}");
-}

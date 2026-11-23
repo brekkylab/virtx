@@ -8,34 +8,30 @@ rust-version.workspace = true
 build = "../virtx-server-stdio/build.rs"
 
 # The server, on `virtx-core`'s protocol over HTTP, to the users and projects its config names;
-# and the library it is built from, which a server with tenants and routes of its own -- virtx
-# cloud's node -- builds on.
+# and the library it is built from, which a server with tenants and routes of its own builds on.
 [features]
 gpu = ["virtx-uvm/gpu"]
 
 [dependencies]
 anyhow = { workspace = true }
-axum = { version = "0.8", default-features = false, features = ["http1", "http2", "query", "tokio", "ws"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
+form_urlencoded = "1"
 http = "1"
-# A job's log, as an event stream; and the hooks' and the keeping's futures.
-futures-util = { version = "0.3", default-features = false }
 http-body-util = "0.1"
 # An OpenID Connect provider's tokens, checked against its keys.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
-# The host's memory, which its machines' capacity is twice of.
-libc = { workspace = true }
 # The provider's discovery document and keys. Its TLS is the one `virtx-uvm` picks for the host.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde = { workspace = true }
 serde_json = "1"
-# A query, read a parameter at a time to name the one that does not read.
-serde_urlencoded = "0.7"
-sha2 = "0.10"
+# A project store's answer, which one over a database awaits; and a home's sandboxes parked
+# side by side.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 thiserror = "2"
 # A member's user, as a segment of the path its `Location` names.
 percent-encoding = "2"
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 # A token's randomness.
@@ -60,7 +56,6 @@ virtx-core = { workspace = true, features = ["client"] }
 tokio = { workspace = true, features = ["io-util", "process"] }
 # A port's WebSocket, as a client would open it.
 tokio-tungstenite = "0.29"
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 # Ctrl-break sent to a server, as an operator interrupts it on Windows.
 [target.'cfg(windows)'.dev-dependencies]

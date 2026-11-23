@@ -1,241 +1,79 @@
-//! What lasts of a sandbox past its machine, and how it is kept on disk: `<id>.json` in the
-//! directory its server keeps records in, for a server started again to know each, parked.
+//! What is kept of a sandbox past the process that made it: `<id>.json` beside its upper disk,
+//! for a server started again over the same root to know it.
+//!
+//! ```text
+//! <dir>/<id>.json        its record, written once it is made
+//! <dir>/<id>.json.part   a record being written, renamed over the record once whole
+//! ```
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use virtx_core::{SandboxCreateArgs, SandboxJob, SandboxPort};
+use virtx_core::{SandboxCreateArgs, SandboxJob};
 
-use crate::{Digest, ImageHold, ImageStore, Snapshot};
+use super::Error;
 
-/// A sandbox as it lasts past its machine, from its making until it is deleted.
+/// A sandbox as it is kept on disk.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct Record {
-    pub(super) id: String,
-    pub(super) name: Option<String>,
-    /// The image it stands on, by digest, held here for as long as it exists: what it boots
-    /// every time it starts.
-    pub(super) image: Digest,
-    pub(super) _held: ImageHold,
-    /// What it boots with each time: its machine's size and network, and its volumes. Its
-    /// `image` is the digest it stands on, and its `ports` are not read: those it has are
-    /// `opened`'s.
+    /// What it was made with, its `image` the digest it booted, which it boots every time, and
+    /// its size as it was last [resized](super::Sandbox::resize) to.
     pub(super) args: SandboxCreateArgs,
-    /// Each port it was made with, and where it is answered.
-    pub(super) opened: Mutex<Vec<SandboxPort>>,
-    /// The port each key names, the secret a server reaches a port by (a tcp server's
-    /// capability): by key. Empty on a server that names its ports by nothing.
-    pub(super) keys: Mutex<HashMap<String, u16>>,
-    /// When it was made, or last used: a job started, run or ended in it, a connection through
-    /// its ports, a request to its files its machine answered.
-    pub(super) used: Mutex<SystemTime>,
+    /// The port each key opens: what its server reaches a port by, such as a capability in the
+    /// port's URL.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(super) keys: HashMap<String, u16>,
     /// Whether its machine ended on its own: nothing boots it again.
-    pub(super) exited: Mutex<bool>,
-    /// How large its disk is to be, in GiB, as grown since it was made: grown so as it next
-    /// boots ([`Snapshot::grow`]). None for one never grown, whose `args` say it.
-    pub(super) disk_gib: Mutex<Option<u32>>,
-    /// Its machine as resized: booted so from its next boot on. None for what was never
-    /// resized, whose `args` say it.
-    pub(super) resized: Mutex<Resized>,
-    /// Its jobs as it was last kept, read back with it, until its sandbox takes them: each that
-    /// ran then, known again as ended by its server's restart ([`Job::kept`]).
-    ///
-    /// [`Job::kept`]: super::job::Job::kept
-    pub(super) jobs: Mutex<Vec<SandboxJob>>,
-}
-
-/// A sandbox's machine as resized since it was made.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Resized {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vcpus: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_mib: Option<u32>,
-}
-
-/// A [`Record`] as it is kept on disk. A server whose ports are named by no key keeps none:
-/// `opened` and `capabilities` are read as empty where they are left out.
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub(super) struct Kept {
-    pub(super) id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) name: Option<String>,
-    pub(super) image: String,
-    pub(super) args: SandboxCreateArgs,
-    #[serde(default)]
-    pub(super) opened: Vec<SandboxPort>,
-    /// [`Record::keys`].
-    #[serde(default)]
-    pub(super) capabilities: HashMap<String, u16>,
-    /// Seconds since the epoch.
-    pub(super) used: u64,
-    /// [`Record::exited`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) exited: bool,
-    /// [`Record::disk_gib`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) disk_gib: Option<u32>,
-    /// [`Record::resized`].
-    #[serde(default)]
-    pub(super) resized: Resized,
-    /// Its jobs as they were as it was last kept: as a job starts or ends, and as its machine
-    /// is parked or ends.
+    /// Its jobs as they were when one last started or ended: each that ran then ran when its
+    /// process let it go, and is known again as ended so.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) jobs: Vec<SandboxJob>,
 }
 
 impl Record {
-    /// The record `kept` is, holding its image in `images`.
-    pub(super) fn of(kept: Kept, images: &ImageStore) -> Result<Record, String> {
-        let image: Digest = kept.image.parse().map_err(|e| format!("{e}"))?;
-        let held = images.hold_image(&image).map_err(|e| e.to_string())?;
-        Ok(Record {
-            id: kept.id,
-            name: kept.name,
-            image,
-            _held: held,
-            args: kept.args,
-            opened: Mutex::new(kept.opened),
-            keys: Mutex::new(kept.capabilities),
-            used: Mutex::new(UNIX_EPOCH + Duration::from_secs(kept.used)),
-            exited: Mutex::new(kept.exited),
-            disk_gib: Mutex::new(kept.disk_gib),
-            resized: Mutex::new(kept.resized),
-            jobs: Mutex::new(kept.jobs),
-        })
+    /// Where sandbox `id`'s record is under `dir`.
+    pub(super) fn path(dir: &Path, id: &str) -> PathBuf {
+        dir.join(format!("{id}.json"))
     }
 
-    /// Every record kept under `dir`, each holding its image in `images`; and each sandbox kept
-    /// there whose record does not read, or whose image is gone, said and [not known](Unknown).
-    pub(super) fn load_all(dir: &Path, images: &ImageStore) -> (Vec<Record>, Vec<Unknown>) {
-        let (mut records, mut unknown) = (Vec::new(), Vec::new());
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return (records, unknown);
+    /// Where sandbox `id`'s record is written before it is renamed over [`Record::path`].
+    pub(super) fn part(dir: &Path, id: &str) -> PathBuf {
+        dir.join(format!("{id}.json.part"))
+    }
+
+    /// The image it boots, by the digest its making resolved.
+    pub(super) fn image(&self) -> Result<crate::Digest, Error> {
+        let virtx_core::ImageName::Digest { digest } = &self.args.image else {
+            return Err(Error::Invalid(
+                "its record names its image by no digest".into(),
+            ));
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Some(id) = path.file_stem().and_then(|id| id.to_str()) else {
-                continue;
-            };
-            let json = std::fs::read(&path).unwrap_or_default();
-            let loaded = serde_json::from_slice::<Kept>(&json)
-                .map_err(|e| e.to_string())
-                .and_then(|kept| Record::of(kept, images));
-            match loaded {
-                Ok(record) => records.push(record),
-                Err(why) => {
-                    eprintln!("sandbox at {} not known again: {why}", path.display());
-                    // What can be read of it, for it to be listed by.
-                    let read: serde_json::Value = serde_json::from_slice(&json).unwrap_or_default();
-                    let image = read["image"]
-                        .as_str()
-                        .or_else(|| read["args"]["image"]["digest"].as_str())
-                        .unwrap_or_default();
-                    unknown.push(Unknown {
-                        id: id.to_owned(),
-                        name: read["name"].as_str().map(str::to_owned),
-                        image: image.to_owned(),
-                        why,
-                    });
-                }
-            }
-        }
-        (records, unknown)
+        digest
+            .parse()
+            .map_err(|e| Error::Invalid(format!("{digest}: {e}")))
     }
 
-    /// What it was made with, as resized since: what it boots as.
-    pub(super) fn args_now(&self) -> SandboxCreateArgs {
-        let mut args = self.args.clone();
-        let resized = *self.resized.lock().unwrap();
-        args.vcpus = resized.vcpus.or(args.vcpus);
-        args.memory_mib = resized.memory_mib.or(args.memory_mib);
-        args.disk_gib = self.disk_gib.lock().unwrap().or(args.disk_gib);
-        args
+    /// Sandbox `id`'s record under `dir`.
+    pub(super) fn read(dir: &Path, id: &str) -> Result<Record, Error> {
+        let path = Record::path(dir, id);
+        let failed = |source| Error::Io {
+            context: format!("reading {}", path.display()),
+            source,
+        };
+        let json = fs::read(&path).map_err(failed)?;
+        serde_json::from_slice(&json).map_err(|e| failed(e.into()))
     }
 
-    /// How large its disk is to be, in bytes: as it was grown, or made.
-    pub(super) fn disk_size(&self) -> u64 {
-        self.disk_gib
-            .lock()
-            .unwrap()
-            .or(self.args.disk_gib)
-            .map_or(Snapshot::SIZE, |gib| u64::from(gib) << 30)
-    }
-
-    pub(super) fn kept(&self) -> Kept {
-        Kept {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            image: self.image.to_string(),
-            args: self.args.clone(),
-            opened: self.opened.lock().unwrap().clone(),
-            capabilities: self.keys.lock().unwrap().clone(),
-            used: self
-                .used
-                .lock()
-                .unwrap()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-            exited: *self.exited.lock().unwrap(),
-            disk_gib: *self.disk_gib.lock().unwrap(),
-            resized: *self.resized.lock().unwrap(),
-            jobs: Vec::new(),
-        }
-    }
-
-    /// It, as the protocol answers a sandbox, running unless its machine ended on its own: its
-    /// ports with their `url`s and any `inbound_error` as its making answers them, given
-    /// `urls`, and otherwise as asking for it again answers them, without either.
-    pub(super) fn answer(&self, urls: bool) -> virtx_core::Sandbox {
-        let mut ports = self.opened.lock().unwrap().clone();
-        if !urls {
-            for port in &mut ports {
-                port.url = None;
-                port.inbound_error = None;
-            }
-        }
-        virtx_core::Sandbox {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            image: self.image.to_string(),
-            running: !*self.exited.lock().unwrap(),
-            ports,
-            abins: self.args.abins.clone(),
-            error: None,
-        }
-    }
-}
-
-/// A sandbox kept here that a server started again cannot know: its record not read, or its
-/// image gone. Listed, not running, with why, until it is deleted; it takes nothing else.
-pub(super) struct Unknown {
-    pub(super) id: String,
-    pub(super) name: Option<String>,
-    /// The digest its record names, if it names one.
-    pub(super) image: String,
-    pub(super) why: String,
-}
-
-impl Unknown {
-    /// It, as the protocol answers a sandbox: not running, and why in `error`.
-    pub(super) fn answer(&self) -> virtx_core::Sandbox {
-        virtx_core::Sandbox {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            image: self.image.clone(),
-            running: false,
-            ports: Vec::new(),
-            abins: Vec::new(),
-            error: Some(format!(
-                "not known again since its server restarted: {}",
-                self.why
-            )),
-        }
+    /// Write it as sandbox `id`'s record under `dir`, whole or not at all.
+    pub(super) fn write(&self, dir: &Path, id: &str) -> io::Result<()> {
+        let part = Record::part(dir, id);
+        fs::write(&part, serde_json::to_vec_pretty(self)?)?;
+        fs::rename(&part, Record::path(dir, id))
     }
 }
 
@@ -243,87 +81,23 @@ impl Unknown {
 mod tests {
     use super::*;
 
-    /// A record as virtx cloud's nodes keep one.
-    const NODE: &str = r#"{
-  "id": "sbx_4f2a9c",
-  "name": "dev",
-  "image": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "args": {
-    "image": {
-      "type": "digest",
-      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    },
-    "name": "dev",
-    "ports": [
-      8080,
-      {
-        "port": 5173,
-        "label": "web",
-        "protocol": "http"
-      }
-    ],
-    "vcpus": 2
-  },
-  "opened": [
-    {
-      "port": 8080,
-      "url": "ports/aaaa"
-    },
-    {
-      "port": 5173,
-      "url": "ports/bbbb",
-      "label": "web",
-      "protocol": "http"
-    }
-  ],
-  "capabilities": {
-    "aaaa": 8080,
-    "bbbb": 5173
-  },
-  "used": 1762300000,
-  "disk_gib": 4,
-  "resized": {
-    "memory_mib": 2048
-  }
-}"#;
-
-    /// A record as a stdio server keeps one of a sandbox whose machine exited: no ports apart
-    /// from its args.
-    const STDIO: &str = r#"{
-  "id": "1a2b3c4d",
-  "image": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "args": {
-    "image": {
-      "type": "digest",
-      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    }
-  },
-  "used": 1762300000,
-  "exited": true
-}"#;
-
     #[test]
-    fn a_record_kept_by_a_node_reads_and_is_written_as_it_was() {
-        let kept: Kept = serde_json::from_str(NODE).unwrap();
-        assert_eq!(kept.capabilities["bbbb"], 5173);
-        assert!(!kept.exited, "left out, it has not exited");
-        assert_eq!(kept.opened[1].label.as_deref(), Some("web"));
-        assert_eq!(kept.disk_gib, Some(4));
-        assert_eq!(kept.resized.memory_mib, Some(2048));
-        let written = serde_json::to_string_pretty(&kept).unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&written).unwrap(),
-            serde_json::from_str::<serde_json::Value>(NODE).unwrap()
-        );
-    }
-
-    #[test]
-    fn a_record_kept_without_ports_reads_with_none() {
-        let kept: Kept = serde_json::from_str(STDIO).unwrap();
-        assert!(kept.exited);
-        assert!(kept.opened.is_empty() && kept.capabilities.is_empty());
-        assert_eq!(kept.resized, Resized::default());
-        let again: Kept = serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap();
-        assert_eq!(again, kept);
+    fn a_record_reads_as_it_was_written_and_leaves_no_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = Record {
+            args: SandboxCreateArgs::new(
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ),
+            keys: HashMap::from([("key".to_owned(), 8080)]),
+            exited: false,
+            jobs: Vec::new(),
+        };
+        record.write(dir.path(), "kept").unwrap();
+        assert_eq!(Record::read(dir.path(), "kept").unwrap(), record);
+        record.exited = true;
+        record.write(dir.path(), "kept").unwrap();
+        assert_eq!(Record::read(dir.path(), "kept").unwrap(), record);
+        assert!(!Record::part(dir.path(), "kept").exists());
+        assert!(Record::read(dir.path(), "none").is_err());
     }
 }

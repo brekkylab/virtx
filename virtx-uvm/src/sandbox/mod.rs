@@ -1,30 +1,27 @@
-//! Sandboxes: each a machine booted from an image over a disk of its own, with volumes mounted
-//! into it, and the processes run in it as [jobs](Job), each with its log -- from its making
-//! until it is deleted, and kept on disk past its server ([`Sandboxes`]).
+//! A sandbox: a machine booted from an image, with volumes mounted into it, and the processes
+//! run in it as [jobs](Job), each with its log.
 //!
-//! A sandbox's machine is parked once nothing has used it for [`park_after`], and booted again
-//! over its disk as it was left for the next job or request to its files; a machine that ends
-//! on its own leaves its sandbox exited, for good. A sandbox unused for
-//! [`reclaim_after`] is deleted ([`Sandboxes::reclaim`]). What a server adds to that -- where
-//! else a disk is kept, how many machines it runs at once, how its ports are reached from
-//! outside the host -- it plugs in as [`Hooks`].
+//! A sandbox made with keys is kept past its process, its record beside its upper disk, for the
+//! next server over its root to know it again ([`Sandbox::kept`]), or for a server it is moved
+//! to to take in ([`Sandbox::take_in`]).
+//!
+//! Where its disk and volumes are kept beyond this machine, its server says with a
+//! [`Backing`](crate::backend::Backing): each is taken from there as its machine boots.
+//!
+//! What a sandbox is to a server beyond this -- how its ports are reached from outside the
+//! host -- is the server's.
 
-mod disk;
 mod error;
-mod hooks;
 mod job;
 mod record;
 pub mod runs;
 #[allow(clippy::module_inception)]
 mod sandbox;
-mod sandboxes;
+mod upper;
 
-pub use disk::{cloned, copy_sparse};
 pub use error::Error;
-pub use hooks::{Held, Hooks, NoHooks, Wanted, Written};
 pub use job::Job;
 pub use sandbox::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, LABEL_MOST, LOG_LIMIT, MAX_DISK_GIB, Resources,
-    Sandbox, park_after, signal_number,
+    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, KEEP_ENDED, Kept, LOG_LIMIT,
+    Sandbox, Unknown, park_after, signal_number,
 };
-pub use sandboxes::{Given, Sandboxes, forget_unrecorded, reclaim_after};

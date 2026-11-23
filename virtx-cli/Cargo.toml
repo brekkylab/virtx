@@ -2,7 +2,7 @@
 name = "virtx-cli"
 version = "0.2.0"
 edition = "2024"
-description = "The `virtx` command: build and manage a virtx server's images from a shell, and sign in to virtx cloud or a server's OpenID Connect provider for the SDKs to use."
+description = "The `virtx` command: build and manage a virtx server's images from a shell, and sign in to its OpenID Connect provider for the SDKs to use."
 license = "Apache-2.0"
 publish = false
 

@@ -676,28 +676,6 @@ mod refusals {
     }
 
     #[tokio::test]
-    async fn a_refusal_in_the_protocol_s_shape_says_its_code() {
-        let router = Router::new().fallback(|| async {
-            http::Response::builder()
-                .status(StatusCode::CONFLICT)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(full(Bytes::from(
-                    r#"{"error": {"code": "ended", "message": "the sandbox's machine has exited"}}"#,
-                )))
-                .unwrap()
-        });
-        let client = piped(router);
-        let error = read(&client, &FileRoot::Sandbox("s1".into()), "a.txt", 0, None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), Some("ended"));
-        assert_eq!(
-            error.to_string(),
-            "the server answered 409 Conflict: ended: the sandbox's machine has exited"
-        );
-    }
-
-    #[tokio::test]
     async fn a_text_plain_refusal_keeps_its_body() {
         let router = Router::new().fallback(|| async {
             http::Response::builder()

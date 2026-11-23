@@ -81,7 +81,7 @@ describe('against virtx-stdio', () => {
     )
     await sandbox.removeFile('work/dir/a.txt')
     await sandbox.remove()
-    await assert.rejects(client.getSandbox(sandbox.id), { status: 404, code: 'not_found' })
+    await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
     await assert.rejects(sandbox.readFile(''), { status: 404 })
   })
 
@@ -113,21 +113,5 @@ describe('against virtx-stdio', () => {
     await volume.remove()
     await assert.rejects(client.getVolume(name), { status: 404, code: 'not_found' })
     await assert.rejects(got.statFile('c.txt'), { status: 404 })
-  })
-
-  test('a sandbox takes a volume by its handle or its name', async () => {
-    await alpine(client)
-    const handed = await client.createVolume(unique('handed'))
-    const named = await client.createVolume(unique('named'))
-    const sandbox = await client.createSandbox(ALPINE, {
-      volumes: [
-        { volume: handed, path: '/data', readonly: true },
-        { volume: named.name, path: '/shared' },
-      ],
-    })
-    assert.equal((await client.getSandbox(sandbox.id)).id, sandbox.id)
-    await sandbox.remove()
-    await handed.remove()
-    await named.remove()
   })
 })

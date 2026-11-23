@@ -2,13 +2,8 @@
 //! answered from the [`Home`] of the project a request names, and those of the projects themselves
 //! ([`projects`]), answered from the [`Host`]. One client is on the other end of stdio, so all of
 //! it is its.
-//!
-//! A sandbox's disk is a snapshot of the store's, named by its id, and what lasts past its
-//! machine is kept on disk beside it ([`Sandboxes`]): a server spawned again knows each,
-//! parked. Its ports are on this host's loopback, each at an address this server picks once
-//! its machine first boots ([`Loopback`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -24,12 +19,11 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
-use futures_util::future::BoxFuture;
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::net::TcpListener;
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinSet};
 
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
@@ -39,12 +33,12 @@ use virtx_core::{
     VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
     from_body,
 };
-use virtx_uvm::sandbox::{Held, Hooks};
+use virtx_uvm::backend::Backing;
 use virtx_uvm::{
-    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
-    Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, Sandboxes, SnapshotError,
-    SnapshotStore, VolumeError, VolumeStore, build_step, signal_number,
+    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
+    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project,
+    ProjectError, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError,
+    VolumeStore, build_step, park_after, recipe_kept, signal_number,
 };
 
 use crate::Host;
@@ -68,7 +62,10 @@ pub struct Home {
     files: Files,
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
-    sandboxes: Sandboxes,
+    /// The sandboxes, by id, until each is removed.
+    sandboxes: Mutex<HashMap<String, Held>>,
+    /// The names sandboxes being made have taken, each until it is made or is not.
+    naming: Mutex<HashSet<String>>,
     /// The image jobs, by id, and what cancels each, until each is removed.
     image_jobs: Mutex<HashMap<String, (Arc<ImageJobOf>, Stop)>>,
     /// Set once its project is to be removed: no sandbox or image job is added after.
@@ -76,36 +73,27 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, which `registry` answers for, and the volumes, sandboxes' disks
-    /// and records under `root`.
+    /// The images in `images`, which `registry` answers for, and the volumes and the sandboxes'
+    /// upper disks under `root`.
     pub fn new(
         images: ImageStore,
         registry: Arc<RegistryServer>,
         root: &Path,
     ) -> anyhow::Result<Home> {
-        let snapshots = SnapshotStore::new(root)?;
+        Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
-        let vm: Vec<OsString> = vec![
-            std::env::current_exe()?.into(),
-            crate::MACHINE_SUBCOMMAND.into(),
-        ];
-        let sandboxes = Sandboxes::new(
-            images.clone(),
-            snapshots.clone(),
-            volumes.clone(),
-            root,
-            vm.clone(),
-            Arc::new(Loopback),
-            virtx_uvm::park_after(),
-        )?;
         Ok(Home {
             images,
             registry,
-            files: Files::new(volumes.clone()),
+            files: Files::new(volumes.clone()).with_host_paths(HostPaths::Named),
             root: root.to_owned(),
             volumes,
-            vm,
-            sandboxes,
+            vm: vec![
+                std::env::current_exe()?.into(),
+                crate::MACHINE_SUBCOMMAND.into(),
+            ],
+            sandboxes: Mutex::default(),
+            naming: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
         })
@@ -117,85 +105,84 @@ impl Home {
     }
 
     /// Close it to every sandbox and image job from now on, for its project to be removed:
-    /// `false`, and left open, while a sandbox lives here -- its machine up or not, of this
-    /// process or another.
+    /// `false`, and left open, while a sandbox of this process or another lives here. Decided
+    /// under the sandboxes' lock, which a sandbox is added under once it holds its upper disk:
+    /// one made meanwhile is either seen here or sees it closed.
     pub fn close(&self) -> bool {
-        if !self.sandboxes.list(None).is_empty() || Sandbox::lives_under(&self.root) {
+        let _sandboxes = self.sandboxes.lock().unwrap();
+        if Sandbox::lives_under(&self.root) {
             return false;
         }
         self.closed.store(true, Ordering::SeqCst);
         true
     }
 
-    /// Its sandboxes reclaimed once unused for [`reclaim_after`](virtx_uvm::reclaim_after),
-    /// from now on.
-    pub fn reclaim(&self) {
-        self.sandboxes.spawn_reclaiming();
-    }
-
-    /// Park every sandbox here, side by side: blocks until each machine has stopped and synced
-    /// what it wrote. Each is kept, parked, for the next server over this home.
+    /// Cancel every image job here, and close every sandbox, as removing each does, side by
+    /// side: blocks until each machine has stopped and synced what it wrote.
     pub fn close_all(&self) {
-        self.sandboxes.close_all_blocking();
+        for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
+            cancel_now(&job, &stop);
+        }
+        let closed: Vec<_> = self
+            .sandboxes
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, held)| held.sandbox)
+            .collect();
+        std::thread::scope(|scope| {
+            for sandbox in &closed {
+                scope.spawn(|| sandbox.close());
+            }
+        });
+    }
+
+    /// Take `name` for a sandbox being made, until what this answers drops: refused `409`
+    /// `exists` where a sandbox here has it, or one being made has taken it.
+    fn naming(&self, name: Option<&str>) -> Result<Naming<'_>, Refused> {
+        let Some(name) = name else {
+            return Ok(Naming(self, None));
+        };
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let mut naming = self.naming.lock().unwrap();
+        let held = sandboxes
+            .values()
+            .any(|held| held.sandbox.name() == Some(name));
+        if held || !naming.insert(name.to_owned()) {
+            return Err(refused(
+                StatusCode::CONFLICT,
+                "exists",
+                format!("a sandbox here is named {name} already"),
+            ));
+        }
+        Ok(Naming(self, Some(name.to_owned())))
+    }
+
+    fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
+        let sandboxes = self.sandboxes.lock().unwrap();
+        sandboxes
+            .get(id)
+            .map(|held| Arc::clone(&held.sandbox))
+            .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))
     }
 }
 
-/// What answers a sandbox's ports on this host: each on its loopback, which only this machine
-/// reaches, at an address picked as its machine first boots, and taken to the sandbox's machine
-/// while it is up.
-struct Loopback;
+/// A name a sandbox being made has taken, given back as this drops: once the sandbox is among
+/// [`Home`]'s, which holds it from there, or once its making failed.
+struct Naming<'a>(&'a Home, Option<String>);
 
-impl Hooks for Loopback {
-    fn listen<'a>(
-        &'a self,
-        sandbox: &'a Arc<Sandbox>,
-        port: &'a SandboxPort,
-    ) -> BoxFuture<'a, Result<Option<(String, Held)>, SandboxError>> {
-        Box::pin(async move {
-            let port = port.port;
-            let opening =
-                |e: std::io::Error| SandboxError::Failed(format!("opening port {port}: {e}"));
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                .await
-                .map_err(opening)?;
-            let at = listener.local_addr().map_err(opening)?;
-            let sandbox = Arc::downgrade(sandbox);
-            let task = tokio::spawn(async move {
-                while let Ok((mut accepted, _)) = listener.accept().await {
-                    let Some(sandbox) = sandbox.upgrade() else {
-                        return;
-                    };
-                    let activity = sandbox.activity();
-                    tokio::spawn(async move {
-                        // Closed at once while its machine is not up, as a port nothing listens
-                        // on is -- and then not a use of it.
-                        match activity.sandbox().connect(port).await {
-                            Ok(mut reached) => {
-                                let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached)
-                                    .await;
-                            }
-                            Err(_) if !activity.sandbox().is_up() => activity.unused(),
-                            Err(_) => {}
-                        }
-                    });
-                }
-            });
-            // On this host's loopback, an `http` one is reached as HTTP at its address as is.
-            Ok(Some((
-                format!("http://{at}"),
-                Box::new(Listening(task)) as Held,
-            )))
-        })
-    }
-}
-
-/// What takes a port's connections, until it drops.
-struct Listening(tokio::task::JoinHandle<()>);
-
-impl Drop for Listening {
+impl Drop for Naming<'_> {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(name) = &self.1 {
+            self.0.naming.lock().unwrap().remove(name);
+        }
     }
+}
+
+/// A sandbox, and what takes each of its ports' connections, until the sandbox goes.
+struct Held {
+    sandbox: Arc<Sandbox>,
+    _listening: JoinSet<()>,
 }
 
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
@@ -541,7 +528,6 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
             let steps = recipe.steps.len();
             for (index, step) in recipe.steps.iter().enumerate() {
                 report(format!("STEP {}/{steps}: {step}", index + 1));
-                let before = layers.len();
                 build_step(
                     &images,
                     &mut image,
@@ -558,10 +544,8 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                     &mut report,
                 )
                 .await?;
-                let layered = layers.len() > before;
-                virtx_uvm::history_kept(&mut image, step.to_string(), layered, layers.len());
             }
-            virtx_uvm::recipe_kept(&mut image, &recipe);
+            recipe_kept(&mut image, &recipe);
             let digest =
                 tokio::task::spawn_blocking(move || images.insert_image(&image, &layers)).await??;
             Ok(digest)
@@ -634,6 +618,15 @@ struct Stop {
 async fn cancel(job: &ImageJobOf, stop: &Stop) {
     stop.task.abort();
     *stop.gate.lock().await = true;
+    end_cancelled(job);
+}
+
+/// [`cancel`], as its home closes: a tag's change under way goes on, not waited for.
+fn cancel_now(job: &ImageJobOf, stop: &Stop) {
+    stop.task.abort();
+    if let Ok(mut gate) = stop.gate.try_lock() {
+        *gate = true;
+    }
     end_cancelled(job);
 }
 
@@ -762,59 +755,35 @@ async fn volume_files(
     home.files.volume(&segments["name"], request).await
 }
 
-/// A request to the files of a sandbox, over WebDAV, asked of its machine, booted first if it is
-/// parked. One whose machine has exited answers `409`, `ended`.
+/// A request to the files of a sandbox, over WebDAV, asked of its machine, booted again if it
+/// was parked: one whose machine has exited answers `409`.
 async fn sandbox_files(
     Extension(home): Extension<Arc<Home>>,
     Segments(segments): Segments<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> Answer {
     let id = &segments["id"];
-    let sandbox = home.sandboxes.get(id)?;
-    // In use from here until the answer has been sent -- taken first, so that it is not parked
-    // unused in between. Refused, it is not used: an exited sandbox is not kept longer for it.
+    let sandbox = home.sandbox(id)?;
+    // In use from here until the answer has been sent, booting it again if it was parked.
     let activity = sandbox.activity();
-    let machine = match sandbox.machine().await {
-        Ok(machine) => machine,
-        Err(e) => {
-            activity.unused();
-            return Err(e.into());
-        }
-    };
+    let machine = sandbox.machine().await?;
     Ok(home.files.sandbox(id, machine, activity, request).await)
 }
 
-/// Every sandbox; `?name=` those named so, one at most.
+/// Every sandbox; with `?name=`, the one named so, if any.
 async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
     let name = query.as_deref().and_then(|query| {
-        query.split('&').find_map(|pair| {
-            let value = pair.strip_prefix("name=")?;
-            Some(percent_decode(value).map_err(|e| invalid(format!("name: {e}"))))
-        })
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "name")
+            .map(|(_, name)| name.into_owned())
     });
-    let name = name.transpose()?;
-    Ok(json(&home.sandboxes.list(name.as_deref())))
-}
-
-/// `value` with each `%XX` decoded, and each `+` a space, as UTF-8.
-fn percent_decode(value: &str) -> Result<String, String> {
-    let mut bytes = Vec::with_capacity(value.len());
-    let mut rest = value.bytes();
-    while let Some(b) = rest.next() {
-        match b {
-            b'%' => {
-                let hex = [rest.next(), rest.next()];
-                let [Some(high), Some(low)] = hex else {
-                    return Err("a % at its end".into());
-                };
-                let digit = |d: u8| (d as char).to_digit(16).ok_or("not a hex digit");
-                bytes.push((digit(high)? * 16 + digit(low)?) as u8);
-            }
-            b'+' => bytes.push(b' '),
-            b => bytes.push(b),
-        }
-    }
-    String::from_utf8(bytes).map_err(|e| e.to_string())
+    let sandboxes = home.sandboxes.lock().unwrap();
+    let listed: Vec<_> = sandboxes
+        .values()
+        .filter(|held| name.is_none() || held.sandbox.name() == name.as_deref())
+        .map(|held| held.sandbox.answer())
+        .collect();
+    Ok(json(&listed))
 }
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
@@ -827,18 +796,87 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             spec.port
         )));
     }
-    if home.closed.load(Ordering::SeqCst) {
+    let _naming = home.naming(args.name.as_deref())?;
+
+    // Each port on this host's loopback, which only this machine reaches, taken to the
+    // sandbox's machine while it runs: TCP as it is, so an `http` port is HTTP at its URL too.
+    let mut opened = Vec::new();
+    let mut listeners = Vec::new();
+    for spec in &args.ports {
+        let port = spec.port;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|e| internal(format!("opening port {port}: {e}")))?;
+        let at = listener
+            .local_addr()
+            .map_err(|e| internal(format!("opening port {port}: {e}")))?;
+        opened.push(SandboxPort {
+            port,
+            url: Some(format!("http://{at}")),
+            label: spec.label.clone(),
+            protocol: spec.protocol.clone(),
+            address: None,
+            inbound_error: None,
+        });
+        listeners.push((port, listener));
+    }
+
+    let sandbox = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        home.vm.clone(),
+        park_after(),
+        None,
+        None,
+        &Backing::default(),
+    )
+    .await?;
+    let mut listening = JoinSet::new();
+    for (port, listener) in listeners {
+        let sandbox = Arc::clone(&sandbox);
+        listening.spawn(async move {
+            while let Ok((mut accepted, _)) = listener.accept().await {
+                let activity = sandbox.activity();
+                tokio::spawn(async move {
+                    // Closed at once when the machine has ended, as a port nothing listens on is.
+                    if let Ok(mut reached) = activity.sandbox().connect(port).await {
+                        let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
+                    }
+                });
+            }
+        });
+    }
+    let id = sandbox.id().to_owned();
+    let held = Held {
+        sandbox: Arc::clone(&sandbox),
+        _listening: listening,
+    };
+    let closed = {
+        let mut sandboxes = home.sandboxes.lock().unwrap();
+        let closed = home.closed.load(Ordering::SeqCst);
+        if !closed {
+            sandboxes.insert(id.clone(), held);
+        }
+        closed
+    };
+    if closed {
+        tokio::task::spawn_blocking(move || sandbox.close()).await?;
         return Err(forbidden("this project is being removed"));
     }
-    let answer = home.sandboxes.create(args, None, true).await?;
-    Ok(created(format!("/sandboxes/{}", answer.id), &answer))
+    let answer = virtx_core::Sandbox {
+        ports: opened,
+        ..sandbox.answer()
+    };
+    Ok(created(format!("/sandboxes/{id}"), &answer))
 }
 
 async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandboxes.answer(&id)?))
+    Ok(json(&home.sandbox(&id)?.answer()))
 }
 
 /// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
@@ -850,14 +888,16 @@ async fn sandbox_resize(
     Whole(request): Whole,
 ) -> Answer {
     let args: SandboxResizeArgs = body(&request)?;
-    Ok(json(&home.sandboxes.get(&id)?.resize(&args).await?))
+    Ok(json(&home.sandbox(&id)?.resize(&args).await?))
 }
 
 async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    home.sandboxes.delete(&id).await?;
+    let removed = home.sandboxes.lock().unwrap().remove(&id);
+    let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
+    tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -865,7 +905,7 @@ async fn sandbox_job_list(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandboxes.get(&id)?.jobs()))
+    Ok(json(&home.sandbox(&id)?.jobs()))
 }
 
 /// `POST /sandboxes/{id}/jobs/exec/`, answered with the job -- or, to a request that accepts
@@ -881,7 +921,7 @@ async fn sandbox_exec(
     if args.cmd.is_empty() {
         return Err(invalid("cmd: an exec names a command"));
     }
-    let sandbox = home.sandboxes.get(&id)?;
+    let sandbox = home.sandbox(&id)?;
     let timeout = args.timeout_ms.map(Duration::from_millis);
     let job = sandbox.exec(args.cmd, args.stdin, timeout).await?;
     let answered = job.get();
@@ -905,7 +945,7 @@ async fn sandbox_job_get(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
 ) -> Answer {
-    Ok(json(&home.sandboxes.get(&id)?.job(&job)?.get()))
+    Ok(json(&home.sandbox(&id)?.job(&job)?.get()))
 }
 
 /// Kill it if it runs, and remove it.
@@ -913,7 +953,7 @@ async fn sandbox_job_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, job)): Segments<(String, String)>,
 ) -> Answer {
-    home.sandboxes.get(&id)?.remove_job(&job)?;
+    home.sandbox(&id)?.remove_job(&job)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -925,7 +965,7 @@ async fn sandbox_job_signal(
     let args: SandboxSignalArgs = body(&request)?;
     let signal = signal_number(&args.signal)
         .ok_or_else(|| invalid(format!("signal: no signal is named {}", args.signal)))?;
-    home.sandboxes.get(&id)?.signal(&job, signal)?;
+    home.sandbox(&id)?.signal(&job, signal)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -945,7 +985,7 @@ async fn sandbox_job_stdin(
     Whole(request): Whole,
 ) -> Answer {
     let args: SandboxStdinArgs = body(&request)?;
-    let sandbox = home.sandboxes.get(&id)?;
+    let sandbox = home.sandbox(&id)?;
     sandbox
         .write_stdin(&job, args.data.unwrap_or_default(), args.eof)
         .await?;
@@ -957,7 +997,7 @@ async fn sandbox_job_events(
     Segments((id, job)): Segments<(String, String)>,
     headers: HeaderMap,
 ) -> Answer {
-    Ok(events(home.sandboxes.get(&id)?.job(&job)?.log(), &headers))
+    Ok(events(home.sandbox(&id)?.job(&job)?.log(), &headers))
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.
@@ -1188,19 +1228,6 @@ impl From<ProjectError> for Refused {
     }
 }
 
-impl From<SnapshotError> for Refused {
-    fn from(e: SnapshotError) -> Refused {
-        match &e {
-            SnapshotError::InvalidName(_) => invalid(e),
-            SnapshotError::Unknown(_) => not_found(e),
-            SnapshotError::AlreadyExists(_) => refused(StatusCode::CONFLICT, "exists", e),
-            SnapshotError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            SnapshotError::Io { source, .. } => io_refused(source, &e),
-            SnapshotError::Fstree(_) => internal(e),
-        }
-    }
-}
-
 impl From<VolumeError> for Refused {
     fn from(e: VolumeError) -> Refused {
         match &e {
@@ -1235,7 +1262,7 @@ impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
+            MachineError::DidNotStart { .. } => {
                 refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
             }
             _ => internal(e),
@@ -1248,27 +1275,16 @@ impl From<SandboxError> for Refused {
         match e {
             SandboxError::Invalid(_) => invalid(e),
             SandboxError::NotFound(_) => not_found(e),
+            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::Unsupported(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "unsupported", e)
             }
-            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::NotStarted(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "not_started", e)
             }
             SandboxError::Ended | SandboxError::JobEnded(_) => {
                 refused(StatusCode::CONFLICT, "ended", e)
             }
-            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
-            SandboxError::Refused {
-                status,
-                code,
-                message,
-            } => refused(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                code,
-                message,
-            ),
-            SandboxError::Failed(_) | SandboxError::Build(_) => internal(e),
             SandboxError::StdinCut { bytes, .. } => {
                 refused(StatusCode::CONFLICT, "ended", e).with("written", bytes)
             }
@@ -1278,13 +1294,14 @@ impl From<SandboxError> for Refused {
                 refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e).after(STDIN_FULL_RETRY)
             }
             SandboxError::Image(e) => e.into(),
-            SandboxError::Snapshot(e) => e.into(),
+            SandboxError::Io { .. } => internal(e),
             SandboxError::Volume(e) => e.into(),
             SandboxError::Backend(e) => internal(e),
             SandboxError::Machine(e) => e.into(),
             SandboxError::Join(e) => e.into(),
             // Where whatever embeds this sets an admission: the protocol's refusal.
             SandboxError::NoRoom(_) => refused(StatusCode::SERVICE_UNAVAILABLE, "capacity", e),
+            SandboxError::InUse(_) => refused(StatusCode::CONFLICT, "in_use", e),
         }
     }
 }
@@ -1298,13 +1315,6 @@ impl From<tokio::task::JoinError> for Refused {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_name_asked_for_is_decoded() {
-        assert_eq!(percent_decode("my%20box+2").unwrap(), "my box 2");
-        assert_eq!(percent_decode("%E4%B8%96").unwrap(), "世");
-        assert!(percent_decode("a%2").is_err());
-    }
 
     /// A write its process closed its stdin under part-way is `409`, `ended`, with how much of
     /// it went in as `written`; no other refusal carries it.

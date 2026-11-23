@@ -18,9 +18,8 @@ use std::{
 
 use virtx::{Auth, Client, Event, Events, Sandbox, SandboxExecArgs, SandboxJobEntry};
 
-/// The image every test that boots a sandbox pulls first: Docker Hub's alpine, from Google's
-/// mirror of its official images, as Docker Hub refuses anonymous pulls past a few an hour.
-pub const ALPINE: &str = "mirror.gcr.io/library/alpine:3.20";
+/// The image every test that boots a sandbox pulls first.
+pub const ALPINE: &str = "alpine:3.20";
 
 /// Make the library the clients are made by ready: nothing with `embedded`, or else
 /// [`library`] opened.
@@ -117,7 +116,7 @@ pub fn run(sandbox: &Sandbox, cmd: &[&str]) -> (Vec<String>, i32) {
         match entry.entry {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => lines.push(line),
             SandboxJobEntry::End(end) => return (lines, end.code),
-            SandboxJobEntry::Truncated {} => {}
+            _ => {}
         }
     }
     panic!("a job's log ends with its end")

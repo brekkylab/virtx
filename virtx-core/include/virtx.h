@@ -334,8 +334,8 @@ struct VirtxStream *virtx_client_upload_image(struct VirtxClient *client,
                                               const uint8_t *args,
                                               size_t args_len);
 
-// Deletes each image no tag points at and no sandbox stands on, and what only such images
-// held. Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
+// Deletes each image no tag points at and no sandbox uses, and what only such images held.
+// Answers with `{"images": ["algorithm:hex", ...], "reclaimed": n}`, the digests deleted
 // and the bytes freed.
 //
 // # Safety
@@ -634,13 +634,12 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
                                            size_t args_len);
 
 // Answers with the sandboxes, as
-// `[{"id": "...", "name": "...", "image": "algorithm:hex", "running": bool,
-// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`, `name` only for one that
-// has one, and `running` `false` once its VM has exited on its own.
+// `[{"id": "...", "image": "algorithm:hex", "running": bool,
+// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`.
 //
 // # Safety
 //
-// `client` is as in `virtx_client_list_volume`.
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held.
 struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
@@ -648,8 +647,7 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 // "ports": [n | {"port": n, "label": "...", "protocol": "tcp" | "http", "inbound": [...]}],
 // "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
-// the image as
-// `{"type": "tag", "tag": "name:tag"}` or
+// the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
 // sandbox as `virtx_client_list_sandbox` answers each, its
 // `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
@@ -693,8 +691,8 @@ struct VirtxFuture *virtx_client_resize_sandbox(struct VirtxClient *client,
                                                 const uint8_t *args,
                                                 size_t args_len);
 
-// Deletes the sandbox `id`, given `{"id": "..."}`: its VM stopped if it is up, and its
-// disk removed. Answers with `null`.
+// Stops the sandbox `id`, ends its jobs and forgets it, given `{"id": "..."}`. Answers
+// with `null`.
 //
 // # Safety
 //

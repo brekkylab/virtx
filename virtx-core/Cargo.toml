@@ -22,9 +22,11 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 # (`virtx`, the Rust client in `virtx-rs/`, which reaches the library through the C ABI) takes `default-features = false`.
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+# Every body is JSON, and a log entry is read as one before it is told a kind this version knows.
+serde_json = "1"
 
 # HTTP over TCP for the client. The same reqwest 0.13 and rustls the `virtx` crate uses.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 # HTTP/2 over stdio for both ends, and the server's end of either transport.
 hyper = { version = "1", optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
@@ -33,8 +35,7 @@ bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
-# Every body is JSON; a job's log is a `text/event-stream`, read and written as SSE.
-serde_json = { version = "1", optional = true }
+# A job's log is a `text/event-stream`, read and written as SSE.
 sse-stream = { version = "0.2", optional = true }
 # Which member of a request's body did not read, for the server's refusal of it.
 serde_path_to_error = { version = "0.1", optional = true }
@@ -73,8 +74,6 @@ libc = { version = "0.2", optional = true }
 cbindgen = { version = "0.29", default-features = false }
 
 [dev-dependencies]
-# The types' tests read their wire form back.
-serde_json = "1"
 # What serves the transport tests' routers, over HTTP and as the hyper service stdio serves.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 hyper-util = { version = "0.1", features = ["service"] }
@@ -101,7 +100,6 @@ client = [
     "dep:bytes",
     "dep:http",
     "dep:http-body-util",
-    "dep:serde_json",
     "dep:sse-stream",
     "dep:futures-util",
     "dep:async-stream",
@@ -123,7 +121,6 @@ server = [
     "dep:http",
     "dep:http-body",
     "dep:tokio",
-    "dep:serde_json",
     "dep:serde_path_to_error",
     "dep:futures-util",
 ]

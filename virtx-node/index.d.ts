@@ -339,9 +339,9 @@ export interface SandboxInfo {
   id: string
   /** The name it was made with, which `findSandbox` finds it by. */
   name?: string
-  /** The digest of the image it stands on: what its VM boots every time. */
+  /** The digest of the image it was made from. */
   image: string
-  /** Whether it takes processes: `false` once its VM has exited on its own. One whose VM the server stopped for want of use is booted again by the next job, and is `true`. */
+  /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
   /** Its opened ports, if it was given some: each with its `url` only as `createSandbox` answers it. */
   ports?: SandboxPort[]
@@ -354,10 +354,7 @@ export interface SandboxInfo {
 /**
  * A sandbox the server holds, as making it or asking for it answered, and the client that reaches
  * it, to run processes in it and read and write its files, its root as its processes see it, as
- * `etc/hostname`. Its disk -- what it writes over its image -- lasts until it is deleted: the
- * server may stop its VM while nothing uses it, and boots it again, over that disk, for the next
- * job or write to its files; its files are read from that disk meanwhile. Dropping it leaves the
- * sandbox; `remove` removes it.
+ * `etc/hostname`. Dropping it leaves the sandbox; `remove` removes it.
  */
 export class Sandbox extends Files implements SandboxInfo {
   private constructor()
@@ -367,12 +364,8 @@ export class Sandbox extends Files implements SandboxInfo {
   running: boolean
   ports?: SandboxPort[]
   abins?: string[]
-  /** Why it takes nothing but `remove`, for one its server could not know again after a restart. */
   error?: string
-  /**
-   * Start `cmd` in it: the job, and its output as the job's `log`. Iterated at once, the job is
-   * started and its log read as one request.
-   */
+  /** Start `cmd` in it: the job, and its output as the job's `log`. */
   exec(cmd: string[], options?: SandboxExecOptions): StartedJob<SandboxJob, SandboxJobEntry>
   /** Every job in it. */
   jobs(): Promise<SandboxJob[]>
@@ -384,10 +377,8 @@ export class Sandbox extends Files implements SandboxInfo {
    * one in use is refused `409`; its disk alone stops nothing. What is left out stays as it is.
    */
   resize(options?: SandboxResizeOptions): Promise<SandboxResources>
-  /** Delete it: its VM stopped if it is up, and its disk removed. Its volumes stay. */
+  /** Stop it, end its jobs and forget it, with everything it wrote outside its volumes. */
   remove(): Promise<void>
-  /** Deletes it on leaving `await using`, as `remove` does; one deleted already is left so. */
-  [Symbol.asyncDispose](): Promise<void>
 }
 
 /** What `Sandbox.resize` changes; whatever is left out stays as it is. */
@@ -413,12 +404,12 @@ export type PortProtocol = 'tcp' | 'http'
 /** A port opened in a sandbox, and where it is reached from. */
 export interface SandboxPort {
   port: number
-  /** Answered by `createSandbox` alone, as secret as the credentials it carries: absent from a sandbox `getSandbox` or `listSandbox` answers. */
+  /** Answered by `createSandbox` alone, as secret as the credentials it carries: absent from a sandbox `getSandbox`, `findSandbox` or `listSandbox` answers, which a `PortForwarder` refuses. */
   url?: string
   /** What it is for, as it was opened with. */
   label?: string
-  /** Absent for `'tcp'`. */
-  protocol?: PortProtocol
+  /** Absent for `'tcp'`. Any other string is a protocol this version does not know, as the server said it. */
+  protocol?: PortProtocol | (string & {})
   /** A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it one. Not secret, as `url` is: what listens there answers whoever connects. */
   address?: string
   /** Why its inbound rules were not set, from a server that made the port all the same: it lets no one in, and is reached at no `address`, until they are. */
@@ -461,7 +452,7 @@ export interface SandboxCreateOptions {
   ports?: PortSpec[]
   vcpus?: number
   memoryMib?: number
-  /** How much it may write over its image, in GiB, at most 1024. */
+  /** How much it may write over its image, in GiB, at most 1024, which goes with it. */
   diskGib?: number
   gpu?: boolean
   gpuMemoryMib?: number
@@ -481,9 +472,10 @@ export interface SandboxExecOptions {
 /**
  * Why a process did not end by itself: the server, or the kernel, killed it, as `SIGKILL` does,
  * its code `137`. `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it
- * ran, or its sandbox parked under it, its sandbox still there; `sandbox_deleted`, its sandbox was
- * removed under it; `vm_exited`, its sandbox's VM exited on its own under it; `oom`, its memory
- * ran out; `restarted`, its server restarted while it ran, keeping its sandbox.
+ * ran, its sandbox still there; `sandbox_deleted`, its sandbox was removed under it; `vm_exited`,
+ * its sandbox's VM exited on its own under it; `oom`, its memory ran out; `restarted`, its server
+ * restarted while it ran, keeping its sandbox. Any other string is a reason this version does not
+ * know, as the server said it.
  */
 export type SandboxJobEndReason =
   | 'timeout'
@@ -492,6 +484,7 @@ export type SandboxJobEndReason =
   | 'vm_exited'
   | 'oom'
   | 'restarted'
+  | (string & {})
 
 /** What the server answers about a process started in a sandbox. */
 export interface SandboxJobInfo {
@@ -663,7 +656,7 @@ export class Client {
   downloadImage(reference: string, path: string): AsyncGenerator<Event<ImageDownloadOutput, string>>
   /** Upload the image in the OCI image layout archive at `path`, and point the tag `reference` (`name:tag`) at it: the archive's only image, or the one it names by that tag. Its events are a line of log a blob, then what it uploaded. */
   uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
-  /** Delete each image no tag points at and no sandbox stands on, and what only such images held. */
+  /** Delete each image no tag points at and no sandbox uses, and what only such images held. */
   pruneImage(): Promise<ImagePruneOutput>
   /** Every project the client has a role in. */
   listProject(): Promise<Project[]>
@@ -692,11 +685,11 @@ export class Client {
  * and emitted as a process warning of the type `VirtxWarning`.
  */
 export class PortForwarder {
-  /** Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it, over `client`'s session. Given the port, what a connection that fails says names its number. Returns once its local address is open, which takes no request of the server. */
+  /** Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it, over `client`'s session. Given the port, what a connection that fails says names its number. Returns once its local address is open, which takes no request of the server. A port without its `url`, as `getSandbox` answers one, is refused with a `VirtxError` naming it. */
   static open(client: Client, port: SandboxPort | string): PortForwarder
   /** Where the port is reached, as `host:port`. */
   readonly address: string
-  /** Why the last connection to the forwarder that failed did, its message naming the port, with the server's reason for closing it if it gave one; `null` while none has, and again once a later connection's port sends a byte. It is the last failure, not whether the port is reached now. Its `status` and `code` are the server's, where it refused the connection's WebSocket. A server on this machine is reached at its own address, not through the forwarder, so it has none. */
+  /** Why the last connection to the forwarder that failed did, its message naming the port, with the server's reason for closing it if it gave one; `null` while none has, and again once a later connection's port sends a byte. It is the last failure, not whether the port is reached now. Its `status` is the server's, where it refused the connection's WebSocket. A server on this machine is reached at its own address, not through the forwarder, so it has none. */
   readonly lastError: VirtxError | null
   /** The address's host: a loopback IP. */
   readonly host: string

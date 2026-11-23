@@ -1,12 +1,8 @@
-//! The server's routes and loops, for an [`Access`]: the endpoints of the protocol
-//! ([`crate::endpoints`]), each answered from the home its request reaches, the images as an OCI
-//! registry, and each sandbox's ports; and sandboxes reclaimed once unused for long, images
-//! pruned. A server built on this one -- virtx
-//! cloud's node -- gives [`router`] an access of its own, and routes of its own beside these;
-//! the server a config alone makes is [`configured`], which does both.
-//!
-//! A project's images are at `/images/oci/v2/`, as an OCI registry (see
-//! [`virtx_uvm::RegistryServer`]): its own, to whoever reaches the project.
+//! The server's routes, for an [`Access`]: the endpoints of the protocol ([`crate::endpoints`]),
+//! each answered from the home its request reaches, the images as an OCI registry, and each
+//! sandbox's ports. A server built on this one gives [`router`] an authenticator of its own in the
+//! access, and routes of its own beside these; the server a config alone makes is [`configured`],
+//! which does both.
 //!
 //! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
 //! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
@@ -30,20 +26,17 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower_http::cors::CorsLayer;
 
-/// What this binary is spawned with to be a machine.
-pub const MACHINE_SUBCOMMAND: &str = "vm";
-
 /// The WebSocket subprotocol a port's TCP is carried in.
 const TCP_SUBPROTOCOL: &str = "virtx.tcp";
 
 /// How much of a port's TCP one message carries at most.
 const CHUNK: usize = 64 << 10;
 
-/// How often each project's images are pruned, as `POST /images/prune` does.
-const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
+/// What a server's binary is spawned with to be a machine.
+pub const MACHINE_SUBCOMMAND: &str = "vm";
 
-/// How often each home's sandboxes are looked at to be reclaimed, at most.
-const RECLAIM_EVERY: Duration = Duration::from_secs(60);
+/// How often images are pruned.
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// This process become a machine, never to come back, if it was spawned to be one: called
 /// before any runtime is made.
@@ -94,12 +87,9 @@ pub fn projects(access: &Arc<Access>) -> axum::Router {
 /// browser at one of its origins has -- with `own` beside them, routes that take no home and
 /// check for themselves, such as the projects themselves ([`projects`]).
 pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
-    let origins = access.origins().to_vec();
     let registry = format!("{}/v2", access::REGISTRY_PATH);
-    let checked = Arc::clone(&access);
-    let reaching = Arc::clone(&access);
+    let cors = cors(access.origins());
     let reading = Arc::clone(&access);
-
     let images = move |request: axum::extract::Request| {
         let access = Arc::clone(&reading);
         async move {
@@ -114,12 +104,14 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
             }
         }
     };
+    let checked = Arc::clone(&access);
+    let reaching = Arc::clone(&access);
     endpoints::router()
         .layer(axum::middleware::from_fn(
             move |mut request: axum::extract::Request, next: Next| {
-                let access = Arc::clone(&checked);
+                let checked = Arc::clone(&checked);
                 async move {
-                    match access.home(request.headers()).await {
+                    match checked.home(request.headers()).await {
                         Ok((_, home)) => {
                             request.extensions_mut().insert(home);
                             next.run(request).await
@@ -129,6 +121,7 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
                 }
             },
         ))
+        .merge(own)
         .route(&registry, any(images.clone()))
         .route(&format!("{registry}/"), any(images.clone()))
         .route(&format!("{registry}/{{*rest}}"), any(images))
@@ -143,44 +136,19 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
                 },
             ),
         )
-        .merge(own)
-        .layer(cors(&origins))
+        .layer(cors)
 }
 
-/// The loops every server runs: each home's sandboxes reclaimed once unused for
-/// [`reclaim_after`](virtx_uvm::reclaim_after), and the images pruned. (A sandbox's machine is
-/// parked by the sandbox itself.)
-pub fn spawn_loops(access: &Arc<Access>) {
-    let reaping = Arc::clone(access);
-    tokio::spawn(async move {
-        // Once a minute, or as often as reclaiming waits, if that is shorter.
-        let every =
-            virtx_uvm::reclaim_after().map_or(RECLAIM_EVERY, |after| after.min(RECLAIM_EVERY));
-        let mut every = tokio::time::interval(every);
-        loop {
-            every.tick().await;
-            for home in &reaping.homes() {
-                home.reclaim();
-            }
-        }
-    });
-
-    let pruning = Arc::clone(access);
+/// The images of every home `access` has, pruned every hour from now on, as
+/// `POST /images/prune` does.
+pub fn keep_pruned(access: Arc<Access>) {
     tokio::spawn(async move {
         let mut every = tokio::time::interval(PRUNE_EVERY);
         loop {
             every.tick().await;
-            // Each project's own: a store pruned once however many homes share it.
-            let mut stores: Vec<virtx_uvm::ImageStore> = Vec::new();
-            for home in pruning.homes() {
-                if !stores.iter().any(|s| s.root() == home.images().root()) {
-                    stores.push(home.images().clone());
-                }
-            }
-            for images in stores {
-                match tokio::task::spawn_blocking(move || images.prune(endpoints::PRUNE_GRACE))
-                    .await
-                {
+            for home in access.homes() {
+                let pruned = move || home.images().prune(endpoints::PRUNE_GRACE);
+                match tokio::task::spawn_blocking(pruned).await {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => eprintln!("pruning the images: {e}"),
                     Err(e) => eprintln!("pruning the images: {e}"),
@@ -188,11 +156,6 @@ pub fn spawn_loops(access: &Arc<Access>) {
             }
         }
     });
-}
-
-/// Serve `router` at `listen` until interrupted.
-pub async fn run(listen: std::net::SocketAddr, router: axum::Router) -> anyhow::Result<()> {
-    serve(bind(listen).await?, router).await
 }
 
 /// A listener at `listen`, where it says it serves.
@@ -205,12 +168,7 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
 }
 
 /// `router` served on `listener` until this process is asked to stop.
-pub async fn serve(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
-    // Each write sent at once: a job's log ends with two small ones, and Nagle's algorithm
-    // would hold the second for the first's delayed ACK, some 40 ms.
-    let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
-        let _ = tcp.set_nodelay(true);
-    });
+pub async fn run(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
     axum::serve(listener, router)
         .with_graceful_shutdown(interrupted())
         .await?;
@@ -353,7 +311,7 @@ async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
                 reason: close_reason(&e.to_string()).into(),
             };
             let _ = socket.send(Message::Close(Some(frame))).await;
-            return tunnel.refused();
+            return;
         }
     };
     let (mut from, mut to) = reached.split();
@@ -403,7 +361,6 @@ mod tests {
 
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
     use std::sync::{Mutex, OnceLock};
 
     use reqwest::{Method, StatusCode, Url};
@@ -413,12 +370,17 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::VolumeListOutputItem;
-    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs};
+    use virtx_core::{
+        Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
+        SandboxCreateArgs, Step,
+    };
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
         FsTree, ImageStore, ProjectId, PublicRegistries, Reference, RegistryProxy, StorageBackend,
         VolumeStore,
     };
+
+    use std::sync::Arc;
 
     use futures_util::StreamExt as _;
     use futures_util::future::BoxFuture;
@@ -460,20 +422,6 @@ mod tests {
         /// As [`Served::spawn`], its image jobs connecting to registries through `registries`
         /// where given.
         async fn spawn_through(name: &str, registries: Option<Arc<dyn RegistryProxy>>) -> Served {
-            Served::spawn_serving(name, registries, false).await
-        }
-
-        /// As [`Served::spawn`], the projects themselves served too, as the binary serves them.
-        async fn spawn_with_projects(name: &str) -> Served {
-            Served::spawn_serving(name, None, true).await
-        }
-
-        /// As [`Served::spawn_through`], the projects themselves served too if `with_projects`.
-        async fn spawn_serving(
-            name: &str,
-            registries: Option<Arc<dyn RegistryProxy>>,
-            with_projects: bool,
-        ) -> Served {
             Served::spawn_over(name, async |home| {
                 let projects = TcpMembership::new(home);
                 let tester = Principal::new("tester");
@@ -492,11 +440,7 @@ mod tests {
                     access = access.through(registries);
                 }
                 let access = Arc::new(access);
-                let own = match with_projects {
-                    true => super::projects(&access),
-                    false => axum::Router::new(),
-                };
-                super::router(access, own)
+                super::router(Arc::clone(&access), super::projects(&access))
             })
             .await
         }
@@ -595,13 +539,11 @@ mod tests {
         }
     }
 
-    /// The HTTP status a request was refused with, whatever the body it came with.
+    /// The HTTP status a request was refused with.
     fn status<T: std::fmt::Debug>(answered: Result<T, virtx_core::Error>) -> u16 {
         match answered {
-            Err(e) => e
-                .status()
-                .unwrap_or_else(|| panic!("not refused by the server: {e}")),
-            Ok(answer) => panic!("expected a refusal, got {answer:?}"),
+            Err(virtx_core::Error::Status(status, _, _)) => status,
+            other => panic!("expected a status, got {other:?}"),
         }
     }
 
@@ -976,6 +918,40 @@ mod tests {
         .expect("the job went on")
     }
 
+    /// A built image keeps the recipe it was built from in its config, under `RECIPE_LABEL`.
+    /// Steps that boot no machine, so the build runs here.
+    #[tokio::test]
+    async fn a_built_image_keeps_its_recipe() {
+        let served = Served::spawn("build-recipe").await;
+        let client = served.connect();
+        let recipe = Recipe::new("scratch")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let job = client
+            .build_image(recipe.clone(), "built:latest")
+            .await
+            .unwrap();
+        // A guard against a hang, not a measure of anything.
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let job = client.get_image_job(&job.id).await.unwrap();
+                if !job.running {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the build went on");
+        let digest = ended.digest.expect("the build failed");
+
+        let store = ImageStore::new(served.project("demo").await.join("images")).unwrap();
+        let (config, _) = store.get_image(&digest.parse().unwrap()).unwrap().unwrap();
+        let kept =
+            &config.config().as_ref().unwrap().labels().as_ref().unwrap()[virtx_uvm::RECIPE_LABEL];
+        assert_eq!(serde_json::from_str::<Recipe>(kept).unwrap(), recipe);
+    }
+
     /// A server's image jobs are held to registries on public addresses: a pull, a push and a
     /// build's base that name one on this host's loopback each fail saying so, and it is
     /// connected to not at all.
@@ -1275,39 +1251,6 @@ mod tests {
         assert_eq!(error["code"], "invalid", "{error}");
     }
 
-    /// A query that does not read is refused `400` `invalid` in the envelope, naming the
-    /// parameter, what it takes and what was sent.
-    #[tokio::test]
-    async fn a_query_that_does_not_read_is_refused_naming_what_it_takes() {
-        let served = Served::spawn("query").await;
-        for (query, said) in [
-            (
-                "limit=abc",
-                r#"limit: a whole number up to 4294967295, not "abc""#,
-            ),
-            (
-                "limit=-1",
-                r#"limit: a whole number up to 4294967295, not "-1""#,
-            ),
-            (
-                "lmit=3",
-                "lmit: not a parameter; the parameters are after, limit",
-            ),
-            ("limit=1&limit=2", "limit: given twice"),
-        ] {
-            let path = format!("volumes/?{query}");
-            let (status, body) = served.send("GET", &path, Some("demo"), "").await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
-            let body: Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(body["error"]["code"], "invalid", "{query}");
-            assert_eq!(body["error"]["message"], said, "{query}");
-        }
-        let (status, _) = served
-            .send("GET", "volumes/?after=a&limit=2", Some("demo"), "")
-            .await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
     /// A body or a path that does not read is refused `400` `invalid` in the server's words:
     /// the member or segment, what it takes, and what was sent.
     #[tokio::test]
@@ -1552,110 +1495,145 @@ mod tests {
 
         // A port that is none, and a sandbox of an image nobody filed, are refused before it
         // boots.
-        let mut args = SandboxCreateArgs::new("a:b");
-        args.ports = vec![0.into()];
+        let args = SandboxCreateArgs::new("a:b").port(0);
+        assert_eq!(status(client.create_sandbox(&args).await), 400);
+        // So are a port asked for over HTTP, which a port's tunnel here does not serve, and one
+        // with inbound rules, which this server keeps none of.
+        let web = PortSpec::new(5173).protocol(PortProtocol::Http);
+        let args = SandboxCreateArgs::new("a:b").port(web);
+        let refused = client.create_sandbox(&args).await.unwrap_err();
+        assert_eq!(refused.status(), Some(400), "{refused}");
+        assert!(refused.to_string().contains("HTTP"), "{refused}");
+        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
+        let args = SandboxCreateArgs::new("a:b").port(ssh);
         assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);
     }
 
-    /// A stand-in for an embedder's registry proxy, which refuses whatever it is asked, saying so.
-    struct Refusing {
-        url: String,
-    }
-
-    struct RefusingPass {
-        url: String,
-        refused: std::sync::Mutex<bool>,
-    }
-
-    impl virtx_uvm::RegistryProxy for Refusing {
-        fn pass(&self) -> Box<dyn virtx_uvm::ProxyPass> {
-            Box::new(RefusingPass {
-                url: self.url.clone(),
-                refused: std::sync::Mutex::new(false),
-            })
-        }
-    }
-
-    impl virtx_uvm::ProxyPass for RefusingPass {
-        fn url(&self) -> &str {
-            &self.url
-        }
-
-        fn refused(&self) -> Option<virtx_uvm::ProxyRefusal> {
-            let mut refused = self.refused.lock().unwrap();
-            (!std::mem::replace(&mut *refused, true)).then(|| virtx_uvm::ProxyRefusal {
-                host: "the registry".into(),
-                why: "it is not let through".into(),
-            })
-        }
-    }
-
-    /// A server given a registry proxy, as virtx cloud's nodes are: a pull goes through it --
-    /// what it refuses fails saying so -- and connects to the registry itself not at all.
+    /// What a server before this one kept of a project's sandboxes is known again as the project
+    /// is first reached: each sandbox kept, parked or exited as it was, behind the port URLs it
+    /// was made with and answering its ports without them, with its jobs, one that ran then
+    /// ended `restarted`; what no sandbox keeps is deleted. No machine boots for it.
     #[tokio::test]
-    async fn a_server_s_pulls_go_through_its_registry_proxy() {
-        use futures_util::StreamExt as _;
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        use virtx_core::ImageJobEntry;
+    async fn a_project_s_sandboxes_are_kept_across_a_restart() {
+        let served = Served::spawn("kept").await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let jobs = json!([
+            { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
+            { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+        ]);
+        let web = json!({ "port": 8080, "label": "web" });
+        let kept = [
+            (
+                "kept",
+                json!({ capability.clone(): 8080 }),
+                false,
+                jobs,
+                web.clone(),
+            ),
+            ("ended", json!({}), true, json!([]), json!(8080)),
+        ];
+        for (id, keys, exited, jobs, port) in kept {
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let image = json!({ "type": "digest", "digest": digest });
+            let args = json!({ "image": image, "ports": [port] });
+            let record = json!({ "args": args, "keys": keys, "exited": exited, "jobs": jobs });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        // What a making cut short before its record leaves, and a record whose disk is gone.
+        std::fs::write(dir.join("cut.ext4"), b"").unwrap();
+        std::fs::write(dir.join("gone.json"), b"{}").unwrap();
 
-        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", proxy.local_addr().unwrap());
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = proxy.accept().await {
-                let mut head = [0; 1024];
-                let _ = stream.read(&mut head).await;
-                let _ = stream
-                    .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
-                    .await;
-            }
-        });
-        let served =
-            Served::spawn_through("registry-proxy", Some(Arc::new(Refusing { url }))).await;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let client = served.connect();
-
-        let reference = format!("127.0.0.1:{port}/team/app:1");
-        let job = client.pull_image(&reference, None).await.unwrap();
-        let mut log = client.image_job_log(&job.id, None);
-        // A guard against a hang, not a measure of anything.
-        let failed = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-            loop {
-                match log.next().await.unwrap() {
-                    Ok(entry) => assert!(!matches!(entry.entry, ImageJobEntry::End(_))),
-                    Err(failed) => break failed,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        let virtx_core::Error::Job(why) = failed else {
-            panic!("{failed:?}");
-        };
+        let (status, listed) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+        listed.sort_by_key(|sandbox| sandbox["id"].as_str().unwrap().to_owned());
         assert_eq!(
-            why,
-            format!(
-                "{reference}: the registry is not reachable from this server: \
-                 it is not let through"
-            )
+            listed,
+            [
+                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080 }] }),
+                json!({ "id": "kept", "image": digest, "running": true, "ports": [web] }),
+            ]
         );
+        let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let got: Value = serde_json::from_str(&got).unwrap();
+        assert_eq!(got, listed[1]);
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let kept_files =
+            |id: &str| [".ext4", ".ext4.lock", ".json"].map(|end| format!("{id}{end}"));
+        assert_eq!(left, [kept_files("ended"), kept_files("kept")].concat());
+
+        let (status, jobs) = served
+            .send("GET", "sandboxes/kept/jobs/", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let jobs: Value = serde_json::from_str(&jobs).unwrap();
         assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock,
-            "the registry was connected to"
+            jobs,
+            json!([
+                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
+                {
+                    "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"],
+                    "running": false, "code": 137, "reason": "restarted",
+                },
+            ])
+        );
+        let (status, log) = served
+            .send("GET", "sandboxes/kept/jobs/ran/events", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            log,
+            "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
+        );
+
+        // Its port's URL reaches it as it did: parked, no machine runs to reach the port in,
+        // which the close says.
+        let port = served.port_url(&format!("ports/{capability}"));
+        let mut socket = Served::open(&port, Some("virtx.tcp")).await.unwrap();
+        let Some(Ok(tungstenite::Message::Close(Some(frame)))) = socket.next().await else {
+            panic!("the WebSocket was not closed with a reason");
+        };
+        assert!(frame.reason.contains("no machine runs"), "{}", frame.reason);
+
+        let (status, _) = served
+            .send("DELETE", "sandboxes/kept", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            kept_files("kept")
+                .iter()
+                .all(|file| !dir.join(file).exists())
+        );
+        let (status, _) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            Served::open(&port, Some("virtx.tcp")).await.err(),
+            Some(404)
         );
     }
 
     /// A sandbox a server before this one kept that this one cannot know again -- its record
-    /// not read, or its image gone -- is listed, not running, with why in `error`. Every other
-    /// request about it is refused `409` `ended`, and it keeps its project from being removed
-    /// until its `DELETE` removes it, its disk and record with it.
+    /// not read, or its image gone -- is listed, not running, with why in `error`: a record
+    /// that does not read is told by the failure's kind, not by its path. Every other request
+    /// about it is refused `409` `ended`, saying why the same way, and it keeps its project from
+    /// being removed until its `DELETE` removes it, its disk and record with it.
     #[tokio::test]
     async fn a_sandbox_not_known_again_is_listed_with_why_until_its_delete() {
-        let served = Served::spawn_with_projects("unknown").await;
+        let served = Served::spawn("unknown").await;
         let demo = served.project("demo").await;
         let dir = demo.join("sandbox");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1682,13 +1660,16 @@ mod tests {
                 json!({ "id": "unread", "image": "", "running": false }),
             ]
         );
-        for error in errors {
-            let error = error.expect("an error says why");
-            assert!(
-                error.as_str().unwrap().starts_with("not known again"),
-                "{error}"
-            );
-        }
+        let said = |why: &str| {
+            Some(json!(format!(
+                "not known again since its server restarted: {why}"
+            )))
+        };
+        let unread = "the server's files: invalid data";
+        assert_eq!(
+            errors,
+            [said(&format!("no image here is {gone}")), said(unread)]
+        );
         let (status, got) = served
             .send("GET", "sandboxes/unread", Some("demo"), "")
             .await;
@@ -1710,6 +1691,8 @@ mod tests {
             assert_eq!(status, StatusCode::CONFLICT, "{method} {path}");
             let refused: Value = serde_json::from_str(&refused).unwrap();
             assert_eq!(refused["error"]["code"], "ended", "{method} {path}");
+            let message = refused["error"]["message"].as_str().unwrap();
+            assert!(message.ends_with(&format!(": {unread}")), "{message}");
         }
         let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
         assert_eq!(status, StatusCode::CONFLICT, "its sandboxes keep it");
@@ -1732,127 +1715,6 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-    }
-
-    /// A sandbox a server before this one kept is known again with its jobs: each that had
-    /// ended as it ended, and each that ran then ended `restarted`, its log that end alone. No
-    /// machine boots for it.
-    #[tokio::test]
-    async fn a_kept_sandbox_s_jobs_are_known_again_each_that_ran_ended_restarted() {
-        let served = Served::spawn_with_projects("kept-jobs").await;
-        served.file_image("kept:1").await;
-        let demo = served.project("demo").await;
-        let images = ImageStore::new(demo.join("images")).unwrap();
-        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
-        let digest = digest.unwrap().to_string();
-        let dir = demo.join("sandbox");
-        std::fs::create_dir_all(&dir).unwrap();
-        let record = json!({
-            "id": "kept",
-            "image": digest,
-            "args": { "image": { "type": "digest", "digest": digest } },
-            "used": 1_762_300_000,
-            "jobs": [
-                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
-                { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
-            ],
-        });
-        std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
-
-        let (status, jobs) = served
-            .send("GET", "sandboxes/kept/jobs/", Some("demo"), "")
-            .await;
-        assert_eq!(status, StatusCode::OK, "{jobs}");
-        assert_eq!(
-            serde_json::from_str::<Value>(&jobs).unwrap(),
-            json!([
-                { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
-                {
-                    "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"],
-                    "running": false, "code": 137, "reason": "restarted",
-                },
-            ])
-        );
-        let (status, log) = served
-            .send("GET", "sandboxes/kept/jobs/ran/events", Some("demo"), "")
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            log,
-            "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
-        );
-        let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            serde_json::from_str::<Value>(&got).unwrap()["running"],
-            true
-        );
-    }
-
-    /// A home's sandboxes, as a server built on this one reads them for routes of its own: each
-    /// found by its id, and counted with how many have their machine up, none while each is
-    /// parked; one not known again is none of them, and counted apart.
-    #[tokio::test]
-    async fn a_home_s_sandboxes_are_found_and_counted() {
-        let access = Arc::new(OnceLock::new());
-        let kept = Arc::clone(&access);
-        let served = Served::spawn_over("counted", async move |home| {
-            let projects = TcpMembership::new(home);
-            let tester = Principal::new("tester");
-            projects.create(&tester, "demo").await.unwrap();
-            let store = ProjectStore::new(home);
-            let made = Access::new(
-                Vec::new(),
-                Arc::new(Tester),
-                Arc::new(projects),
-                store.clone(),
-                Arc::new(store),
-            );
-            let made = Arc::new(made);
-            let _ = kept.set(Arc::clone(&made));
-            super::router(made, axum::Router::new())
-        })
-        .await;
-        served.file_image("kept:1").await;
-        let demo = served.project("demo").await;
-        let images = ImageStore::new(demo.join("images")).unwrap();
-        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
-        let digest = digest.unwrap().to_string();
-        let dir = demo.join("sandbox");
-        std::fs::create_dir_all(&dir).unwrap();
-        let gone = format!("sha256:{}", "0".repeat(64));
-        for (id, image) in [("a", &digest), ("b", &digest), ("lost", &gone)] {
-            let image = json!({ "type": "digest", "digest": image });
-            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
-            let record = json!({
-                "id": id, "image": image["digest"], "args": { "image": image },
-                "used": 1_762_300_000,
-            });
-            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
-        }
-        let (status, _) = served.send("GET", "sandboxes/", Some("demo"), "").await;
-        assert_eq!(status, StatusCode::OK);
-        let home = access.get().unwrap().homes().pop().unwrap();
-
-        let sandboxes = home.sandboxes();
-        let counts = |known, up, unknown| crate::endpoints::Counts { known, up, unknown };
-        assert_eq!(sandboxes.counts(), counts(2, 0, 1));
-        let mut listed: Vec<_> = sandboxes
-            .list()
-            .iter()
-            .map(|sandbox| sandbox.id().to_owned())
-            .collect();
-        listed.sort();
-        assert_eq!(listed, ["a", "b"]);
-        assert_eq!(sandboxes.get("a").unwrap().id(), "a");
-        assert!(sandboxes.get("lost").is_none(), "not known again");
-        assert!(sandboxes.get("none").is_none());
-        assert!(sandboxes.running_on("a").is_none(), "parked");
-
-        let (status, _) = served.send("DELETE", "sandboxes/b", Some("demo"), "").await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(home.sandboxes().counts(), counts(1, 0, 1));
-        assert!(home.sandboxes().get("b").is_none());
     }
 
     /// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.
@@ -2286,6 +2148,147 @@ mod tests {
         assert_eq!(tagged.map(|image| image.to_string()), Some(digest));
     }
 
+    /// A backend that keeps nothing, whose `want` -- the first wait of a sandbox's making --
+    /// says it was reached in `wanting` and, while `holding`, waits for `go`; and writes the
+    /// record `writes` names, where it names one, as another making under its id would.
+    struct Holding {
+        holding: std::sync::atomic::AtomicBool,
+        wanting: tokio::sync::Semaphore,
+        go: tokio::sync::Semaphore,
+        writes: Mutex<Option<PathBuf>>,
+    }
+
+    impl Default for Holding {
+        fn default() -> Holding {
+            Holding {
+                holding: Default::default(),
+                wanting: tokio::sync::Semaphore::new(0),
+                go: tokio::sync::Semaphore::new(0),
+                writes: Mutex::default(),
+            }
+        }
+    }
+
+    impl StorageBackend for Holding {
+        fn want<'a>(&'a self, _: Wanted<'a>) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                self.wanting.add_permits(1);
+                if self.holding.load(std::sync::atomic::Ordering::SeqCst) {
+                    self.go.acquire().await.unwrap().forget();
+                }
+                if let Some(record) = self.writes.lock().unwrap().take() {
+                    std::fs::write(record, b"{}").unwrap();
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// A sandbox made under an id and keys given it is refused, before its machine boots, an id
+    /// a sandbox here has or one made meanwhile takes, a key one here opens a port by or one
+    /// being made was given, an id that cannot be one and keys that are not one for each port;
+    /// a port over HTTP and with inbound rules is not refused for it. Nothing of it is made,
+    /// and a key a making that failed was given is given back.
+    #[tokio::test]
+    async fn a_sandbox_made_under_an_id_and_keys_given_it_is_refused_only_what_it_cannot_be() {
+        use crate::endpoints::{Given, Home};
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let images = ImageStore::new(root.join("images")).unwrap();
+        let digest = empty_image(&images);
+        images
+            .insert_tag(&"kept:1".parse().unwrap(), &digest)
+            .unwrap();
+        let dir = root.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let image = json!({ "type": "digest", "digest": digest.to_string() });
+        let args = json!({ "image": image, "ports": [8080] });
+        let record = json!({ "args": args, "keys": { capability.clone(): 8080 } });
+        std::fs::write(dir.join("kept.ext4"), b"").unwrap();
+        std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
+        let registry =
+            virtx_uvm::RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH).unwrap();
+        let backend = Arc::new(Holding::default());
+        let home = Home::new(images, Arc::new(registry), root).unwrap();
+        let home = home.backed_by(Arc::clone(&backend) as Arc<dyn StorageBackend>);
+        assert!(home.sandboxes().get("kept").is_some());
+
+        let web = PortSpec::new(8080)
+            .protocol(PortProtocol::Http)
+            .inbound([InboundRule::new("10.0.0.0/8")]);
+        let made = async |image: &str, id: &str, keys: &[(&str, u16)]| {
+            let args = SandboxCreateArgs::new(image).port(web.clone());
+            let keys = keys.iter().map(|(key, port)| (key.to_string(), *port));
+            let given = Given {
+                id: id.to_owned(),
+                keys: keys.collect(),
+            };
+            refused_with(home.make(args, given).await.err().unwrap()).await
+        };
+        let exists = (StatusCode::CONFLICT, "exists".to_owned());
+        assert_eq!(made("kept:1", "kept", &[("k", 8080)]).await, exists);
+        // Taken before its image is looked for.
+        assert_eq!(made("none:1", "kept", &[("k", 8080)]).await, exists);
+        assert_eq!(made("kept:1", "new", &[(&capability, 8080)]).await, exists);
+        let invalid = (StatusCode::BAD_REQUEST, "invalid".to_owned());
+        for id in ["", "../x", "a.b", &"a".repeat(65)] {
+            assert_eq!(made("kept:1", id, &[("k", 8080)]).await, invalid, "{id:?}");
+        }
+        let unkeyed: [&[(&str, u16)]; 7] = [
+            &[],
+            &[("k", 9090)],
+            &[("k", 8080), ("j", 8080)],
+            &[("k", 8080), ("j", 9090)],
+            &[("", 8080)],
+            &[("k-1", 8080)],
+            &[(&"k".repeat(129), 8080)],
+        ];
+        for keys in unkeyed {
+            assert_eq!(made("kept:1", "new", keys).await, invalid, "{keys:?}");
+        }
+        // Past each check of its own, refused for what is not here alone.
+        let missing = (StatusCode::NOT_FOUND, "not_found".to_owned());
+        assert_eq!(made("none:1", "new", &[("k", 8080)]).await, missing);
+
+        // A key one being made was given is taken until its making ends, and then given back.
+        backend
+            .holding
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let first = made("none:1", "first", &[("k", 8080)]);
+        let second = async {
+            backend.wanting.acquire().await.unwrap().forget();
+            // The first held; this one, past `keying`, would not be.
+            backend
+                .holding
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            let second = made("none:1", "second", &[("k", 8080)]).await;
+            backend.go.add_permits(1);
+            second
+        };
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!((first, second), (missing.clone(), exists.clone()));
+        assert_eq!(made("none:1", "second", &[("k", 8080)]).await, missing);
+
+        // An id another making takes after it was looked at is refused as its disk is made.
+        *backend.writes.lock().unwrap() = Some(dir.join("raced.json"));
+        assert_eq!(made("kept:1", "raced", &[("k", 8080)]).await, exists);
+        // What the other making holds, as it would.
+        for left in ["raced.json", "raced.ext4.lock"] {
+            std::fs::remove_file(dir.join(left)).unwrap();
+        }
+
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with("kept."))
+            .collect();
+        left.sort();
+        assert_eq!(left, Vec::<String>::new());
+        assert_eq!(home.sandboxes().list().len(), 1);
+    }
+
     /// A sandbox whose record and disk are put in a home is taken in, its image wanted from the
     /// home's backend: parked, behind its port URLs, and taken in once. Let go of, no request
     /// reaches it, and its record and disk stay for it to be taken in again; in use, it is not
@@ -2329,14 +2332,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let capability = "c".repeat(64);
         let image = json!({ "type": "digest", "digest": digest });
-        let record = json!({
-            "id": "moved",
-            "image": digest,
-            "args": { "image": image, "ports": [8080] },
-            "opened": [{ "port": 8080, "url": format!("ports/{capability}") }],
-            "capabilities": { capability.clone(): 8080 },
-            "used": 1_762_300_000,
-        });
+        let record = json!({ "args": { "image": image, "ports": [8080] }, "keys": { capability.clone(): 8080 } });
         std::fs::write(dir.join("moved.ext4"), b"").unwrap();
         std::fs::write(dir.join("moved.json"), record.to_string()).unwrap();
         let (status, _) = served
@@ -2358,13 +2354,8 @@ mod tests {
             serde_json::from_str::<Value>(&got).unwrap()["image"],
             digest
         );
-        // Parked, no machine runs to reach its port in, which the close says.
         let port = served.port_url(&format!("ports/{capability}"));
-        let mut socket = Served::open(&port, Some("virtx.tcp")).await.unwrap();
-        let Some(Ok(tungstenite::Message::Close(Some(frame)))) = socket.next().await else {
-            panic!("the WebSocket was not closed with a reason");
-        };
-        assert!(frame.reason.contains("no machine runs"), "{}", frame.reason);
+        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
         let again = home.take_in("moved").await.err().unwrap();
         assert_eq!(
             refused_with(again).await,
@@ -2372,6 +2363,18 @@ mod tests {
         );
         let none = home.take_in("none").await.err().unwrap();
         assert_eq!(refused_with(none).await.0, StatusCode::NOT_FOUND);
+        // One whose record does not read is refused as making it is, by the failure's kind.
+        let (disk, unread) = (dir.join("unread.ext4"), dir.join("unread.json"));
+        std::fs::write(&disk, b"").unwrap();
+        std::fs::write(&unread, b"not a record").unwrap();
+        let refused = home.take_in("unread").await.err().unwrap();
+        let refused = axum::response::IntoResponse::into_response(refused);
+        assert_eq!(refused.status().as_u16(), 500);
+        let body = axum::body::to_bytes(refused.into_body(), usize::MAX).await;
+        let body: Value = serde_json::from_slice(&body.unwrap()).unwrap();
+        assert_eq!(body["error"]["message"], "the server's files: invalid data");
+        std::fs::remove_file(disk).unwrap();
+        std::fs::remove_file(unread).unwrap();
 
         // In use, it stays; let go of, it is reached no more, and its record and disk stay.
         let tunnel = home.tunnel(&capability).unwrap();
@@ -2411,5 +2414,68 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert_eq!(*beyond.removed.lock().unwrap(), ["moved"]);
         assert!(!dir.join("moved.ext4").exists() && !dir.join("moved.json").exists());
+    }
+
+    /// A home's sandboxes, as a server built on this one reads them for routes of its own: each
+    /// found by its id, and counted with how many have their machine up, none while each is
+    /// parked; one not known again is none of them, and counted apart.
+    #[tokio::test]
+    async fn a_home_s_sandboxes_are_found_and_counted() {
+        let access = Arc::new(OnceLock::new());
+        let kept = Arc::clone(&access);
+        let served = Served::spawn_over("counted", async move |home| {
+            let projects = TcpMembership::new(home);
+            let tester = Principal::new("tester");
+            projects.create(&tester, "demo").await.unwrap();
+            let store = ProjectStore::new(home);
+            let made = Access::new(
+                Vec::new(),
+                Arc::new(Tester),
+                Arc::new(projects),
+                store.clone(),
+                Arc::new(store),
+            );
+            let made = Arc::new(made);
+            let _ = kept.set(Arc::clone(&made));
+            super::router(made, axum::Router::new())
+        })
+        .await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let digest = digest.unwrap().to_string();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = format!("sha256:{}", "0".repeat(64));
+        for (id, image) in [("a", &digest), ("b", &digest), ("lost", &gone)] {
+            let image = json!({ "type": "digest", "digest": image });
+            std::fs::write(dir.join(format!("{id}.ext4")), b"").unwrap();
+            let record = json!({ "args": { "image": image } });
+            std::fs::write(dir.join(format!("{id}.json")), record.to_string()).unwrap();
+        }
+        let (status, _) = served.send("GET", "sandboxes/", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::OK);
+        let home = access.get().unwrap().homes().pop().unwrap();
+
+        let sandboxes = home.sandboxes();
+        let counts = |known, up, unknown| crate::endpoints::Counts { known, up, unknown };
+        assert_eq!(sandboxes.counts(), counts(2, 0, 1));
+        let mut listed: Vec<_> = sandboxes
+            .list()
+            .iter()
+            .map(|sandbox| sandbox.id().to_owned())
+            .collect();
+        listed.sort();
+        assert_eq!(listed, ["a", "b"]);
+        assert_eq!(sandboxes.get("a").unwrap().id(), "a");
+        assert!(sandboxes.get("lost").is_none(), "not known again");
+        assert!(sandboxes.get("none").is_none());
+        assert!(sandboxes.running_on("a").is_none(), "parked");
+
+        let (status, _) = served.send("DELETE", "sandboxes/b", Some("demo"), "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(home.sandboxes().counts(), counts(1, 0, 1));
+        assert!(home.sandboxes().get("b").is_none());
     }
 }

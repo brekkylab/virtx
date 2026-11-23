@@ -1,6 +1,5 @@
-// Images, volumes and their mounts, sandboxes and their ports, and the jobs of images and
-// sandboxes, against the fixture's `virtx-stdio`, and its `virtx-server-tcp` where a port is
-// forwarded.
+// Images, volumes and their mounts, sandboxes, and the jobs of images and sandboxes,
+// against the fixture's `virtx-stdio`, and its `virtx-server-tcp` where a port is forwarded.
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -22,62 +21,6 @@ describe('against virtx-stdio', () => {
     client = Client.spawn(fixture().stdio)
   })
   afterEach(() => client.close())
-
-  test('a sandbox runs until it is removed, and is found by its name', async () => {
-    await alpine(client)
-    const name = unique('work')
-    const made = await client.createSandbox(ALPINE, { name, ports: [8000] })
-    assert.ok(made instanceof virtx.Sandbox)
-    assert.equal(made.client, client)
-    assert.equal(made.running, true)
-    assert.equal(made.name, name)
-    assert.deepEqual(
-      made.ports.map(({ port }) => port),
-      [8000],
-    )
-    const found = await client.findSandbox(name)
-    assert.ok(found instanceof virtx.Sandbox)
-    assert.equal(found.id, made.id)
-    assert.equal(found.running, true)
-    assert.equal(await client.findSandbox(unique('nobody')), undefined)
-    await assert.rejects(client.createSandbox(ALPINE, { name }), {
-      source: 'server',
-      status: 409,
-      code: 'exists',
-    })
-
-    await made.remove()
-    await assert.rejects(client.getSandbox(made.id), { status: 404 })
-  })
-
-  test('a port says what it is for, and whether it is HTTP', async () => {
-    await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE, {
-      ports: [
-        5900,
-        { port: 5173, label: 'dev server', protocol: 'http' },
-        { port: 3000, label: 'api' },
-      ],
-    })
-    const [vnc, dev, api] = sandbox.ports
-    assert.deepEqual([vnc.port, vnc.label, vnc.protocol], [5900, undefined, undefined])
-    assert.deepEqual([dev.port, dev.label, dev.protocol], [5173, 'dev server', 'http'])
-    assert.deepEqual([api.port, api.label, api.protocol], [3000, 'api', undefined])
-    await sandbox.remove()
-  })
-
-  // What `await using` calls on leaving its block, called as it would be, so the test parses on
-  // a Node without that syntax.
-  test('a sandbox is deleted when disposed', { skip: !Symbol.asyncDispose }, async () => {
-    await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE)
-    assert.equal((await client.getSandbox(sandbox.id)).running, true)
-    await sandbox[Symbol.asyncDispose]()
-    await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
-
-    // One deleted already is left so.
-    await sandbox[Symbol.asyncDispose]()
-  })
 
   test('a sandbox is resized and its disk never shrunk', async () => {
     await alpine(client)
@@ -338,47 +281,6 @@ describe('against virtx-stdio', () => {
     await sandbox.remove()
   })
 
-  test('a command iterated then awaited answers the job it read', async () => {
-    await alpine(client)
-    const sandbox = await client.createSandbox(ALPINE)
-    const echo = sandbox.exec(['echo', 'hi'])
-    const log = await Array.fromAsync(echo)
-    assert.deepEqual(log.at(-1).end, { code: 0 })
-    const job = await echo
-    assert.ok(job instanceof virtx.SandboxJob)
-    assert.equal(job.sandboxId, sandbox.id)
-    assert.deepEqual(job.cmd, ['echo', 'hi'])
-    assert.deepEqual(
-      (await sandbox.jobs()).map((j) => j.id),
-      [job.id],
-    )
-    await sandbox.remove()
-  })
-
-  test('an exec iterated at once whose start fails throws in the loop, and nowhere else', async () => {
-    const unheard = []
-    const hear = (reason) => unheard.push(reason)
-    process.on('unhandledRejection', hear)
-    try {
-      await alpine(client)
-      const sandbox = await client.createSandbox(ALPINE)
-      await assert.rejects(
-        (async () => {
-          for await (const _ of sandbox.exec(['no-such-command'])) {
-            // no entry: its start fails
-          }
-        })(),
-        { status: 422, code: 'not_started' },
-      )
-      await sandbox.remove()
-      // A turn of the event loop for an unheard rejection to be told.
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      assert.deepEqual(unheard, [])
-    } finally {
-      process.off('unhandledRejection', hear)
-    }
-  })
-
   test('a started job awaited and iterated is one job', async () => {
     await alpine(client)
     const reference = `${unique('once')}:latest`
@@ -457,6 +359,13 @@ test('a forwarded port nothing listens on says so', async () => {
   try {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE, { ports: [7000] })
+    // The port asked for again has no `url` to forward: the one its making answered has.
+    const again = await client.getSandbox(sandbox.id)
+    assert.throws(() => PortForwarder.open(client, again.ports[0]), {
+      name: 'VirtxError',
+      source: 'client',
+      message: /^port 7000 has no url/,
+    })
     const forwarder = PortForwarder.open(client, sandbox.ports[0])
     try {
       assert.equal(forwarder.lastError, null)

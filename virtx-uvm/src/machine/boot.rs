@@ -7,7 +7,7 @@
 //!                           the agent mounts over -- left for the overlay before any
 //!                           command runs
 //! virtio-blk /dev/vda       the root filesystem's disk, read-only -- the overlay's lower
-//! virtio-blk /dev/vdb       the snapshot -- the overlay's upper layer
+//! virtio-blk /dev/vdb       the upper disk -- the overlay's upper layer
 //! virtio-con hvc0           the guest's console, into libkrun's log, which goes to ctrlout
 //!            virtx-ctrl     the control channel to the agent, passed on to and from the host
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
@@ -85,8 +85,6 @@ use serde::{Deserialize, Serialize};
 use super::gpu;
 use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
 use super::{Error, MachineConfig, Network, Result, STOP_TIMEOUT, net};
-use crate::fstree::FsTree;
-use crate::snapshot::Snapshot;
 use crate::volume::{Remote, Served};
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
@@ -131,7 +129,7 @@ const ALIB_TAG: &str = "alib";
 const ALIB_HOST: &str = "alib";
 
 /// The log target libkrun gives what the guest's console prints.
-const CONSOLE_TARGET: &str = "init_or_kernel";
+pub(super) const CONSOLE_TARGET: &str = "init_or_kernel";
 
 /// What a machine's process is spawned with, as one argument: the machine, and its ends of
 /// the control channel and the I/O channel.
@@ -194,13 +192,6 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
 pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
-    // Before anything is built, so a machine over a snapshot another one holds is refused
-    // with nothing to undo -- unless whoever started it holds the lock for it.
-    let lock = match machine.snapshot_held {
-        true => None,
-        false => machine.snapshot.as_ref().map(Snapshot::lock).transpose()?,
-    };
-
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
@@ -224,11 +215,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut shares = Vec::new();
     for (dir, at, tag) in [(&abin, ABIN_DIR, ABIN_TAG), (&alib, ALIB_DIR, ALIB_TAG)] {
         let Some(dir) = dir else { continue };
-        let host = utf8(dir)?;
+        let host = utf8(dir, at)?;
         info.shares.push((tag.to_owned(), at.to_owned()));
         shares.push(
             FsDevice::new_read_only(tag, host)
-                .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
+                .map_err(|e| Error::vmm(format!("sharing {at}"), e))?,
         );
     }
     let mut holds = Vec::with_capacity(machine.volumes.len());
@@ -256,7 +247,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         holds.push(volume.hold()?);
         let tag = format!("{MOUNT_TAG}{}", shares.len());
         let files = volume.files();
-        let host = utf8(&files)?;
+        let shared = format!("volume {} at {at}", volume.name());
+        let host = utf8(&files, &shared)?;
         info.shares.push((tag.clone(), at.clone()));
         // Read-only at the device, which is the whole of what `read_only` promises.
         shares.push(
@@ -264,7 +256,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 true => FsDevice::new_read_only(&tag, host),
                 false => FsDevice::new(&tag, host),
             }
-            .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
+            .map_err(|e| Error::vmm(format!("sharing {shared}"), e))?,
         );
         for mount in volume.mounts() {
             let served =
@@ -300,20 +292,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .map(|(port, listener)| Ok((*port, listener.local_addr()?)))
         .collect::<io::Result<_>>()
         .map_err(|e| Error::io("reading where the published ports are", e))?;
-
-    let upper = match &machine.snapshot {
-        Some(snapshot) => snapshot.path.clone(),
-        None => {
-            let path =
-                std::env::temp_dir().join(format!("virtx-uvm-upper-{}.ext4", std::process::id()));
-            let file = File::create(&path).map_err(|e| Error::Io {
-                context: format!("creating {}", path.display()),
-                source: e,
-            })?;
-            FsTree::new().to_ext4(Snapshot::sparse(file), Snapshot::SIZE)?;
-            path
-        }
-    };
 
     // The guest kernel, which libkrun `dlopen`s rather than links.
     let mut payload =
@@ -404,26 +382,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 
     // Read-only at the device and not merely in the guest's mount flags: what is behind
     // it is the layer files, shared with every other root filesystem over them.
-    let rootfs = utf8(&machine.rootfs)?;
+    let rootfs = utf8(&machine.rootfs, "the root's image")?;
     let mut lower = BlockDevice::new("vda", rootfs, DiskFormat::Vmdk)
-        .map_err(|e| Error::vmm(format!("attaching {rootfs}"), e))?;
+        .map_err(|e| Error::vmm("attaching the root's image", e))?;
     lower.set_read_only(true);
 
-    let upper_path = utf8(&upper)?;
+    let upper_path = utf8(&machine.upper, "the upper disk")?;
     // A sandbox's disk as the embedder's disks open it ([`crate::disks`]): read and written
-    // through what they make of it, if anything, rather than as the file is. A build's is its
-    // file.
+    // through what they make of it, if anything, rather than as the file is.
     let opened = match &machine.sandbox_disk {
         Some(disk) => crate::disks::disks()
-            .open(&upper, disk.source.as_deref())
-            .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
+            .open(&machine.upper, disk.source.as_deref())
+            .map_err(|e| Error::io("opening the upper disk", e))?,
         None => None,
     };
     let upper_device = match &opened {
         Some(disk) => BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, disk.storage()),
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
-    .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
+    .map_err(|e| Error::vmm("attaching the upper disk", e))?;
     // Told its machine has booted, as its agent says it is ready.
     let booting = opened.clone();
     if let Some(disk) = opened {
@@ -480,13 +457,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .prefault_memory(prefault_memory())
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
-
-    // The disk is open now, so a temporary one can lose its name and go with the
-    // process. Windows will not remove an open file, and leaves it in the temp directory.
-    #[cfg(unix)]
-    if machine.snapshot.is_none() {
-        let _ = std::fs::remove_file(&upper);
-    }
 
     // The root for the agent to build, then the host's messages on to it, and the agent's back -- `Ready` with where the ports
     // are published, which only this side knows. A host that has closed `ctrlin`, or written
@@ -567,7 +537,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 
     // Held for as long as the machine runs -- which is the rest of the process, whose end is
     // what lets them go.
-    let _held = (lock, holds);
+    let _held = holds;
     vmm.run();
     Err(Error::EventLoop)
 }
@@ -584,11 +554,7 @@ pub(super) unsafe fn hold(ctrlin: u64, ctrlout: u64) -> File {
     let (ctrlin, ctrlout) = unsafe { (from_raw(ctrlin), from_raw(ctrlout)) };
     let _ = CTRLOUT.set(Mutex::new(ctrlout));
     if log::set_logger(&Logger).is_ok() {
-        // Everything with `VIRTX_MACHINE_LOG` set, as its host says everything then too.
-        log::set_max_level(match std::env::var_os("VIRTX_MACHINE_LOG") {
-            Some(_) => log::LevelFilter::Debug,
-            None => log::LevelFilter::Warn,
-        });
+        log::set_max_level(log::LevelFilter::Warn);
     }
     ctrlin
 }
@@ -633,7 +599,7 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
-        let message = format!("{}: {}", record.target(), record.args());
+        let message = record.args().to_string();
         // A terminal ends its lines with `\r\n`, and libkrun takes off only the `\n`.
         let message = match record.target() {
             CONSOLE_TARGET => message.trim_end_matches('\r').to_string(),
@@ -641,6 +607,7 @@ impl log::Log for Logger {
         };
         let _ = send(&CtrlResp::Log {
             level: record.level().to_string(),
+            target: record.target().to_string(),
             message,
         });
     }
@@ -668,14 +635,12 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
     Ok(published)
 }
 
-/// A path as libkrun takes it, which is a `&str`. Refused rather than lossily converted: a
-/// name with a replacement character in it opens some other file or none.
-fn utf8(path: &Path) -> Result<&str> {
+/// The path of `what`, such as `/abin`, as libkrun takes it, which is a `&str`. Refused rather
+/// than lossily converted: a name with a replacement character in it opens some other file or
+/// none.
+fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| Error::Io {
-        context: format!(
-            "{} is not valid UTF-8, which libkrun cannot name",
-            path.display()
-        ),
+        context: format!("the path of {what} is not valid UTF-8, which libkrun cannot name"),
         source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
     })
 }

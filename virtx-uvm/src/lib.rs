@@ -1,8 +1,9 @@
-//! Images, the machines provisioned from them, and the snapshots and registries around
-//! them, and the volumes mounted into them; the sandboxes a server makes of those, and the jobs
-//! run in each -- and the files of a snapshot, a volume or a sandbox, served to a client; and
-//! where a project's data is kept beyond this machine, if anywhere ([`StorageBackend`]). How
-//! many machines may run at once is the embedder's to say ([`Admission`]).
+//! Images, the machines provisioned from them, and the registries around them, and the
+//! volumes mounted into them; the sandboxes a server makes of those, and the jobs run in each
+//! -- and the files of a volume or a sandbox, served to a client; and the projects all of it
+//! belongs to; and where a project's data is kept beyond this machine, if anywhere
+//! ([`StorageBackend`]). How many machines may run at once is the embedder's to say
+//! ([`Admission`]).
 
 mod admission;
 pub mod backend;
@@ -12,8 +13,7 @@ mod fstree;
 mod image;
 mod machine;
 mod project;
-pub mod sandbox;
-mod snapshot;
+mod sandbox;
 mod volume;
 
 pub use admission::{Admission, NoRoom, Room, admit, set_admission};
@@ -21,7 +21,7 @@ pub use backend::StorageBackend;
 pub use files::Files;
 pub use fstree::*;
 pub use image::{
-    image_build::{Error as BuildError, RECIPE_LABEL, build_step, history_kept, recipe_kept},
+    image_build::{Error as BuildError, RECIPE_LABEL, build_step, recipe_kept},
     registry_client::{
         Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
         RegistryProxy,
@@ -44,11 +44,9 @@ pub use project::{
 };
 pub use sandbox::runs;
 pub use sandbox::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob,
-    LOG_LIMIT, Sandbox, Sandboxes, park_after, reclaim_after, signal_number,
-};
-pub use snapshot::{
-    Error as SnapshotError, Lock as SnapshotLock, Snapshot, Store as SnapshotStore,
+    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
+    Job as SandboxJob, KEEP_ENDED, Kept as KeptSandboxes, LOG_LIMIT, Sandbox,
+    Unknown as UnknownSandbox, park_after, signal_number,
 };
 pub use volume::{
     Dirent, DirentKind, Error as VolumeError, GDRIVE_ORIGINS_ENV, Gdrive, GdriveConfig,
@@ -57,7 +55,36 @@ pub use volume::{
     Store as VolumeStore, Volume,
 };
 
-/// Whether `name` can name a snapshot, a volume or anything else kept under a name: letters,
+/// Whether a server's answers name this host's paths, which an account of a failure on its
+/// files does, as `reading /home/virtx/project/a/volume/v/mounts.json: …` does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostPaths {
+    /// Not named, for a caller elsewhere: such a failure is told by its kind, and its account
+    /// is written to this process's stderr.
+    #[default]
+    Hidden,
+    /// Named, for a caller on this host, as `virtx-stdio`'s is: such a failure is told as its
+    /// account says it.
+    Named,
+}
+
+impl HostPaths {
+    /// What an answer says of an operation on this host's files that failed with an error of
+    /// `kind`, `account` saying which and how. Answered even when stderr cannot take the
+    /// account, as on a disk that is full.
+    pub fn told(self, kind: std::io::ErrorKind, account: impl std::fmt::Display) -> String {
+        match self {
+            HostPaths::Hidden => {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(), "{account}");
+                format!("the server's files: {kind}")
+            }
+            HostPaths::Named => account.to_string(),
+        }
+    }
+}
+
+/// Whether `name` can name a volume or anything else kept under a name: letters,
 /// digits, `.`, `_` and `-`, not starting with `.` or `-`, and at most 128 bytes, since it
 /// becomes a file name.
 pub fn is_name(name: &str) -> bool {

@@ -7,8 +7,7 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use super::provider::{self, Asked, Provider, Tokens};
-use super::session::{self, Kept, Session, SignIn, SignedIn};
-use crate::cli::cloud::{self, CloudArgs, CloudCommand, DOMAIN};
+use super::session::{self, Kept, Session, SignIn};
 
 /// How long an ID token kept has to have left to be given again: more than the minute before
 /// it runs out in which an SDK asks for another.
@@ -52,32 +51,16 @@ pub(in crate::cli) enum SignInCommand {
     Logout,
 }
 
-/// Run `command`, and answer its exit code: of `provider` where one is named -- by its issuer
-/// and client, or the server `login` is given -- of virtx cloud where `cloud` names its domain,
-/// and otherwise of what was signed in to last, virtx cloud where nothing was. A provider's HTTP
-/// blocks, so it runs on no runtime's thread; virtx cloud's runs on one of its own.
-pub(in crate::cli) fn run(
-    provider: &ProviderArgs,
-    cloud: &CloudArgs,
-    command: SignInCommand,
-) -> u8 {
+/// Run `command` of `provider`, and answer its exit code. Its HTTP blocks, so it runs on no
+/// runtime's thread.
+pub(in crate::cli) fn run(provider: &ProviderArgs, command: SignInCommand) -> u8 {
     let run = || {
         let dir = session::dir()?;
         let server = match &command {
             SignInCommand::Login { url, .. } => url.as_deref(),
             _ => None,
         };
-        let sign_in = match sign_in(provider, server, cloud.domain.is_some(), &dir)? {
-            Of::Provider(sign_in) => sign_in,
-            Of::Cloud(kept) => {
-                let domain = cloud
-                    .domain
-                    .clone()
-                    .or(kept)
-                    .unwrap_or_else(|| DOMAIN.into());
-                return of_cloud(&domain, command);
-            }
-        };
+        let sign_in = sign_in(provider, server, &dir)?;
         let refused = std::env::var_os("VIRTX_TOKEN_REFUSED").is_some();
         match command {
             SignInCommand::Login { scope, .. } => login(&dir, &sign_in, &scope, open),
@@ -112,55 +95,24 @@ pub(in crate::cli) fn run(
     }
 }
 
-/// What a command of signing in is of: a provider, or virtx cloud, at the domain last signed in
-/// to if it was.
-enum Of {
-    Provider(SignIn),
-    Cloud(Option<String>),
-}
-
-/// The provider `provider` names, or else the one `server` says to sign in to; or else virtx
-/// cloud, where `cloud` names it; or else what was signed in to last, and virtx cloud where
-/// nothing was.
-fn sign_in(
-    provider: &ProviderArgs,
-    server: Option<&str>,
-    cloud: bool,
-    dir: &Path,
-) -> anyhow::Result<Of> {
+/// The provider `provider` names, or else the one `server` says to sign in to, or else the one
+/// last signed in to.
+fn sign_in(provider: &ProviderArgs, server: Option<&str>, dir: &Path) -> anyhow::Result<SignIn> {
     let (issuer, client_id) = match (&provider.issuer, &provider.client_id, server) {
         (Some(issuer), Some(client_id), _) => (issuer.clone(), client_id.clone()),
         (None, None, Some(server)) => provider::advertised(server)?
             .with_context(|| format!("{server} names no provider to sign in to"))?,
-        (None, None, None) if cloud => return Ok(Of::Cloud(None)),
         (None, None, None) => {
-            return Ok(match session::signed_in(dir) {
-                Some(SignedIn::Provider(sign_in)) => Of::Provider(sign_in),
-                Some(SignedIn::Cloud { domain }) => Of::Cloud(Some(domain)),
-                None => Of::Cloud(None),
-            });
+            return session::signed_in(dir)
+                .context("not signed in; run virtx login <the server's URL>");
         }
         _ => bail!("a provider is named by both --issuer and --client-id"),
     };
-    Ok(Of::Provider(SignIn {
+    Ok(SignIn {
         issuer,
         client_id,
         client_secret: provider.client_secret.clone(),
-    }))
-}
-
-/// `command` of virtx cloud at `domain`, on a runtime of its own.
-fn of_cloud(domain: &str, command: SignInCommand) -> anyhow::Result<()> {
-    let command = match command {
-        SignInCommand::Login { .. } => CloudCommand::Login,
-        SignInCommand::Token { json } => CloudCommand::Token { json },
-        SignInCommand::Whoami => CloudCommand::Whoami,
-        SignInCommand::Logout => CloudCommand::Logout,
-    };
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(cloud::run(domain, command))
+    })
 }
 
 fn now() -> u64 {
@@ -338,10 +290,7 @@ mod tests {
         login(&dir, &sign_in, "openid", open).unwrap();
         // The page the provider answered, a web page.
         assert_eq!(opened, Some(format!("{}/approve", sign_in.issuer)));
-        let Some(SignedIn::Provider(signed_in)) = session::signed_in(&dir) else {
-            panic!("the provider is not kept as signed in to");
-        };
-        assert_eq!(signed_in.issuer, sign_in.issuer);
+        assert_eq!(session::signed_in(&dir).unwrap().issuer, sign_in.issuer);
 
         // The one signing in issued has a minute left: refreshed, and the one after it kept.
         let first = token(&dir, &sign_in, false).unwrap();
@@ -441,59 +390,5 @@ mod tests {
         let ended = token(&dir, &sign_in, false).err().unwrap();
         assert!(ended.to_string().contains("the session has ended"));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// What `argv` is of, with `kept` as what was signed in to last: a provider's issuer, or
-    /// virtx cloud's domain if it was kept, `None` for virtx cloud's where none was.
-    fn of(argv: &[&str], kept: Option<&str>) -> Result<String, Option<String>> {
-        let dir = std::env::temp_dir().join(format!(
-            "virtx-cli-of-{}-{}",
-            std::process::id(),
-            argv.join("-").replace('/', "_")
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        if let Some(kept) = kept {
-            std::fs::write(dir.join("signed-in.json"), kept).unwrap();
-        }
-        let Ok(crate::cli::command::Asked::SignIn(provider, cloud, command)) =
-            crate::cli::command::parse(argv.iter().copied())
-        else {
-            panic!("{argv:?} is no command of signing in");
-        };
-        let server = match &command {
-            SignInCommand::Login { url, .. } => url.as_deref(),
-            _ => None,
-        };
-        let of = sign_in(&provider, server, cloud.domain.is_some(), &dir).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        match of {
-            Of::Provider(sign_in) => Ok(sign_in.issuer),
-            Of::Cloud(domain) => Err(domain),
-        }
-    }
-
-    #[test]
-    fn a_command_is_of_what_it_names_or_else_of_what_was_signed_in_to_last_or_else_virtx_cloud() {
-        let provider = r#"{"issuer": "https://idp.invalid", "client_id": "virtx"}"#;
-        // As `cloud.rs` keeps virtx cloud's.
-        let cloud = r#"{"domain": "dev.virtx.sh"}"#;
-        let named = [
-            "virtx",
-            "token",
-            "--issuer",
-            "https://other.invalid",
-            "--client-id",
-            "c",
-        ];
-        assert_eq!(of(&named, Some(cloud)), Ok("https://other.invalid".into()));
-        let domain = ["virtx", "whoami", "--domain", "x.invalid"];
-        assert_eq!(of(&domain, Some(provider)), Err(None));
-        for command in ["login", "token", "whoami", "logout"] {
-            let argv = ["virtx", command];
-            assert_eq!(of(&argv, Some(provider)), Ok("https://idp.invalid".into()));
-            assert_eq!(of(&argv, Some(cloud)), Err(Some("dev.virtx.sh".into())));
-            assert_eq!(of(&argv, None), Err(None));
-        }
     }
 }

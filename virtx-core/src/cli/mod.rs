@@ -1,6 +1,5 @@
 //! `virtx`: build, list, tag, move and remove a virtx server's images from a shell, and sign in
-//! for the SDKs to use: to a server's OpenID Connect provider (`sign_in`), or to virtx cloud
-//! (`cloud.rs`).
+//! to a server's OpenID Connect provider for the SDKs to use (`sign_in`).
 //!
 //! The spelling follows `docker`'s, in both of its forms: `virtx image <command>`, and the
 //! top-level `build`, `images`, `inspect`, `rmi`, `pull`, `push`, `tag`, `save` and `load`,
@@ -14,7 +13,6 @@
 //! names an image; each command's arguments and handler are in the file of its name.
 
 mod build;
-mod cloud;
 mod command;
 mod inspect;
 mod job;
@@ -40,9 +38,7 @@ pub fn main(argv: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> u8 {
     let (server, command) = match command::parse(argv) {
         Ok(command::Asked::Images(server, command)) => (server, command),
         // Signing in blocks on its own HTTP, which a runtime's thread may not.
-        Ok(command::Asked::SignIn(provider, cloud, command)) => {
-            return sign_in::run(&provider, &cloud, command);
-        }
+        Ok(command::Asked::SignIn(provider, command)) => return sign_in::run(&provider, command),
         Err(code) => return code,
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()

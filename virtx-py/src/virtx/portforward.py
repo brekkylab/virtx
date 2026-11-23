@@ -54,9 +54,9 @@ class PortForwarder:
     def last_error(self) -> VirtxError | None:
         """Why the last connection to the forwarder that failed did, its message naming the port,
         with the server's reason for closing it if it gave one; ``None`` while none has, and again
-        once a later connection's port sends a byte. ``status`` and ``code`` are the server's,
-        where it refused the connection's WebSocket. A server on this machine is reached at its
-        own address, not through the forwarder, so it has none."""
+        once a later connection's port sends a byte. ``status`` is the server's, where it refused
+        the connection's WebSocket. A server on this machine is reached at its own address, not
+        through the forwarder, so it has none."""
         if self._raw is None:
             raise VirtxError("the forwarder is closed")
         out = _Bytes()

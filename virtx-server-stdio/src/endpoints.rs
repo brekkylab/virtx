@@ -38,7 +38,7 @@ use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
     ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project,
     ProjectError, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError,
-    VolumeStore, build_step, park_after, recipe_kept, signal_number,
+    VolumeStore, based_on, build_step, park_after, signal_number,
 };
 
 use crate::Host;
@@ -545,7 +545,6 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                 )
                 .await?;
             }
-            recipe_kept(&mut image, &recipe);
             let digest =
                 tokio::task::spawn_blocking(move || images.insert_image(&image, &layers)).await??;
             Ok(digest)
@@ -556,6 +555,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
 /// pulled into the store now, anonymously, and left untagged: a build tags only what it builds.
+/// Its config names it as what the build is based on ([`based_on`]).
 async fn base(
     images: &ImageStore,
     base: &str,
@@ -577,9 +577,10 @@ async fn base(
         }
     };
     let held = images.hold_image(&image)?;
-    let (config, layers) = images
+    let (mut config, layers) = images
         .get_image(&image)?
-        .ok_or(ImageStoreError::Missing(image))?;
+        .ok_or_else(|| ImageStoreError::Missing(image.clone()))?;
+    based_on(&mut config, base, &image);
     Ok((config, layers, Some(held)))
 }
 

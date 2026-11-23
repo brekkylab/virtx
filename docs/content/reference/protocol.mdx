@@ -240,7 +240,7 @@ A server MAY refuse to connect to a registry, or to a host that registry sends i
 The job then fails, its `error` naming the host.
 
 A build builds an image from `recipe` into the server's images and tags it `reference`, as a push of it would.
-The image's config keeps `recipe`, as its JSON, in the label `sh.virtx.recipe`.
+The image's history keeps each step as its Dockerfile instruction, in `created_by`; its config's labels `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` name its base as `recipe` does and by the base's digest on the server, in place of any the base had. A build keeps no time in the image, so the same recipe over the same base builds the same image.
 
 Cancelling one stops it:
 

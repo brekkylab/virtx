@@ -12,8 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oci_spec::image::{Digest, ImageConfiguration};
-use virtx_core::{Recipe, Step};
+use oci_spec::image::{
+    ANNOTATION_BASE_IMAGE_DIGEST, ANNOTATION_BASE_IMAGE_NAME, Digest, HistoryBuilder,
+    ImageConfiguration,
+};
+use virtx_core::Step;
 
 use super::store::{self, Store};
 use crate::fstree::{self, FsTree};
@@ -49,17 +52,14 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The label a built image keeps the recipe it was built from under, as its JSON.
-pub const RECIPE_LABEL: &str = "sh.virtx.recipe";
-
-/// `recipe` kept in the config of `image`, built from it: under [`RECIPE_LABEL`].
-pub fn recipe_kept(image: &mut ImageConfiguration, recipe: &Recipe) {
+/// `image` marked as built on the image `name` -- the reference a recipe names it by -- which
+/// is `digest` in the store it was built in: under the OCI's `base.name` and `base.digest`
+/// labels, in place of any its base had.
+pub fn based_on(image: &mut ImageConfiguration, name: &str, digest: &Digest) {
     let mut config = image.config().clone().unwrap_or_default();
     let mut labels = config.labels().clone().unwrap_or_default();
-    labels.insert(
-        RECIPE_LABEL.into(),
-        serde_json::to_string(recipe).expect("a recipe serializes"),
-    );
+    labels.insert(ANNOTATION_BASE_IMAGE_NAME.into(), name.into());
+    labels.insert(ANNOTATION_BASE_IMAGE_DIGEST.into(), digest.to_string());
     config.set_labels(Some(labels));
     image.set_config(Some(config));
 }
@@ -72,7 +72,43 @@ pub fn recipe_kept(image: &mut ImageConfiguration, recipe: &Recipe) {
 /// not there -- and in a machine as `spec` says, spawned as `vm` (see [`Machine::start`]).
 /// Each line it writes goes to `report`. One that exits with anything but 0 is
 /// [`Error::Failed`], and changes nothing.
+///
+/// The step is kept in the image's history, as `docker history` reads it: its instruction as
+/// `created_by`, and whether it added a layer. Not where the history did not already tell each
+/// layer apart -- a base that kept none -- as it would then name the wrong ones. No time is
+/// kept, so the same steps over the same base make the same image.
 pub async fn build_step(
+    store: &Store,
+    image: &mut ImageConfiguration,
+    layers: &mut Vec<Digest>,
+    step: &Step,
+    vm: &[OsString],
+    spec: &MachineSpec,
+    report: impl FnMut(String) + Send,
+) -> Result<()> {
+    let before = layers.len();
+    step_further(store, image, layers, step, vm, spec, report).await?;
+    let layered = layers.len() > before;
+    let mut history = image.history().clone().unwrap_or_default();
+    let told = history
+        .iter()
+        .filter(|h| !h.empty_layer().unwrap_or(false))
+        .count();
+    if told + usize::from(layered) == layers.len() {
+        history.push(
+            HistoryBuilder::default()
+                .created_by(step.to_string())
+                .comment("virtx")
+                .empty_layer(!layered)
+                .build()
+                .expect("every field is optional"),
+        );
+        image.set_history(Some(history));
+    }
+    Ok(())
+}
+
+async fn step_further(
     store: &Store,
     image: &mut ImageConfiguration,
     layers: &mut Vec<Digest>,

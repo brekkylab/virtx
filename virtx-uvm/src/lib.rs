@@ -21,7 +21,7 @@ pub use backend::StorageBackend;
 pub use files::Files;
 pub use fstree::*;
 pub use image::{
-    image_build::{Error as BuildError, RECIPE_LABEL, build_step, recipe_kept},
+    image_build::{Error as BuildError, based_on, build_step},
     registry_client::{
         Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
         RegistryProxy,
@@ -36,6 +36,8 @@ pub use machine::{
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;
+/// The labels a built image names its base by: see [`based_on`].
+pub use oci_spec::image::{ANNOTATION_BASE_IMAGE_DIGEST, ANNOTATION_BASE_IMAGE_NAME};
 /// An image's config, and the OS it says it is for.
 pub use oci_spec::image::{ImageConfiguration, Os};
 pub use project::{

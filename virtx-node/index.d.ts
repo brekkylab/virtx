@@ -408,8 +408,8 @@ export interface SandboxPort {
   url?: string
   /** What it is for, as it was opened with. */
   label?: string
-  /** Absent for `'tcp'`. */
-  protocol?: PortProtocol
+  /** Absent for `'tcp'`. Any other string is a protocol this version does not know, as the server said it. */
+  protocol?: PortProtocol | (string & {})
   /** A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it one. Not secret, as `url` is: what listens there answers whoever connects. */
   address?: string
   /** Why its inbound rules were not set, from a server that made the port all the same: it lets no one in, and is reached at no `address`, until they are. */
@@ -474,7 +474,8 @@ export interface SandboxExecOptions {
  * its code `137`. `timeout`, its `timeoutMs` ran out; `cancelled`, its job was removed while it
  * ran, its sandbox still there; `sandbox_deleted`, its sandbox was removed under it; `vm_exited`,
  * its sandbox's VM exited on its own under it; `oom`, its memory ran out; `restarted`, its server
- * restarted while it ran, keeping its sandbox.
+ * restarted while it ran, keeping its sandbox. Any other string is a reason this version does not
+ * know, as the server said it.
  */
 export type SandboxJobEndReason =
   | 'timeout'
@@ -483,6 +484,7 @@ export type SandboxJobEndReason =
   | 'vm_exited'
   | 'oom'
   | 'restarted'
+  | (string & {})
 
 /** What the server answers about a process started in a sandbox. */
 export interface SandboxJobInfo {

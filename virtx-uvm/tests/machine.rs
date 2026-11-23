@@ -487,7 +487,7 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
 
     // Parked, what it took is let go of.
     let let_go = [format!("let go {disk}"), "let go Volume(\"rw\")".into()];
-    until("parked", || !told.said.lock().unwrap().is_empty()).await;
+    until("parked", || sandbox.up_since().is_none()).await;
     assert_eq!(told.read(), let_go);
 
     // Refused its disk, it does not boot; let, it does.

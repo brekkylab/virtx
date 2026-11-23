@@ -77,11 +77,14 @@ pub enum Refusal {
 /// project is removed, and a sandbox's disk let go of here and taken in nowhere else.
 pub trait StorageBackend: Send + Sync {
     /// `what` was just made here, `size` bytes -- the size a disk is made with; `0` for a volume,
-    /// which grows with its files -- before anything is written to it: kept from now on.
-    /// Refused [`Exists`](Refusal::Exists) where one of its name is kept already; what was made
-    /// here is then removed.
+    /// which grows with its files: kept from now on. A volume is asked before anything is
+    /// written to it. Refused [`Exists`](Refusal::Exists) where one of its name is kept already;
+    /// what was made here is then removed.
     ///
-    /// Asked once for a disk, as it is made. One [resized](crate::Sandbox::resize) larger is
+    /// Asked once for a disk, as it is made, and while its machine first boots: the disk is
+    /// [taken](Self::take) before this has answered, and the backend takes it as its own then,
+    /// with nothing to bring up. Refused, the machine is stopped and the sandbox is not made.
+    /// One [resized](crate::Sandbox::resize) larger is
     /// grown past `size` as its machine boots, while it is [taken](Self::take), and is kept
     /// larger once the machine is down, with no call to the backend to say so. The
     /// [`Disks`](crate::disks::Disks) an embedder [sets](crate::disks::set_disks) are asked

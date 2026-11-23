@@ -592,6 +592,84 @@ impl StorageBackend for Told {
     }
 }
 
+/// A backend that keeps a disk only once it has been taken, as one whose record of a disk goes
+/// over the network while its machine boots; or that refuses it, after it was taken.
+#[derive(Default)]
+struct KeptOnceTaken {
+    taken: tokio::sync::Notify,
+    refusing: bool,
+}
+
+impl StorageBackend for KeptOnceTaken {
+    fn made<'a>(&'a self, what: Stored<'a>, _: u64) -> BoxFuture<'a, Result<(), Refusal>> {
+        Box::pin(async move {
+            self.taken.notified().await;
+            match self.refusing {
+                true => Err(Refusal::Exists(format!("{what:?} is kept already"))),
+                false => Ok(()),
+            }
+        })
+    }
+
+    fn take<'a>(&'a self, _: Stored<'a>) -> BoxFuture<'a, Result<Held, Refusal>> {
+        self.taken.notify_one();
+        Box::pin(async { Ok(Box::new(()) as Held) })
+    }
+}
+
+/// A sandbox's machine boots while its backend keeps its disk, the one not waiting on the
+/// other, and it is made once both are done.
+async fn a_sandbox_boots_while_its_backend_keeps_its_disk(home: Home) {
+    let backing = Backing::default();
+    assert!(backing.set(Arc::new(KeptOnceTaken::default()) as Arc<dyn StorageBackend>));
+    let args = small();
+    let made = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm(),
+        None,
+        None,
+        Some(HashMap::new()),
+        &backing,
+    );
+    let sandbox = tokio::time::timeout(HANG, made).await;
+    let sandbox = sandbox.expect("booted before its disk was kept").unwrap();
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+    close(sandbox).await;
+}
+
+/// A disk its backend refuses to keep once its machine has booted leaves nothing: the sandbox
+/// is not made.
+async fn a_sandbox_whose_disk_is_refused_as_it_boots_leaves_nothing(home: Home) {
+    let backing = Backing::default();
+    let refusing = KeptOnceTaken {
+        refusing: true,
+        ..KeptOnceTaken::default()
+    };
+    assert!(backing.set(Arc::new(refusing) as Arc<dyn StorageBackend>));
+    let args = small();
+    let made = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm(),
+        None,
+        None,
+        Some(HashMap::new()),
+        &backing,
+    );
+    let refused = tokio::time::timeout(HANG, made).await.expect("answered");
+    assert!(
+        matches!(refused, Err(SandboxError::Backend(Refusal::Exists(_)))),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(home.left(), Vec::<String>::new());
+}
+
 /// What a backend is asked as a sandbox is made, booted, parked, let go of and taken in again
 /// over it: its image wanted, its volumes brought up, and its disk made there; its disk and the
 /// volume it writes taken as its machine boots, and let go of once it is parked, the one it
@@ -3021,6 +3099,8 @@ fn main() -> ExitCode {
         a_kept_sandbox_whose_making_is_cut_short_leaves_nothing,
         a_sandbox_is_made_under_an_id_given_it,
         a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs,
+        a_sandbox_boots_while_its_backend_keeps_its_disk,
+        a_sandbox_whose_disk_is_refused_as_it_boots_leaves_nothing,
         a_machine_that_did_not_start_tells_why_without_this_host_s_paths,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,

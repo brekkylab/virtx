@@ -423,15 +423,16 @@ impl Sandbox {
             )
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
-        if let Some(backend) = backend {
-            let size = u64::from(args.disk_gib.unwrap_or(DEFAULT_DISK_GIB)) << 30;
-            if let Err(e) = backend.made(Stored::Disk(&sandbox.id), size).await {
-                let closed = Arc::clone(&sandbox);
-                tokio::task::spawn_blocking(move || closed.close()).await?;
-                return Err(e.into());
+        // Its disk kept by the backend while its machine boots, the one not waiting on the
+        // other: answered once both are done.
+        let size = u64::from(args.disk_gib.unwrap_or(DEFAULT_DISK_GIB)) << 30;
+        let kept = async {
+            match backend {
+                Some(backend) => backend.made(Stored::Disk(&sandbox.id), size).await,
+                None => Ok(()),
             }
-        }
-        let made = async {
+        };
+        let booted = async {
             sandbox.wake_in(Some(room)).await?;
             match keys {
                 Some(keys) => sandbox.keep(Record {
@@ -443,13 +444,16 @@ impl Sandbox {
                 None => Ok(()),
             }
         };
-        if let Err(e) = made.await {
+        let (kept, booted) = tokio::join!(kept, booted);
+        if kept.is_err() || booted.is_err() {
             let closed = Arc::clone(&sandbox);
             tokio::task::spawn_blocking(move || closed.close()).await?;
+            // Refused by the backend, its disk is not kept there; kept, it is removed again.
+            kept?;
             if let Some(backend) = backend {
                 let _ = backend.remove(Stored::Disk(&sandbox.id)).await;
             }
-            return Err(e);
+            booted?;
         }
         Ok(sandbox)
     }

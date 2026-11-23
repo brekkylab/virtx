@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.25", "hatch-fancy-pypi-readme>=24"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=80", "setuptools-rust>=1.13"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "virtx"
 version = "0.2.1"
-# The repository's README, which lies outside this directory: hatchling reads it only as a hook's.
-dynamic = ["readme"]
+# The repository's README, linked here: setuptools reads nothing outside this directory.
+readme = "README.md"
 description = "A virtx client for Python, over libvirtx_core's C ABI."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -25,8 +25,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 # What crosses the C ABI is JSON, and the C ABI itself is reached with ctypes, so the package
-# depends on nothing and has no extension module of its own: a wheel is the Python files and
-# `libvirtx_core` for its platform, which `hatch_build.py` puts in `src/virtx/` beside them.
+# depends on nothing: a wheel is the Python files and `libvirtx_core` for its platform.
 dependencies = []
 
 [project.urls]
@@ -36,10 +35,6 @@ Repository = "https://github.com/brekkylab/virtx"
 Issues = "https://github.com/brekkylab/virtx/issues"
 Changelog = "https://github.com/brekkylab/virtx/releases"
 
-[tool.hatch.metadata.hooks.fancy-pypi-readme]
-content-type = "text/markdown"
-fragments = [{ path = "../README.md" }]
-
 [project.scripts]
 # `libvirtx_core`'s `virtx` command, as the `virtx-cli` binary is.
 virtx = "virtx._cli:main"
@@ -47,28 +42,36 @@ virtx = "virtx._cli:main"
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff==0.17.5"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/virtx"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
-# `hatch_build.py`: `libvirtx_core` put beside the Python files, built by cargo or taken from
-# `$VIRTX_CORE_LIB`. The copy an editable install keeps in `src/virtx/` is ignored by git, and so
-# left out of a wheel, which carries the one built for it.
-[tool.hatch.build.hooks.custom]
+[tool.setuptools.package-data]
+virtx = ["py.typed"]
+
+# `libvirtx_core`, built by cargo from `virtx-cabi` and put in the package as `virtx._virtx_core`,
+# named as an extension module is, for `_library.py` to open with ctypes: in `dev` for an
+# editable install, in `release` for a wheel.
+[[tool.setuptools-rust.ext-modules]]
+target = "virtx._virtx_core"
+path = "../virtx-cabi/Cargo.toml"
+binding = "NoBinding"
+
+# The library is no CPython extension, so one wheel serves every Python the package does.
+[tool.distutils.bdist_wheel]
+py-limited-api = "cp311"
 
 [tool.uv]
-# An editable install carries the library built from the crate, so it is built again when the
-# crate changes.
+# An editable install carries the library built from the crates, so it is built again when they
+# change.
 cache-keys = [
     { file = "pyproject.toml" },
-    { file = "hatch_build.py" },
     { file = "../Cargo.lock" },
+    { file = "../virtx-cabi/**" },
     { file = "../virtx-core/Cargo.toml" },
     { file = "../virtx-core/build.rs" },
     { file = "../virtx-core/src/**/*.rs" },
-    { env = "VIRTX_CORE_LIB" },
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-

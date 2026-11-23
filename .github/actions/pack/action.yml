@@ -1,0 +1,62 @@
+# One platform's wheel and npm package, built from `virtx-cabi` by the packages' own tools:
+# setuptools-rust builds the wheel (`virtx-py/pyproject.toml`), which on Linux auditwheel tags
+# manylinux_2_28 and holds to that glibc; napi builds the library into the platform's package,
+# which `napi create-npm-dirs` writes from `virtx-node/package.json`, and npm packs it. Both
+# build in `release` for `target`, beside `cargo xtask build client`'s build of it.
+#
+# Python is the runner's on Linux, where the job runs in a manylinux image; set up here
+# elsewhere. `@brekkylab/virtx` itself is packed where it is installed from: see `packages`.
+name: pack
+description: Build this platform's wheel and npm package into a directory.
+
+inputs:
+  platform:
+    description: The platform's npm name (darwin-arm64, linux-x64-gnu, ...)
+    required: true
+  target:
+    description: The Rust target triple the library is built for
+    required: true
+  out:
+    description: The directory the wheel and the package's tarball go into
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7.1.0
+      with:
+        node-version: 22
+
+    - if: runner.os != 'Linux'
+      uses: actions/setup-python@v7.1.0
+      with:
+        python-version: "3.12"
+
+    - name: Wheel
+      shell: bash
+      env:
+        CARGO_BUILD_TARGET: ${{ inputs.target }}
+        OUT: ${{ inputs.out }}
+      run: |
+        mkdir -p "$OUT"
+        python -m pip install --quiet build~=1.6
+        python -m build --wheel --outdir "$RUNNER_TEMP/wheel" virtx-py
+        if [ "$RUNNER_OS" = Linux ]; then
+          auditwheel repair --plat "manylinux_2_28_$(uname -m)" --wheel-dir "$OUT" "$RUNNER_TEMP"/wheel/*.whl
+        else
+          cp -v "$RUNNER_TEMP"/wheel/*.whl "$OUT/"
+        fi
+
+    - name: npm package
+      shell: bash
+      working-directory: virtx-node
+      env:
+        PLATFORM: ${{ inputs.platform }}
+        TARGET: ${{ inputs.target }}
+        OUT: ${{ inputs.out }}
+      run: |
+        npm ci --ignore-scripts --no-audit --no-fund
+        npx napi create-npm-dirs
+        npx napi build --platform --release --no-js --target "$TARGET" \
+          --manifest-path ../virtx-cabi/Cargo.toml --output-dir "npm/$PLATFORM"
+        npm pack "./npm/$PLATFORM" --pack-destination "$GITHUB_WORKSPACE/$OUT"

@@ -28,8 +28,7 @@ pub fn open() {
     virtx::load(library()).unwrap();
 }
 
-/// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, with its default features. Not the
-/// one in `deps`: that is the dependency's, built without the C ABI.
+/// `$VIRTX_CORE_LIB`, or else `libvirtx_core` built now, from `virtx-cabi`.
 #[cfg(not(feature = "embedded"))]
 pub fn library() -> std::path::PathBuf {
     use std::{path::PathBuf, process::Command};
@@ -44,18 +43,11 @@ pub fn library() -> std::path::PathBuf {
             let exe = env::current_exe().unwrap();
             let profile = exe.parent().unwrap().parent().unwrap();
             let mut build = Command::new(env!("CARGO"));
-            build.args([
-                "rustc",
-                "-p",
-                "virtx-core",
-                "--lib",
-                "--crate-type",
-                "cdylib",
-            ]);
+            build.args(["build", "-p", "virtx-cabi"]);
             if profile.ends_with("release") {
                 build.arg("--release");
             }
-            assert!(build.status().unwrap().success(), "building virtx-core");
+            assert!(build.status().unwrap().success(), "building virtx-cabi");
             profile.join(format!(
                 "{}virtx_core{}",
                 env::consts::DLL_PREFIX,

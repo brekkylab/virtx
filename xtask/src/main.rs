@@ -83,9 +83,11 @@ components:
                   /abin and no /alib";
 
 /// The client's packages, which `check` checks before `init` has run.
-const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx", "virtx-cli"];
-/// The package the client library is built from.
+const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-cabi", "virtx", "virtx-cli"];
+/// The client's crate, whose own tests `test` runs first.
 const CLIENT_PACKAGE: &str = "virtx-core";
+/// The package the client library, `libvirtx_core`, is built from.
+const LIBRARY_PACKAGE: &str = "virtx-cabi";
 /// The packages that link libkrun, and `xtask`, which `check` checks once `init` has run.
 const SERVER_PACKAGES: &[&str] = &[
     "virtx-uvm",
@@ -711,6 +713,8 @@ fn lint_bindings() -> anyhow::Result<()> {
             "install",
             "--prefix",
             "virtx-node",
+            // The tools alone: not the library its `prepare` builds.
+            "--ignore-scripts",
             "--no-audit",
             "--no-fund",
             "--silent",
@@ -799,14 +803,13 @@ fn client_library() -> String {
     )
 }
 
-/// The library alone, with the features its default is: no kernel and nothing to sign. Its
-/// crate builds an rlib alone, so the library for C is asked for here.
+/// The library alone, and its static library: no kernel and nothing to sign.
 fn build_client(options: &Options) -> anyhow::Result<()> {
     let mut cargo = cargo();
     cargo.current_dir(root_path()).args([
         "rustc",
         "-p",
-        CLIENT_PACKAGE,
+        LIBRARY_PACKAGE,
         "--lib",
         "--crate-type",
         "cdylib,staticlib",
@@ -1703,19 +1706,11 @@ fn compiled_since(since: std::time::SystemTime) -> Vec<String> {
     compiled
 }
 
-/// The library the packages' tests open, as each builds it: `libvirtx_core` in the `dev`
-/// profile, with its default features.
+/// The library virtx-rs's tests open, as they build it: `libvirtx_core` in the `dev` profile.
 fn build_test_library() -> anyhow::Result<()> {
     cargo_in_root(
-        &[
-            "rustc",
-            "-p",
-            CLIENT_PACKAGE,
-            "--lib",
-            "--crate-type",
-            "cdylib",
-        ],
-        "the library the packages' tests open",
+        &["build", "-p", LIBRARY_PACKAGE],
+        "the library virtx-rs's tests open",
     )
 }
 

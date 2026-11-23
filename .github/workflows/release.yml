@@ -58,10 +58,11 @@ jobs:
           path: dist/release
           merge-multiple: true
 
+      # As `packages` packs it: the repository's README and LICENSE copied in, its scripts not run.
       - name: "@brekkylab/virtx"
         run: |
-          mkdir -p "$RUNNER_TEMP/no-libs"
-          node scripts/packages/pack-npm.mjs "$RUNNER_TEMP/no-libs" dist/release --allow-missing
+          cp README.md LICENSE virtx-node/
+          (cd virtx-node && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/dist/release")
           tar -xzOf "dist/release/brekkylab-virtx-$VERSION.tgz" package/package.json
 
       - name: Every platform's files

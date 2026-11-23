@@ -35,13 +35,18 @@ const FILE_NAME =
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
 
-// The package carrying the library for this platform, which npm installs only here.
-const PLATFORM_PACKAGE = {
-  'darwin-arm64': '@brekkylab/virtx-darwin-arm64',
-  'linux-x64': '@brekkylab/virtx-linux-x64-gnu',
-  'linux-arm64': '@brekkylab/virtx-linux-arm64-gnu',
-  'win32-x64': '@brekkylab/virtx-win32-x64-msvc',
+// This platform, as napi names it (`napi.targets` in `package.json`).
+const PLATFORM = {
+  'darwin-arm64': 'darwin-arm64',
+  'linux-x64': 'linux-x64-gnu',
+  'linux-arm64': 'linux-arm64-gnu',
+  'win32-x64': 'win32-x64-msvc',
 }[`${process.platform}-${process.arch}`]
+
+// The library as `napi build --platform` names it: beside this file from a source install, and
+// the `main` of this platform's package, which npm installs only here.
+const BUILT = PLATFORM && `virtx.${PLATFORM}.node`
+const PLATFORM_PACKAGE = PLATFORM && `@brekkylab/virtx-${PLATFORM}`
 
 class VirtxError extends Error {
   constructor(message, status = null, body = null, source = 'client', code = null, written = null) {
@@ -309,21 +314,21 @@ function libraryPath() {
 // The library in this platform's package, or `null` where it is not installed.
 function platformLibrary() {
   try {
-    return path.join(path.dirname(require.resolve(`${PLATFORM_PACKAGE}/package.json`)), FILE_NAME)
+    return require.resolve(PLATFORM_PACKAGE)
   } catch {
     return null
   }
 }
 
-// The open library, opening it first if none is: `$VIRTX_CORE_LIB`, else one beside this file,
-// else the one in this platform's package, else the platform's file name for the system's
+// The open library, opening it first if none is: `$VIRTX_CORE_LIB`, else one built beside this
+// file, else the one in this platform's package, else the platform's file name for the system's
 // loader to look up.
 function library() {
   if (opened === null) {
-    const beside = path.join(__dirname, FILE_NAME)
+    const beside = BUILT && path.join(__dirname, BUILT)
     load(
       process.env[LIBRARY_ENV] ||
-        (fs.existsSync(beside) ? beside : PLATFORM_PACKAGE && platformLibrary()) ||
+        (beside && fs.existsSync(beside) ? beside : PLATFORM && platformLibrary()) ||
         FILE_NAME,
     )
   }

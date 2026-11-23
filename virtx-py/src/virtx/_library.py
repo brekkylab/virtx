@@ -39,6 +39,13 @@ else:
     FILE_NAME = "libvirtx_core.so"
 
 
+def _bundled() -> Path | None:
+    """The library this package carries, ``virtx/_virtx_core``, where it is installed: named as
+    an extension module is by the Python that built the wheel (``_virtx_core.abi3.so``,
+    ``_virtx_core.pyd``, ...), which need not be the one running."""
+    return next(Path(__file__).parent.glob("_virtx_core.*"), None)
+
+
 def args(**args: Any) -> bytes:
     """``args`` without the ones left out, as JSON."""
     return json.dumps({key: value for key, value in args.items() if value is not None}).encode()
@@ -367,8 +374,8 @@ def library() -> Library:
     """The open library, opening it first if none is: ``$VIRTX_CORE_LIB``, else the one in this
     package, else the platform's file name for the system's loader to look up."""
     if _library is None:
-        bundled = Path(__file__).with_name(FILE_NAME)
-        path = os.environ.get(LIBRARY_ENV) or (str(bundled) if bundled.exists() else FILE_NAME)
+        bundled = _bundled()
+        path = os.environ.get(LIBRARY_ENV) or (str(bundled) if bundled else FILE_NAME)
         load(path)
     assert _library is not None
     return _library

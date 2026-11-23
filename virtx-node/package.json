@@ -9,8 +9,18 @@
     "sandbox",
     "agent"
   ],
+  "homepage": "https://virtx.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brekkylab/virtx.git",
+    "directory": "virtx-node"
+  },
   "bugs": {
     "url": "https://github.com/brekkylab/virtx/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "main": "index.js",
   "types": "index.d.ts",
@@ -25,16 +35,33 @@
   "engines": {
     "node": ">= 22"
   },
+  "napi": {
+    "binaryName": "virtx",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
   "scripts": {
-    "install": "node build-lib.mjs",
-    "pretest": "node build-lib.mjs",
+    "build": "napi build --platform --no-js --manifest-path ../virtx-cabi/Cargo.toml --output-dir .",
+    "prepare": "npm run build",
+    "pretest": "npm run build",
     "test": "cargo xtask fixture -- node --test --test-concurrency=1 '__test__/**/*.spec.mjs'"
   },
   "dependencies": {
     "koffi": "^3.3.3"
   },
+  "optionalDependencies": {
+    "@brekkylab/virtx-darwin-arm64": "0.2.1",
+    "@brekkylab/virtx-linux-x64-gnu": "0.2.1",
+    "@brekkylab/virtx-linux-arm64-gnu": "0.2.1",
+    "@brekkylab/virtx-win32-x64-msvc": "0.2.1"
+  },
   "devDependencies": {
     "@biomejs/biome": "2.6.7",
+    "@napi-rs/cli": "3.10.12",
     "@types/node": "24.19.2",
     "typescript": "7.0.2"
   }

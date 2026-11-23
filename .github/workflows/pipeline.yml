@@ -22,8 +22,8 @@
 #   and, in a full run:
 #   build + packages (macos-aarch64,      guest         server, library, packages and their smoke,
 #     windows-x86_64)                                   in one job; macOS' clippy too
-#   build (linux-x86_64, linux-aarch64)   guest         server and library, in manylinux_2_28
-#   packages (linux-x86_64, -aarch64)     its build     packages and their smoke, on ubuntu-22.04
+#   build (linux-x86_64, linux-aarch64)   guest         server, library and packages, in manylinux_2_28
+#   packages (linux-x86_64, -aarch64)     its build     the packages' smoke, on ubuntu-22.04
 #
 # macOS has no lint or tests of its own: no runner here can boot a machine on it, and the
 # machines virtx is written on are Macs.
@@ -138,8 +138,12 @@ jobs:
           node=$(jq -r .version virtx-node/package.json)
           wrong=""
           [ "$node" = "$version" ] || wrong="$wrong virtx-node/package.json=$node"
-          for f in virtx-rs/Cargo.toml virtx-py/pyproject.toml; do
+          for f in virtx-rs/Cargo.toml virtx-cabi/Cargo.toml virtx-py/pyproject.toml; do
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
+          done
+          # The platform packages the npm package names are the ones released with it.
+          for dep in $(jq -r '.optionalDependencies | to_entries[] | "\(.key)=\(.value)"' virtx-node/package.json); do
+            [ "${dep#*=}" = "$version" ] || wrong="$wrong virtx-node/package.json:$dep"
           done
           # The `virtx-core` a published `virtx` depends on is the one released with it.
           dep=$(sed -n 's/^virtx-core = {.*version = "\([^"]*\)".*/\1/p' virtx-rs/Cargo.toml)
@@ -394,7 +398,7 @@ jobs:
       - run: cargo xtask clippy --gpu
 
   # macOS and Windows: `virtx-stdio` and `virtx-server-tcp`, each archived with the kernel, abin
-  # and alib; `libvirtx_core`; and the platform's packages packed from them and tried, all on one
+  # and alib; `libvirtx_core`; and the platform's packages built with it and tried, all on one
   # runner.
   build-native:
     name: build + packages (${{ matrix.release }})
@@ -425,9 +429,12 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       # Before any checkout: Windows' git converts to CRLF, and the GPU libraries' builds run
-      # shell scripts written against LF.
-      - name: Keep line endings as committed
-        run: git config --global core.autocrlf false
+      # shell scripts written against LF; and checks a link out as a file holding its target,
+      # where the wheel reads the README through `virtx-py/README.md`.
+      - name: Keep line endings and links as committed
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.symlinks true
 
       - uses: actions/checkout@v7.0.1
         with:
@@ -562,6 +569,15 @@ jobs:
             echo "::error::$f needs the DLLs above to load"; exit 1
           fi
 
+      - uses: ./.github/actions/pack
+        env:
+          # The oldest macOS the wheel's tag says it runs on.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        with:
+          platform: ${{ matrix.platform }}
+          target: ${{ matrix.target }}
+          out: dist/release
+
       - uses: ./.github/actions/packages
         with:
           version: ${{ needs.version.outputs.version }}
@@ -579,8 +595,9 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  # Linux: `virtx-stdio`, `virtx-server-tcp` and `libvirtx_core`, built in manylinux_2_28 and handed to
-  # `packages-linux` to be packed and tried below the build runners' glibc.
+  # Linux: `virtx-stdio`, `virtx-server-tcp`, `libvirtx_core` and the platform's wheel and npm
+  # package, built in manylinux_2_28 and handed to `packages-linux` to be tried below the build
+  # runners' glibc.
   build-linux:
     name: build (${{ matrix.release }})
     needs: guest
@@ -675,13 +692,19 @@ jobs:
           done
           exit ${fail:-0}
 
+      # In the image, which the wheel's manylinux_2_28 and the npm package's glibc are of.
+      - uses: ./.github/actions/pack
+        with:
+          platform: ${{ matrix.platform }}
+          target: ${{ matrix.target }}
+          out: built/dist/release
+
       - name: Hand the build on
         run: |
           VIRTX_HOME="$PWD/guest" cargo xtask archive --with-abin
-          mkdir -p built/dist/release built/dist/lib/${{ matrix.platform }}
+          mkdir -p built/dist/release
           cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz \
             target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz built/dist/release/
-          cp -v target/${{ matrix.target }}/release/libvirtx_core.so built/dist/lib/${{ matrix.platform }}/
 
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -690,8 +713,8 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  # A Linux platform's packages, packed from what `linux` built and tried on ubuntu-22.04,
-  # below the build runners' glibc.
+  # A Linux platform's packages, as `build-linux` built them, tried on ubuntu-22.04, below the
+  # build runners' glibc.
   packages-linux:
     name: packages (${{ matrix.release }})
     needs: [version, build-linux]

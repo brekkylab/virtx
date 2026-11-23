@@ -1,0 +1,24 @@
+[package]
+name = "virtx-cabi"
+version = "0.2.1"
+edition = "2024"
+description = "libvirtx_core: virtx-core's C ABI as a library for C, which the Python and Node packages open."
+license = "Apache-2.0"
+repository = "https://github.com/brekkylab/virtx"
+homepage = "https://virtx.sh"
+# The library ships in the Python and Node packages and a release's archives, not on crates.io.
+publish = false
+
+[lib]
+# `libvirtx_core.{so,dylib}` (`virtx_core.dll` on Windows), declared by
+# `virtx-core/include/virtx.h`. A crate of its own, so that no crate's build but this one's
+# makes a cdylib: its file name carries no hash of its features, and nothing depends on it.
+# A cdylib alone, as setuptools-rust and napi build it, so that both and `cargo build` make one
+# build of it; `cargo xtask build client` asks for `libvirtx_core.a` too.
+name = "virtx_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Named apart from this crate's own `virtx_core`; its `#[no_mangle]` functions are this
+# library's exports.
+ffi = { package = "virtx-core", path = "../virtx-core", features = ["ffi", "cli"] }

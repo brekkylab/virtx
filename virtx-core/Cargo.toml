@@ -13,11 +13,9 @@ categories = ["virtualization", "api-bindings"]
 
 [lib]
 # `rlib` alone: for Rust, this crate's tests and any crate that depends on it. The library for
-# C -- `libvirtx_core.{so,dylib}` (`virtx_core.dll` on Windows) and `libvirtx_core.a`, declared
-# by `include/virtx.h` -- is built only where it is asked for, with `cargo rustc --crate-type`
-# (`cargo xtask build client`, and the Python and Node packages' installs). A cdylib's file name carries no hash of its features, so built
-# with every build, each crate's tests' features would write over the last and rebuild this
-# crate, and all that depends on it, again.
+# C -- `libvirtx_core`, declared by `include/virtx.h` -- is `virtx-cabi`'s. A cdylib's file name
+# carries no hash of its features, so built here, with every build, each crate's tests' features
+# would write over the last and rebuild this crate, and all that depends on it, again.
 crate-type = ["rlib"]
 
 [dependencies]

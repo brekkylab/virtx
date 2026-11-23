@@ -1,4 +1,5 @@
 /.venv/
 __pycache__/
-/src/virtx/libvirtx_core.*
-/src/virtx/virtx_core.dll
+/build/
+/src/virtx/_virtx_core.*
+/src/*.egg-info/

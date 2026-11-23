@@ -1,3 +1,3 @@
 node_modules/
-/libvirtx_core.*
-/virtx_core.dll
+/virtx.*.node
+/npm/

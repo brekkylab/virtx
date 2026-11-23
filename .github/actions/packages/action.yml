@@ -1,24 +1,23 @@
-# One platform's packages, packed and tried as a user installs them, on the runner the job is
-# on: the npm package from a registry on localhost and the wheel pip picks, each opening the
-# library it carries; then the server that library fetches, from a release layout served on
-# localhost, started and asked to answer.
+# One platform's packages, tried as a user installs them, on the runner the job is on: the npm
+# package from a registry on localhost and the wheel pip picks, each opening the library it
+# carries; then the server that library fetches, from a release layout served on localhost,
+# started and asked to answer.
 #
-# What the job built is where it built it: the platform's library in `dist/lib/<platform>/`
-# and its servers' archives in `dist/release/`. Only that platform is packed
-# (`--allow-missing`), beside `@brekkylab/virtx` itself, which names every platform's package
-# and gets the one this runner is -- the others are not in the registry, and an optional
-# dependency that is not there is passed over, as it is on a platform npm does not match.
-# A release attaches what each platform packed and tried here, and packs only
-# `@brekkylab/virtx` again, once, for all of them; see `release.yml`.
+# What the job built is in `dist/release/`: its wheel and its platform's npm package (`pack`)
+# and its servers' archives. `@brekkylab/virtx` itself is packed here, beside them: it names
+# every platform's package and gets the one this runner is -- the others are not in the
+# registry, and an optional dependency that is not there is passed over, as it is on a platform
+# npm does not match. A release attaches what each platform built and tried here, and packs
+# only `@brekkylab/virtx` again, once, for all of them; see `release.yml`.
 name: packages
-description: Pack this platform's npm package and wheel, install them, and smoke them and the server.
+description: Pack @brekkylab/virtx beside this platform's packages, install them, and smoke them and the server.
 
 inputs:
   version:
     description: The version every manifest says
     required: true
   platform:
-    description: The platform's npm name, as `dist/lib/<platform>/` has it (darwin-arm64, ...)
+    description: The platform's npm name (darwin-arm64, ...)
     required: true
 
 runs:
@@ -32,16 +31,17 @@ runs:
       with:
         python-version: "3.12"
 
-    # Exactly one platform's: a library missing would pack nothing for it and pass.
-    - name: Pack
+    # Exactly one platform's: a package missing would try nothing for it and pass. npm packs
+    # only what is in `virtx-node/`, so the repository's README and LICENSE are copied in; its
+    # scripts, which build the library from source, are not run.
+    - name: "@brekkylab/virtx"
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
         PLATFORM: ${{ inputs.platform }}
       run: |
-        node scripts/packages/pack-npm.mjs dist/lib dist/release --allow-missing
-        python -m pip install --quiet build~=1.6 wheel~=0.48
-        scripts/packages/pack-wheels.sh dist/lib dist/release --allow-missing
+        cp README.md LICENSE virtx-node/
+        (cd virtx-node && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/dist/release")
         cd dist/release
         ls -la
         count() { ls $1 2>/dev/null | wc -l | tr -d ' '; }

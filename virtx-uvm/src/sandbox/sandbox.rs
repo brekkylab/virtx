@@ -1289,7 +1289,8 @@ impl Drop for Activity {
 }
 
 /// The directory a sandbox made with [`abins`](SandboxCreateArgs::abins) shows at `/abin`: each
-/// program it named, and its `SKILL.md` under `skills/`, linked from the server's own.
+/// program it named, its `SKILL.md` under `skills/`, and what it installs beside itself in
+/// `.<program>/`, linked from the server's own.
 ///
 /// One is shared, read-only, by every sandbox made with the same programs as they stand: `<key>/`
 /// in `<root>/sandbox/abin/`, keyed by the programs' names, sizes and times, so that only the
@@ -1305,8 +1306,8 @@ impl Abin {
         root.join(SANDBOX).join(ABIN_HOST)
     }
 
-    /// The one in `dir` of `names`, each a program in `programs`, and the `SKILL.md` of each
-    /// that has one: made, when no sandbox has made it yet.
+    /// The one in `dir` of `names`, each a program in `programs`, with the `SKILL.md` of each
+    /// that has one and every file in its `.<program>/`: made, when no sandbox has made it yet.
     fn create(dir: &Path, programs: &Path, names: &[String]) -> Result<Abin, Error> {
         let io = |context: String| move |source| Error::Io { context, source };
         let mut files = Vec::new();
@@ -1315,6 +1316,27 @@ impl Abin {
             let skill = Path::new(SKILLS).join(program).join(SKILL);
             if programs.join(&skill).is_file() {
                 files.push(skill);
+            }
+            let mut dirs = vec![PathBuf::from(format!(".{program}"))];
+            while let Some(sub) = dirs.pop() {
+                let from = programs.join(&sub);
+                if !from.is_dir() {
+                    continue;
+                }
+                let entries =
+                    fs::read_dir(&from).map_err(io(format!("reading {}", from.display())))?;
+                for entry in entries {
+                    let entry = entry.map_err(io(format!("reading {}", from.display())))?;
+                    let kind = entry
+                        .file_type()
+                        .map_err(io(format!("reading {}", from.display())))?;
+                    let at = sub.join(entry.file_name());
+                    if kind.is_dir() {
+                        dirs.push(at);
+                    } else {
+                        files.push(at);
+                    }
+                }
             }
         }
         files.sort();
@@ -1709,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn an_abin_holds_the_programs_named_with_their_skills_shared_until_swept() {
+    fn an_abin_holds_the_programs_named_with_their_skills_and_installs_shared_until_swept() {
         let host = tempfile::tempdir().unwrap();
         let programs = host.path().join(ABIN_HOST);
         fs::create_dir_all(programs.join(SKILLS).join("index")).unwrap();
@@ -1717,6 +1739,11 @@ mod tests {
             fs::write(programs.join(program), program).unwrap();
         }
         fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
+        fs::create_dir_all(programs.join(".display/lib")).unwrap();
+        fs::write(programs.join(".display/server"), "server").unwrap();
+        fs::write(programs.join(".display/lib/libx.so"), "libx").unwrap();
+        fs::create_dir_all(programs.join(".docread")).unwrap();
+        fs::write(programs.join(".docread/model"), "model").unwrap();
 
         let dir = host.path().join("sandbox").join(ABIN_HOST);
         let names = ["index".to_string(), "display".to_string()];
@@ -1730,6 +1757,15 @@ mod tests {
             b"skill"
         );
         assert!(!skills.join("display").exists());
+        assert_eq!(
+            fs::read(abin.dir.join(".display/server")).unwrap(),
+            b"server"
+        );
+        assert_eq!(
+            fs::read(abin.dir.join(".display/lib/libx.so")).unwrap(),
+            b"libx"
+        );
+        assert!(!abin.dir.join(".docread").exists());
 
         let reversed = ["display".to_string(), "index".to_string()];
         let same = Abin::create(&dir, &programs, &reversed).unwrap();

@@ -23,7 +23,8 @@ const ABINS: &[(&str, &str)] = &[
 ];
 
 /// Build the `/abin` programs for the guest, in the debug or release profile, and place them,
-/// their `SKILL.md` and what each one's build script leaves in `OUT_DIR/install/` in `out`.
+/// their `SKILL.md` and, as `.<program>/`, what each one's build script leaves in
+/// `OUT_DIR/install/`, in `out`.
 pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
     let root = root_path();
     let target = guest_target()?;
@@ -116,23 +117,13 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
         place(&built.join(program), &out.join(program))?;
 
         // Replaced whole, so that nothing an earlier build placed is left in it.
+        let at = out.join(format!(".{program}"));
+        if at.is_dir() {
+            fs::remove_dir_all(&at).with_context(|| format!("removing {}", at.display()))?;
+        }
         let install = out_dirs.get(program).map(|dir| dir.join("install"));
         if let Some(install) = install.filter(|install| install.is_dir()) {
-            for entry in
-                fs::read_dir(&install).with_context(|| format!("reading {}", install.display()))?
-            {
-                let entry = entry?;
-                let at = out.join(entry.file_name());
-                if at.is_dir() {
-                    fs::remove_dir_all(&at)
-                        .with_context(|| format!("removing {}", at.display()))?;
-                }
-                if entry.file_type()?.is_dir() {
-                    place_dir(&entry.path(), &at)?;
-                } else {
-                    place(&entry.path(), &at)?;
-                }
-            }
+            place_dir(&install, &at)?;
         }
 
         let skill = crate_dir.join(program).join("SKILL.md");

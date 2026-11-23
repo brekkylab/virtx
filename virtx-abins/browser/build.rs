@@ -1,6 +1,6 @@
-//! What `browser` installs beside itself in `/abin`, all of it in `.agent-browser/`, fetched
-//! into `OUT_DIR`, checked against what is pinned here, and laid out in
-//! `OUT_DIR/install/.agent-browser/`:
+//! What `browser` installs beside itself in `/abin`, all of it in `.browser/`, fetched into
+//! `OUT_DIR`, checked against what is pinned here, and laid out in `OUT_DIR/install/`, which
+//! xtask places as `.browser/`:
 //!
 //! - `agent-browser`, vercel-labs/agent-browser's static musl build, and `skill-data/`, the
 //!   guides its `skills` command prints, from the same release's npm package.
@@ -22,9 +22,9 @@ use std::{
 
 use sha2::{Digest as _, Sha256};
 
-/// Where `OUT_DIR/install/.agent-browser` is in the guest, as `/abin` is mounted: the one place it is
-/// named, since the kernel reads an interpreter's path as it is written, from `/`.
-const HOME: &str = "/abin/.agent-browser";
+/// Where `OUT_DIR/install` is in the guest, as `/abin` is mounted: the one place it is named,
+/// since the kernel reads an interpreter's path as it is written, from `/`.
+const HOME: &str = "/abin/.browser";
 
 /// agent-browser's release, and the sha256 of its static musl build for each architecture, as
 /// the release's page gives them.
@@ -185,7 +185,7 @@ fn main() {
     let sha256 = |data: &[u8]| format!("{:x}", Sha256::digest(data));
 
     // Replaced whole, so that nothing a build before this one placed is left in it.
-    let home = out.join("install/.agent-browser");
+    let home = out.join("install");
     if home.exists() {
         fs::remove_dir_all(&home).expect("removing the last install");
     }

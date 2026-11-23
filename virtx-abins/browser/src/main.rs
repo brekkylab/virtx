@@ -13,8 +13,8 @@ const AS_BROWSER: &str = "VIRTX_BROWSER_AS_BROWSER";
 
 fn main() {
     let me = env::current_exe().expect("/proc/self/exe names this program");
-    // What `build.rs` installs, in `.agent-browser/` beside this program.
-    let home = me.with_file_name(".agent-browser");
+    // What `build.rs` installs, in `.browser/` beside this program.
+    let home = me.with_file_name(".browser");
     let mut command;
     if env::var_os(AS_BROWSER).is_some() {
         command = Command::new(home.join("chrome/chrome"));

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: khj809 <onsealeatang@gmail.com>
 Date: Mon, 9 Nov 2026 18:14:33 +0900
-Subject: tsi: a socket listened on again stays where its first listen put it
+Subject: tsi-listen-again: a socket listened on again stays where its first listen put it
 
 ## Why virtx needs it
 

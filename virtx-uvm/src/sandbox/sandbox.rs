@@ -161,6 +161,8 @@ pub struct Sandbox {
     id: String,
     /// The name it was made with, which a server finds it again by.
     name: Option<String>,
+    /// What it was made with, its image by digest, as large as it was last resized to.
+    args: Mutex<SandboxCreateArgs>,
     /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
     root: PathBuf,
     /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
@@ -531,6 +533,7 @@ impl Sandbox {
         Ok(Sandbox {
             id: upper.id.clone(),
             name: args.name.clone(),
+            args: Mutex::new(args.clone()),
             root: root.to_owned(),
             up_since: Mutex::default(),
             dir,
@@ -588,6 +591,12 @@ impl Sandbox {
     /// The name it was made with, if any.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    /// What it was made with: its `image` the digest it boots, and its `vcpus`, `memory_mib` and
+    /// `disk_gib` as it was last [resized](Sandbox::resize) to, where it was.
+    pub fn args(&self) -> SandboxCreateArgs {
+        self.args.lock().unwrap().clone()
     }
 
     /// When its machine came up, while it is up; `None` while it is parked or has exited.
@@ -835,11 +844,13 @@ impl Sandbox {
         if (vcpus, memory_mib) != (spec.vcpus, spec.ram_mib) {
             self.park_under_turn(Some(Duration::ZERO)).await?;
         }
+        let mut resized_args = self.args.lock().unwrap().clone();
+        resized_args.vcpus = Some(vcpus);
+        resized_args.memory_mib = Some(memory_mib);
+        resized_args.disk_gib = Some(disk_gib);
         if let Some(record) = &mut *self.record.lock().unwrap() {
             let mut resized = record.clone();
-            resized.args.vcpus = Some(vcpus);
-            resized.args.memory_mib = Some(memory_mib);
-            resized.args.disk_gib = Some(disk_gib);
+            resized.args = resized_args.clone();
             resized
                 .write(&self.dir, &self.id)
                 .map_err(|source| Error::Io {
@@ -854,6 +865,7 @@ impl Sandbox {
             config.spec.ram_mib = memory_mib;
         }
         self.disk_gib.store(disk_gib, Ordering::Relaxed);
+        *self.args.lock().unwrap() = resized_args;
         Ok(SandboxResources {
             vcpus,
             memory_mib,

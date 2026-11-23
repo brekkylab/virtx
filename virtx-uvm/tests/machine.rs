@@ -25,8 +25,8 @@ use futures_util::{
 };
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{
-    SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxResizeArgs,
-    SandboxResources, SandboxVolume,
+    ImageName, SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry,
+    SandboxResizeArgs, SandboxResources, SandboxVolume,
 };
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
@@ -1866,6 +1866,46 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     assert_eq!(home.left(), Vec::<String>::new());
 }
 
+/// A sandbox's args are what it was made with, its image by the digest it boots and its size as
+/// last resized to, and the same once it is known again past its server.
+async fn a_sandbox_s_args_are_what_it_was_made_with_as_last_resized(home: Home) {
+    home.volumes.create("data").unwrap();
+    let asked = SandboxCreateArgs {
+        name: Some("named".to_owned()),
+        volumes: vec![SandboxVolume {
+            volume: "data".to_owned(),
+            path: "/data".to_owned(),
+            readonly: true,
+        }],
+        disk_gib: Some(1),
+        ..small()
+    };
+    let sandbox = home.making(&asked, None, Some(HashMap::new())).await;
+    let sandbox = sandbox.unwrap();
+    let mut made = asked.clone();
+    made.image = ImageName::Digest {
+        digest: sandbox.answer().image,
+    };
+    assert_eq!(sandbox.args(), made);
+
+    let resize = SandboxResizeArgs {
+        memory_mib: Some(1536),
+        disk_gib: Some(2),
+        ..SandboxResizeArgs::default()
+    };
+    let now = sandbox.resize(&resize).await.unwrap();
+    let mut resized = made.clone();
+    resized.vcpus = Some(now.vcpus);
+    resized.memory_mib = Some(now.memory_mib);
+    resized.disk_gib = Some(2);
+    assert_eq!(sandbox.args(), resized);
+
+    leave(sandbox).await;
+    let known = home.kept();
+    assert_eq!(known[0].args(), resized);
+    close(Arc::clone(&known[0])).await;
+}
+
 async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
     let mut args = small();
     args.disk_gib = Some(1);
@@ -2964,6 +3004,7 @@ fn main() -> ExitCode {
         a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
         a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
         a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown,
+        a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,

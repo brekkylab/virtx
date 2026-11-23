@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">コードとAIエージェントのための使い捨てLinux VM</h3>
+<h3 align="center">AIエージェントのためのmicroVMサンドボックス</h3>
+
+<p align="center">Dockerもデーモンも、セットアップは不要です。</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,12 +27,9 @@
 
 <br>
 
-virtxを使うと、自分のコードから使い捨てのLinux VMを立ち上げてタスクを実行できます。
+virtxは、AIエージェントのためのmicroVMサンドボックスです。自分のコードから使い捨てのLinux VMを立ち上げてタスクを実行でき、VMは手元のマシン、自分で運用するサーバー、またはvirtx cloudで動かせます。
 
 手元のマシンには入れたくない重い依存関係が必要な処理や、AIエージェントが自分の判断で実行するコマンドのように、そもそも手元で動かしたくないコードを扱うときに役立ちます。VMの中でインストールしたものや変更した内容はVMを削除すると消え、残るのは保存しておいたボリュームに書き込んだものだけです。
-
-> [!TIP]
-> virtxでAIエージェントを作るなら、私たちが開発しているオープンソースのエージェントSDK、[Ailoy](https://github.com/brekkylab/ailoy)もぜひ試してみてください。virtxをベースにしていて、エージェントごとに専用のサンドボックスを用意するので、設定なしでコマンドやファイル操作のツールがVMの中で動きます。
 
 ## クイックスタート
 
@@ -217,6 +216,7 @@ let client = Client::connect(
 - **サンドボックス内のサービスに接続:** サンドボックス内のWebサーバー、SSH、VNCデスクトップ、データベースに、手元のマシンのアドレスからアクセスできます。
 - **前回の続きから再開:** サンドボックスが書き込んだ内容をボリュームに残して次のサンドボックスに引き継いだり、ボリュームを複数のサンドボックスで共有したり、Notion、Google Drive、OneDriveを普通のファイルとしてマウントしたりできます。
 - **GPUも使える:** サンドボックスの中から、ホストのGPUでディープラーニングなどのVulkan処理を実行できます。
+- **どのエージェントフレームワークでも:** サンドボックスは他のツールと同じように使えるので、どのフレームワークやコーディングエージェントからでも操作できます。オープンソースのエージェントSDK [Ailoy](https://github.com/brekkylab/ailoy) もその一つです。
 
 ## 動作要件
 

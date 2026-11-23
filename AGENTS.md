@@ -1,6 +1,6 @@
 # AGENTS.md
 
-virtx runs tasks in disposable Linux micro-VMs from your own code. This repository is both ends of it: the client, one library with packages for Python, Node and Rust over it, and the server that runs the VMs. Read this before changing anything.
+virtx is a microVM sandbox for AI agents: it runs tasks in disposable Linux microVMs from your own code. This repository is both ends of it: the client, one library with packages for Python, Node and Rust over it, and the server that runs the VMs. Read this before changing anything.
 
 ## One behaviour, two ends
 

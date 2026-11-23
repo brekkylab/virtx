@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">Disposable Linux VMs for your code and your AI agents.</h3>
+<h3 align="center">The microVM sandbox for AI agents.</h3>
+
+<p align="center">No Docker, no daemon to set up.</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,13 +27,10 @@
 
 <br>
 
-virtx lets you run tasks in disposable Linux VMs from your own code.
+virtx is a microVM sandbox for AI agents. It lets you run tasks in a disposable Linux VM from your own code, on your machine, on a server you run, or on virtx cloud.
 
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
 Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
-
-> [!TIP]
-> Building an AI agent on virtx? [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK, is built on it and gives every agent a sandbox of its own, so its commands and file tools run in a VM with no setup.
 
 ## Quickstart
 
@@ -218,6 +217,7 @@ let client = Client::connect(
 - **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
 - **Pick up where you left off:** keep what a sandbox wrote in a volume for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
 - **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
+- **Works with any agent framework:** a sandbox is a tool like any other, so any framework or coding agent can drive it. [Ailoy](https://github.com/brekkylab/ailoy), an open-source agent SDK, is one that does.
 
 ## Requirements
 

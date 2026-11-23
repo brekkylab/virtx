@@ -1,0 +1,241 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grf53 <grf0503@gmail.com>
+Date: Thu, 5 Nov 2026 14:22:20 +0900
+Subject: cooperative-matrix-bfloat16: expose VK_KHR_shader_bfloat16 and VK_KHR_cooperative_matrix on Apple7 and later
+
+## Why virtx needs it
+
+A sandbox's GPU on macOS is MoltenVK, and a guest program that multiplies matrices on the GPU, as ncnn's `gemm_cm` does, asks for `VK_KHR_cooperative_matrix` and `VK_KHR_shader_bfloat16`.
+Upstream MoltenVK exposes neither, though Metal has had bfloat and `simdgroup_matrix` since MSL 3.1.
+
+## What it changes
+
+`VK_KHR_shader_bfloat16` depends only on Vulkan 1.1, so the version the guest's device
+reports is irrelevant to it. Upstream MoltenVK does not expose it, nor
+`VK_KHR_cooperative_matrix`; `VK_KHR_shader_float16_int8` (fp16) is available. With the
+patch, on Apple7 and later, MoltenVK reports both extensions and 8x8 and 16x16 shapes. The
+shaders are translated by SPIRV-Cross with its patch of the same name, which this one is
+of no use without.
+
+**The guest needs Mesa 26.0 or later.** Venus passes neither extension through
+before that: Debian trixie's 25.0 shows the device without them, and
+trixie-backports' 26.1 with both.
+
+A matrix's dimensions that are specialization constants reach MSL as macros, and MoltenVK
+compiles the variant with the pipeline's values defined. A failed conversion does not fail
+`vkCreateComputePipelines` loudly enough for ncnn: it loads the net and the guest aborts at
+dispatch, with the reason only on the machine process's stderr, which is the server's.
+
+## When it can go
+
+When upstream MoltenVK reports `VK_KHR_shader_bfloat16` and `VK_KHR_cooperative_matrix` with these shapes.
+KhronosGroup/MoltenVK#2753 reports `VK_KHR_cooperative_matrix` at 8x8 alone and waits on SPIRV-Cross, so it does not replace this by itself.
+---
+ MoltenVK/MoltenVK/GPUObjects/MVKDevice.h      |  5 ++
+ MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm     | 67 +++++++++++++++++++
+ .../GPUObjects/MVKDeviceFeatureStructs.def    |  2 +
+ MoltenVK/MoltenVK/GPUObjects/MVKInstance.mm   |  1 +
+ MoltenVK/MoltenVK/Layers/MVKExtensions.def    |  2 +
+ MoltenVK/MoltenVK/Vulkan/vulkan.mm            | 15 +++++
+ 6 files changed, 92 insertions(+)
+
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+index 534a414..5022fdf 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.h
+@@ -257,6 +257,9 @@ public:
+ 	/** Populates the specified structure with the tool properties of this device. */
+ 	VkResult getToolProperties(uint32_t* pToolCount, VkPhysicalDeviceToolProperties* pToolProperties);
+ 
++	/** Returns the cooperative matrix configurations supported on this device. */
++	VkResult getCooperativeMatrixProperties(uint32_t* pPropertyCount, VkCooperativeMatrixPropertiesKHR* pProperties);
++
+ #pragma mark Surfaces
+ 
+ 	/**
+@@ -488,6 +491,8 @@ protected:
+ 	void initExtensions();
+ 	void initCounterSets();
+ 	bool needsCounterSetRetained();
++	bool supportsCooperativeMatrix();
++	bool supportsBFloat16();
+ 	void updateTimestampPeriod();
+ 	MVKArrayRef<MVKQueueFamily*> getQueueFamilies();
+ 	void initPipelineCacheUUID();
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+index 359f8a2..05b9c0a 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm
+@@ -638,6 +638,19 @@
+ 				robustness2Features->nullDescriptor = false;
+ 				break;
+ 			}
++			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR: {
++				auto* coopMatFeatures = (VkPhysicalDeviceCooperativeMatrixFeaturesKHR*)next;
++				coopMatFeatures->cooperativeMatrix = supportsCooperativeMatrix();
++				coopMatFeatures->cooperativeMatrixRobustBufferAccess = false;
++				break;
++			}
++			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR: {
++				auto* bf16Features = (VkPhysicalDeviceShaderBfloat16FeaturesKHR*)next;
++				bf16Features->shaderBFloat16Type = supportsBFloat16();
++				bf16Features->shaderBFloat16DotProduct = supportsBFloat16();
++				bf16Features->shaderBFloat16CooperativeMatrix = supportsBFloat16() && supportsCooperativeMatrix();
++				break;
++			}
+ 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FMA_FEATURES_KHR: {
+ 				auto* shaderFmaFeatures = (VkPhysicalDeviceShaderFmaFeaturesKHR*)next;
+ 				shaderFmaFeatures->shaderFmaFloat16 = true;
+@@ -1207,6 +1220,11 @@
+ 				floatControlsProperties->shaderRoundingModeRTZFloat64 = supportedProps12.shaderRoundingModeRTZFloat64;
+ 				break;
+ 			}
++            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR: {
++                auto* coopMatProperties = (VkPhysicalDeviceCooperativeMatrixPropertiesKHR*)next;
++                coopMatProperties->cooperativeMatrixSupportedStages = supportsCooperativeMatrix() ? VK_SHADER_STAGE_COMPUTE_BIT : 0;
++                break;
++            }
+             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_PROPERTIES_KHR: {
+                 auto* barycentricProperties = (VkPhysicalDeviceFragmentShaderBarycentricPropertiesKHR*)next;
+                 barycentricProperties->triStripVertexOrderIndependentOfProvokingVertex = false;
+@@ -1908,6 +1926,49 @@
+ 	return VK_SUCCESS;
+ }
+ 
++VkResult MVKPhysicalDevice::getCooperativeMatrixProperties(uint32_t* pPropertyCount, VkCooperativeMatrixPropertiesKHR* pProperties) {
++	static const struct { uint32_t size; VkComponentTypeKHR ab, cr; } combos[] = {
++		{ 8,  VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR },
++		{ 16, VK_COMPONENT_TYPE_BFLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR },
++		{ 8,  VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR },
++		{ 8,  VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR },
++		{ 8,  VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR },
++		{ 16, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR },
++		{ 16, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR },
++		{ 16, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR },
++	};
++	uint32_t first = supportsBFloat16() ? 0 : 2;
++	uint32_t count = supportsCooperativeMatrix() ? (uint32_t)std::size(combos) - first : 0;
++	if ( !pProperties ) {
++		*pPropertyCount = count;
++		return VK_SUCCESS;
++	}
++	uint32_t written = min(*pPropertyCount, count);
++	for (uint32_t n = 0; n < written; n++) {
++		uint32_t i = first + n;
++		auto& p = pProperties[n];
++		p.MSize = combos[i].size;
++		p.NSize = combos[i].size;
++		p.KSize = combos[i].size;
++		p.AType = combos[i].ab;
++		p.BType = combos[i].ab;
++		p.CType = combos[i].cr;
++		p.ResultType = combos[i].cr;
++		p.saturatingAccumulation = VK_FALSE;
++		p.scope = VK_SCOPE_SUBGROUP_KHR;
++	}
++	*pPropertyCount = written;
++	return written < count ? VK_INCOMPLETE : VK_SUCCESS;
++}
++
++bool MVKPhysicalDevice::supportsBFloat16() {
++	return _metalFeatures.mslVersion >= SPIRV_CROSS_NAMESPACE::CompilerMSL::Options::make_msl_version(3, 1) && supportsMTLGPUFamily(Apple7);
++}
++
++bool MVKPhysicalDevice::supportsCooperativeMatrix() {
++	return _metalFeatures.mslVersion >= SPIRV_CROSS_NAMESPACE::CompilerMSL::Options::make_msl_version(3, 1) && supportsMTLGPUFamily(Apple7);
++}
++
+ VkResult MVKPhysicalDevice::getToolProperties(uint32_t* pToolCount, VkPhysicalDeviceToolProperties* pToolProperties) {
+ 	// Metal does not currently have a standard way to detect attached tools, so report nothing.
+ 	*pToolCount = 0;
+@@ -3558,6 +3619,12 @@ static uint32_t mvkGetEntryProperty(io_registry_entry_t entry, CFStringRef prope
+ 	if (!_metalFeatures.quadControlFlow || !_metalFeatures.quadPermute) {
+ 		pWritableExtns->vk_KHR_shader_quad_control.enabled = false;
+ 	}
++	if (!supportsCooperativeMatrix()) {
++		pWritableExtns->vk_KHR_cooperative_matrix.enabled = false;
++	}
++	if (!supportsBFloat16()) {
++		pWritableExtns->vk_KHR_shader_bfloat16.enabled = false;
++	}
+ 	if (!_metalFeatures.samplerMirrorClampToEdge) {
+ 		pWritableExtns->vk_KHR_sampler_mirror_clamp_to_edge.enabled = false;
+ 	}
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def
+index 9342deb..9a9ab2c 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKDeviceFeatureStructs.def
+@@ -80,6 +80,7 @@ MVK_DEVICE_FEATURE(VariablePointer,                       VARIABLE_POINTER,
+ MVK_DEVICE_FEATURE(VertexAttributeDivisor,                VERTEX_ATTRIBUTE_DIVISOR,                    2)
+ MVK_DEVICE_FEATURE(VulkanMemoryModel,                     VULKAN_MEMORY_MODEL,                         3)
+ MVK_DEVICE_FEATURE(ZeroInitializeWorkgroupMemory,         ZERO_INITIALIZE_WORKGROUP_MEMORY,            1)
++MVK_DEVICE_FEATURE_EXTN(CooperativeMatrix,                COOPERATIVE_MATRIX,                   KHR,   2)
+ MVK_DEVICE_FEATURE_EXTN(FragmentShaderBarycentric,        FRAGMENT_SHADER_BARYCENTRIC,          KHR,   1)
+ MVK_DEVICE_FEATURE_EXTN(Maintenance7,                     MAINTENANCE_7,                        KHR,   1)
+ MVK_DEVICE_FEATURE_EXTN(Maintenance8,                     MAINTENANCE_8,                        KHR,   1)
+@@ -90,6 +91,7 @@ MVK_DEVICE_FEATURE_EXTN(PresentId2,                       PRESENT_ID_2,
+ MVK_DEVICE_FEATURE_EXTN(PresentWait,                      PRESENT_WAIT,                         KHR,   1)
+ MVK_DEVICE_FEATURE_EXTN(PresentWait2,                     PRESENT_WAIT_2,                       KHR,   1)
+ MVK_DEVICE_FEATURE_EXTN(Robustness2,                      ROBUSTNESS_2,                         KHR,   3)
++MVK_DEVICE_FEATURE_EXTN(ShaderBfloat16,                   SHADER_BFLOAT16,                      KHR,   3)
+ MVK_DEVICE_FEATURE_EXTN(ShaderFma,                        SHADER_FMA,                           KHR,   3)
+ MVK_DEVICE_FEATURE_EXTN(ShaderMaximalReconvergence,       SHADER_MAXIMAL_RECONVERGENCE,         KHR,   1)
+ MVK_DEVICE_FEATURE_EXTN(ShaderQuadControl,                SHADER_QUAD_CONTROL,                  KHR,   1)
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKInstance.mm b/MoltenVK/MoltenVK/GPUObjects/MVKInstance.mm
+index ef69994..d4ba27e 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKInstance.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKInstance.mm
+@@ -758,6 +758,7 @@
+ 
+ 	// Device extension functions.
+ 	ADD_DVC_EXT_ENTRY_POINT(vkGetCalibratedTimestampsKHR, KHR_CALIBRATED_TIMESTAMPS);
++	ADD_DVC_EXT_ENTRY_POINT(vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR, KHR_COOPERATIVE_MATRIX);
+ 	ADD_DVC_EXT_ENTRY_POINT(vkGetPhysicalDeviceCalibrateableTimeDomainsKHR, KHR_CALIBRATED_TIMESTAMPS);
+     ADD_DVC_EXT_ENTRY_POINT(vkCreateDeferredOperationKHR, KHR_DEFERRED_HOST_OPERATIONS);
+     ADD_DVC_EXT_ENTRY_POINT(vkDeferredOperationJoinKHR, KHR_DEFERRED_HOST_OPERATIONS);
+diff --git a/MoltenVK/MoltenVK/Layers/MVKExtensions.def b/MoltenVK/MoltenVK/Layers/MVKExtensions.def
+index bb0935b..144fbe6 100644
+--- a/MoltenVK/MoltenVK/Layers/MVKExtensions.def
++++ b/MoltenVK/MoltenVK/Layers/MVKExtensions.def
+@@ -46,6 +46,7 @@ MVK_EXTENSION(KHR_8bit_storage,                         KHR_8BIT_STORAGE,
+ MVK_EXTENSION(KHR_bind_memory2,                         KHR_BIND_MEMORY_2,                        DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(KHR_buffer_device_address,                KHR_BUFFER_DEVICE_ADDRESS,                DEVICE,   13.0,  16.0,  1.0)
+ MVK_EXTENSION(KHR_calibrated_timestamps,                KHR_CALIBRATED_TIMESTAMPS,                DEVICE,   10.15, 14.0,  1.0)
++MVK_EXTENSION(KHR_cooperative_matrix,                   KHR_COOPERATIVE_MATRIX,                   DEVICE,   14.0,  17.0,  1.0)
+ MVK_EXTENSION(KHR_copy_commands2,                       KHR_COPY_COMMANDS_2,                      DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(KHR_create_renderpass2,                   KHR_CREATE_RENDERPASS_2,                  DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(KHR_dedicated_allocation,                 KHR_DEDICATED_ALLOCATION,                 DEVICE,   10.11,  8.0,  1.0)
+@@ -99,6 +100,7 @@ MVK_EXTENSION(KHR_sampler_mirror_clamp_to_edge,         KHR_SAMPLER_MIRROR_CLAMP
+ MVK_EXTENSION(KHR_sampler_ycbcr_conversion,             KHR_SAMPLER_YCBCR_CONVERSION,             DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(KHR_separate_depth_stencil_layouts,       KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS,       DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(KHR_shader_atomic_int64,                  KHR_SHADER_ATOMIC_INT64,                  DEVICE,   MVK_NA, MVK_NA, MVK_NA)
++MVK_EXTENSION(KHR_shader_bfloat16,                      KHR_SHADER_BFLOAT16,                      DEVICE,   14.0,  17.0,  1.0)
+ MVK_EXTENSION(KHR_shader_draw_parameters,               KHR_SHADER_DRAW_PARAMETERS,               DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(KHR_shader_expect_assume,                 KHR_SHADER_EXPECT_ASSUME,                 DEVICE,   10.11,  8.0,  1.0)
+ MVK_EXTENSION(KHR_shader_float_controls,                KHR_SHADER_FLOAT_CONTROLS,                DEVICE,   10.11,  8.0,  1.0)
+diff --git a/MoltenVK/MoltenVK/Vulkan/vulkan.mm b/MoltenVK/MoltenVK/Vulkan/vulkan.mm
+index 9ee0c4e..127fcb1 100644
+--- a/MoltenVK/MoltenVK/Vulkan/vulkan.mm
++++ b/MoltenVK/MoltenVK/Vulkan/vulkan.mm
+@@ -3175,6 +3175,21 @@ MVK_PUBLIC_VULKAN_SYMBOL void vkCmdSetRenderingInputAttachmentIndices(
+ MVK_PUBLIC_VULKAN_CORE_ALIAS(vkGetDeviceMemoryOpaqueCaptureAddress, KHR);
+ 
+ 
++#pragma mark -
++#pragma mark VK_KHR_cooperative_matrix
++
++MVK_PUBLIC_VULKAN_SYMBOL VkResult vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(
++	VkPhysicalDevice							physicalDevice,
++	uint32_t*									pPropertyCount,
++	VkCooperativeMatrixPropertiesKHR*			pProperties) {
++	MVKTraceVulkanCallStart();
++	MVKPhysicalDevice* mvkPD = MVKPhysicalDevice::getMVKPhysicalDevice(physicalDevice);
++	VkResult rslt = mvkPD->getCooperativeMatrixProperties(pPropertyCount, pProperties);
++	MVKTraceVulkanCallEnd();
++	return rslt;
++}
++
++
+ #pragma mark -
+ #pragma mark VK_KHR_calibrated_timestamps
+ 

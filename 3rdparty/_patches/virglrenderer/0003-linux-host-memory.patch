@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grf53 <grf0503@gmail.com>
+Date: Sat, 21 Nov 2026 18:48:47 +0900
+Subject: linux-host-memory: venus backs host-visible memory with shm where only an opaque fd is exported
+
+## Why virtx needs it
+
+libkrun maps a blob into the guest by mmap of the fd it exports, which a dma_buf or a shm allows and an opaque fd does not.
+NVIDIA's driver exports host-visible memory only as opaque fds, so on it every guest vkMapMemory failed with VK_ERROR_MEMORY_MAP_FAILED.
+Upstream imports shm as a host pointer only on a device that exports no fd at all; this takes that path wherever no dma_buf is exported, and reports resizable-BAR memory types as device-local only there, since system memory cannot back them.
+
+## What it changes
+
+A guest maps host-visible memory through the fd its `VkDeviceMemory` exports:
+the host `mmap`s it into the guest's window. A dma_buf or a shm fd can be
+mapped; an opaque fd cannot. NVIDIA's driver exports host-visible memory only as
+opaque fds, so on it every guest `vkMapMemory` failed with
+`VK_ERROR_MEMORY_MAP_FAILED` (the host answers `RESOURCE_MAP_BLOB` with
+`ERR_UNSPEC`), while llvmpipe, which exports dma_bufs, worked.
+
+Upstream already backs host-visible memory with shm imported as a host pointer
+(`VK_EXT_external_memory_host`) and exported as that shm, but only on a device
+that exports no fd at all, which is macOS's. The patch takes that path on a
+device that exports no dma_buf, an opaque fd or not. On one that exports only
+opaque fds, resizable-BAR types -- device-local *and* host-visible -- are
+reported to the guest as device-local only, since system memory cannot back
+them and nothing else the host has can be mapped. llvmpipe, which exports
+dma_bufs, is untouched.
+
+## When it can go
+
+When upstream takes the host pointer path on a device that exports only opaque fds, or libkrun maps an opaque fd.
+---
+ src/venus/vkr_device_memory.c   |  7 +++++--
+ src/venus/vkr_physical_device.c | 23 +++++++++++++++++++++++
+ 2 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
+index 9db3e011..00fb21db 100644
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -506,8 +506,11 @@ vkr_fix_mappable_info(struct vkr_device *dev,
+    const bool force_udmabuf_import = physical_dev->udmabuf_dev_fd >= 0;
+    const bool support_export = physical_dev->is_dma_buf_fd_export_supported ||
+                                physical_dev->is_opaque_fd_export_supported;
+-   const bool use_host_ptr_import =
+-      physical_dev->EXT_external_memory_host && !support_export;
++   /* Also where only an opaque fd is exported, as by NVIDIA's driver: a VMM that maps a
++    * blob by its fd can mmap a dma_buf or a shm, not an opaque fd.
++    */
++   const bool use_host_ptr_import = physical_dev->EXT_external_memory_host &&
++                                    !physical_dev->is_dma_buf_fd_export_supported;
+ 
+    if (force_udmabuf_import) {
+       /* To be noted, there are 2 limits for udmabuf:
+diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
+index e67f716c..71719ee0 100644
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -328,6 +328,29 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
+       else
+          vkr_log("missing VK_EXT_external_memory_dma_buf for gbm import!");
+    }
++
++   /* Where only an opaque fd is exported, host-visible memory is shm imported as a host
++    * pointer (see vkr_fix_mappable_info), which is system memory. A type that is
++    * device-local as well -- resizable BAR -- is reported device-local only: left
++    * host-visible, a guest that picks it for a mapping gets memory nothing can map.
++    */
++   if (physical_dev->EXT_external_memory_host &&
++       physical_dev->is_opaque_fd_export_supported &&
++       !physical_dev->is_dma_buf_fd_export_supported && !physical_dev->gbm_device &&
++       physical_dev->udmabuf_dev_fd < 0) {
++      VkPhysicalDeviceMemoryProperties *props = &physical_dev->memory_properties;
++      const VkMemoryPropertyFlags host_bits = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++                                              VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
++      for (uint32_t i = 0; i < props->memoryTypeCount; i++) {
++         VkMemoryPropertyFlags *flags = &props->memoryTypes[i].propertyFlags;
++         /* the spoof's type 1 is the device's type 0 with DEVICE_LOCAL taken off */
++         const bool device_local = (*flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
++                                   (physical_dev->mem_type_spoof && i == 1);
++         if (device_local && (*flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
++            *flags &= ~host_bits;
++      }
++   }
+ }
+ 
+ static void

@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[path = "../../virtx-uvm/src/machine/wire.rs"]
 mod wire;
@@ -391,8 +391,11 @@ fn main() -> ExitCode {
     match serve() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            // To the console, which the host keeps as the machine's log.
-            eprintln!("{}: {e}", env!("CARGO_BIN_NAME"));
+            let said = format!("{}: {e}", env!("CARGO_BIN_NAME"));
+            eprintln!("{said}");
+            // And to the kernel's log, which reaches the console libkrun logs on the host: the
+            // stderr port libkrun gives this agent goes nowhere.
+            let _ = fs::write("/dev/kmsg", format!("<3>{said}\n"));
             ExitCode::FAILURE
         }
     }
@@ -617,22 +620,44 @@ fn serve() -> io::Result<()> {
     Ok(())
 }
 
-/// The virtio-console port named `name`.
+/// How long a port is waited for. The host adds and names each port once the guest's driver
+/// asks, so on a busy host a port can still be unnamed when this agent first looks.
+const PORT_WAIT: Duration = Duration::from_secs(10);
+
+/// The virtio-console port named `name`, waited for up to [`PORT_WAIT`].
 fn find(name: &str) -> io::Result<PathBuf> {
-    let by_name = PathBuf::from("/dev/virtio-ports").join(name);
-    if by_name.exists() {
-        return Ok(by_name);
-    }
-    for entry in fs::read_dir("/sys/class/virtio-ports")?.flatten() {
-        let named = fs::read_to_string(entry.path().join("name")).unwrap_or_default();
-        if named.trim() == name {
-            return Ok(PathBuf::from("/dev").join(entry.file_name()));
+    find_in(
+        Path::new("/dev"),
+        Path::new("/sys/class/virtio-ports"),
+        name,
+        PORT_WAIT,
+    )
+}
+
+/// The port named `name` in `ports`, sysfs's class of them, as its device under `dev`: looked
+/// for again until `wait` has passed.
+fn find_in(dev: &Path, ports: &Path, name: &str, wait: Duration) -> io::Result<PathBuf> {
+    let until = Instant::now() + wait;
+    loop {
+        let by_name = dev.join("virtio-ports").join(name);
+        if by_name.exists() {
+            return Ok(by_name);
         }
+        // Absent, or not yet named: the port has not come yet.
+        for entry in fs::read_dir(ports).into_iter().flatten().flatten() {
+            let named = fs::read_to_string(entry.path().join("name")).unwrap_or_default();
+            if named.trim() == name {
+                return Ok(dev.join(entry.file_name()));
+            }
+        }
+        if Instant::now() >= until {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no virtio-console port named `{name}` after {wait:?}"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("no virtio-console port named `{name}`"),
-    ))
 }
 
 /// Start `cmd` in a process group of its own, its stdin a pipe if `stdin`, answer the host with
@@ -1137,5 +1162,52 @@ fn failed(e: io::Error) -> IoFailure {
         | io::ErrorKind::InvalidInput => IoFailure::Forbidden,
         io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => IoFailure::Full,
         _ => IoFailure::Other(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory of the test's own, standing in for `/dev` and sysfs.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("virtx-guest-{}-{test}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_port_named_after_the_first_look_is_found() {
+        let dir = scratch("named-late");
+        let (dev, ports) = (dir.join("dev"), dir.join("ports"));
+        let naming = {
+            let ports = ports.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                fs::create_dir_all(ports.join("vport1p1")).unwrap();
+                fs::write(ports.join("vport1p1/name"), format!("{PORT_NAME}\n")).unwrap();
+            })
+        };
+        let found = find_in(&dev, &ports, PORT_NAME, Duration::from_secs(5));
+        naming.join().unwrap();
+        assert_eq!(found.unwrap(), dev.join("vport1p1"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_port_never_named_is_not_found_once_the_wait_is_over() {
+        let dir = scratch("never-named");
+        let ports = dir.join("ports");
+        fs::create_dir_all(ports.join("vport1p1")).unwrap();
+        fs::write(ports.join("vport1p1/name"), format!("{IO_PORT_NAME}\n")).unwrap();
+        let found = find_in(
+            &dir.join("dev"),
+            &ports,
+            PORT_NAME,
+            Duration::from_millis(50),
+        );
+        assert_eq!(found.unwrap_err().kind(), io::ErrorKind::NotFound);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

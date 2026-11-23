@@ -592,7 +592,25 @@ fn check(client_only: bool) -> anyhow::Result<()> {
         &["test", "-p", "virtx-uvm", "--lib"],
         "the unit tests of virtx-uvm",
     )?;
+    guest_tests()?;
     eprintln!("xtask: checked");
+    Ok(())
+}
+
+/// The unit tests of the agent inside each machine, a workspace of its own: on Linux alone,
+/// the only OS it builds for.
+fn guest_tests() -> anyhow::Result<()> {
+    if !cfg!(target_os = "linux") {
+        eprintln!("xtask: the unit tests of virtx-uvm-guest left out: they run on Linux");
+        return Ok(());
+    }
+    let mut command = cargo();
+    command
+        .current_dir(root_path().join("virtx-uvm-guest"))
+        .arg("test");
+    eprintln!("xtask: the unit tests of virtx-uvm-guest");
+    let status = command.status().context("running cargo")?;
+    ensure!(status.success(), "the unit tests of virtx-uvm-guest failed");
     Ok(())
 }
 

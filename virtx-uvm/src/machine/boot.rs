@@ -299,10 +299,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // No bounce buffer. A guest whose RAM reaches past 4 GiB -- the default 4 GiB does, over
     // the MMIO hole -- sets aside 64 MiB for swiotlb and zeroes it while it boots, and no
     // device here bounces through it: none offers `VIRTIO_F_ACCESS_PLATFORM`, so virtio
-    // reaches guest memory directly, and WHP passes no device through. Under WHP each page
-    // the guest first touches is a fault the hypervisor resolves one at a time; nested, as
-    // on a cloud runner, those 16384 faults were 2.1s of a 6.4s boot.
-    #[cfg(windows)]
+    // reaches guest memory directly, and nothing is passed through. Each page the guest first
+    // touches is a fault its hypervisor resolves: 13 ms of a boot under nested KVM, and under
+    // WHP, nested, 2.1s of 6.4.
     payload.append_cmdline("swiotlb=noforce");
     // The kernel's crypto algorithms are not tested as each registers: on one vCPU those tests
     // are a third of a boot, run against the init for it.

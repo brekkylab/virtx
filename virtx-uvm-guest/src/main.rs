@@ -416,20 +416,29 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
     // The boot root is shared by the time this runs, and a mount under a shared one cannot be
     // moved.
     mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
-    mount(
-        Some(&asked.lower_device),
-        LOWER_AT,
-        Some(&asked.lower_fstype),
-        libc::MS_RDONLY,
-        None,
-    )?;
-    mount(
-        Some(&asked.upper_device),
-        UPPER_AT,
-        Some(&asked.upper_fstype),
-        0,
-        None,
-    )?;
+    // The two disks at once: each mount waits on its own disk's reads.
+    std::thread::scope(|s| {
+        let lower = s.spawn(|| {
+            mount(
+                Some(&asked.lower_device),
+                LOWER_AT,
+                Some(&asked.lower_fstype),
+                libc::MS_RDONLY,
+                None,
+            )
+        });
+        let upper = mount(
+            Some(&asked.upper_device),
+            UPPER_AT,
+            Some(&asked.upper_fstype),
+            0,
+            None,
+        );
+        lower
+            .join()
+            .map_err(|_| io::Error::other("mounting the lower disk panicked"))??;
+        upper
+    })?;
     fs::create_dir_all(UPPER_DIR)?;
     fs::create_dir_all(WORK_DIR)?;
     let layers = format!("lowerdir={LOWER_AT},upperdir={UPPER_DIR},workdir={WORK_DIR}");

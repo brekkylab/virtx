@@ -17,7 +17,8 @@ linked against it and the guest enumerated the device — `/dev/dri/card0`,
 `renderD128`, `card0-Virtual-1`. What that does not say is that anything has
 been *rendered* through it there, with the guest half from `/alib`. Carried from there to
 `18dbf18`, where upstream had rewritten venus's memory allocation under it, it has been built
-on macOS alone, in both `render-server-mode=none` and `thread`, and not yet on a Windows host.
+on macOS, in both `render-server-mode=none` and `thread`, and on Windows, where a `gpu` server
+linked against it passed virtx-uvm's GPU tests.
 
 Most of it is the POSIX surface venus assumes and Windows
 does not have — `unistd.h`, `sys/mman.h`, `dlfcn.h`, `sys/resource.h`,
@@ -94,8 +95,7 @@ macOS used to take it too and no longer does. It is not Windows-specific: a
 `render-server-mode=none` build on macOS compiles, and serves a context, a blob
 and a fence to a C harness. A VM on it panics in rutabaga's Darwin backend on a
 `-1` descriptor, which was not chased, since nothing ships that combination. The
-blob-as-host-pointer path the context pairs with on Windows is `_WIN32`-only and
-has not been compiled on the new base.
+blob-as-host-pointer path the context pairs with on Windows is `_WIN32`-only.
 
 vrend is left out (`-Dvrend=false`), and libepoxy with it: the patch ports venus alone, and a
 guest's requests to the legacy context 0 are answered by upstream's no-op context.

@@ -96,15 +96,15 @@ pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
 /// Grow the upper disk at `path`, which no machine runs over, to `gib` GiB, with what is on it
 /// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
 /// no room to grow in place, which a kernel will not grow either -- is read whole and written
-/// again at the new size: at `part`, moved over it once whole and `written` has answered, so a
-/// failure, `written`'s too, leaves it as it was. Each file is read whole, its holes too, so a
-/// file larger than the disk could hold is refused, and the new disk takes on the host what its
-/// files are long, not `gib`.
+/// again at the new size: at `part`, moved over it once whole and `before_move` has answered,
+/// so a failure, `before_move`'s too, leaves it as it was. Each file is read whole, its holes
+/// too, so a file larger than the disk could hold is refused, and the new disk takes on the host
+/// what its files are long, not `gib`.
 pub(crate) fn grow_upper(
     path: &Path,
     part: &Path,
     gib: u32,
-    written: impl FnOnce() -> io::Result<()>,
+    before_move: impl FnOnce() -> io::Result<()>,
 ) -> Result<()> {
     let size = u64::from(gib) << 30;
     let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);
@@ -113,18 +113,20 @@ pub(crate) fn grow_upper(
     }
     let tree = FsTree::from_ext4(io::BufReader::new(File::open(path).map_err(read)?))?;
     let _ = std::fs::remove_file(part);
-    let written = File::create_new(part)
+    let grown = File::create_new(part)
         .map_err(|e| Error::io(format!("creating {}", part.display()), e))
         .and_then(|file| Ok(tree.to_ext4(sparse(file), size)?))
-        .and_then(|()| written().map_err(|e| Error::io(format!("growing {}", path.display()), e)))
+        .and_then(|()| {
+            before_move().map_err(|e| Error::io(format!("growing {}", path.display()), e))
+        })
         .and_then(|()| {
             std::fs::rename(part, path)
                 .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
         });
-    if written.is_err() {
+    if grown.is_err() {
         let _ = std::fs::remove_file(part);
     }
-    written
+    grown
 }
 
 /// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not an

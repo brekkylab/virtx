@@ -677,6 +677,12 @@ fn forward(port: u16) -> io::Result<()> {
                     return;
                 };
                 let _ = guest.set_nodelay(true);
+                // Non-blocking, so that no thread waits inside a TSI socket's call, which
+                // holds the socket's lock: a read waiting there for the answer would keep the
+                // other thread from sending what it answers. Each waits in `poll` instead.
+                if guest.set_nonblocking(true).is_err() {
+                    return;
+                }
                 let (Ok(host_back), Ok(guest_back)) = (host.try_clone(), guest.try_clone())
                 else {
                     return;
@@ -684,16 +690,52 @@ fn forward(port: u16) -> io::Result<()> {
                 // Each direction ends with the half-close that says so, and the other keeps
                 // going until its own end says the same.
                 let back = thread::spawn(move || {
-                    let _ = io::copy(&mut &guest_back, &mut &host_back);
+                    let _ = copy(&guest_back, &host_back, &guest_back);
                     let _ = host_back.shutdown(Shutdown::Write);
                 });
-                let _ = io::copy(&mut &host, &mut &guest);
+                let _ = copy(&host, &guest, &guest);
                 let _ = guest.shutdown(Shutdown::Write);
                 let _ = back.join();
             });
         }
     });
     Ok(())
+}
+
+/// [`io::copy`] from `from` to `to`, one of which is `guest`, non-blocking: waiting in `poll`
+/// for `guest` where it takes or has nothing now.
+fn copy(mut from: impl Read, mut to: impl io::Write, guest: &TcpStream) -> io::Result<()> {
+    let wait = |events| {
+        let mut polled = libc::pollfd {
+            fd: guest.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd` of a descriptor held open.
+        unsafe { libc::poll(&mut polled, 1, -1) };
+    };
+    let mut buf = vec![0; 64 << 10];
+    loop {
+        let read = match from.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                wait(libc::POLLIN);
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let mut left = &buf[..read];
+        while !left.is_empty() {
+            match to.write(left) {
+                Ok(written) => left = &left[written..],
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => wait(libc::POLLOUT),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 /// The virtio-console port named `name`.

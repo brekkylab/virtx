@@ -88,6 +88,10 @@ pub enum Error {
     #[error(transparent)]
     Fstree(#[from] fstree::Error),
 
+    /// What failed in this process's own work, not on this host's files, whose failures are
+    /// [`Store`](Error::Store)'s and [`Fstree`](Error::Fstree)'s: making the client, a task that
+    /// panicked, and reading, serializing or compressing in memory what a registry serves or is
+    /// sent.
     #[error("{context}: {source}")]
     Io {
         context: String,

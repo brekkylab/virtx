@@ -263,7 +263,9 @@ impl Access {
     }
 
     /// Project `id`'s home, made as it is first reached, by a request or by this: `None` once it
-    /// is being removed, or where it is to have none.
+    /// is being removed, or where it is to have none. It asks no one whether `id` is a project's:
+    /// that is the caller's to know, or its [`Homes`]' to refuse. A `Homes` that makes a home for
+    /// any id, as `ProjectStore` does, makes one, and its directory, for an id no project has.
     pub async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         if let Some(home) = self.homes.lock().unwrap().get(id) {
             return Ok(home.clone());

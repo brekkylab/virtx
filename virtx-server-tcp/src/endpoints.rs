@@ -39,11 +39,11 @@ use virtx_core::{
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
-    Activity, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
-    ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
+    Activity, BuildError, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
+    HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, Network, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
-    RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend, UnknownSandbox,
-    VolumeError, VolumeStore, build_step, park_after, recipe_kept, signal_number,
+    RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
+    UnknownSandbox, VolumeError, VolumeStore, build_step, park_after, recipe_kept, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -1040,7 +1040,7 @@ where
                 },
                 Err(e) => ImageJobEnd {
                     digest: None,
-                    error: Some(e.to_string()),
+                    error: Some(failed(e)),
                 },
             };
             ending.end(
@@ -1070,6 +1070,43 @@ where
         format!("/images/jobs/{id}"),
         &*job.job.lock().unwrap(),
     ))
+}
+
+/// Why an image job failed with `e`, as the job says it: a failure on the server's files by its
+/// kind, and a machine that did not start as its process told it, with the account of either,
+/// which can name the server's paths, on the server's stderr; the rest as it says itself.
+fn failed(e: Failure) -> String {
+    let e = match e.downcast::<BuildError>() {
+        Ok(e) => {
+            if let BuildError::Io { source, .. }
+            | BuildError::Fstree(FstreeError::Io { source, .. }) = &*e
+            {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                BuildError::Store(e) => Refused::from(e).2,
+                BuildError::Machine(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    let e = match e.downcast::<RegistryError>() {
+        Ok(e) => {
+            if let RegistryError::Fstree(FstreeError::Io { source, .. }) = &*e {
+                return io_failure(source, &e);
+            }
+            return match *e {
+                RegistryError::Store(e) => Refused::from(e).2,
+                e => e.to_string(),
+            };
+        }
+        Err(e) => e,
+    };
+    match e.downcast::<ImageStoreError>() {
+        Ok(e) => Refused::from(*e).2,
+        Err(e) => e.to_string(),
+    }
 }
 
 async fn image_pull(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
@@ -1920,11 +1957,10 @@ impl IntoResponse for Refused {
 }
 
 /// What a refusal says of an operation on the host's files that failed with `e`: `e`'s kind.
-/// `message` can name the server's own paths, so it goes to the server's stderr instead, and the
-/// refusal is answered even when stderr cannot take it, as on a disk that is full.
+/// `message` can name the server's own paths, so it goes to the server's stderr instead
+/// ([`HostPaths::Hidden`]).
 fn io_failure(e: &std::io::Error, message: impl Display) -> String {
-    let _ = writeln!(io::stderr(), "{message}");
-    format!("the server's files: {}", e.kind())
+    HostPaths::Hidden.told(e.kind(), message)
 }
 
 /// The refusal an operation on the host's files that failed with `e` is.
@@ -1986,13 +2022,21 @@ impl From<ImageStoreError> for Refused {
     }
 }
 
-/// What booting a sandbox's machine, or sending it a command or a signal, fails with.
+/// What booting a sandbox's machine, or sending it a command or a signal, fails with. A machine
+/// that did not start is answered with why as its process told it, and its whole account, which
+/// can name the server's paths, goes to the server's stderr.
 impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
-                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
+            MachineError::DidNotStart { account, told } => {
+                let _ = writeln!(io::stderr(), "{account}");
+                refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", told)
+            }
+            MachineError::Io { source, .. }
+            | MachineError::Fstree(FstreeError::Io { source, .. })
+            | MachineError::Volume(VolumeError::Io { source, .. }) => {
+                internal(io_failure(source, &e))
             }
             _ => internal(e),
         }
@@ -2113,8 +2157,19 @@ mod tests {
                 context: CONTEXT.into(),
                 source: source(),
             };
-            let internal: [Refused; 3] = [
+            let internal: [Refused; 6] = [
                 ImageStoreError::Fstree(tree()).into(),
+                MachineError::Fstree(tree()).into(),
+                MachineError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                }
+                .into(),
+                MachineError::Volume(VolumeError::Io {
+                    context: CONTEXT.into(),
+                    source: source(),
+                })
+                .into(),
                 ProjectError::Io {
                     context: CONTEXT.into(),
                     source: source(),
@@ -2161,6 +2216,113 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["error"]["message"], "the server's projects failed");
+    }
+
+    #[tokio::test]
+    async fn a_machine_that_did_not_start_is_answered_as_it_tells_it() {
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let told = format!("{why}; last logged:\nattaching the root's image: boot error");
+        let refusal: Refused = MachineError::DidNotStart {
+            account: format!(
+                "{why}; last logged:\nvirtx_uvm::machine::machine: attaching the root's image: \
+                 boot error: /home/virtx/project/a/images/rootfs/sha256/a.vmdk"
+            ),
+            told: told.clone(),
+        }
+        .into();
+        let response = refusal.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "boot_failed");
+        assert_eq!(body["error"]["message"], told.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_failed_image_job_says_why_without_the_server_s_paths() {
+        const CONTEXT: &str = "opening /home/virtx/project/a/images/rootfs/sha256/a.vmdk";
+        let source = || io::Error::new(io::ErrorKind::PermissionDenied, "under /home/virtx");
+        let store = move || ImageStoreError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let tree = move || FstreeError::Io {
+            context: CONTEXT.into(),
+            source: source(),
+        };
+        let on_files: [Failure; 6] = [
+            Box::new(BuildError::Io {
+                context: CONTEXT.into(),
+                source: source(),
+            }),
+            Box::new(BuildError::Store(store())),
+            Box::new(BuildError::Fstree(tree())),
+            Box::new(RegistryError::Store(store())),
+            Box::new(RegistryError::Fstree(tree())),
+            Box::new(store()),
+        ];
+        for e in on_files {
+            assert_eq!(failed(e), "the server's files: permission denied");
+        }
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        cancelled.abort();
+        let elsewhere: [Failure; 2] = [
+            Box::new(BuildError::Join(cancelled.await.unwrap_err())),
+            Box::new(RegistryError::Io {
+                context: "making a registry client".into(),
+                source: io::Error::other("no proxy"),
+            }),
+        ];
+        for e in elsewhere {
+            let said = e.to_string();
+            assert_eq!(failed(e), said);
+        }
+        let why = "the machine's process ended with exit status: 1 before it was up";
+        let machine = BuildError::Machine(MachineError::DidNotStart {
+            account: format!("{why}; last logged:\n{CONTEXT}"),
+            told: why.into(),
+        });
+        assert_eq!(failed(Box::new(machine)), why);
+        let base = "base alpine:3.20: no image here is tagged alpine:3.20";
+        assert_eq!(failed(base.into()), base);
+
+        let root = std::env::temp_dir().join(format!("virtx-tcp-image-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let images = ImageStore::new(root.join("images")).unwrap();
+        let registry = Arc::new(RegistryServer::new(images.clone(), "/images").unwrap());
+        let home = Arc::new(Home::new(images, registry, &root).unwrap());
+        let started = image_job(
+            &home,
+            ImageJobKind::Build,
+            "app".into(),
+            None,
+            move |_| async move { Err(Failure::from(store())) },
+        );
+        assert!(started.is_ok());
+        let job = Arc::clone(&home.image_jobs.lock().unwrap().values().next().unwrap().0);
+        let ended = async {
+            loop {
+                if let ImageJob {
+                    running: false,
+                    error,
+                    ..
+                } = &*job.job.lock().unwrap()
+                {
+                    break error.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let error = tokio::time::timeout(Duration::from_secs(10), ended)
+            .await
+            .unwrap();
+        assert_eq!(
+            error.as_deref(),
+            Some("the server's files: permission denied")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A write its process closed its stdin under part-way is `409`, `ended`, with how much of

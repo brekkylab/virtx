@@ -35,10 +35,10 @@ use virtx_core::{
 };
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
-    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
-    Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
-    build_step, park_after, recipe_kept, signal_number,
+    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
+    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project,
+    ProjectError, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError,
+    VolumeStore, build_step, park_after, recipe_kept, signal_number,
 };
 
 use crate::Host;
@@ -85,7 +85,7 @@ impl Home {
         Ok(Home {
             images,
             registry,
-            files: Files::new(volumes.clone()),
+            files: Files::new(volumes.clone()).with_host_paths(HostPaths::Named),
             root: root.to_owned(),
             volumes,
             vm: vec![
@@ -1262,7 +1262,7 @@ impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
+            MachineError::DidNotStart { .. } => {
                 refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
             }
             _ => internal(e),

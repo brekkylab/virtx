@@ -406,11 +406,21 @@ impl Home {
         true
     }
 
+    /// Close it as [`close`](Home::close) does, whatever lives here.
+    pub(crate) fn close_anyway(&self) {
+        let _sandboxes = self.sandboxes.lock().unwrap();
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
     /// Cancel every image job here, and close every sandbox, as removing each does, side by
-    /// side: blocks until each machine has stopped and synced what it wrote.
+    /// side, those kept here and not known again among them: blocks until each machine has
+    /// stopped and synced what it wrote.
     pub fn close_all(&self) {
         for (_, (job, stop)) in self.image_jobs.lock().unwrap().drain() {
             cancel_now(&job, &stop);
+        }
+        for (_, unknown) in self.unknown.lock().unwrap().drain() {
+            unknown.remove();
         }
         let closed: Vec<_> = self
             .sandboxes

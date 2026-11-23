@@ -571,15 +571,20 @@ fn raw(end: &impl std::os::windows::io::AsRawHandle) -> u64 {
     end.as_raw_handle() as usize as u64
 }
 
-/// Keep `ends` open in the process `command` spawns, which they are not by default.
+/// Keep `ends` open in the process `command` spawns, and nothing else of this one's but its
+/// stdio. On macOS a pipe or a socket is made inheritable and only then marked otherwise, so
+/// one another thread is making as this forks would go to the machine too and stay open for as
+/// long as it runs: another machine's spawn, waiting on its status pipe, would wait that long.
 #[cfg(unix)]
 fn inherit(command: &mut Command, ends: [u64; 4]) -> io::Result<()> {
     use std::os::unix::process::CommandExt as _;
 
-    // SAFETY: `fcntl` is async-signal-safe, which is all that may run between `fork` and
-    // `exec`.
+    let mut others = Descriptors::new();
+    // SAFETY: what runs between `fork` and `exec` makes system calls alone, into memory made
+    // before the fork.
     unsafe {
         command.pre_exec(move || {
+            others.close_on_exec();
             for end in ends {
                 if libc::fcntl(end as i32, libc::F_SETFD, 0) == -1 {
                     return Err(io::Error::last_os_error());
@@ -589,6 +594,111 @@ fn inherit(command: &mut Command, ends: [u64; 4]) -> io::Result<()> {
         });
     }
     Ok(())
+}
+
+/// What a child needs to mark every descriptor past its stdio to close on `exec`, between
+/// `fork` and `exec`, where nothing may allocate: made before the fork.
+#[cfg(unix)]
+struct Descriptors {
+    /// Below which every descriptor is, for when the open ones cannot be found otherwise.
+    limit: libc::c_int,
+    /// Room for the open ones as macOS lists them: twice as many as are open now, for those
+    /// other threads open before the fork.
+    #[cfg(target_os = "macos")]
+    listed: Vec<libc::proc_fdinfo>,
+}
+
+#[cfg(unix)]
+impl Descriptors {
+    fn new() -> Descriptors {
+        // SAFETY: `sysconf` reads a limit.
+        let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+        let limit = match limit {
+            1.. => limit.min(libc::c_int::MAX.into()) as libc::c_int,
+            _ => libc::c_int::MAX,
+        };
+        #[cfg(target_os = "macos")]
+        let listed = {
+            // SAFETY: with no buffer, `proc_pidinfo` answers how large one has to be.
+            let bytes = unsafe {
+                libc::proc_pidinfo(
+                    libc::getpid(),
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            let open = bytes.max(0) as usize / std::mem::size_of::<libc::proc_fdinfo>();
+            let empty = libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            };
+            vec![empty; 2 * open + 64]
+        };
+        Descriptors {
+            limit,
+            #[cfg(target_os = "macos")]
+            listed,
+        }
+    }
+
+    /// Mark every descriptor of this process past its stdio to close on `exec`.
+    fn close_on_exec(&mut self) {
+        #[cfg(target_os = "linux")]
+        // SAFETY: `close_range` closes nothing with `CLOSE_RANGE_CLOEXEC`.
+        if unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        } == 0
+        {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let size = std::mem::size_of_val(self.listed.as_slice());
+            // SAFETY: `listed` is `size` bytes; `proc_pidinfo` is a system call, nothing more.
+            let bytes = unsafe {
+                libc::proc_pidinfo(
+                    libc::getpid(),
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    self.listed.as_mut_ptr().cast(),
+                    size as libc::c_int,
+                )
+            };
+            // Short of full, it listed every one.
+            if bytes > 0 && (bytes as usize) < size {
+                let listed = bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
+                for info in &self.listed[..listed] {
+                    close_on_exec(info.proc_fd);
+                }
+                return;
+            }
+        }
+        for fd in 3..self.limit {
+            close_on_exec(fd);
+        }
+    }
+}
+
+/// Mark `fd` to close on `exec`, if it is open and past stdio.
+#[cfg(unix)]
+fn close_on_exec(fd: libc::c_int) {
+    if fd < 3 {
+        return;
+    }
+    // SAFETY: `fcntl` on a descriptor that may not be open answers so, and changes nothing.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags != -1 && flags & libc::FD_CLOEXEC == 0 {
+            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
+    }
 }
 
 /// Keep `ends` open in the process `command` spawns, which they are not by default.

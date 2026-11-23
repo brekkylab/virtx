@@ -1236,6 +1236,32 @@ async fn a_machine_s_process_leads_a_process_group_of_its_own(home: Home) {
     close(sandbox).await;
 }
 
+/// A machine's process holds what it was handed and none of its starter's other descriptors:
+/// not one left inheritable, as one another thread is making is for a moment on macOS, which
+/// held there would stay open for as long as the machine runs.
+#[cfg(unix)]
+async fn a_machine_s_process_holds_none_of_its_starter_s_descriptors(home: Home) {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    // SAFETY: a descriptor this test holds open.
+    assert_ne!(
+        unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFD, 0) },
+        -1
+    );
+    let sandbox = home.sandbox(&small(), None).await;
+    drop(writer);
+    // On a thread of its own, which a read held open does not keep this process past its end.
+    let (read, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || read.send(reader.read(&mut [0; 1]).unwrap()));
+    let got = tokio::task::spawn_blocking(move || got.recv_timeout(HANG))
+        .await
+        .unwrap();
+    close(sandbox).await;
+    assert_eq!(got.expect("no machine holds the pipe open"), 0);
+}
+
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&small(), park).await;
@@ -3032,7 +3058,10 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
     #[cfg(unix)]
-    tests.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
+    tests.extend(tests![
+        a_machine_s_process_leads_a_process_group_of_its_own,
+        a_machine_s_process_holds_none_of_its_starter_s_descriptors
+    ]);
     // The x86_64 kernels are built without those tests, and seeded by their CPU.
     #[cfg(target_arch = "aarch64")]
     tests.extend(tests![

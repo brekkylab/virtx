@@ -445,6 +445,15 @@ fn renew(asked: &wire::MachineInfo) -> io::Result<()> {
             }
         }
     }
+    // A restored guest may hold what its snapshot's disks' first blocks were: dropped, so the
+    // disks are read as they are.
+    for device in [&asked.lower_device, &asked.upper_device] {
+        if let Ok(disk) = File::open(device) {
+            // BLKFLSBUF, _IO(0x12, 97).
+            // SAFETY: takes no argument.
+            unsafe { libc::ioctl(disk.as_raw_fd(), 0x1261 as _) };
+        }
+    }
     if let Some((secs, nanos)) = asked.now {
         let now = libc::timespec {
             tv_sec: secs as _,

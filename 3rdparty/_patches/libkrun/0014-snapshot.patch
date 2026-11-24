@@ -1100,10 +1100,10 @@ index 95117a2a..89c1652b 100644
  
 diff --git a/src/libkrun/src/vmm/snapshot.rs b/src/libkrun/src/vmm/snapshot.rs
 new file mode 100644
-index 00000000..ec291c17
+index 00000000..8ace270e
 --- /dev/null
 +++ b/src/libkrun/src/vmm/snapshot.rs
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,373 @@
 +//! A paused machine written to a directory, and read back to restore it in a fresh process on
 +//! the same host: KVM x86_64 only.
 +//!
@@ -1250,7 +1250,9 @@ index 00000000..ec291c17
 +    }
 +    let path = dir.join("memory");
 +    let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-+    if std::env::var_os("VIRTX_SPIKE_EAGER").is_some() {
++    // Read rather than mapped: under nested virtualization each 4 KiB page of a file mapping
++    // the guest touches is a fault through both hypervisors, where huge anonymous pages are few.
++    if std::env::var_os("VIRTX_SPIKE_MAPPED").is_none() {
 +        return read_memory(&file, mem).map_err(|e| format!("reading {}: {e}", path.display()));
 +    }
 +    let mut offset = 0u64;

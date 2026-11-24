@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "virtx"
-version = "0.2.0"
+version = "0.2.1"
 # The repository's README, which lies outside this directory: hatchling reads it only as a hook's.
 dynamic = ["readme"]
 description = "A virtx client for Python, over libvirtx_core's C ABI."

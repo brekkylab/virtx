@@ -177,7 +177,8 @@ class ImageJob:
         async for item in self.client._items(
             "virtx_client_image_job_log", args(id=self.id, after=after)
         ):
-            yield image_job_entry(item)
+            if (entry := image_job_entry(item)) is not None:
+                yield entry
 
     async def complete(self, print: bool = False) -> str:
         """Follow it to its end, printing each line of its log if ``print``: the digest it ended
@@ -222,15 +223,18 @@ ImageJobEntry = Log | Truncated | ImageJobEnd
 """An entry of an image job's log."""
 
 
-def image_job_entry(item: Mapping[str, Any]) -> LogEntry[ImageJobEntry]:
-    """An item of ``ImageJob.log``'s stream, as ``{"id": n, "log": "..."}`` and the like."""
+def image_job_entry(item: Mapping[str, Any]) -> LogEntry[ImageJobEntry] | None:
+    """An item of ``ImageJob.log``'s stream, as ``{"id": n, "log": "..."}`` and the like;
+    ``None`` for an entry of a kind this version does not know, to be passed over."""
     entry: ImageJobEntry
     if "log" in item:
         entry = Log(item["log"])
     elif "truncated" in item:
         entry = Truncated()
-    else:
+    elif "end" in item:
         entry = ImageJobEnd(item["end"]["digest"])
+    else:
+        return None
     return LogEntry(item["id"], entry)
 
 

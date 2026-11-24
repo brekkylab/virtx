@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     env, fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -23,9 +23,103 @@ const ABINS: &[(&str, &str)] = &[
 ];
 
 /// Build the `/abin` programs for the guest, in the debug or release profile, and place them,
-/// their `SKILL.md` and, as `.<program>/`, what each one's build script leaves in
-/// `OUT_DIR/install/`, in `out`.
+/// their `SKILL.md` and what each installs in `out`.
 pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
+    let root = root_path();
+    let target = cross_ready()?;
+
+    let crate_dir = root.join("virtx-abins");
+    let mut cargo = cross_cargo(&crate_dir);
+    cargo.args(["build", "--target", target]);
+    if !debug {
+        cargo.arg("--release");
+    }
+    for (package, _) in ABINS {
+        cargo.args(["-p", package]);
+    }
+    // The messages, for where each package's build script wrote: what one puts in
+    // `OUT_DIR/install` is what its program installs beside itself. Diagnostics and build
+    // scripts' output still reach the terminal, on stderr.
+    cargo
+        .arg("--message-format=json-render-diagnostics")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let built = cargo
+        .output()
+        .with_context(|| format!("running cargo for abin for {target}"))?;
+    ensure!(built.status.success(), "building abin for {target} failed");
+
+    // A message names its package by id, whose spelling is cargo's own: the workspace's
+    // metadata says which id is which package.
+    let metadata = cross_cargo(&crate_dir)
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .stderr(Stdio::inherit())
+        .output()
+        .context("running cargo metadata for abin")?;
+    ensure!(metadata.status.success(), "cargo metadata for abin failed");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&metadata.stdout).context("reading cargo metadata")?;
+    let names: HashMap<&str, &str> = metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|package| Some((package["id"].as_str()?, package["name"].as_str()?)))
+        .collect();
+
+    let mut out_dirs = HashMap::new();
+    for line in String::from_utf8_lossy(&built.stdout).lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message["reason"] != "build-script-executed" {
+            continue;
+        }
+        let package = message["package_id"].as_str().and_then(|id| names.get(id));
+        if let (Some(package), Some(dir)) = (package, message["out_dir"].as_str()) {
+            out_dirs.insert(package.to_string(), Path::new(dir).join("install"));
+        }
+    }
+
+    let profile = if debug { "debug" } else { "release" };
+    fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    let built = target_path().join(format!("{target}/{profile}"));
+    for (package, program) in ABINS {
+        place(&built.join(program), &out.join(program))?;
+
+        // Under `install/<program>/`, at the paths it has in `/abin`; replaced whole, so that
+        // what a program stopped installing goes.
+        let at = out.join("install").join(program);
+        if at.exists() {
+            fs::remove_dir_all(&at).with_context(|| format!("removing {}", at.display()))?;
+        }
+        // A package with a build script has its `OUT_DIR` in the messages, or what it installs
+        // would be missing from `/abin` with nothing said.
+        match out_dirs.get(*package) {
+            Some(from) if from.is_dir() => place_dir(from, &at)?,
+            Some(_) => {}
+            None => ensure!(
+                !crate_dir.join(program).join("build.rs").is_file(),
+                "cargo's messages name no OUT_DIR for {package}'s build script"
+            ),
+        }
+
+        let skill = crate_dir.join(program).join("SKILL.md");
+        let at = out.join("skills").join(program);
+        if skill.is_file() {
+            fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
+            place(&skill, &at.join("SKILL.md"))?;
+        } else {
+            let _ = fs::remove_file(at.join("SKILL.md"));
+            let _ = fs::remove_dir(&at);
+        }
+    }
+
+    Ok(())
+}
+
+/// The guest's target, with what cross-compiling `virtx-abins/` for it needs: the musl sysroot,
+/// fetched when there is none, and the compiler and archiver, asked for when they are missing.
+fn cross_ready() -> anyhow::Result<&'static str> {
     let root = root_path();
     let target = guest_target()?;
     let arch = target.split('-').next().unwrap_or_default();
@@ -60,83 +154,25 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
             }
         );
     }
+    Ok(target)
+}
 
-    let crate_dir = root.join("virtx-abins");
-    let mut cargo = cross_cargo(&crate_dir);
-    cargo.args([
-        "build",
-        "--target",
-        target,
-        "--message-format=json-render-diagnostics",
-    ]);
-    if !debug {
-        cargo.arg("--release");
+/// The tests of `virtx-abins/`, for the guest's target in the release profile `build` compiles
+/// their dependencies in: run on a Linux host, whose kernel runs the static musl binaries, and
+/// compiled alone on any other.
+pub(crate) fn test() -> anyhow::Result<()> {
+    let target = cross_ready()?;
+    let linux = cfg!(target_os = "linux");
+    let mut cargo = cross_cargo(&root_path().join("virtx-abins"));
+    cargo.args(["test", "--release", "--target", target]);
+    if !linux {
+        cargo.arg("--no-run");
     }
-    for (package, _) in ABINS {
-        cargo.args(["-p", package]);
+    let status = cargo.status().context("running cargo test for abin")?;
+    ensure!(status.success(), "the tests of abin failed");
+    if !linux {
+        eprintln!("xtask: compiled the tests of abin, which run on a Linux host");
     }
-    let output = cargo
-        .stderr(Stdio::inherit())
-        .output()
-        .with_context(|| format!("running cargo for abin for {target}"))?;
-    ensure!(output.status.success(), "building abin for {target} failed");
-
-    // Each program's `OUT_DIR`, as cargo names it for the build script it ran or found fresh. A
-    // path package's id is `path+file://<its directory>#...`, and each one's directory is
-    // `virtx-abins/<program>`.
-    let mut out_dirs = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if message["reason"] != "build-script-executed" {
-            continue;
-        }
-        let (Some(id), Some(dir)) = (message["package_id"].as_str(), message["out_dir"].as_str())
-        else {
-            continue;
-        };
-        let Some(package) = id
-            .strip_prefix("path+file://")
-            .and_then(|id| id.split('#').next())
-        else {
-            continue;
-        };
-        if let Some((_, program)) = ABINS
-            .iter()
-            .find(|(_, program)| package.ends_with(&format!("/{program}")))
-        {
-            out_dirs.insert(*program, PathBuf::from(dir));
-        }
-    }
-
-    let profile = if debug { "debug" } else { "release" };
-    fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
-    let built = target_path().join(format!("{target}/{profile}"));
-    for (_, program) in ABINS {
-        place(&built.join(program), &out.join(program))?;
-
-        // Replaced whole, so that nothing an earlier build placed is left in it.
-        let at = out.join(format!(".{program}"));
-        if at.is_dir() {
-            fs::remove_dir_all(&at).with_context(|| format!("removing {}", at.display()))?;
-        }
-        let install = out_dirs.get(program).map(|dir| dir.join("install"));
-        if let Some(install) = install.filter(|install| install.is_dir()) {
-            place_dir(&install, &at)?;
-        }
-
-        let skill = crate_dir.join(program).join("SKILL.md");
-        let at = out.join("skills").join(program);
-        if skill.is_file() {
-            fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
-            place(&skill, &at.join("SKILL.md"))?;
-        } else {
-            let _ = fs::remove_file(at.join("SKILL.md"));
-            let _ = fs::remove_dir(&at);
-        }
-    }
-
     Ok(())
 }
 

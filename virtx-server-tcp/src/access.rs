@@ -262,9 +262,11 @@ impl Access {
         Ok((who, home.ok_or(StatusCode::FORBIDDEN)?))
     }
 
-    /// Project `id`'s home, made as it is first reached: `None` once it is being removed, or
-    /// where it is to have none.
-    async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
+    /// Project `id`'s home, made as it is first reached, by a request or by this: `None` once it
+    /// is being removed, or where it is to have none. It asks no one whether `id` is a project's:
+    /// that is the caller's to know, or its [`Homes`]' to refuse. A `Homes` that makes a home for
+    /// any id, as `ProjectStore` does, makes one, and its directory, for an id no project has.
+    pub async fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         if let Some(home) = self.homes.lock().unwrap().get(id) {
             return Ok(home.clone());
         }
@@ -578,5 +580,42 @@ mod tests {
         assert_eq!(access.homes().len(), 1);
         assert_eq!(home("gone").await.err(), Some(StatusCode::FORBIDDEN));
         assert!(!store.path(&gone).join("images").exists());
+    }
+
+    /// A project's home is reached by its id as a request reaches it, made by whichever comes
+    /// first, and none for a project being removed or one its homes make none of.
+    #[tokio::test]
+    async fn a_project_s_home_is_reached_by_its_id_as_by_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let alice = Principal::new("alice");
+        let first = projects.create(&alice, "first").await.unwrap().id;
+        let second = projects.create(&alice, "second").await.unwrap().id;
+        let none = projects.create(&alice, "none").await.unwrap().id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(Only(store.clone(), vec![first, second])),
+        );
+        let requested = async |project| {
+            let headers = headers(Some("alice"), Some(project), None);
+            access.home(&headers).await.unwrap().1
+        };
+
+        // By its id first, then by a request: the one home.
+        let home = access.home_of(&first).await.unwrap().unwrap();
+        assert_eq!(home.root, store.path(&first));
+        assert!(Arc::ptr_eq(&requested("first").await, &home));
+        // By a request first, then by its id: the one home.
+        let home = requested("second").await;
+        let by_id = access.home_of(&second).await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&by_id, &home));
+
+        assert!(access.home_of(&none).await.unwrap().is_none());
+        assert!(access.close(&first));
+        assert!(access.home_of(&first).await.unwrap().is_none());
     }
 }

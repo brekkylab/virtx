@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ._library import VirtxError, args
 from .files import Files
@@ -20,8 +20,12 @@ if TYPE_CHECKING:
     from .client import Client
 
 
+E = TypeVar("E", bound=Enum)
+
+
 class PortProtocol(str, Enum):
-    """How a sandbox's port is reached from outside it."""
+    """How a sandbox's port is reached from outside it. A protocol this version does not know is
+    read as the server's string itself."""
 
     TCP = "tcp"
     """TCP: at a loopback address, or through a ``PortForwarder`` opened with its ``url``."""
@@ -63,7 +67,8 @@ class SandboxPort:
     label: str | None = None
     """What it is for, as it was opened with."""
 
-    protocol: PortProtocol = PortProtocol.TCP
+    protocol: PortProtocol | str = PortProtocol.TCP
+    """A ``str`` for a protocol this version does not know."""
 
     address: str | None = None
     """A ``host:port`` any TCP client reaches a TCP port at directly, from a server that gives it
@@ -80,7 +85,7 @@ class SandboxPort:
             value["port"],
             value.get("url"),
             value.get("label"),
-            PortProtocol(value.get("protocol", "tcp")),
+            _known(PortProtocol, value.get("protocol", "tcp")),
             value.get("address"),
             InboundError.from_dict(why) if why is not None else None,
         )
@@ -232,8 +237,8 @@ class Sandbox(Files):
             async for item in self.client._items("virtx_client_exec_sandbox_log", request):
                 if "job" in item:
                     yield SandboxJob.from_dict(self.client, self.id, item["job"])
-                else:
-                    yield sandbox_job_entry(item)
+                elif (entry := sandbox_job_entry(item)) is not None:
+                    yield entry
 
         return StartedJob(start, lambda job: job.log(), run)
 
@@ -277,7 +282,8 @@ class SandboxJobKind(str, Enum):
 
 class SandboxJobEndReason(str, Enum):
     """Why a process did not end by itself: the server, or the kernel, killed it, as ``SIGKILL``
-    does, its code ``137``."""
+    does, its code ``137``. A reason this version does not know is read as the server's string
+    itself."""
 
     TIMEOUT = "timeout"
     """Its ``timeout_ms`` ran out."""
@@ -326,8 +332,9 @@ class SandboxJob:
     code: int | None = None
     """Once it has ended, its exit code."""
 
-    reason: SandboxJobEndReason | None = None
-    """Once it has ended, why, if it did not end by itself."""
+    reason: SandboxJobEndReason | str | None = None
+    """Once it has ended, why, if it did not end by itself: a ``str`` for a reason this version
+    does not know."""
 
     @classmethod
     def from_dict(cls, client: Client, sandbox_id: str, value: Mapping[str, Any]) -> SandboxJob:
@@ -369,7 +376,8 @@ class SandboxJob:
         async for item in self.client._items(
             "virtx_client_sandbox_job_log", self._args(after=after)
         ):
-            yield sandbox_job_entry(item)
+            if (entry := sandbox_job_entry(item)) is not None:
+                yield entry
 
     async def complete(self, print: bool = False) -> int:
         """Follow it to its end, printing what its process writes to stdout and stderr as it
@@ -415,23 +423,32 @@ class SandboxJobEnd:
 
     code: int
 
-    reason: SandboxJobEndReason | None = None
-    """Why, if it did not end by itself."""
+    reason: SandboxJobEndReason | str | None = None
+    """Why, if it did not end by itself: a ``str`` for a reason this version does not know."""
 
 
-def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | None:
+def _known(kind: type[E], value: str) -> E | str:
+    """``value`` as a member of ``kind``, or as the server said it where this version does not
+    know it."""
+    try:
+        return kind(value)
+    except ValueError:
+        return value
+
+
+def _reason(value: Mapping[str, Any]) -> SandboxJobEndReason | str | None:
     """A job's, or its end's, ``reason``, if it has one."""
     reason = value.get("reason")
-    return None if reason is None else SandboxJobEndReason(reason)
+    return None if reason is None else _known(SandboxJobEndReason, reason)
 
 
 SandboxJobEntry = Stdout | Stderr | Truncated | SandboxJobEnd
 """An entry of a sandbox job's log."""
 
 
-def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
+def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry] | None:
     """An item of ``SandboxJob.log``'s stream, as ``{"id": n, "stdout": "..."}`` and the
-    like."""
+    like; ``None`` for an entry of a kind this version does not know, to be passed over."""
     entry: SandboxJobEntry
     if "stdout" in item:
         entry = Stdout(item["stdout"])
@@ -439,6 +456,8 @@ def sandbox_job_entry(item: Mapping[str, Any]) -> LogEntry[SandboxJobEntry]:
         entry = Stderr(item["stderr"])
     elif "truncated" in item:
         entry = Truncated()
-    else:
+    elif "end" in item:
         entry = SandboxJobEnd(item["end"]["code"], _reason(item["end"]))
+    else:
+        return None
     return LogEntry(item["id"], entry)

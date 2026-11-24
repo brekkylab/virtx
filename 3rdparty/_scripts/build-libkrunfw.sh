@@ -16,8 +16,8 @@
 # aarch64 has neither register set: memory types there come from the page tables' MAIR,
 # and write-combining works without any of this.
 #
-#     xtask/scripts/build-libkrunfw.sh            # build if build/krunfw is empty
-#     LIBKRUNFW_REBUILD=1 xtask/scripts/...       # build again over what is there
+#     3rdparty/_scripts/build-libkrunfw.sh        # build if build/krunfw is empty
+#     LIBKRUNFW_REBUILD=1 3rdparty/_scripts/...   # build again over what is there
 #
 # # Where the kernel is built
 #

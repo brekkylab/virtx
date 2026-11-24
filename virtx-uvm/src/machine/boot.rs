@@ -640,6 +640,8 @@ fn spike_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<std:
     info.shares.hash(&mut hash);
     machine.rootfs.hash(&mut hash);
     std::fs::metadata(&machine.upper).ok()?.len().hash(&mut hash);
+    // Whether its disk offers the guest a write cache to flush, which the guest negotiated.
+    crate::disks::disks().flushed(&machine.upper).hash(&mut hash);
     // This binary, whose libkrun and agent wrote the snapshot.
     let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
     (exe.len(), exe.modified().ok()).hash(&mut hash);

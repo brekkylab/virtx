@@ -676,6 +676,50 @@ async fn a_sandbox_whose_disk_is_refused_as_it_boots_leaves_nothing(home: Home) 
     assert_eq!(home.left(), Vec::<String>::new());
 }
 
+/// A backend that answers a disk made only once it is told to, and refuses it then.
+#[derive(Default)]
+struct RefusedLater {
+    told: tokio::sync::Notify,
+}
+
+impl StorageBackend for RefusedLater {
+    fn made<'a>(&'a self, what: Stored<'a>, _: u64) -> BoxFuture<'a, Result<(), Refusal>> {
+        Box::pin(async move {
+            self.told.notified().await;
+            Err(Refusal::Exists(format!("{what:?} is kept already")))
+        })
+    }
+}
+
+/// A sandbox is answered once its machine is up, its backend still keeping its disk; refused
+/// after, it is closed, and nothing of it is left.
+async fn a_sandbox_whose_disk_is_refused_after_it_is_up_is_closed(home: Home) {
+    let backing = Backing::default();
+    let refusing = Arc::new(RefusedLater::default());
+    assert!(backing.set(Arc::clone(&refusing) as Arc<dyn StorageBackend>));
+    let args = small();
+    let made = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm(),
+        None,
+        None,
+        Some(HashMap::new()),
+        &backing,
+    );
+    let sandbox = tokio::time::timeout(HANG, made)
+        .await
+        .expect("answered before its disk was kept")
+        .unwrap();
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+
+    refusing.told.notify_one();
+    until("closed", || home.left().is_empty()).await;
+    assert!(run(&sandbox, &["true"], None).await.is_err());
+}
+
 /// What a backend is asked as a sandbox is made, booted, parked, let go of and taken in again
 /// over it: its image wanted, its volumes brought up, and its disk made there; its disk and the
 /// volume it writes taken as its machine boots, and let go of once it is parked, the one it
@@ -3390,6 +3434,7 @@ fn main() -> ExitCode {
         a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs,
         a_sandbox_boots_while_its_backend_keeps_its_disk,
         a_sandbox_whose_disk_is_refused_as_it_boots_leaves_nothing,
+        a_sandbox_whose_disk_is_refused_after_it_is_up_is_closed,
         a_machine_that_did_not_start_tells_why_without_this_host_s_paths,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,

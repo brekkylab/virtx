@@ -149,6 +149,13 @@ enum State {
     Exited,
 }
 
+/// A backend's keeping of a new sandbox's disk ([`Sandbox::create`]): answered already, or
+/// going on on a task of its own.
+enum Keeping {
+    Answered(Result<(), crate::backend::Refusal>),
+    Going(tokio::task::JoinHandle<Result<(), crate::backend::Refusal>>),
+}
+
 /// A sandbox: a machine booted as it was made, again whenever it is needed after it was
 /// [parked](Sandbox::idle) for want of use, and the processes run in it.
 ///
@@ -424,13 +431,25 @@ impl Sandbox {
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
         // Its disk kept by the backend while its machine boots, the one not waiting on the
-        // other: answered once both are done.
+        // other: answered once its machine is up, the backend's answer taken then if it has
+        // come, and otherwise after -- a refusal then closes the sandbox.
         let size = u64::from(args.disk_gib.unwrap_or(DEFAULT_DISK_GIB)) << 30;
-        let kept = async {
-            match backend {
-                Some(backend) => backend.made(Stored::Disk(&sandbox.id), size).await,
-                None => Ok(()),
+        // Asked before its machine boots, up to the backend's first wait -- a backend holds the
+        // disk as its own then, for the boot's take to find -- and the rest on a task of its own.
+        let mut kept = match backend {
+            Some(backend) => {
+                let (backend, id) = (Arc::clone(backend), sandbox.id.clone());
+                let mut keeping: futures_util::future::BoxFuture<'static, _> =
+                    Box::pin(async move { backend.made(Stored::Disk(&id), size).await });
+                let first =
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(keeping.as_mut().poll(cx)))
+                        .await;
+                Some(match first {
+                    std::task::Poll::Ready(answered) => Keeping::Answered(answered),
+                    std::task::Poll::Pending => Keeping::Going(tokio::spawn(keeping)),
+                })
             }
+            None => None,
         };
         let booted = async {
             sandbox.wake_in(Some(room)).await?;
@@ -444,16 +463,43 @@ impl Sandbox {
                 None => Ok(()),
             }
         };
-        let (kept, booted) = tokio::join!(kept, booted);
-        if kept.is_err() || booted.is_err() {
+        let booted = booted.await;
+        // The backend's answer now, if it has come or the machine did not boot.
+        let kept_now = match kept.take() {
+            Some(Keeping::Answered(answered)) => Some(answered),
+            Some(Keeping::Going(keeping)) if keeping.is_finished() || booted.is_err() => {
+                Some(keeping.await?)
+            }
+            keeping => {
+                kept = keeping;
+                None
+            }
+        };
+        if matches!(kept_now, Some(Err(_))) || booted.is_err() {
             let closed = Arc::clone(&sandbox);
             tokio::task::spawn_blocking(move || closed.close()).await?;
             // Refused by the backend, its disk is not kept there; kept, it is removed again.
-            kept?;
+            if let Some(kept) = kept_now {
+                kept?;
+            }
             if let Some(backend) = backend {
                 let _ = backend.remove(Stored::Disk(&sandbox.id)).await;
             }
             booted?;
+        }
+        // Up, and its backend still keeping its disk: refused after, it is closed, and nothing
+        // of it is kept.
+        if let Some(Keeping::Going(keeping)) = kept {
+            let refused = Arc::downgrade(&sandbox);
+            tokio::spawn(async move {
+                let Ok(Err(e)) = keeping.await else {
+                    return;
+                };
+                log::warn!("a sandbox's disk was refused after it was made, and it is closed: {e}");
+                if let Some(sandbox) = refused.upgrade() {
+                    let _ = tokio::task::spawn_blocking(move || sandbox.close()).await;
+                }
+            });
         }
         Ok(sandbox)
     }

@@ -83,7 +83,9 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// Asked once for a disk, as it is made, and while its machine first boots: the disk is
     /// [taken](Self::take) before this has answered, and the backend takes it as its own then,
-    /// with nothing to bring up. Refused, the machine is stopped and the sandbox is not made.
+    /// with nothing to bring up. The sandbox is answered once its machine is up, this answered
+    /// or not. Refused before, the machine is stopped and the sandbox is not made; refused
+    /// after, the sandbox is closed.
     /// One [resized](crate::Sandbox::resize) larger is
     /// grown past `size` as its machine boots, while it is [taken](Self::take), and is kept
     /// larger once the machine is down, with no call to the backend to say so. The

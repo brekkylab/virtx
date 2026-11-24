@@ -1,7 +1,6 @@
 //! A [`RegistryProxy`] a server runs for itself: an HTTP CONNECT proxy on this host's loopback
-//! that lets a registry client through to the addresses
-//! [`Network::Public`](crate::Network::Public) lets a guest reach, and to the registries named
-//! to it.
+//! that lets a registry client through to the addresses the internet routes -- those a guest
+//! with a network reaches -- and to the registries named to it.
 //!
 //! An image job runs in the server's own process, on the host, and a registry sends its client
 //! on: to a token realm, down a redirect, to a layer's URL. So where a job may connect is

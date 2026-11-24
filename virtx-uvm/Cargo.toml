@@ -57,23 +57,21 @@ unicode-normalization = "0.1"
 anyhow = { workspace = true }
 # The errno values a served volume answers the guest in.
 libc = { workspace = true }
+# The directory a machine's published ports' sockets are in, its own and removed with it.
+tempfile = "3"
 # libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
 log = "0.4"
 # The storage an embedder's disk is read and written through ([`disks::imago`]): the version
 # libkrun links, re-exported so that an embedder names it from here.
 imago = { version = "0.2.6", default-features = false, features = ["sync"] }
 # The machine: libkrun linked in, its block devices on, and the init it lays over the
-# guest's root. Our fork, at a commit on its `virtx` branch; what each commit there is for is
-# in 3rdparty/FORKS.md. To work on libkrun from a local clone, override the source outside the
-# repository, in `~/.cargo/config.toml`:
-#     [patch."https://github.com/brekkylab/libkrun"]
-#     libkrun = { path = "../libkrun/src/libkrun" }
-#     krun-init-blob = { path = "../libkrun/init/init-blob" }
-#     krun-display = { path = "../libkrun/src/display" }
-krun = { git = "https://github.com/brekkylab/libkrun", rev = "cc7d8205", package = "libkrun", features = ["blk"] }
-krun_init = { git = "https://github.com/brekkylab/libkrun", rev = "cc7d8205", package = "krun-init-blob", features = ["krun"] }
+# guest's root. Taken by path from the submodule `3rdparty/libkrun`, which is upstream's commit
+# with `3rdparty/_patches/libkrun` applied in its tree by `cargo xtask init`; what each patch is
+# for is in the patch.
+krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = ["blk"] }
+krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = ["krun"] }
 # A display backend, which libkrun's virtio-gpu device has to be handed.
-krun_display = { git = "https://github.com/brekkylab/libkrun", rev = "cc7d8205", package = "krun-display", optional = true }
+krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
 
 # The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
 # downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic
@@ -105,9 +103,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [dev-dependencies]
-# The remote stores' tests: directories to read local files from, and a runtime with threads
-# for the mock servers they answer from.
-tempfile = "3"
+# The remote stores' tests: a runtime with threads for the mock servers they answer from.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 # The tests that boot machines: its own `main`, which becomes the machine when spawned to be one.

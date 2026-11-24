@@ -44,7 +44,14 @@ pub fn library() -> std::path::PathBuf {
             let exe = env::current_exe().unwrap();
             let profile = exe.parent().unwrap().parent().unwrap();
             let mut build = Command::new(env!("CARGO"));
-            build.args(["build", "-p", "virtx-core", "--lib"]);
+            build.args([
+                "rustc",
+                "-p",
+                "virtx-core",
+                "--lib",
+                "--crate-type",
+                "cdylib",
+            ]);
             if profile.ends_with("release") {
                 build.arg("--release");
             }
@@ -116,7 +123,7 @@ pub fn run(sandbox: &Sandbox, cmd: &[&str]) -> (Vec<String>, i32) {
         match entry.entry {
             SandboxJobEntry::Stdout(line) | SandboxJobEntry::Stderr(line) => lines.push(line),
             SandboxJobEntry::End(end) => return (lines, end.code),
-            SandboxJobEntry::Truncated {} => {}
+            _ => {}
         }
     }
     panic!("a job's log ends with its end")

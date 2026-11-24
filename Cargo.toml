@@ -10,9 +10,9 @@
 # users and projects its config names. `xtask` builds, signs and packs them.
 #
 # A bare `cargo build` or `cargo test` builds and tests `virtx-core` alone: the server needs the
-# submodules checked out (`cargo xtask init`), a guest kernel and a musl target, which a change
-# to the client should not, and `virtx-rs`'s tests run against the servers, as
-# `cargo xtask test -p virtx` serves them.
+# submodules checked out and libkrun's patched (`cargo xtask init`), a guest kernel and a musl
+# target, which a change to the client should not, and `virtx-rs`'s tests run against the
+# servers, as `cargo xtask test -p virtx` serves them.
 [workspace]
 resolver = "3"
 members = [
@@ -36,7 +36,12 @@ default-members = ["virtx-core"]
 # `virtx-uvm-guest/` is the agent inside each machine, which `virtx-uvm`'s build script
 # cross-compiles to `*-unknown-linux-musl` and embeds -- a workspace root of its own for the
 # same reason as `virtx-abins/`.
+#
+# `3rdparty/libkrun` and `3rdparty/rutabaga_gfx` are workspaces of their own, whose crates are
+# taken by path: libkrun's by `virtx-uvm`, rutabaga_gfx's by `[patch.crates-io]` below.
 exclude = [
+    "3rdparty/libkrun",
+    "3rdparty/rutabaga_gfx",
     "virtx-abins",
     "virtx-uvm-guest",
 ]
@@ -60,9 +65,10 @@ serde = { version = "1", features = ["derive"] }
 tokio = "1"
 
 # rutabaga_gfx 0.1.85 on crates.io predates the Darwin sys layer (merged
-# 2026-09-02) and routes macOS to a stub backend that panics at runtime.
-# Track our fork of the repo, at a commit on its `virtx` branch, until a release carries it;
-# magma-gpu lives in the same repo. This reaches libkrun's `rutabaga_gfx = "0.1.85"` too.
+# 2026-09-02) and routes macOS to a stub backend that panics at runtime. Taken by path from
+# the submodule `3rdparty/rutabaga_gfx` until a release carries it: upstream's commit with
+# `3rdparty/_patches/rutabaga_gfx` applied in its tree by `cargo xtask init`. magma-gpu lives
+# in the same repository. This reaches libkrun's `rutabaga_gfx = "0.1.85"` too.
 [patch.crates-io]
-rutabaga_gfx = { git = "https://github.com/brekkylab/rutabaga_gfx", rev = "94c49875" }
-magma-gpu = { git = "https://github.com/brekkylab/rutabaga_gfx", rev = "94c49875" }
+rutabaga_gfx = { path = "3rdparty/rutabaga_gfx" }
+magma-gpu = { path = "3rdparty/rutabaga_gfx/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }

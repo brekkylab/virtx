@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grf53 <grf0503@gmail.com>
+Date: Thu, 5 Nov 2026 14:22:19 +0900
+Subject: macos-krunfw-path: open libkrunfw beside the executable on macOS, as on Linux and Windows
+
+## Why virtx needs it
+
+The guest kernel sits beside the binary that opens it, on every host.
+dyld looks for a dlopen name with no slash only in DYLD_LIBRARY_PATH and the fallback path, never near the caller, so on macOS whoever ran the server had to set an environment variable.
+KRUNFW_NAME is @loader_path/libkrunfw.5.dylib there, which dyld resolves against the directory of what did the dlopen.
+
+## What it changes
+
+One string, so that macOS obeys the same rule as the other two: **the guest kernel sits
+beside the binary that opens it.**
+
+`cargo xtask build server-*` and `cargo xtask test` put it there, and libkrun opens it
+by name at run time rather than linking it. On Windows a bare name is enough, because the loader searches the
+executable's own directory before anywhere else. On Linux it is enough too, because
+`dlopen` consults the *calling object's* `DT_RUNPATH` and the link sets that to `$ORIGIN`
+— see `.cargo/config.toml`.
+
+dyld does neither. A `dlopen` argument with no slash in it is looked for in
+`DYLD_LIBRARY_PATH` and then `DYLD_FALLBACK_LIBRARY_PATH`
+(`$HOME/lib:/usr/local/lib:/usr/lib`), and nowhere near the caller. `@rpath` and
+`@loader_path` do not help: they are prefixes dyld expands inside a *path*, so a name
+that is not one is never resolved against them, whatever `LC_RPATH` the binary carries.
+So `KRUNFW_NAME` is `@loader_path/libkrunfw.5.dylib` there — a path, which dyld then
+resolves against the directory of whatever did the `dlopen`.
+
+What this replaces is an environment variable that whoever runs the binary had to set,
+which a wrapper can do for `cargo xtask run` and nothing can do for an installed binary
+someone runs by hand.
+
+## When it can go
+
+When upstream opens libkrunfw by a path relative to its loader on macOS, or takes the path from the embedder.
+---
+ src/libkrun/src/api/payload.rs | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/libkrun/src/api/payload.rs b/src/libkrun/src/api/payload.rs
+index 00c61c9e..b106abdc 100644
+--- a/src/libkrun/src/api/payload.rs
++++ b/src/libkrun/src/api/payload.rs
+@@ -273,8 +273,18 @@ const KRUNFW_NAME: &str = "libkrunfw.so.5";
+ const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
+ #[cfg(all(target_os = "linux", feature = "tdx"))]
+ const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
++// `@loader_path/` and not a leaf name, which is what every other target here uses. The
++// kernel is shipped beside the binary that opens it -- see `virtx-uvm/build.rs` --
++// and on the other two platforms a leaf name finds it there: Windows searches the
++// executable's own directory first, and Linux the calling object's `DT_RUNPATH`, which
++// the link sets to `$ORIGIN`. dyld does neither. A `dlopen` argument with no slash in it
++// is looked for in `DYLD_LIBRARY_PATH` and then `DYLD_FALLBACK_LIBRARY_PATH`, and nowhere
++// near the caller -- `@rpath` and `@loader_path` are prefixes dyld expands in a *path*,
++// so a name that is not one is never resolved against them. Spelling the prefix is what
++// puts macOS under the same rule as the others rather than under an environment variable
++// that has to be set by whoever runs the binary.
+ #[cfg(target_os = "macos")]
+-const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
++const KRUNFW_NAME: &str = "@loader_path/libkrunfw.5.dylib";
+ #[cfg(target_os = "windows")]
+ const KRUNFW_NAME: &str = "libkrunfw.dll";
+ 

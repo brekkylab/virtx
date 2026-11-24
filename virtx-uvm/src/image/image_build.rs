@@ -41,15 +41,10 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
-}
 
-impl From<tokio::task::JoinError> for Error {
-    fn from(e: tokio::task::JoinError) -> Error {
-        Error::Io {
-            context: "building a layer".into(),
-            source: std::io::Error::other(e),
-        }
-    }
+    /// Blocking work moved off the runtime that panicked or was cancelled.
+    #[error("building a layer: {0}")]
+    Join(#[from] tokio::task::JoinError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -250,7 +245,7 @@ mod tests {
             ram_mib: 512,
             gpu: false,
             gpu_memory_mib: None,
-            network: Default::default(),
+            network: false,
         };
         let steps = [
             Step::Workdir("/app".into()),

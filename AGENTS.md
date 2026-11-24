@@ -17,7 +17,7 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), the sandboxes the servers make of them and the jobs run in each (`sandbox/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
 - `virtx-server-stdio/` and `virtx-server-tcp/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-stdio` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in. `virtx-server-tcp` is a library too, which its binary and a server with an authenticator and routes of its own are built from.
 - `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs a sandbox gets at `/abin`, those its `abins` name; each one's `SKILL.md` is its `--help` copied by hand, so a clap string that changes is a `SKILL.md` to regenerate. What every VM gets at `/alib` is built by `xtask/scripts/build-alib.sh`.
-- `3rdparty/` — virglrenderer, MoltenVK, SPIRV-Cross and libepoxy as submodules, built by `xtask/scripts/build-deps.*` for the server's `gpu` feature. Each is a brekkylab fork pinned to its `virtx` branch: the upstream commit, then one commit per change of ours; libkrun and rutabaga_gfx are forks of the same shape, which cargo fetches as git dependencies. `3rdparty/FORKS.md` says what each fork's commits are for.
+- `3rdparty/` — libkrun, rutabaga_gfx, virglrenderer, MoltenVK and SPIRV-Cross as submodules, virglrenderer and MoltenVK each built by its own script there, `3rdparty/_scripts/build-virglrenderer.*` and `build-moltenvk.sh`, which `xtask/scripts/build-deps.*` runs in order for the server's `gpu` feature. The guest kernel, libkrunfw, is built there too, by `3rdparty/_scripts/build-libkrunfw.sh` from upstream's tag, with no submodule and no patch. None is a fork: each is upstream's own repository pinned to a commit of its `main`, and what virtx changes in it is its patches in `3rdparty/_patches/`; each patch's message says why virtx needs it and when it can go. libkrun's and rutabaga_gfx's are applied in each submodule's own tree by `cargo xtask init`, since cargo takes their crates from there by path, and the others' to a copy under `build/` by their build. `3rdparty/README.md` says how a patch is written and when one is taken out, and a project virtx comes to change is taken the same way.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the workflows run to pack and smoke-test the client's packages.
 - `.github/workflows/` — `pipeline` lints and tests every platform, and in full also builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and smoke-tests them; `ci` runs it on a pull request (lint and tests) and on `main` (in full), and `release` runs it in full on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `pipeline` refuses any other spelling of), runs `publish`'s checks over what was built, and attaches it to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
@@ -28,6 +28,7 @@ Every step is `cargo xtask`, run from a clone of this repository; `cargo xtask -
 
 ```bash
 git clone https://github.com/brekkylab/virtx && cd virtx
+git submodule update --init 3rdparty/libkrun 3rdparty/rutabaga_gfx   # cargo reads their crates' manifests, whatever it builds
 ```
 
 ### Server
@@ -38,7 +39,7 @@ The servers need more of the host than Rust, and Docker on every host, which bui
 - **Windows**, x86_64: the Windows Hypervisor Platform feature, MSVC build tools, clang and lld, and Docker in Linux-container mode. The `gpu` feature also needs `LIBCLANG_PATH` naming the directory `libclang.dll` is in, best set in `%USERPROFILE%\.cargo\config.toml` since the path is the machine's; no Vulkan SDK is needed. Smart App Control blocks every unsigned build script, failing with `os error 4551`, so it has to be off.
 
 ```bash
-cargo xtask init                                  # checks out the submodules and adds the guest's musl target; the servers need it
+cargo xtask init                                  # checks out the submodules, applies libkrun's and rutabaga_gfx's patches and adds the guest's musl target; the servers need it
 cargo xtask build kernel server-stdio server-tcp  # the guest kernel and both servers, signed on macOS
 cargo xtask install --prefix ~/.local             # what was built, into ~/.local/bin
 export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, in place of a downloaded one
@@ -48,7 +49,7 @@ export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, 
 - `cargo xtask build` and `test` put the guest kernel beside a server, where it looks for it, and on macOS sign the server with `com.apple.security.hypervisor`, which Hypervisor.framework requires; `cargo xtask run` only signs. A plain `cargo build`, `run` or `test`, an IDE's Run button included, does neither, and its server cannot boot a machine.
 - Set no library search path for the servers: one wide enough to find the kernel lets another virglrenderer, such as krunkit's, stand in for the one in `build/`, silently.
 - `KRUN_LOG=debug` (or `info`, `warn`, `trace`) turns on libkrun's log, which reaches the server with the guest's console.
-- `build/` is untracked and reproducible from `xtask/scripts/`: the kernel, the GPU libraries, alib's builds, the musl sysroot and the meson venv.
+- `build/` is untracked and reproducible from `xtask/scripts/` and `3rdparty/_scripts/`: the kernel, the GPU libraries, alib's builds, the musl sysroot and the meson venv.
 
 ### Clients
 
@@ -68,7 +69,7 @@ Then, in your own project, install the package for your language from the clone:
 
 - `load(path)` opens a library from the program itself, in place of `VIRTX_CORE_LIB`; a process opens one.
 - A module that takes a client from another opens the file `library_path()` answers, and takes the client from the pointer `client.clone().into_raw()` answers, with `Client.from_raw`. In Node, `libraryPath()`, `intoRaw()` and `fromRaw`.
-- A change to the client needs nothing of `init`. A change to the servers needs `init` and the guest kernel.
+- A change to the client needs nothing of `init`, only those two submodules checked out, as every cargo command does. A change to the servers needs `init` and the guest kernel, and `init` again after a pull that changed their patches in `3rdparty/_patches/` or their pins: a server is not built from a tree `init` has not brought to them. It is `init` that moves those two to a new pin, not `git submodule update` or `git pull --recurse-submodules`, which git refuses over a tree with the patches applied.
 
 ## Tests
 
@@ -85,6 +86,7 @@ Each test goes in the lowest layer that can show what it tests, fastest first:
 
 - **`virtx-core`: unit tests.** What it does by itself, in a `#[cfg(test)] mod tests {}` inside the module it tests. Its transport is tested from one end to the other there, since both ends are in the crate.
 - **`virtx-uvm`: unit tests, and the tests that boot machines.** Its unit tests sit in its modules as `virtx-core`'s do. A machine is a process the binary it is in spawns of itself (see `machine/`), which a module's test cannot be, so the tests that boot one are `virtx-uvm/tests/machine.rs`, a test binary with a `main` that becomes the machine when spawned so. They make sandboxes of `virtx-uvm` itself, with no server in front: a job's output, end and timeout, a job cancelled, a machine parked and booted again, what a closed sandbox leaves, sandboxes made, closed and mounting one volume at once, and what the files endpoints answer a write to a sandbox's file.
+- **`virtx-uvm-guest`: unit tests, on Linux alone.** The agent's own, in `virtx-uvm-guest/src/main.rs`, over directories standing in for the guest's `/dev` and sysfs. It is a workspace of its own and builds for Linux only, so `cargo xtask check` and `cargo xtask test` run them on Linux and skip them elsewhere.
 - **`virtx-server-*`: unit tests, and the app served in the test's process.** Each server's `app` -- what its binary serves -- is served in the test's own process, over a pipe as stdio serves it or on the loopback over HTTP, and called as a client calls it: the endpoints, what they refuse, who reaches which project, and what each keeps on disk. No machine is booted here: what a server does with one, such as a build's steps, is tested end to end.
 - **`virtx-rs`, `virtx-py`, `virtx-node`: end to end, against the servers.** Each package through its own runner, against the real servers served as the fixture: a client's flow through the package, the library, a transport and a server to a machine, such as a sandbox's files as its processes see them, its ports, and a build. There is no other suite of them. The flows, and what a server does in them, are `virtx-rs`'s, since every package reaches the server through the one library. `virtx-py` and `virtx-node` test their own layer: each call goes through, its arguments as the language takes them, its answer as the language's types, its log as the language iterates one, and its refusal as the language raises one -- not a server's behaviour again.
 
@@ -94,9 +96,10 @@ Each test goes in the lowest layer that can show what it tests, fastest first:
 
 ```bash
 cargo xtask test                                  # every suite, each summed up at the end; those that need the servers are skipped until they can be built
-cargo xtask test --no-run                         # compiles everything `test` would and runs none; needs no guest kernel
+cargo xtask test --no-run                         # compiles and installs everything `test` would and runs none; needs no guest kernel
 cargo xtask test -p virtx-core                    # one crate's tests
 cargo xtask test -p virtx-uvm                     # its unit tests, and the tests that boot machines
+(cd virtx-uvm-guest && cargo test)                # the agent's unit tests, on Linux
 cargo xtask test -p virtx-server-stdio            # a server's own, its app served in the test's process
 cargo xtask test -p virtx                         # Rust, against the fixture
 cargo xtask test -p virtx-cli                     # the command's signing in, against the fixture

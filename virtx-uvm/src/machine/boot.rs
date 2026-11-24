@@ -13,7 +13,7 @@
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
 //! virtio-vsock              the guest's network, on a machine with one or with published
-//!                           ports -- see [`Network`]
+//!                           ports -- see [`net`]
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag once the overlay is
@@ -70,7 +70,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -84,7 +84,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "gpu")]
 use super::gpu;
 use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
-use super::{Error, MachineConfig, Network, Result, STOP_TIMEOUT, net};
+use super::{Error, MachineConfig, Result, STOP_TIMEOUT, net};
 use crate::volume::{Remote, Served};
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
@@ -129,13 +129,14 @@ const ALIB_TAG: &str = "alib";
 const ALIB_HOST: &str = "alib";
 
 /// The log target libkrun gives what the guest's console prints.
-const CONSOLE_TARGET: &str = "init_or_kernel";
+pub(super) const CONSOLE_TARGET: &str = "init_or_kernel";
 
-/// What a machine's process is spawned with, as one argument: the machine, and its ends of
-/// the control channel and the I/O channel.
+/// What a machine's process is spawned with, as one argument: the machine, its ends of the
+/// control channel and the I/O channel, and the directory its published ports' sockets go in.
 #[derive(Serialize, Deserialize)]
 pub(super) struct BootArgs {
     pub config: MachineConfig,
+    pub sockets: PathBuf,
     pub ctrlin: u64,
     pub ctrlout: u64,
     pub ioin: u64,
@@ -185,13 +186,19 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 
 /// Build `machine`, running the agent, and become it: load the guest kernel, lay the init over
 /// an empty root, attach the devices, pass `ctrlin` on to the agent and the agent on to
-/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, and run.
+/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, put the published ports'
+/// sockets in `sockets`, and run.
 ///
 /// **This does not return.** The VMM exits this process with the guest's own status, so what
 /// comes back is a machine that could not be built, or a failure of the event loop.
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
-pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
+pub(super) fn boot(
+    machine: MachineConfig,
+    sockets: &Path,
+    ctrlin: File,
+    io: (File, File),
+) -> Result<Infallible> {
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
@@ -205,8 +212,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         upper_device: UPPER_DEVICE.to_owned(),
         upper_fstype: UPPER_FSTYPE.to_owned(),
         shares: Vec::new(),
-        nameserver: (machine.spec.network != Network::None).then(|| net::NAMESERVER.to_string()),
+        nameserver: machine.spec.network.then(|| net::NAMESERVER.to_string()),
         workdir: workdir(&machine.config),
+        ports: machine.ports.clone(),
     };
 
     // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
@@ -215,11 +223,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut shares = Vec::new();
     for (dir, at, tag) in [(&abin, ABIN_DIR, ABIN_TAG), (&alib, ALIB_DIR, ALIB_TAG)] {
         let Some(dir) = dir else { continue };
-        let host = utf8(dir)?;
+        let host = utf8(dir, at)?;
         info.shares.push((tag.to_owned(), at.to_owned()));
         shares.push(
             FsDevice::new_read_only(tag, host)
-                .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
+                .map_err(|e| Error::vmm(format!("sharing {at}"), e))?,
         );
     }
     let mut holds = Vec::with_capacity(machine.volumes.len());
@@ -247,7 +255,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         holds.push(volume.hold()?);
         let tag = format!("{MOUNT_TAG}{}", shares.len());
         let files = volume.files();
-        let host = utf8(&files)?;
+        let shared = format!("volume {} at {at}", volume.name());
+        let host = utf8(&files, &shared)?;
         info.shares.push((tag.clone(), at.clone()));
         // Read-only at the device, which is the whole of what `read_only` promises.
         shares.push(
@@ -255,7 +264,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                 true => FsDevice::new_read_only(&tag, host),
                 false => FsDevice::new(&tag, host),
             }
-            .map_err(|e| Error::vmm(format!("sharing {host} as {tag}"), e))?,
+            .map_err(|e| Error::vmm(format!("sharing {shared}"), e))?,
         );
         for mount in volume.mounts() {
             let served =
@@ -298,10 +307,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // No bounce buffer. A guest whose RAM reaches past 4 GiB -- the default 4 GiB does, over
     // the MMIO hole -- sets aside 64 MiB for swiotlb and zeroes it while it boots, and no
     // device here bounces through it: none offers `VIRTIO_F_ACCESS_PLATFORM`, so virtio
-    // reaches guest memory directly, and WHP passes no device through. Under WHP each page
-    // the guest first touches is a fault the hypervisor resolves one at a time; nested, as
-    // on a cloud runner, those 16384 faults were 2.1s of a 6.4s boot.
-    #[cfg(windows)]
+    // reaches guest memory directly, and nothing is passed through. Each page the guest first
+    // touches is a fault its hypervisor resolves: 13 ms of a boot under nested KVM, and under
+    // WHP, nested, 2.1s of 6.4.
     payload.append_cmdline("swiotlb=noforce");
     // The kernel's crypto algorithms are not tested as each registers: on one vCPU those tests
     // are a third of a boot, run against the init for it.
@@ -381,25 +389,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 
     // Read-only at the device and not merely in the guest's mount flags: what is behind
     // it is the layer files, shared with every other root filesystem over them.
-    let rootfs = utf8(&machine.rootfs)?;
+    let rootfs = utf8(&machine.rootfs, "the root's image")?;
     let mut lower = BlockDevice::new("vda", rootfs, DiskFormat::Vmdk)
-        .map_err(|e| Error::vmm(format!("attaching {rootfs}"), e))?;
+        .map_err(|e| Error::vmm("attaching the root's image", e))?;
     lower.set_read_only(true);
 
-    let upper_path = utf8(&machine.upper)?;
+    let upper_path = utf8(&machine.upper, "the upper disk")?;
     // A sandbox's disk as the embedder's disks open it ([`crate::disks`]): read and written
     // through what they make of it, if anything, rather than as the file is.
     let opened = match &machine.sandbox_disk {
         Some(disk) => crate::disks::disks()
             .open(&machine.upper, disk.source.as_deref())
-            .map_err(|e| Error::io(format!("opening {upper_path}"), e))?,
+            .map_err(|e| Error::io("opening the upper disk", e))?,
         None => None,
     };
     let upper_device = match &opened {
         Some(disk) => BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, disk.storage()),
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
-    .map_err(|e| Error::vmm(format!("attaching {upper_path}"), e))?;
+    .map_err(|e| Error::vmm("attaching the upper disk", e))?;
     // Told its machine has booted, as its agent says it is ready.
     let booting = opened.clone();
     if let Some(disk) = opened {
@@ -425,8 +433,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network != Network::None || !published.is_empty() {
-        devices.add(net::attach(machine.spec.network, published)?);
+    if machine.spec.network || !published.is_empty() {
+        devices.add(net::attach(machine.spec.network, published, sockets)?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module
@@ -598,7 +606,7 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
-        let message = format!("{}: {}", record.target(), record.args());
+        let message = record.args().to_string();
         // A terminal ends its lines with `\r\n`, and libkrun takes off only the `\n`.
         let message = match record.target() {
             CONSOLE_TARGET => message.trim_end_matches('\r').to_string(),
@@ -606,14 +614,15 @@ impl log::Log for Logger {
         };
         let _ = send(&CtrlResp::Log {
             level: record.level().to_string(),
+            target: record.target().to_string(),
             message,
         });
     }
 
     fn flush(&self) {}
 }
-/// A listener on this host's loopback for each of `ports`, which the guest's listener on that
-/// port is relayed from. Refused for `0`, which is no port, and for one given twice.
+/// A listener on this host's loopback for each of `ports`, which connections to that guest port
+/// are relayed from. Refused for `0`, which is no port, and for one given twice.
 fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
     let mut published = Vec::with_capacity(ports.len());
     for (i, &port) in ports.iter().enumerate() {
@@ -633,14 +642,12 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
     Ok(published)
 }
 
-/// A path as libkrun takes it, which is a `&str`. Refused rather than lossily converted: a
-/// name with a replacement character in it opens some other file or none.
-fn utf8(path: &Path) -> Result<&str> {
+/// The path of `what`, such as `/abin`, as libkrun takes it, which is a `&str`. Refused rather
+/// than lossily converted: a name with a replacement character in it opens some other file or
+/// none.
+pub(super) fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| Error::Io {
-        context: format!(
-            "{} is not valid UTF-8, which libkrun cannot name",
-            path.display()
-        ),
+        context: format!("the path of {what} is not valid UTF-8, which libkrun cannot name"),
         source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
     })
 }

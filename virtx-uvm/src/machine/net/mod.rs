@@ -21,17 +21,26 @@
 //!
 //! # The way out and the way in
 //!
-//! Apart, as the protocol has them. [`Network`] is where the guest's own connections may go;
-//! a published port is how this host reaches a listener in the guest, and works whatever
-//! the network is -- a machine with none is still reached on its published ports, and
-//! reaches its own.
+//! Apart, as the protocol has them. [`network`](super::MachineSpec::network) is whether the
+//! guest's own connections go anywhere; a published port is how this host reaches a listener
+//! in the guest, and works whether or not they do -- a machine with no network is still
+//! reached on its published ports, and reaches its own.
+//!
+//! The way in is not TSI's. A connection to a published port is relayed ([`relay`]) to a
+//! socket libkrun listens on for this host, which carries it to a vsock port in the guest, and
+//! the agent there connects it to the guest's own loopback:
+//!
+//! ```text
+//!      host                                   │ hypervisor │          guest
+//!   ─────────────────────────────────────────────────────────────────────────────────
+//!   published ──► relay ──► unix socket ──► muxer ──┼──► vsock ──► agent ──► 127.0.0.1:port
+//! ```
 //!
 //! # What a guest's own sockets still are
 //!
 //! The guest's. The kernel tries its own stack first and falls back to the host only for
 //! what its own stack cannot reach, so two programs in the guest talking over its loopback
-//! never leave it, and a `listen` the host is not asked to take stays a listener in the
-//! guest.
+//! never leave it. Every `listen` stays in the guest: this host never takes one.
 //!
 //! # A machine with neither
 //!
@@ -43,63 +52,49 @@ mod relay;
 mod resolver;
 
 use std::net::{Ipv4Addr, TcpListener};
+use std::path::Path;
 use std::sync::Arc;
 
 use krun::{TsiFlags, VsockDevice};
-use serde::{Deserialize, Serialize};
 
 use policy::Policy;
 pub(crate) use policy::routed;
 
+use super::boot::utf8;
+use super::wire::VSOCK_PORT_BASE;
 use super::{Error, Result};
-
-/// Where the guest's own connections may go.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Network {
-    /// Nowhere: the guest reaches its own loopback and its own published ports, and no
-    /// names resolve.
-    #[default]
-    None,
-
-    /// Everything this host reaches, its loopback and its LAN included -- as it is every
-    /// other process's here. For a machine on its user's own computer.
-    Host,
-
-    /// Only addresses the internet routes: this host's loopback, private and link-local
-    /// ranges, and cloud metadata at `169.254.169.254` are refused. For a machine on a
-    /// server others reach, where what the host reaches is not the guest's to reach.
-    Public,
-}
 
 /// Start this machine's network and hand back the device that is its near end.
 ///
-/// `published` are the listeners on this host whose connections reach a port in the guest
-/// -- each one bound by the caller, which is the end that knows where it is and says so.
-/// Each gets a thread that carries its connections to wherever the guest is listening on
-/// that port by then.
-pub(crate) fn attach(network: Network, published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
-    let resolver = match network {
-        Network::None => None,
-        Network::Host | Network::Public => resolver::host_resolvers().first().copied(),
-    };
-    let policy = Arc::new(
-        Policy::new(network, resolver, published.iter().map(|(port, _)| *port)).with_relays(
-            published
-                .iter()
-                .filter_map(|(port, listener)| Some((*port, listener.local_addr().ok()?))),
-        ),
-    );
+/// `network` is whether the guest's own connections reach the internet; `published` are the
+/// listeners on this host whose connections reach a port in the guest -- each one bound by
+/// the caller, which is the end that knows where it is and says so. Each gets a socket libkrun
+/// listens on in `sockets`, carried to the guest port's vsock port, and a thread that relays
+/// to it.
+pub(crate) fn attach(
+    network: bool,
+    published: Vec<(u16, TcpListener)>,
+    sockets: &Path,
+) -> Result<VsockDevice> {
+    let resolver = network
+        .then(|| resolver::host_resolvers().first().copied())
+        .flatten();
+    let mut device = VsockDevice::new(GUEST_CID, TsiFlags::HIJACK_INET)
+        .map_err(|e| Error::vmm("attaching the guest's network", e))?;
+    device.set_policy(Arc::new(Policy::new(network, resolver)));
+
     for (port, listener) in published {
-        relay::spawn(port, listener, policy.clone()).map_err(|e| Error::Io {
+        let socket = sockets.join(format!("{port}.sock"));
+        device.add_unix_port(
+            VSOCK_PORT_BASE + u32::from(port),
+            utf8(&socket, &format!("guest port {port}'s socket"))?,
+            true,
+        );
+        relay::spawn(port, listener, socket).map_err(|e| Error::Io {
             context: format!("relaying into guest port {port}"),
             source: e,
         })?;
     }
-
-    let mut device = VsockDevice::new(GUEST_CID, TsiFlags::HIJACK_INET)
-        .map_err(|e| Error::vmm("attaching the guest's network", e))?;
-    device.set_policy(policy);
     Ok(device)
 }
 

@@ -519,7 +519,7 @@ impl Sandbox {
             });
         }
         spike_step("after");
-        log::warn!(
+        eprintln!(
             "spike create {}: {} total={:.1}",
             sandbox.id,
             spike
@@ -1130,7 +1130,7 @@ impl Sandbox {
             config.spec.outward = crate::outward::given(&booting.root);
             let spike_served = spike_t0.elapsed();
             let started = Machine::start(config, &vm)?;
-            log::warn!(
+            eprintln!(
                 "spike wake {}: take={:.1} queued={:.1} grow+serve={:.1} start={:.1}",
                 booting.id,
                 spike_taken.as_secs_f64() * 1000.0,

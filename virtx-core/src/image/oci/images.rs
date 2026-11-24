@@ -196,15 +196,24 @@ mod tests {
         client.close().await;
     }
 
-    /// A listing asks for its tags' manifests at once, not each after the last has answered:
-    /// here each answers only once the other has been asked for.
+    /// A listing asks for its repositories' tags at once, and then for every tag's manifest at
+    /// once, not each after the last has answered: here each of a stage's requests answers only
+    /// once every other of that stage has been asked for.
     #[tokio::test]
-    async fn a_list_asks_for_its_tags_manifests_at_once() {
-        let both = Arc::new(tokio::sync::Barrier::new(2));
+    async fn a_list_asks_for_its_tags_and_their_manifests_at_once() {
+        let every_tags = Arc::new(tokio::sync::Barrier::new(2));
+        let tags = |tags: &'static [&'static str]| {
+            let every_tags = Arc::clone(&every_tags);
+            get(move || async move {
+                every_tags.wait().await;
+                Json(json!({ "tags": tags }))
+            })
+        };
+        let every_manifest = Arc::new(tokio::sync::Barrier::new(3));
         let manifest = |digest: &'static str| {
-            let both = Arc::clone(&both);
+            let every_manifest = Arc::clone(&every_manifest);
             head(move || async move {
-                both.wait().await;
+                every_manifest.wait().await;
                 [
                     (
                         header::CONTENT_TYPE.as_str(),
@@ -218,25 +227,28 @@ mod tests {
         let router = Router::new()
             .route(
                 "/images/oci/v2/_catalog",
-                get(|| async { Json(json!({"repositories": ["one"]})) }),
+                get(|| async { Json(json!({"repositories": ["one", "two"]})) }),
             )
-            .route(
-                "/images/oci/v2/one/tags/list",
-                get(|| async { Json(json!({"tags": ["a", "b"]})) }),
-            )
+            .route("/images/oci/v2/one/tags/list", tags(&["a", "b"]))
+            .route("/images/oci/v2/two/tags/list", tags(&["c"]))
             .route("/images/oci/v2/one/manifests/a", manifest("sha256:aa"))
-            .route("/images/oci/v2/one/manifests/b", manifest("sha256:bb"));
+            .route("/images/oci/v2/one/manifests/b", manifest("sha256:bb"))
+            .route("/images/oci/v2/two/manifests/c", manifest("sha256:cc"));
         let client = piped(router);
         let listed = tokio::time::timeout(std::time::Duration::from_secs(60), list(&client))
             .await
-            .expect("both manifests were asked for at once")
+            .expect("each stage's requests were asked for at once")
             .unwrap();
         assert_eq!(
             listed
                 .iter()
                 .map(|image| (image.reference.as_str(), image.digest.as_str()))
                 .collect::<Vec<_>>(),
-            [("one:a", "sha256:aa"), ("one:b", "sha256:bb")]
+            [
+                ("one:a", "sha256:aa"),
+                ("one:b", "sha256:bb"),
+                ("two:c", "sha256:cc")
+            ]
         );
         client.close().await;
     }

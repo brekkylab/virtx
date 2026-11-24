@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: khj809 <khj809@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 18:51:10 +0900
+Subject: lib-only: libkrun and its init blob build as Rust libraries alone
+
+## Why virtx needs it
+
+virtx links libkrun as an rlib, through `virtx-uvm`, and the init blob with it: nothing in virtx opens `libkrun.so` or `libkrun.dylib`, nor the init blob's C library. Taken by path, as cargo takes this tree, both crates are checked for freshness each time they are built, and their `cdylib`s made that fail: each crate of virtx's turns on different features of libkrun, and a `cdylib`'s file name, unlike an rlib's, carries no hash of them, so each build wrote over the library the last one left and the next build found its own stale. `cargo xtask test` rebuilt libkrun, the init blob and everything on them before each server crate's tests, which the compile step had built already, and failed CI's check that the test step compiles nothing.
+
+## What it changes
+
+`crate-type` of `src/libkrun` and `init/init-blob` is `["lib"]`. Their C API is still compiled, and still exported by a `cdylib` of a crate that asks for one.
+
+## When it can go
+
+When upstream builds its `cdylib` only where it is asked for (a feature, or a crate of its own for the C library), or once cargo names a `cdylib`'s file by its features as it does an rlib's.
+---
+ init/init-blob/Cargo.toml | 2 +-
+ src/libkrun/Cargo.toml    | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/init/init-blob/Cargo.toml b/init/init-blob/Cargo.toml
+index 2736e5b..2a5a7dd 100644
+--- a/init/init-blob/Cargo.toml
++++ b/init/init-blob/Cargo.toml
+@@ -37,4 +37,4 @@ krun-init-common = { path = "../common", features = ["server"] }
+ [lib]
+ name = "krun_init"
+ path = "src/lib.rs"
+-crate-type = ["lib", "cdylib"]
++crate-type = ["lib"]
+diff --git a/src/libkrun/Cargo.toml b/src/libkrun/Cargo.toml
+index 14e8bac..5df0a81 100644
+--- a/src/libkrun/Cargo.toml
++++ b/src/libkrun/Cargo.toml
+@@ -83,4 +83,4 @@ devices = { package = "krun-devices", version = "=0.1.0-2.0.0-dev", path = "../d
+ 
+ [lib]
+ name = "krun"
+-crate-type = ["cdylib", "lib"]
+\ No newline at end of file
++crate-type = ["lib"]
+\ No newline at end of file

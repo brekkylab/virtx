@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grf53 <grf0503@gmail.com>
+Date: Thu, 5 Nov 2026 14:22:21 +0900
+Subject: macos: the proxy context's fences reach its sync thread without eventfd
+
+## Why virtx needs it
+
+macOS has no eventfd, and upstream drops VIRGL_RENDERER_THREAD_SYNC on such a host, and the proxy context's sync thread with it.
+rutabaga always sets ASYNC_FENCE_CB, so no fence was delivered until something called virgl_renderer_poll, and the guest found no device.
+A socket pair stands in for the eventfd, and virgl_renderer_init keeps the flag when only the render server is asked for.
+
+## What it changes
+
+The submodule is pinned to upstream main, not to a release. 1.3.0 —
+the minimum rutabaga_gfx accepts — forced the render server on with venus and
+that server was Linux-only, so macOS needed an in-process venus context and a
+host-pointer blob API carried out of tree. Since then upstream grew both halves
+of a real macOS path:
+
+- **the render server as a thread** (`render-server-mode=thread`,
+  `render-server-worker=thread`), so nothing is forked or spawned, and the
+  server builds on macOS (kqueue for signalfd, `SOCK_STREAM` framing for
+  `SOCK_SEQPACKET`);
+- **memory as shm**: host-visible `VkDeviceMemory` is shm imported as a host
+  pointer through `VK_EXT_external_memory_host`, and the blob is exported as an
+  ordinary `FD_SHM` descriptor, which `virgl_renderer_resource_map` simply
+  `mmap`s.
+
+Venus is only initialised with `VIRGL_RENDERER_RENDER_SERVER` set, so a
+machine asks for it wherever the render server is built -- macOS and Linux, not
+Windows (see `virtx-uvm/src/machine/gpu.rs`). The patch carries what
+upstream main still gets wrong there:
+
+- **`VIRGL_RENDERER_THREAD_SYNC` is dropped on any host without eventfd**, and
+  with it the proxy context's sync thread — so `ASYNC_FENCE_CB`, which rutabaga
+  always sets, delivered no fence until someone called `virgl_renderer_poll`,
+  and the guest found no device. The proxy context now stands a socket pair in
+  for the eventfd: the render server writes one end, the sync thread polls and
+  drains the other, `SO_NOSIGPIPE` on the writing end turns a late write into
+  `EPIPE`. `virgl_renderer_init` keeps the flag without eventfd when only the
+  render server path is asked for, since vrend and the drm renderers still
+  need a real eventfd.
+
+`-Dvulkan-dload=false` still links MoltenVK rather than `dlopen`ing it: the
+dload path asks dyld for `libvulkan.1.dylib` or `libMoltenVK.dylib` by leaf
+name, and Homebrew's `lib` is not on its default search path. Linux does the
+opposite: `-Dvulkan-dload=true`, so a server starts on a host with no
+Vulkan loader, and offers a GPU only where it finds one.
+
+## When it can go
+
+When upstream delivers the render server's fences on a host without eventfd.
+---
+ src/proxy/proxy_context.c | 52 +++++++++++++++++++++++++++++++++++++--
+ src/proxy/proxy_context.h |  4 +++
+ src/virglrenderer.c       | 12 ++++++++-
+ 3 files changed, 65 insertions(+), 3 deletions(-)
+
+diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
+index 4f87d5ac..11aa4e9f 100644
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -8,6 +8,9 @@
+ #include <fcntl.h>
+ #include <poll.h>
+ #include <sys/mman.h>
++#ifndef HAVE_EVENTFD_H
++#include <sys/socket.h>
++#endif
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
+@@ -518,10 +521,12 @@ proxy_context_destroy(struct virgl_context *base)
+    if (ctx->sync_thread.fence_eventfd >= 0) {
+       if (ctx->sync_thread.created) {
+          ctx->sync_thread.stop = true;
+-         write_eventfd(ctx->sync_thread.fence_eventfd, 1);
++         write_eventfd(ctx->sync_thread.fence_notify_fd, 1);
+          thrd_join(ctx->sync_thread.thread, NULL);
+       }
+ 
++      if (ctx->sync_thread.fence_notify_fd != ctx->sync_thread.fence_eventfd)
++         close(ctx->sync_thread.fence_notify_fd);
+       close(ctx->sync_thread.fence_eventfd);
+    }
+ 
+@@ -565,6 +570,40 @@ proxy_context_init_base(struct proxy_context *ctx)
+    ctx->base.submit_fence = proxy_context_submit_fence;
+ }
+ 
++#ifndef HAVE_EVENTFD_H
++/* Without eventfd (macOS), a socket pair stands in for it: the render server
++ * writes to one end and the sync thread polls and drains the other. The
++ * writing end is kept here as well, to hand to the server and to wake the
++ * sync thread on destroy. SO_NOSIGPIPE makes a write after the reading end is
++ * gone fail with EPIPE instead of raising SIGPIPE.
++ */
++static bool
++proxy_context_create_fence_socket_pair(struct proxy_context *ctx)
++{
++   int fds[2];
++   if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds))
++      return false;
++
++   const int on = 1;
++   for (int i = 0; i < 2; i++) {
++      if (fcntl(fds[i], F_SETFD, FD_CLOEXEC) || fcntl(fds[i], F_SETFL, O_NONBLOCK)) {
++         close(fds[0]);
++         close(fds[1]);
++         return false;
++      }
++   }
++   if (setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on))) {
++      close(fds[0]);
++      close(fds[1]);
++      return false;
++   }
++
++   ctx->sync_thread.fence_eventfd = fds[0];
++   ctx->sync_thread.fence_notify_fd = fds[1];
++   return true;
++}
++#endif
++
+ static bool
+ proxy_context_init_fencing(struct proxy_context *ctx)
+ {
+@@ -579,11 +618,19 @@ proxy_context_init_fencing(struct proxy_context *ctx)
+    if (!(proxy_renderer.flags & VIRGL_RENDERER_THREAD_SYNC))
+       return true;
+ 
++#ifdef HAVE_EVENTFD_H
+    ctx->sync_thread.fence_eventfd = create_eventfd(0);
+    if (ctx->sync_thread.fence_eventfd < 0) {
+       proxy_log("failed to create fence eventfd");
+       return false;
+    }
++   ctx->sync_thread.fence_notify_fd = ctx->sync_thread.fence_eventfd;
++#else
++   if (!proxy_context_create_fence_socket_pair(ctx)) {
++      proxy_log("failed to create fence socket pair");
++      return false;
++   }
++#endif
+ 
+    if (proxy_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB) {
+       int ret = thrd_create(&ctx->sync_thread.thread, proxy_context_sync_thread, ctx);
+@@ -668,7 +715,7 @@ proxy_context_init(struct proxy_context *ctx, uint32_t ctx_flags)
+       .flags = ctx_flags,
+       .shmem_size = ctx->shmem.size,
+    };
+-   const int req_fds[2] = { ctx->shmem.fd, ctx->sync_thread.fence_eventfd };
++   const int req_fds[2] = { ctx->shmem.fd, ctx->sync_thread.fence_notify_fd };
+    const int req_fd_count = req_fds[1] >= 0 ? 2 : 1;
+    if (!proxy_socket_send_request_with_fds(&ctx->socket, &req, sizeof(req), req_fds,
+                                            req_fd_count)) {
+@@ -708,6 +755,7 @@ proxy_context_create(uint32_t ctx_id,
+    mtx_init(&ctx->free_fences_mutex, mtx_plain);
+    list_inithead(&ctx->free_fences);
+    ctx->sync_thread.fence_eventfd = -1;
++   ctx->sync_thread.fence_notify_fd = -1;
+ 
+    if (!proxy_context_init(ctx, ctx_flags)) {
+       proxy_context_destroy(&ctx->base);
+diff --git a/src/proxy/proxy_context.h b/src/proxy/proxy_context.h
+index ce29ecae..fe08dcb2 100644
+--- a/src/proxy/proxy_context.h
++++ b/src/proxy/proxy_context.h
+@@ -53,6 +53,10 @@ struct proxy_context {
+    struct {
+       /* when VIRGL_RENDERER_THREAD_SYNC is set */
+       int fence_eventfd;
++      /* the end the render server writes to; the same fd as fence_eventfd
++       * unless eventfd is unavailable and a socket pair stands in for it
++       */
++      int fence_notify_fd;
+ 
+       /* when VIRGL_RENDERER_ASYNC_FENCE_CB is also set */
+       thrd_t thread;
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index acdd202c..a4b760b6 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -954,7 +954,17 @@ int virgl_renderer_init(void *cookie, int flags, struct virgl_renderer_callbacks
+    int ret;
+ 
+    /* VIRGL_RENDERER_THREAD_SYNC is a hint and can be silently ignored */
+-   if (!has_eventfd() || getenv("VIRGL_DISABLE_MT"))
++   bool can_thread_sync = has_eventfd();
++#if defined(ENABLE_RENDER_SERVER) && !defined(HAVE_EVENTFD_H)
++   /* Without eventfd, the render server path can still honour it: proxy
++    * context falls back to a socket pair. vrend and the drm renderers cannot,
++    * so the hint survives only when neither is asked for.
++    */
++   if ((flags & VIRGL_RENDERER_RENDER_SERVER) && (flags & VIRGL_RENDERER_NO_VIRGL) &&
++       !(flags & VIRGL_RENDERER_DRM))
++      can_thread_sync = true;
++#endif
++   if (!can_thread_sync || getenv("VIRGL_DISABLE_MT"))
+       flags &= ~VIRGL_RENDERER_THREAD_SYNC;
+ 
+    if (state.client_initialized && (state.cookie != cookie ||

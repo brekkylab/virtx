@@ -30,7 +30,7 @@
 //!
 //! Upstream virglrenderer serves venus only through its render server, and initialises
 //! venus at all only when this bit is set. The macOS and Linux builds run that server as a
-//! thread of this process (`render-server-mode=thread`, in `xtask/scripts/build-deps.sh`),
+//! thread of this process (`render-server-mode=thread`, in `3rdparty/_scripts/build-virglrenderer.sh`),
 //! so the bit starts nothing. The Windows build has no render server and carries an
 //! in-process venus context instead, which answers to `VENUS` alone -- with this bit set
 //! there it would look for a server that was never built.
@@ -50,7 +50,7 @@
 //!
 //! The device the guest enumerates reports the same size: venus caps every heap, and
 //! `VK_EXT_memory_budget`'s budgets, at `VKR_HEAP_SIZE_MAX` (see
-//! virglrenderer's `heap-limit` commit), which is set here from the
+//! virglrenderer's `heap-limit` patch), which is set here from the
 //! window. Otherwise the guest sees the host device's whole heap -- 19 GB on an 18 GB Mac
 //! -- sizes itself to that, and learns the truth from a mapping that fails; ncnn copies
 //! out of the null pointer it gets back.
@@ -124,7 +124,7 @@ pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
 /// heap -- 32 GiB on a 5090, for a 2 GiB window -- until a mapping past the window failed.
 /// Setting it here is setting it there only because there is one C runtime: this binary links
 /// it statically (`+crt-static`, `.cargo/config.toml`), and virglrenderer is a static library
-/// built to match (`-Db_vscrt=mt`, `xtask/scripts/build-deps.ps1`), linked into it. Were
+/// built to match (`-Db_vscrt=mt`, `3rdparty/_scripts/build-virglrenderer.ps1`), linked into it. Were
 /// virglrenderer a DLL with a C runtime of its own, the cap would stop reaching it again.
 #[cfg(windows)]
 fn crt_setenv(name: &str, value: &str) {

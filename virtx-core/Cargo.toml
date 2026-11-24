@@ -1,6 +1,6 @@
 [package]
 name = "virtx-core"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "The virtx client: the types every request takes and answers, the wire, and the C ABI of libvirtx_core."
 license = "Apache-2.0"
@@ -12,10 +12,13 @@ keywords = ["vm", "microvm", "sandbox", "agent", "virtualization"]
 categories = ["virtualization", "api-bindings"]
 
 [lib]
-# `rlib` for Rust (this crate's tests, and any crate that depends on it); `cdylib` and
-# `staticlib` for C, as `libvirtx_core.{so,dylib}` (`virtx_core.dll` on Windows) and
-# `libvirtx_core.a`, declared by `include/virtx.h`.
-crate-type = ["rlib", "cdylib", "staticlib"]
+# `rlib` alone: for Rust, this crate's tests and any crate that depends on it. The library for
+# C -- `libvirtx_core.{so,dylib}` (`virtx_core.dll` on Windows) and `libvirtx_core.a`, declared
+# by `include/virtx.h` -- is built only where it is asked for, with `cargo rustc --crate-type`
+# (`cargo xtask build client`). A cdylib's file name carries no hash of its features, so built
+# with every build, each crate's tests' features would write over the last and rebuild this
+# crate, and all that depends on it, again.
+crate-type = ["rlib"]
 
 [dependencies]
 # What the types need, and all they need: a crate that only names requests and their answers

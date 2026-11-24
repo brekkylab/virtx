@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fstree::FsTree;
 use crate::machine::{
-    Error, Network, Result,
+    Error, Result,
     boot::{self, BootArgs, CONSOLE_TARGET},
     wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
@@ -101,10 +101,16 @@ pub(crate) fn create_upper(path: &Path, gib: u32) -> Result<()> {
 /// Grow the upper disk at `path`, which no machine runs over, to `gib` GiB, with what is on it
 /// kept; one as large or larger is left. Its filesystem -- laid out by [`FsTree::to_ext4`] with
 /// no room to grow in place, which a kernel will not grow either -- is read whole and written
-/// again at the new size: at `part`, moved over it once whole, so a failure leaves it as it
-/// was. Each file is read whole, its holes too, so a file larger than the disk could hold is
-/// refused, and the new disk takes on the host what its files are long, not `gib`.
-pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
+/// again at the new size: at `part`, moved over it once whole and `before_move` has answered,
+/// so a failure, `before_move`'s too, leaves it as it was. Each file is read whole, its holes
+/// too, so a file larger than the disk could hold is refused, and the new disk takes on the host
+/// what its files are long, not `gib`.
+pub(crate) fn grow_upper(
+    path: &Path,
+    part: &Path,
+    gib: u32,
+    before_move: impl FnOnce() -> io::Result<()>,
+) -> Result<()> {
     let size = u64::from(gib) << 30;
     let read = |e: io::Error| Error::io(format!("reading {}", path.display()), e);
     if std::fs::metadata(path).map_err(read)?.len() >= size {
@@ -112,17 +118,20 @@ pub(crate) fn grow_upper(path: &Path, part: &Path, gib: u32) -> Result<()> {
     }
     let tree = FsTree::from_ext4(io::BufReader::new(File::open(path).map_err(read)?))?;
     let _ = std::fs::remove_file(part);
-    let written = File::create_new(part)
+    let grown = File::create_new(part)
         .map_err(|e| Error::io(format!("creating {}", part.display()), e))
         .and_then(|file| Ok(tree.to_ext4(sparse(file), size)?))
+        .and_then(|()| {
+            before_move().map_err(|e| Error::io(format!("growing {}", path.display()), e))
+        })
         .and_then(|()| {
             std::fs::rename(part, path)
                 .map_err(|e| Error::io(format!("moving {} into place", part.display()), e))
         });
-    if written.is_err() {
+    if grown.is_err() {
         let _ = std::fs::remove_file(part);
     }
-    written
+    grown
 }
 
 /// `file`, new and about to be a disk, kept sparse by the host: its size a ceiling and not an
@@ -171,9 +180,12 @@ pub struct MachineSpec {
     /// Ignored without [`gpu`](MachineSpec::gpu).
     pub gpu_memory_mib: Option<u32>,
 
-    /// Where the guest's own connections may go: the way out.
+    /// Whether the guest's own connections go anywhere: on, to the addresses the internet
+    /// routes, and never to this host's loopback, its private and link-local ranges or cloud
+    /// metadata at `169.254.169.254`; off, nowhere, and no names resolve. A guest reaches its
+    /// own published ports either way.
     #[serde(default)]
-    pub network: Network,
+    pub network: bool,
 }
 
 /// A volume shown in the guest. Pointed at rather than carried, so its mounts' credentials stay
@@ -209,6 +221,9 @@ pub struct Machine {
     /// What the embedder serves its disk with ([`Disks::serve`](crate::disks::Disks::serve)),
     /// held until its process has been killed and waited for.
     held: Option<crate::disks::Held>,
+    /// The directory its published ports' sockets are in, removed once its process has been
+    /// killed and waited for.
+    _sockets: tempfile::TempDir,
 }
 
 impl Drop for Machine {
@@ -241,8 +256,16 @@ impl Machine {
             io::pipe().map_err(|e| Error::io("making ctrlout", e))?;
         let (their_ioin, ioin) = io::pipe().map_err(|e| Error::io("making ioin", e))?;
         let (ioout, their_ioout) = io::pipe().map_err(|e| Error::io("making ioout", e))?;
+        // This machine's own, which no one else can have made first or reach into: in the
+        // temporary directory, which keeps a socket's path short of the hundred-odd bytes it
+        // may take.
+        let sockets = tempfile::Builder::new()
+            .prefix("virtx-")
+            .tempdir()
+            .map_err(|e| Error::io("making the published ports' directory", e))?;
         let args = BootArgs {
             config,
+            sockets: sockets.path().to_owned(),
             ctrlin: raw(&their_ctrlin),
             ctrlout: raw(&their_ctrlout),
             ioin: raw(&their_ioin),
@@ -288,6 +311,7 @@ impl Machine {
                         io: files(ioin, ioout),
                         published,
                         held: None,
+                        _sockets: sockets,
                     });
                 }
                 Some(CtrlResp::Log {
@@ -612,7 +636,7 @@ pub fn enter() -> Result<Infallible> {
     let ctrlin = unsafe { boot::hold(args.ctrlin, args.ctrlout) };
     // SAFETY: as above.
     let io = unsafe { (boot::from_raw(args.ioin), boot::from_raw(args.ioout)) };
-    let entered = boot::boot(args.config, ctrlin, io);
+    let entered = boot::boot(args.config, &args.sockets, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
         log::error!(target: TOLD_TARGET, "{}", e.told());
@@ -687,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks() {
+    fn an_upper_grown_is_as_large_with_what_was_on_it_and_never_shrinks_and_told_once_written() {
         use crate::fstree::{Entry, Meta};
         let dir = tempfile::tempdir().unwrap();
         let (path, part) = (dir.path().join("w.ext4"), dir.path().join("w.ext4.part"));
@@ -702,13 +726,23 @@ mod tests {
             .unwrap();
         let before = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
 
-        grow_upper(&path, &part, 3).unwrap();
+        // Told once it is written, and left as it was where that fails.
+        let failed = grow_upper(&path, &part, 3, || {
+            assert_eq!(std::fs::metadata(&part).unwrap().len(), 3 << 30);
+            Err(io::Error::other("refused"))
+        });
+        assert!(matches!(failed, Err(Error::Io { .. })), "{failed:?}");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1 << 30);
+        assert!(!part.exists());
+
+        grow_upper(&path, &part, 3, || Ok(())).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
         let after = FsTree::from_ext4(File::open(&path).unwrap()).unwrap();
         assert_eq!(after.digest(), before.digest());
         assert!(!part.exists());
 
-        grow_upper(&path, &part, 2).unwrap();
+        let told = || panic!("told of a disk not grown");
+        grow_upper(&path, &part, 2, told).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 << 30);
     }
 
@@ -726,7 +760,7 @@ mod tests {
                 ram_mib: 2048,
                 gpu: false,
                 gpu_memory_mib: None,
-                network: Network::Public,
+                network: true,
             },
             volumes: vec![VolumeMount {
                 path: PathBuf::from("/store/volume/data"),

@@ -24,8 +24,8 @@ use super::{Error, Job};
 use crate::backend::{Backing, Held, Stored, Wanted};
 use crate::machine::wire::{CtrlResp, Taken};
 use crate::{
-    Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
-    Ports, Reference, Room, SandboxDisk, VolumeHold, VolumeMount, VolumeStore,
+    Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Ports,
+    Reference, Room, SandboxDisk, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -161,6 +161,8 @@ pub struct Sandbox {
     id: String,
     /// The name it was made with, which a server finds it again by.
     name: Option<String>,
+    /// What it was made with, its image by digest, as large as it was last resized to.
+    args: Mutex<SandboxCreateArgs>,
     /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
     root: PathBuf,
     /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
@@ -531,6 +533,7 @@ impl Sandbox {
         Ok(Sandbox {
             id: upper.id.clone(),
             name: args.name.clone(),
+            args: Mutex::new(args.clone()),
             root: root.to_owned(),
             up_since: Mutex::default(),
             dir,
@@ -588,6 +591,12 @@ impl Sandbox {
     /// The name it was made with, if any.
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    /// What it was made with: its `image` the digest it boots, and its `vcpus`, `memory_mib` and
+    /// `disk_gib` as it was last [resized](Sandbox::resize) to, where it was.
+    pub fn args(&self) -> SandboxCreateArgs {
+        self.args.lock().unwrap().clone()
     }
 
     /// When its machine came up, while it is up; `None` while it is parked or has exited.
@@ -835,11 +844,13 @@ impl Sandbox {
         if (vcpus, memory_mib) != (spec.vcpus, spec.ram_mib) {
             self.park_under_turn(Some(Duration::ZERO)).await?;
         }
+        let mut resized_args = self.args.lock().unwrap().clone();
+        resized_args.vcpus = Some(vcpus);
+        resized_args.memory_mib = Some(memory_mib);
+        resized_args.disk_gib = Some(disk_gib);
         if let Some(record) = &mut *self.record.lock().unwrap() {
             let mut resized = record.clone();
-            resized.args.vcpus = Some(vcpus);
-            resized.args.memory_mib = Some(memory_mib);
-            resized.args.disk_gib = Some(disk_gib);
+            resized.args = resized_args.clone();
             resized
                 .write(&self.dir, &self.id)
                 .map_err(|source| Error::Io {
@@ -854,6 +865,7 @@ impl Sandbox {
             config.spec.ram_mib = memory_mib;
         }
         self.disk_gib.store(disk_gib, Ordering::Relaxed);
+        *self.args.lock().unwrap() = resized_args;
         Ok(SandboxResources {
             vcpus,
             memory_mib,
@@ -1011,21 +1023,10 @@ impl Sandbox {
                 }
             }
         }
-        // What its disk is fetched from while its machine runs, if the embedder's disks say,
-        // held with the machine.
-        let mut config = config;
-        let served = crate::disks::disks()
-            .serve(&config.upper)
-            .map_err(|e| Error::Io {
-                context: format!("serving the disk of sandbox {}", self.id),
-                source: e,
-            })?;
-        let (source, held) = served.unzip();
-        *self.served.lock().unwrap() = Some(source.is_some());
-        config.sandbox_disk = Some(SandboxDisk { source });
         // Booting is blocking work, until the guest takes commands: its disk grown first to as
         // large as it was last resized to. A grow that fails leaves the disk as it was, which it
         // boots on, to be grown at a later boot.
+        let mut config = config;
         let vm = self.vm.clone();
         let (booting, gib) = (Arc::clone(self), self.disk_gib.load(Ordering::Relaxed));
         let machine = tokio::task::spawn_blocking(move || {
@@ -1034,9 +1035,20 @@ impl Sandbox {
             {
                 eprintln!("sandbox {}'s disk not grown to {gib} GiB: {e}", booting.id);
             }
-            Ok::<_, Error>(Machine::start(config, &vm)?)
+            // What its disk, as grown, is fetched from while its machine runs, if the
+            // embedder's disks say, held with the machine.
+            let served = crate::disks::disks()
+                .serve(&config.upper)
+                .map_err(|e| Error::Io {
+                    context: format!("serving the disk of sandbox {}", booting.id),
+                    source: e,
+                })?;
+            let (source, held) = served.unzip();
+            *booting.served.lock().unwrap() = Some(source.is_some());
+            config.sandbox_disk = Some(SandboxDisk { source });
+            Ok::<_, Error>((Machine::start(config, &vm)?, held))
         });
-        let machine = machine.await??;
+        let (machine, held) = machine.await??;
         let machine = Arc::new(machine.holding(held));
         *self.holding.lock().unwrap() = holding;
         let closed = {
@@ -1679,10 +1691,7 @@ fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
         ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
         gpu: args.gpu.unwrap_or(false),
         gpu_memory_mib: args.gpu_memory_mib,
-        network: match args.network {
-            true => Network::Public,
-            false => Network::None,
-        },
+        network: args.network,
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "virtx"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A virtx client for Rust, over libvirtx_core's C ABI."
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ embedded = ["virtx-core/ffi"]
 [dependencies]
 # The types every request takes and answers; and, with `embedded`, the client behind the C ABI.
 # The version is what a published `virtx` depends on, and is the one both crates say.
-virtx-core = { path = "../virtx-core", version = "0.2.0", default-features = false }
+virtx-core = { path = "../virtx-core", version = "0.2.1", default-features = false }
 # Opening `libvirtx_core` and finding its functions, without `embedded`.
 libloading = "0.8"
 # `Stream`, which a request answering item by item is.

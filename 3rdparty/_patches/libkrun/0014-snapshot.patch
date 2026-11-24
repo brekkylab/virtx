@@ -1,0 +1,1400 @@
+diff --git a/src/devices/src/virtio/console/device.rs b/src/devices/src/virtio/console/device.rs
+index 10ab92a5..976baeb2 100644
+--- a/src/devices/src/virtio/console/device.rs
++++ b/src/devices/src/virtio/console/device.rs
+@@ -163,7 +163,7 @@ impl Console {
+ 
+     pub(crate) fn process_control_tx(&mut self) -> bool {
+         log::trace!("process_control_tx");
+-        let DeviceState::Activated(ref mem, ref interrupt) = self.device_state else {
++        let DeviceState::Activated(ref mem, _) = self.device_state else {
+             unreachable!()
+         };
+ 
+@@ -256,31 +256,38 @@ impl Console {
+         }
+ 
+         for port_id in ports_to_start {
+-            log::trace!("Starting port io for port {port_id}");
+-            let rx_idx = port_id_to_queue_idx(QueueDirection::Rx, port_id);
+-            let tx_idx = port_id_to_queue_idx(QueueDirection::Tx, port_id);
+-
+-            // Take ownership of port queues - they are moved to the port.
+-            let rx_queue = self.queues[rx_idx]
+-                .take()
+-                .expect("port rx queue should exist")
+-                .queue;
+-            let tx_queue = self.queues[tx_idx]
+-                .take()
+-                .expect("port tx queue should exist")
+-                .queue;
+-
+-            self.ports[port_id].start(
+-                mem.clone(),
+-                rx_queue,
+-                tx_queue,
+-                interrupt.clone(),
+-                self.control.clone(),
+-            );
++            self.start_port(port_id);
+         }
+ 
+         raise_irq
+     }
++
++    fn start_port(&mut self, port_id: usize) {
++        let DeviceState::Activated(ref mem, ref interrupt) = self.device_state else {
++            unreachable!()
++        };
++        log::trace!("Starting port io for port {port_id}");
++        let rx_idx = port_id_to_queue_idx(QueueDirection::Rx, port_id);
++        let tx_idx = port_id_to_queue_idx(QueueDirection::Tx, port_id);
++
++        // Take ownership of port queues - they are moved to the port.
++        let rx_queue = self.queues[rx_idx]
++            .take()
++            .expect("port rx queue should exist")
++            .queue;
++        let tx_queue = self.queues[tx_idx]
++            .take()
++            .expect("port tx queue should exist")
++            .queue;
++
++        self.ports[port_id].start(
++            mem.clone(),
++            rx_queue,
++            tx_queue,
++            interrupt.clone(),
++            self.control.clone(),
++        );
++    }
+ }
+ 
+ impl VirtioDevice for Console {
+@@ -356,6 +363,27 @@ impl VirtioDevice for Console {
+         self.device_state.is_activated()
+     }
+ 
++    /// Which ports the guest has opened, a byte each.
++    fn snapshot(&self) -> Vec<u8> {
++        self.ports.iter().map(|port| port.is_active() as u8).collect()
++    }
++
++    fn restore(&mut self, saved: &[u8]) -> Result<(), String> {
++        if saved.len() != self.ports.len() {
++            return Err(format!(
++                "{} console ports where the snapshot has {}",
++                self.ports.len(),
++                saved.len()
++            ));
++        }
++        for (port_id, open) in saved.iter().enumerate() {
++            if *open != 0 {
++                self.start_port(port_id);
++            }
++        }
++        Ok(())
++    }
++
+     fn reset(&mut self) -> bool {
+         // Shutdown ports and clear queues.
+         for port in &mut self.ports {
+diff --git a/src/devices/src/virtio/console/port.rs b/src/devices/src/virtio/console/port.rs
+index caae5bc7..d34bbc98 100644
+--- a/src/devices/src/virtio/console/port.rs
++++ b/src/devices/src/virtio/console/port.rs
+@@ -97,6 +97,11 @@ impl Port {
+         &self.name
+     }
+ 
++    /// Whether the guest has opened the port, and its I/O runs.
++    pub(crate) fn is_active(&self) -> bool {
++        matches!(self.state, PortState::Active { .. })
++    }
++
+     pub fn terminal(&self) -> Option<&dyn PortTerminalProperties> {
+         self.terminal.as_deref()
+     }
+diff --git a/src/devices/src/virtio/device.rs b/src/devices/src/virtio/device.rs
+index 96a76b75..1e09196f 100644
+--- a/src/devices/src/virtio/device.rs
++++ b/src/devices/src/virtio/device.rs
+@@ -94,6 +94,8 @@ pub(crate) struct VirtioTransportState {
+     queue_evts: Vec<Arc<EventFd>>,
+     pub(crate) queue_config: Vec<QueueConfig>,
+     bus_master_gate: Option<Arc<AtomicBool>>,
++    /// The queues as the driver configured them when it activated the device, for a snapshot.
++    activated_queues: Vec<super::snapshot::QueueSnapshot>,
+ }
+ 
+ impl VirtioTransportState {
+@@ -121,6 +123,7 @@ impl VirtioTransportState {
+             queue_evts,
+             queue_config,
+             bus_master_gate: None,
++            activated_queues: Vec::new(),
+         })
+     }
+ 
+@@ -210,6 +213,10 @@ impl VirtioTransportState {
+         let Some(queues) = self.queues.take() else {
+             return;
+         };
++        self.activated_queues = queues
++            .iter()
++            .map(super::snapshot::QueueSnapshot::of)
++            .collect();
+ 
+         let mut device_queues: Vec<DeviceQueue> = queues
+             .into_iter()
+@@ -228,6 +235,75 @@ impl VirtioTransportState {
+             .expect("Failed to activate device");
+     }
+ 
++    /// The transport and its device, at a quiescent point.
++    pub(crate) fn snapshot(&self) -> super::snapshot::TransportSnapshot {
++        let device = self.locked_device();
++        let activated = device.is_activated();
++        super::snapshot::TransportSnapshot {
++            device_type: device.device_type(),
++            device_status: self.device_status,
++            features_select: self.features_select,
++            acked_features_select: self.acked_features_select,
++            queue_select: self.queue_select,
++            config_generation: self.config_generation,
++            acked_features: device.acked_features(),
++            interrupt_status: 0,
++            queues: if activated {
++                self.activated_queues.clone()
++            } else {
++                Vec::new()
++            },
++            device: if activated { device.snapshot() } else { Vec::new() },
++        }
++    }
++
++    /// Sets the transport to `snapshot`, activating its device as the driver had, and hands the
++    /// device what it saved of itself.
++    pub(crate) fn restore(
++        &mut self,
++        snapshot: &super::snapshot::TransportSnapshot,
++        interrupt: InterruptTransport,
++    ) -> Result<(), String> {
++        let device_type = self.locked_device().device_type();
++        if device_type != snapshot.device_type {
++            return Err(format!(
++                "a device of type {device_type} where the snapshot has {}",
++                snapshot.device_type
++            ));
++        }
++        self.features_select = snapshot.features_select;
++        self.acked_features_select = snapshot.acked_features_select;
++        self.queue_select = snapshot.queue_select;
++        self.device_status = snapshot.device_status;
++        self.config_generation = snapshot.config_generation;
++        self.locked_device()
++            .set_acked_features(snapshot.acked_features);
++        if snapshot.queues.is_empty() {
++            return Ok(());
++        }
++        if snapshot.queues.len() != self.queue_config.len() {
++            return Err(format!(
++                "{} queues where the snapshot has {}",
++                self.queue_config.len(),
++                snapshot.queues.len()
++            ));
++        }
++        let mut queues: Vec<Queue> = snapshot
++            .queues
++            .iter()
++            .zip(&self.queue_config)
++            .map(|(queue, config)| queue.queue(config.size, &self.mem))
++            .collect();
++        if let Some(gate) = &self.bus_master_gate {
++            for queue in &mut queues {
++                queue.set_bus_master_gate(gate.clone());
++            }
++        }
++        self.queues = Some(queues);
++        self.activate(interrupt);
++        self.locked_device().restore(&snapshot.device)
++    }
++
+     pub(crate) fn set_device_status(
+         &mut self,
+         status: u32,
+@@ -411,6 +487,22 @@ pub trait VirtioDevice: AsAny + Send {
+     fn shm_region(&self) -> Option<&VirtioShmRegion> {
+         None
+     }
++
++    /// What the activated device keeps beyond its queues, at a quiescent point, for
++    /// [`restore`](VirtioDevice::restore) to set again on a fresh one.
++    fn snapshot(&self) -> Vec<u8> {
++        Vec::new()
++    }
++
++    /// Sets what [`snapshot`](VirtioDevice::snapshot) saved, on a device just activated from
++    /// its snapshot's queues.
++    fn restore(&mut self, saved: &[u8]) -> Result<(), String> {
++        if saved.is_empty() {
++            Ok(())
++        } else {
++            Err(format!("{} keeps no state to restore", self.device_name()))
++        }
++    }
+ }
+ 
+ pub trait VmmExitObserver: Send {
+diff --git a/src/devices/src/virtio/fs/device.rs b/src/devices/src/virtio/fs/device.rs
+index c7a2bcc1..1bcc6bc1 100644
+--- a/src/devices/src/virtio/fs/device.rs
++++ b/src/devices/src/virtio/fs/device.rs
+@@ -63,6 +63,8 @@ pub struct Fs {
+     worker_thread: Option<JoinHandle<()>>,
+     worker_stopfd: EventFd,
+     exit_code: Arc<AtomicI32>,
++    /// What the guest's `FUSE_INIT` chose, shared with the worker's server.
++    options: Arc<std::sync::atomic::AtomicU64>,
+     #[cfg(target_os = "macos")]
+     map_sender: Option<Sender<WorkerMessage>>,
+ }
+@@ -105,6 +107,7 @@ impl Fs {
+             worker_thread: None,
+             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
+             exit_code,
++            options: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+             #[cfg(target_os = "macos")]
+             map_sender: None,
+         };
+@@ -317,6 +320,7 @@ impl VirtioDevice for Fs {
+             self.external.clone(),
+             self.worker_stopfd.try_clone().unwrap(),
+             self.exit_code.clone(),
++            self.options.clone(),
+             #[cfg(target_os = "macos")]
+             self.map_sender.clone(),
+         )
+@@ -338,6 +342,26 @@ impl VirtioDevice for Fs {
+         self.shm_region.as_ref()
+     }
+ 
++    /// The options the guest's `FUSE_INIT` chose. What a passthrough server holds open for the
++    /// guest is not saved: a snapshot is taken before the guest has looked anything up in it.
++    fn snapshot(&self) -> Vec<u8> {
++        self.options
++            .load(std::sync::atomic::Ordering::Relaxed)
++            .to_le_bytes()
++            .to_vec()
++    }
++
++    fn restore(&mut self, saved: &[u8]) -> Result<(), String> {
++        let options: [u8; 8] = saved
++            .try_into()
++            .map_err(|_| format!("{} bytes of fs options", saved.len()))?;
++        self.options.store(
++            u64::from_le_bytes(options),
++            std::sync::atomic::Ordering::Relaxed,
++        );
++        Ok(())
++    }
++
+     fn reset(&mut self) -> bool {
+         if let Some(worker) = self.worker_thread.take() {
+             let _ = self.worker_stopfd.write(1);
+diff --git a/src/devices/src/virtio/fs/server.rs b/src/devices/src/virtio/fs/server.rs
+index d4d77b6c..8dcdb35f 100644
+--- a/src/devices/src/virtio/fs/server.rs
++++ b/src/devices/src/virtio/fs/server.rs
+@@ -70,15 +70,18 @@ impl io::Write for ZCWriter<'_> {
+ 
+ pub struct Server<F: FileSystem + Sync> {
+     fs: F,
+-    options: AtomicU64,
++    options: Arc<AtomicU64>,
+ }
+ 
+ impl<F: FileSystem + Sync> Server<F> {
+     pub fn new(fs: F) -> Server<F> {
+-        Server {
+-            fs,
+-            options: AtomicU64::new(FsOptions::empty().bits()),
+-        }
++        Self::with_options(fs, Arc::new(AtomicU64::new(FsOptions::empty().bits())))
++    }
++
++    /// A server whose negotiated options are `options`, which its device keeps too: what the
++    /// guest's `FUSE_INIT` chose, for a snapshot to save and a restore to set again.
++    pub fn with_options(fs: F, options: Arc<AtomicU64>) -> Server<F> {
++        Server { fs, options }
+     }
+ 
+     #[allow(clippy::cognitive_complexity)]
+diff --git a/src/devices/src/virtio/fs/worker.rs b/src/devices/src/virtio/fs/worker.rs
+index ba15fcaa..cb7dcdd9 100644
+--- a/src/devices/src/virtio/fs/worker.rs
++++ b/src/devices/src/virtio/fs/worker.rs
+@@ -116,32 +116,30 @@ impl FsWorker {
+         external: Option<Arc<dyn ExternalFs>>,
+         stop_fd: EventFd,
+         exit_code: Arc<AtomicI32>,
++        options: Arc<std::sync::atomic::AtomicU64>,
+         #[cfg(target_os = "macos")] map_sender: Option<Sender<WorkerMessage>>,
+     ) -> Result<Self, io::Error> {
+         let inode_alloc = Arc::new(InodeAllocator::new());
+         let server = match (external, passthrough_cfg) {
+-            (Some(fs), _) => FsServer::External(Server::new(External(fs))),
++            (Some(fs), _) => FsServer::External(Server::with_options(External(fs), options)),
+             (None, Some(cfg)) if read_only => {
+                 let inner = PassthroughFsRo::new(cfg, inode_alloc.clone())?;
+-                FsServer::ReadOnly(Server::new(AugmentFs::new(
+-                    inner,
+-                    &inode_alloc,
+-                    virtual_entries,
+-                )))
++                FsServer::ReadOnly(Server::with_options(
++                    AugmentFs::new(inner, &inode_alloc, virtual_entries),
++                    options,
++                ))
+             }
+             (None, Some(cfg)) => {
+                 let inner = PassthroughFs::new(cfg, inode_alloc.clone())?;
+-                FsServer::ReadWrite(Server::new(AugmentFs::new(
+-                    inner,
+-                    &inode_alloc,
+-                    virtual_entries,
+-                )))
++                FsServer::ReadWrite(Server::with_options(
++                    AugmentFs::new(inner, &inode_alloc, virtual_entries),
++                    options,
++                ))
+             }
+-            (None, None) => FsServer::Null(Server::new(AugmentFs::new(
+-                NullFs,
+-                &inode_alloc,
+-                virtual_entries,
+-            ))),
++            (None, None) => FsServer::Null(Server::with_options(
++                AugmentFs::new(NullFs, &inode_alloc, virtual_entries),
++                options,
++            )),
+         };
+         Ok(Self {
+             queues,
+diff --git a/src/devices/src/virtio/mmio.rs b/src/devices/src/virtio/mmio.rs
+index 73357e09..c3555f00 100644
+--- a/src/devices/src/virtio/mmio.rs
++++ b/src/devices/src/virtio/mmio.rs
+@@ -225,6 +225,21 @@ impl MmioTransport {
+         self.state.queue_evts()
+     }
+ 
++    /// The transport and its device, at a quiescent point.
++    pub fn snapshot(&self) -> super::snapshot::TransportSnapshot {
++        let mut snapshot = self.state.snapshot();
++        snapshot.interrupt_status = self.interrupt.status() as u32;
++        snapshot
++    }
++
++    /// Sets the transport, and its device, to `snapshot`.
++    pub fn restore(&mut self, snapshot: &super::snapshot::TransportSnapshot) -> Result<(), String> {
++        self.state
++            .restore(snapshot, self.device_interrupt.clone())?;
++        *self.interrupt.0.status.lock().unwrap() = snapshot.interrupt_status as usize;
++        Ok(())
++    }
++
+     fn check_device_status(&self, set: u32, clr: u32) -> bool {
+         self.state.device_status & (set | clr) == set
+     }
+diff --git a/src/devices/src/virtio/mod.rs b/src/devices/src/virtio/mod.rs
+index b298df14..917121eb 100644
+--- a/src/devices/src/virtio/mod.rs
++++ b/src/devices/src/virtio/mod.rs
+@@ -32,6 +32,7 @@ mod mmio;
+ pub mod net;
+ mod pci;
+ mod queue;
++pub mod snapshot;
+ #[cfg(not(feature = "tee"))]
+ pub mod rng;
+ #[cfg(target_os = "linux")]
+diff --git a/src/devices/src/virtio/snapshot.rs b/src/devices/src/virtio/snapshot.rs
+new file mode 100644
+index 00000000..53fde319
+--- /dev/null
++++ b/src/devices/src/virtio/snapshot.rs
+@@ -0,0 +1,70 @@
++//! What a virtio device's transport is, saved at a quiescent point and set again on a fresh
++//! device, so that a restored guest finds its devices where it left them without negotiating
++//! them again.
++//!
++//! A queue is saved as the driver configured it. Its device's place in it is not: at a quiescent
++//! point the device has used everything it took, so on restore both of its indices are the used
++//! ring's own index, read from the restored memory.
++
++use std::num::Wrapping;
++
++use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
++
++use super::Queue;
++
++/// A queue as its driver configured it.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct QueueSnapshot {
++    pub size: u16,
++    pub ready: bool,
++    pub desc_table: u64,
++    pub avail_ring: u64,
++    pub used_ring: u64,
++}
++
++impl QueueSnapshot {
++    pub(crate) fn of(queue: &Queue) -> Self {
++        Self {
++            size: queue.size,
++            ready: queue.ready,
++            desc_table: queue.desc_table.0,
++            avail_ring: queue.avail_ring.0,
++            used_ring: queue.used_ring.0,
++        }
++    }
++
++    /// The queue again, its device's indices at the used ring's.
++    pub(crate) fn queue(&self, max_size: u16, mem: &GuestMemoryMmap) -> Queue {
++        let mut queue = Queue::new(max_size);
++        queue.size = self.size;
++        queue.ready = self.ready;
++        queue.desc_table = GuestAddress(self.desc_table);
++        queue.avail_ring = GuestAddress(self.avail_ring);
++        queue.used_ring = GuestAddress(self.used_ring);
++        if self.ready {
++            let used: u16 = mem
++                .read_obj(GuestAddress(self.used_ring + 2))
++                .unwrap_or_default();
++            queue.next_avail = Wrapping(used);
++            queue.next_used = Wrapping(used);
++        }
++        queue
++    }
++}
++
++/// A transport and its device, as far as a restore needs them.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct TransportSnapshot {
++    pub device_type: u32,
++    pub device_status: u32,
++    pub features_select: u32,
++    pub acked_features_select: u32,
++    pub queue_select: u32,
++    pub config_generation: u32,
++    pub acked_features: u64,
++    pub interrupt_status: u32,
++    /// The queues the device was activated with; none for a device the driver never activated.
++    pub queues: Vec<QueueSnapshot>,
++    /// What the device itself keeps beyond its queues: see [`super::VirtioDevice::snapshot`].
++    pub device: Vec<u8>,
++}
+diff --git a/src/libkrun/src/api/vmm_builder.rs b/src/libkrun/src/api/vmm_builder.rs
+index 5534d224..b029b7b4 100644
+--- a/src/libkrun/src/api/vmm_builder.rs
++++ b/src/libkrun/src/api/vmm_builder.rs
+@@ -41,6 +41,8 @@ pub struct VmmBuilder<'a> {
+     acpi: bool,
+     smbios_oem_strings: Vec<String>,
+     shutdown_support: bool,
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    restore: Option<std::path::PathBuf>,
+ }
+ 
+ #[cfg_attr(feature = "ffi", ffier::export(invariant('a)))]
+@@ -218,6 +220,15 @@ impl<'a> VmmBuilder<'a> {
+         self
+     }
+ 
++    /// Restore the machine from the snapshot [`VmmHandle::snapshot`] wrote to `dir`, rather
++    /// than boot it. It is configured as the one snapshotted was -- vCPUs, memory and devices,
++    /// attached in the same order -- and its payload is not loaded. KVM x86_64 only.
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    pub fn restore(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
++        self.restore = Some(dir.into());
++        self
++    }
++
+     pub fn build(self) -> Result<Vmm<'a>, VmmError> {
+         build_vm(self).inspect_err(|e| log::error!("{e}"))
+     }
+@@ -315,6 +326,24 @@ impl VmmHandle {
+         Err(VmmError::FeatureDisabled())
+     }
+ 
++    /// Pause the VM and write it to `dir`, for [`VmmBuilder::restore`] to restore in another
++    /// process on this host; waits until it is written. The VM stays paused. The devices must
++    /// be quiescent: nothing the guest gave them is in flight. KVM x86_64 only.
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    pub fn snapshot(&self, dir: &std::path::Path) -> Result<(), VmmError> {
++        if !self.pause_supported {
++            return Err(VmmError::FeatureDisabled());
++        }
++        let (reply, answer) = crossbeam_channel::bounded(1);
++        self.vm_ctl_tx
++            .send(VmCtl::Snapshot(dir.to_path_buf(), reply))
++            .map_err(|e| VmmError::Internal(format!("snapshot: {e}")))?;
++        answer
++            .recv()
++            .map_err(|e| VmmError::Internal(format!("snapshot: {e}")))?
++            .map_err(VmmError::Internal)
++    }
++
+     /// Signal the guest to perform an orderly ACPI shutdown.
+     ///
+     /// This requires [`VmmBuilder::shutdown_support`] to have been enabled
+@@ -526,6 +555,10 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
+     #[cfg(not(target_os = "linux"))]
+     let _ = builder_cfg.transparent_huge_pages;
+     vm_resources.acpi_enabled = builder_cfg.acpi;
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    {
++        vm_resources.restore = builder_cfg.restore;
++    }
+     if !builder_cfg.smbios_oem_strings.is_empty() {
+         vm_resources.smbios_oem_strings = Some(builder_cfg.smbios_oem_strings);
+     }
+diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
+index d13be75e..f866ab2f 100644
+--- a/src/libkrun/src/vmm/builder.rs
++++ b/src/libkrun/src/vmm/builder.rs
+@@ -120,6 +120,8 @@ use vm_memory::{Address, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+ pub enum StartMicrovmError {
+     /// Unable to attach block device to Vmm.
+     AttachBlockDevice(io::Error),
++    /// The snapshot to restore from cannot be read or does not fit the machine.
++    Restore(String),
+     #[cfg(target_os = "macos")]
+     /// Failed to create HVF in-kernel IrqChip.
+     CreateHvfIrqChip(hvf::Error),
+@@ -400,6 +402,7 @@ impl Display for StartMicrovmError {
+             MissingMemSizeConfig => {
+                 write!(f, "Cannot start microvm without guest mem_size config.")
+             }
++            Restore(ref e) => write!(f, "Cannot restore the snapshot: {e}"),
+             NetDeviceNotConfigured => {
+                 write!(f, "The net device configuration is missing the tap device.")
+             }
+@@ -805,6 +808,23 @@ pub fn build_microvm(
+ ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
+     let payload = choose_payload(vm_resources)?;
+ 
++    // A machine restored from a snapshot: its memory, vCPUs and devices are set from it, and
++    // nothing of a boot is written into it.
++    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
++    let mut restoring = vm_resources
++        .restore
++        .as_ref()
++        .map(|dir| {
++            super::snapshot::Snapshot::read(dir)
++                .map(|snapshot| (dir.clone(), snapshot))
++                .map_err(StartMicrovmError::Restore)
++        })
++        .transpose()?;
++    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee"))))]
++    let restoring: Option<((), ())> = None;
++    #[allow(unused_mut)]
++    let mut restoring = restoring;
++
+     #[cfg(all(
+         target_arch = "x86_64",
+         any(target_os = "linux", target_os = "windows")
+@@ -893,7 +913,13 @@ pub fn build_microvm(
+         vm_resources.transparent_huge_pages,
+         #[cfg(feature = "tee")]
+         fw_range_for_mem,
++        restoring.is_some(),
+     )?;
++    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
++    if let Some((dir, snapshot)) = &restoring {
++        super::snapshot::map_memory(dir, &guest_memory, &snapshot.regions)
++            .map_err(StartMicrovmError::Restore)?;
++    }
+ 
+     let vcpu_config = vm_resources.vcpu_config();
+ 
+@@ -1283,7 +1309,9 @@ pub fn build_microvm(
+             Some(intc.clone()),
+         )?;
+ 
+-        let kernel_boot = vm_resources.firmware_config.is_none() && !cfg!(feature = "tee");
++        let kernel_boot = vm_resources.firmware_config.is_none()
++            && !cfg!(feature = "tee")
++            && restoring.is_none();
+ 
+         vcpus = create_vcpus_x86_64(
+             &vm,
+@@ -1298,6 +1326,24 @@ pub fn build_microvm(
+             _sender,
+         )
+         .map_err(StartMicrovmError::Internal)?;
++
++        // The vCPUs first, then the interrupt controllers and the clock, as KVM orders them.
++        #[cfg(not(feature = "tee"))]
++        if let Some((_, snapshot)) = &mut restoring {
++            if snapshot.vcpus.len() != vcpus.len() {
++                return Err(StartMicrovmError::Restore(format!(
++                    "{} vCPUs where the snapshot has {}",
++                    vcpus.len(),
++                    snapshot.vcpus.len()
++                )));
++            }
++            for (vcpu, state) in vcpus.iter().zip(std::mem::take(&mut snapshot.vcpus)) {
++                vcpu.restore_state(state)
++                    .map_err(|e| StartMicrovmError::Restore(format!("a vCPU's state: {e}")))?;
++            }
++            vm.restore_state(&snapshot.vm)
++                .map_err(|e| StartMicrovmError::Restore(format!("the VM's state: {e}")))?;
++        }
+     }
+ 
+     #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+@@ -1532,6 +1578,26 @@ pub fn build_microvm(
+         )
+         .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
+ 
++    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
++    if let Some((_, snapshot)) = &restoring {
++        let transports = &vmm.mmio_device_manager.transports;
++        if transports.len() != snapshot.transports.len() {
++            return Err(StartMicrovmError::Restore(format!(
++                "{} virtio devices where the snapshot has {}",
++                transports.len(),
++                snapshot.transports.len()
++            )));
++        }
++        for (index, (transport, saved)) in transports.iter().zip(&snapshot.transports).enumerate()
++        {
++            transport
++                .lock()
++                .unwrap()
++                .restore(saved)
++                .map_err(|e| StartMicrovmError::Restore(format!("virtio device {index}: {e}")))?;
++        }
++    }
++
+     if let Some(s) = &vm_resources.kernel_cmdline.epilog {
+         vmm.kernel_cmdline.insert_str(s).unwrap();
+     }
+@@ -1562,7 +1628,9 @@ pub fn build_microvm(
+     // populating boot_params for the Linux kernel (cmd_line_ptr already points here
+     // via configure_system).
+     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+-    load_cmdline(&vmm)?;
++    if restoring.is_none() {
++        load_cmdline(&vmm)?;
++    }
+     #[cfg(all(target_arch = "x86_64", feature = "tdx"))]
+     if vm_resources.tee_firmware_config.is_some() {
+         load_cmdline(&vmm)?;
+@@ -1606,6 +1674,7 @@ pub fn build_microvm(
+     #[cfg(not(all(target_os = "linux", target_arch = "riscv64")))]
+     let _riscv_isa_info: Option<()> = None;
+ 
++    if restoring.is_none() {
+     vmm.configure_system(
+         vcpus.as_slice(),
+         &intc,
+@@ -1618,6 +1687,7 @@ pub fn build_microvm(
+         &riscv_isa_info,
+     )
+     .map_err(StartMicrovmError::Internal)?;
++    }
+ 
+     #[cfg(feature = "tee")]
+     {
+@@ -2137,6 +2207,7 @@ pub fn create_guest_memory(
+     #[cfg(target_os = "macos")] ram_in_blocks: bool,
+     #[cfg(target_os = "linux")] transparent_huge_pages: bool,
+     #[cfg(feature = "tee")] firmware_range: Option<(u64, usize)>,
++    skip_payload: bool,
+ ) -> std::result::Result<
+     (GuestMemoryMmap, ArchMemoryInfo, ShmManager, PayloadConfig),
+     StartMicrovmError,
+@@ -2319,25 +2390,37 @@ pub fn create_guest_memory(
+     let ram_in_blocks =
+         ram_in_blocks && map_ram_in_blocks(&guest_mem, &arch_mem_info, map_guest_ram_in_blocks);
+ 
++    // A restored machine's memory is its snapshot's, mapped over this once it is made.
+     let LoadedPayload {
+         guest_mem,
+         entry_addr,
+         initrd_config,
+         kernel_cmdline: cmdline,
+         pvh,
+-    } = load_payload(
+-        kernel_bundle,
+-        #[cfg(feature = "tee")]
+-        qboot_bundle,
+-        #[cfg(feature = "tee")]
+-        initrd_bundle,
+-        use_vhost_user,
+-        guest_mem,
+-        &arch_mem_info,
+-        payload,
+-    )?;
++    } = if skip_payload {
++        LoadedPayload {
++            guest_mem,
++            entry_addr: GuestAddress(0),
++            initrd_config: None,
++            kernel_cmdline: None,
++            pvh: false,
++        }
++    } else {
++        load_payload(
++            kernel_bundle,
++            #[cfg(feature = "tee")]
++            qboot_bundle,
++            #[cfg(feature = "tee")]
++            initrd_bundle,
++            use_vhost_user,
++            guest_mem,
++            &arch_mem_info,
++            payload,
++        )?
++    };
+ 
+-    if !payload.is_external_kernel()
++    if !skip_payload
++        && !payload.is_external_kernel()
+         && let Some(firmware_data) = firmware_data.as_ref()
+     {
+         guest_mem
+diff --git a/src/libkrun/src/vmm/device_manager/kvm/mmio.rs b/src/libkrun/src/vmm/device_manager/kvm/mmio.rs
+index 732ad768..4ad3d014 100644
+--- a/src/libkrun/src/vmm/device_manager/kvm/mmio.rs
++++ b/src/libkrun/src/vmm/device_manager/kvm/mmio.rs
+@@ -91,6 +91,9 @@ pub struct MMIODeviceManager {
+     mmio_base: u64,
+     irqs: IrqAllocator,
+     id_to_dev_info: HashMap<(DeviceType, String), MMIODeviceInfo>,
++    /// The virtio transports, in the order they were attached: what a snapshot saves and a
++    /// restore sets again.
++    pub transports: Vec<Arc<Mutex<devices::virtio::MmioTransport>>>,
+ }
+ 
+ impl MMIODeviceManager {
+@@ -104,6 +107,7 @@ impl MMIODeviceManager {
+             irqs,
+             bus: devices::Bus::new(),
+             id_to_dev_info: HashMap::new(),
++            transports: Vec::new(),
+         }
+     }
+ 
+@@ -148,8 +152,10 @@ impl MMIODeviceManager {
+ 
+         mmio_device.set_irq_line(irq);
+ 
++        let mmio_device = Arc::new(Mutex::new(mmio_device));
++        self.transports.push(mmio_device.clone());
+         self.bus
+-            .insert(Arc::new(Mutex::new(mmio_device)), self.mmio_base, MMIO_LEN)
++            .insert(mmio_device, self.mmio_base, MMIO_LEN)
+             .map_err(Error::BusError)?;
+         let ret = (self.mmio_base, irq);
+         self.id_to_dev_info.insert(
+diff --git a/src/libkrun/src/vmm/linux/vstate.rs b/src/libkrun/src/vmm/linux/vstate.rs
+index c0064595..c19b46c4 100644
+--- a/src/libkrun/src/vmm/linux/vstate.rs
++++ b/src/libkrun/src/vmm/linux/vstate.rs
+@@ -858,7 +858,6 @@ impl Vm {
+         self.fd.clone()
+     }
+ 
+-    #[allow(unused)]
+     #[cfg(target_arch = "x86_64")]
+     /// Saves and returns the Kvm Vm state.
+     pub fn save_state(&self) -> Result<VmState> {
+@@ -901,7 +900,6 @@ impl Vm {
+         })
+     }
+ 
+-    #[allow(unused)]
+     #[cfg(target_arch = "x86_64")]
+     /// Restores the Kvm Vm state.
+     pub fn restore_state(&self, state: &VmState) -> Result<()> {
+@@ -922,17 +920,39 @@ impl Vm {
+     }
+ }
+ 
+-#[allow(unused)]
+ #[cfg(target_arch = "x86_64")]
+ /// Structure holding VM kvm state.
+ pub struct VmState {
+     pitstate: kvm_pit_state2,
+-    clock: kvm_clock_data,
++    pub(crate) clock: kvm_clock_data,
+     pic_master: kvm_irqchip,
+     pic_slave: kvm_irqchip,
+     ioapic: kvm_irqchip,
+ }
+ 
++#[cfg(target_arch = "x86_64")]
++impl VmState {
++    pub(crate) fn write(&self, out: &mut crate::vmm::snapshot::Writer) {
++        out.pod(&self.pitstate);
++        out.pod(&self.clock);
++        out.pod(&self.pic_master);
++        out.pod(&self.pic_slave);
++        out.pod(&self.ioapic);
++    }
++
++    pub(crate) fn read(
++        input: &mut crate::vmm::snapshot::Reader,
++    ) -> std::result::Result<Self, String> {
++        Ok(Self {
++            pitstate: input.pod()?,
++            clock: input.pod()?,
++            pic_master: input.pod()?,
++            pic_slave: input.pod()?,
++            ioapic: input.pod()?,
++        })
++    }
++}
++
+ /// Encapsulates configuration parameters for the guest vCPUS.
+ #[derive(Debug, Eq, PartialEq)]
+ pub struct VcpuConfig {
+@@ -1365,7 +1385,6 @@ impl Vcpu {
+         ))
+     }
+ 
+-    #[allow(unused)]
+     #[cfg(target_arch = "x86_64")]
+     fn save_state(&self) -> Result<VcpuState> {
+         /*
+@@ -1410,7 +1429,10 @@ impl Vcpu {
+         let debug_regs = self.fd.get_debug_regs().map_err(Error::VcpuGetDebugRegs)?;
+         let lapic = self.fd.get_lapic().map_err(Error::VcpuGetLapic)?;
+         let nmsrs = self.fd.get_msrs(&mut msrs).map_err(Error::VcpuGetMsrs)?;
+-        assert_eq!(nmsrs, num_msrs);
++        if nmsrs != num_msrs {
++            // KVM stops at the first MSR it cannot read: keep those it read.
++            msrs = Msrs::from_entries(&msrs.as_slice()[..nmsrs]).unwrap();
++        }
+         let vcpu_events = self
+             .fd
+             .get_vcpu_events()
+@@ -1429,9 +1451,8 @@ impl Vcpu {
+         })
+     }
+ 
+-    #[allow(unused)]
+     #[cfg(target_arch = "x86_64")]
+-    fn restore_state(&self, state: VcpuState) -> Result<()> {
++    pub(crate) fn restore_state(&self, state: VcpuState) -> Result<()> {
+         /*
+          * Ordering requirements:
+          *
+@@ -1675,6 +1696,14 @@ impl Vcpu {
+                     )));
+                     continue;
+                 }
++                #[cfg(target_arch = "x86_64")]
++                Ok(VcpuEvent::SaveState(reply)) => {
++                    let _ = reply.send(Err(format!(
++                        "vcpu {}: cannot save its state while running",
++                        self.id
++                    )));
++                    continue;
++                }
+                 Err(TryRecvError::Disconnected) => {
+                     return self.exit(VcpuResponse::Exited(FC_EXIT_CODE_GENERIC_ERROR));
+                 }
+@@ -1738,6 +1767,14 @@ impl Vcpu {
+                 let _ = reply.send(());
+                 StateMachine::next(Self::running)
+             }
++            #[cfg(target_arch = "x86_64")]
++            Ok(VcpuEvent::SaveState(reply)) => {
++                let _ = reply.send(
++                    self.save_state()
++                        .map_err(|e| format!("vcpu {}: saving its state: {e}", self.id)),
++                );
++                StateMachine::next(Self::paused)
++            }
+             #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+             Ok(VcpuEvent::RestoreCounter { counter, reply }) => {
+                 let result = write_counter(&self.fd, counter).map_err(|e| {
+@@ -1820,6 +1857,41 @@ pub struct VcpuState {
+     xsave: kvm_xsave,
+ }
+ 
++#[cfg(target_arch = "x86_64")]
++impl VcpuState {
++    pub(crate) fn write(&self, out: &mut crate::vmm::snapshot::Writer) {
++        out.slice(self.cpuid.as_slice());
++        out.slice(self.msrs.as_slice());
++        out.pod(&self.debug_regs);
++        out.pod(&self.lapic);
++        out.pod(&self.mp_state);
++        out.pod(&self.regs);
++        out.pod(&self.sregs);
++        out.pod(&self.vcpu_events);
++        out.pod(&self.xcrs);
++        out.pod(&self.xsave);
++    }
++
++    pub(crate) fn read(
++        input: &mut crate::vmm::snapshot::Reader,
++    ) -> std::result::Result<Self, String> {
++        let cpuid = CpuId::from_entries(&input.slice()?).map_err(|e| format!("cpuid: {e:?}"))?;
++        let msrs = Msrs::from_entries(&input.slice()?).map_err(|e| format!("msrs: {e:?}"))?;
++        Ok(Self {
++            cpuid,
++            msrs,
++            debug_regs: input.pod()?,
++            lapic: input.pod()?,
++            mp_state: input.pod()?,
++            regs: input.pod()?,
++            sregs: input.pod()?,
++            vcpu_events: input.pod()?,
++            xcrs: input.pod()?,
++            xsave: input.pod()?,
++        })
++    }
++}
++
+ #[derive(Debug)]
+ /// List of events that the Vcpu can receive.
+ pub enum VcpuEvent {
+@@ -1827,6 +1899,9 @@ pub enum VcpuEvent {
+     Pause(Sender<result::Result<Option<u64>, String>>),
+     /// Event that should resume the Vcpu.
+     Resume(Sender<()>),
++    /// Save the paused vCPU's state, for a snapshot.
++    #[cfg(target_arch = "x86_64")]
++    SaveState(Sender<result::Result<VcpuState, String>>),
+     /// Set the guest's counter while paused.
+     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+     RestoreCounter {
+diff --git a/src/libkrun/src/vmm/mod.rs b/src/libkrun/src/vmm/mod.rs
+index c1af50bd..69d8c9a3 100644
+--- a/src/libkrun/src/vmm/mod.rs
++++ b/src/libkrun/src/vmm/mod.rs
+@@ -18,6 +18,8 @@ pub mod resources;
+ /// Signal handling utilities.
+ #[cfg(target_os = "linux")]
+ pub mod signal_handler;
++#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++pub(crate) mod snapshot;
+ /// Wrappers over structures used to configure the VMM.
+ pub mod vmm_config;
+ 
+@@ -227,6 +229,12 @@ enum VcpuRunState {
+ pub enum VmCtl {
+     Pause,
+     Resume,
++    /// Pause the VM, write it to the directory, and answer; the VM stays paused.
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    Snapshot(
++        std::path::PathBuf,
++        Sender<std::result::Result<(), String>>,
++    ),
+ }
+ 
+ impl Vmm {
+@@ -412,6 +420,40 @@ impl Vmm {
+         Ok(())
+     }
+ 
++    /// Pauses the VM and writes it to `dir`: see [`snapshot`]. The devices must be quiescent --
++    /// every buffer they took used -- which is the embedder's to arrange; the VM stays paused.
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    pub fn snapshot(&mut self, dir: &std::path::Path) -> std::result::Result<(), String> {
++        self.pause()?;
++        // A device's worker may still be finishing a buffer the guest gave it before it paused.
++        std::thread::sleep(Duration::from_millis(20));
++        let vcpus = self
++            .request_vcpus(VcpuEvent::SaveState)
++            .map_err(|e| e.to_string())?
++            .into_iter()
++            .collect::<std::result::Result<Vec<_>, _>>()?;
++        let mut vm = self
++            .vm
++            .save_state()
++            .map_err(|e| format!("saving the VM's state: {e}"))?;
++        if let Some(clock) = self.paused_clock {
++            vm.clock = clock;
++        }
++        let transports = self
++            .mmio_device_manager
++            .transports
++            .iter()
++            .map(|transport| transport.lock().unwrap().snapshot())
++            .collect();
++        snapshot::Snapshot {
++            vcpus,
++            vm,
++            regions: snapshot::regions(&self.guest_memory),
++            transports,
++        }
++        .write(dir, &self.guest_memory)
++    }
++
+     #[cfg(target_os = "linux")]
+     fn request_vcpus<T>(&self, event: impl Fn(Sender<T>) -> VcpuEvent) -> Result<Vec<T>> {
+         let mut responses = Vec::with_capacity(self.vcpus_handles.len());
+@@ -612,9 +654,14 @@ impl Subscriber for Vmm {
+         #[cfg(any(target_os = "macos", target_os = "linux"))]
+         if source == self.vm_ctl_rx.as_raw_fd() && event_set == EventSet::IN {
+             while let Ok(Some(req)) = self.vm_ctl_rx.try_recv() {
+-                let res = match req {
++                let res = match &req {
+                     VmCtl::Pause => self.pause(),
+                     VmCtl::Resume => self.resume(),
++                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++                    VmCtl::Snapshot(dir, reply) => {
++                        let _ = reply.send(self.snapshot(dir));
++                        Ok(())
++                    }
+                 };
+                 if let Err(e) = res {
+                     error!("vm {req:?} failed: {e}");
+diff --git a/src/libkrun/src/vmm/resources.rs b/src/libkrun/src/vmm/resources.rs
+index 95117a2a..89c1652b 100644
+--- a/src/libkrun/src/vmm/resources.rs
++++ b/src/libkrun/src/vmm/resources.rs
+@@ -135,6 +135,9 @@ pub struct VmResources {
+     /// RISC-V ISA information discovered from KVM
+     #[cfg(target_arch = "riscv64")]
+     pub riscv_isa_info: Option<arch::riscv64::linux::kvm::RiscvIsaInfo>,
++    /// A snapshot to restore the machine from rather than boot it: see `vmm::snapshot`.
++    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++    pub restore: Option<std::path::PathBuf>,
+ }
+ 
+ impl VmResources {
+@@ -289,6 +292,8 @@ mod tests {
+             kernel_console: None,
+             #[cfg(target_arch = "riscv64")]
+             riscv_isa_info: None,
++            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
++            restore: None,
+         }
+     }
+ 
+diff --git a/src/libkrun/src/vmm/snapshot.rs b/src/libkrun/src/vmm/snapshot.rs
+new file mode 100644
+index 00000000..4312cb86
+--- /dev/null
++++ b/src/libkrun/src/vmm/snapshot.rs
+@@ -0,0 +1,310 @@
++//! A paused machine written to a directory, and read back to restore it in a fresh process on
++//! the same host: KVM x86_64 only.
++//!
++//! ```text
++//! <dir>/state    the vCPUs, the VM's interrupt controllers and clock, the memory's layout and
++//!                every virtio transport, in the order the devices were attached
++//! <dir>/memory   the guest's RAM, region after region, sparse where a page is zero
++//! ```
++//!
++//! A restore maps `memory` privately over the guest's RAM, so pages are read from the file as
++//! the guest touches them and copied only when it writes them. A snapshot is a host's own: its
++//! vCPU state names the host's CPU features, and nothing here checks them on another.
++
++use std::fs::{self, File};
++use std::io::{self, Write};
++use std::os::unix::fs::FileExt;
++use std::os::unix::io::AsRawFd;
++use std::path::Path;
++
++use devices::virtio::snapshot::{QueueSnapshot, TransportSnapshot};
++use vm_memory::{GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
++
++use super::vstate::{VcpuState, VmState};
++
++const MAGIC: &[u8; 8] = b"VXSNAP01";
++const PAGE: usize = 4096;
++
++/// A machine's state, without its memory.
++pub(crate) struct Snapshot {
++    pub(crate) vcpus: Vec<VcpuState>,
++    pub(crate) vm: VmState,
++    /// Each RAM region's guest address and length, in the order `memory` holds them.
++    pub(crate) regions: Vec<(u64, u64)>,
++    pub(crate) transports: Vec<TransportSnapshot>,
++}
++
++impl Snapshot {
++    pub(crate) fn write(&self, dir: &Path, mem: &GuestMemoryMmap) -> Result<(), String> {
++        fs::create_dir_all(dir).map_err(|e| format!("making {}: {e}", dir.display()))?;
++        write_memory(&dir.join("memory"), mem)
++            .map_err(|e| format!("writing the guest's memory: {e}"))?;
++
++        let mut out = Writer::default();
++        out.bytes(MAGIC);
++        out.u64(self.vcpus.len() as u64);
++        for vcpu in &self.vcpus {
++            vcpu.write(&mut out);
++        }
++        self.vm.write(&mut out);
++        out.u64(self.regions.len() as u64);
++        for (addr, len) in &self.regions {
++            out.u64(*addr);
++            out.u64(*len);
++        }
++        out.u64(self.transports.len() as u64);
++        for transport in &self.transports {
++            write_transport(&mut out, transport);
++        }
++        let path = dir.join("state");
++        let mut file = File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
++        file.write_all(&out.0)
++            .map_err(|e| format!("{}: {e}", path.display()))
++    }
++
++    pub(crate) fn read(dir: &Path) -> Result<Self, String> {
++        let path = dir.join("state");
++        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
++        let mut input = Reader(&bytes);
++        if input.bytes()? != MAGIC {
++            return Err(format!("{} is not a snapshot this libkrun reads", path.display()));
++        }
++        let vcpus = (0..input.u64()?)
++            .map(|_| VcpuState::read(&mut input))
++            .collect::<Result<_, _>>()?;
++        let vm = VmState::read(&mut input)?;
++        let regions = (0..input.u64()?)
++            .map(|_| Ok((input.u64()?, input.u64()?)))
++            .collect::<Result<_, String>>()?;
++        let transports = (0..input.u64()?)
++            .map(|_| read_transport(&mut input))
++            .collect::<Result<_, _>>()?;
++        Ok(Self {
++            vcpus,
++            vm,
++            regions,
++            transports,
++        })
++    }
++}
++
++/// Each region's guest address and length, as a snapshot lays out its memory.
++pub(crate) fn regions(mem: &GuestMemoryMmap) -> Vec<(u64, u64)> {
++    mem.iter()
++        .map(|region| (region.start_addr().0, region.len()))
++        .collect()
++}
++
++/// The guest's RAM into `path`, region after region, leaving a hole for every zero page.
++fn write_memory(path: &Path, mem: &GuestMemoryMmap) -> io::Result<()> {
++    let file = File::create(path)?;
++    let mut offset = 0u64;
++    for region in mem.iter() {
++        let len = region.len() as usize;
++        // SAFETY: the region's own mapping, `len` bytes long, which the paused guest and the
++        // quiesced devices do not write while it is read.
++        let bytes = unsafe { std::slice::from_raw_parts(region.as_ptr(), len) };
++        let mut page = 0;
++        while page < len {
++            let end = (page + PAGE).min(len);
++            // Runs of non-zero pages are written at once.
++            if bytes[page..end].iter().all(|b| *b == 0) {
++                page = end;
++                continue;
++            }
++            let mut run_end = end;
++            while run_end < len {
++                let next = (run_end + PAGE).min(len);
++                if bytes[run_end..next].iter().all(|b| *b == 0) {
++                    break;
++                }
++                run_end = next;
++            }
++            file.write_all_at(&bytes[page..run_end], offset + page as u64)?;
++            page = run_end;
++        }
++        offset += len as u64;
++    }
++    file.set_len(offset)?;
++    Ok(())
++}
++
++/// Maps `dir/memory` privately over the guest's RAM, which must be laid out as `regions` says.
++/// Nothing may have been written to RAM before, since this replaces it.
++pub(crate) fn map_memory(
++    dir: &Path,
++    mem: &GuestMemoryMmap,
++    regions: &[(u64, u64)],
++) -> Result<(), String> {
++    let laid_out = self::regions(mem);
++    if laid_out != regions {
++        return Err(format!(
++            "the guest's memory is laid out as {laid_out:x?}, the snapshot's as {regions:x?}"
++        ));
++    }
++    let path = dir.join("memory");
++    let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
++    let mut offset = 0u64;
++    for region in mem.iter() {
++        // SAFETY: replaces the region's own mapping, at its own address and length, with the
++        // file's pages; the guest has not run and nothing holds a reference into it.
++        let mapped = unsafe {
++            libc::mmap(
++                region.as_ptr().cast(),
++                region.len() as usize,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_PRIVATE | libc::MAP_FIXED | libc::MAP_NORESERVE,
++                file.as_raw_fd(),
++                offset as libc::off_t,
++            )
++        };
++        if mapped == libc::MAP_FAILED {
++            return Err(format!(
++                "mapping {} over the guest's memory: {}",
++                path.display(),
++                io::Error::last_os_error()
++            ));
++        }
++        offset += region.len();
++    }
++    Ok(())
++}
++
++fn write_transport(out: &mut Writer, t: &TransportSnapshot) {
++    out.u64(t.device_type.into());
++    out.u64(t.device_status.into());
++    out.u64(t.features_select.into());
++    out.u64(t.acked_features_select.into());
++    out.u64(t.queue_select.into());
++    out.u64(t.config_generation.into());
++    out.u64(t.acked_features);
++    out.u64(t.interrupt_status.into());
++    out.u64(t.queues.len() as u64);
++    for q in &t.queues {
++        out.u64(q.size.into());
++        out.u64(q.ready.into());
++        out.u64(q.desc_table);
++        out.u64(q.avail_ring);
++        out.u64(q.used_ring);
++    }
++    out.bytes(&t.device);
++}
++
++fn read_transport(input: &mut Reader) -> Result<TransportSnapshot, String> {
++    let u32_of = |v: u64| u32::try_from(v).map_err(|_| format!("{v} is not a u32"));
++    let device_type = u32_of(input.u64()?)?;
++    let device_status = u32_of(input.u64()?)?;
++    let features_select = u32_of(input.u64()?)?;
++    let acked_features_select = u32_of(input.u64()?)?;
++    let queue_select = u32_of(input.u64()?)?;
++    let config_generation = u32_of(input.u64()?)?;
++    let acked_features = input.u64()?;
++    let interrupt_status = u32_of(input.u64()?)?;
++    let queues = (0..input.u64()?)
++        .map(|_| {
++            Ok(QueueSnapshot {
++                size: input.u64()? as u16,
++                ready: input.u64()? != 0,
++                desc_table: input.u64()?,
++                avail_ring: input.u64()?,
++                used_ring: input.u64()?,
++            })
++        })
++        .collect::<Result<_, String>>()?;
++    let device = input.bytes()?.to_vec();
++    Ok(TransportSnapshot {
++        device_type,
++        device_status,
++        features_select,
++        acked_features_select,
++        queue_select,
++        config_generation,
++        acked_features,
++        interrupt_status,
++        queues,
++        device,
++    })
++}
++
++/// Length-prefixed fields, in the host's own byte order and layout: a snapshot is read only
++/// where it was written.
++#[derive(Default)]
++pub(crate) struct Writer(Vec<u8>);
++
++impl Writer {
++    pub(crate) fn bytes(&mut self, bytes: &[u8]) {
++        self.0.extend((bytes.len() as u64).to_le_bytes());
++        self.0.extend(bytes);
++    }
++
++    pub(crate) fn u64(&mut self, v: u64) {
++        self.0.extend(v.to_le_bytes());
++    }
++
++    /// A KVM structure, as its bytes.
++    pub(crate) fn pod<T>(&mut self, v: &T) {
++        // SAFETY: KVM's structures are plain data; any of their bytes may be read.
++        let bytes = unsafe {
++            std::slice::from_raw_parts((v as *const T).cast::<u8>(), std::mem::size_of::<T>())
++        };
++        self.bytes(bytes);
++    }
++
++    pub(crate) fn slice<T>(&mut self, v: &[T]) {
++        // SAFETY: as `pod`'s, for each element.
++        let bytes = unsafe {
++            std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v))
++        };
++        self.bytes(bytes);
++    }
++}
++
++pub(crate) struct Reader<'a>(&'a [u8]);
++
++impl<'a> Reader<'a> {
++    pub(crate) fn bytes(&mut self) -> Result<&'a [u8], String> {
++        let len = self.u64()? as usize;
++        if self.0.len() < len {
++            return Err("the snapshot's state ends early".into());
++        }
++        let (bytes, rest) = self.0.split_at(len);
++        self.0 = rest;
++        Ok(bytes)
++    }
++
++    pub(crate) fn u64(&mut self) -> Result<u64, String> {
++        if self.0.len() < 8 {
++            return Err("the snapshot's state ends early".into());
++        }
++        let (bytes, rest) = self.0.split_at(8);
++        self.0 = rest;
++        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
++    }
++
++    pub(crate) fn pod<T>(&mut self) -> Result<T, String> {
++        let bytes = self.bytes()?;
++        if bytes.len() != std::mem::size_of::<T>() {
++            return Err(format!(
++                "{} bytes where a {} takes {}",
++                bytes.len(),
++                std::any::type_name::<T>(),
++                std::mem::size_of::<T>()
++            ));
++        }
++        // SAFETY: KVM's structures are plain data, valid for any bytes of their size.
++        Ok(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<T>()) })
++    }
++
++    pub(crate) fn slice<T>(&mut self) -> Result<Vec<T>, String> {
++        let bytes = self.bytes()?;
++        let size = std::mem::size_of::<T>();
++        if bytes.len() % size != 0 {
++            return Err(format!("{} bytes of {}", bytes.len(), std::any::type_name::<T>()));
++        }
++        Ok(bytes
++            .chunks_exact(size)
++            // SAFETY: as `pod`'s, for each element.
++            .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr().cast::<T>()) })
++            .collect())
++    }
++}

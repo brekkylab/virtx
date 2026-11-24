@@ -412,6 +412,42 @@ const NEW_ROOT: &str = "/newroot";
 ///
 /// libkrun's init stays PID 1 on the boot root it started this from, which is where it tells
 /// the host how the machine ended.
+/// Seeds the guest's random pool with the host's `seed`, crediting it, and has the kernel's
+/// generator take it at once; and sets the wall clock to the host's.
+fn renew(asked: &wire::MachineInfo) -> io::Result<()> {
+    if !asked.seed.is_empty() {
+        // `struct rand_pool_info`: bits credited, bytes, then the bytes.
+        let mut info = Vec::with_capacity(8 + asked.seed.len());
+        info.extend(((asked.seed.len() * 8) as i32).to_ne_bytes());
+        info.extend((asked.seed.len() as i32).to_ne_bytes());
+        info.extend(&asked.seed);
+        let random = File::options().write(true).open("/dev/random")?;
+        // RNDADDENTROPY and RNDRESEEDCRNG, _IOW('R', 0x03, int[2]) and _IO('R', 0x07).
+        const RNDADDENTROPY: libc::c_ulong = 0x4008_5203;
+        const RNDRESEEDCRNG: libc::c_ulong = 0x5207;
+        // SAFETY: `info` is a `rand_pool_info` as long as it says; the second takes nothing.
+        unsafe {
+            if libc::ioctl(random.as_raw_fd(), RNDADDENTROPY as _, info.as_ptr()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(random.as_raw_fd(), RNDRESEEDCRNG as _) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    if let Some((secs, nanos)) = asked.now {
+        let now = libc::timespec {
+            tv_sec: secs as _,
+            tv_nsec: nanos as _,
+        };
+        // SAFETY: a valid timespec.
+        if unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &now) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 fn root(asked: &wire::MachineInfo) -> io::Result<()> {
     // The boot root is shared by the time this runs, and a mount under a shared one cannot be
     // moved.
@@ -571,8 +607,10 @@ fn serve() -> io::Result<()> {
         .write(true)
         .open(find(PORT_NAME)?)?;
     let out: Out = Arc::new(Mutex::new(input.try_clone()?));
+    send(&out, &CtrlResp::Waiting);
     let asked = wire::recv(&mut input)?
         .ok_or_else(|| io::Error::other("the channel ended before it named a root"))?;
+    renew(&asked)?;
     root(&asked)?;
     // SAFETY: nothing else runs yet; the threads start below.
     unsafe { alib_env() };

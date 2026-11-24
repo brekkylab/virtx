@@ -3158,6 +3158,105 @@ impl Outward for Refusing {
     }
 }
 
+/// Spike: cold boots against restores from a snapshot taken as a machine's agent waits.
+async fn spike_snapshot(home: Home) {
+    let var = |name: &str, default: u32| -> u32 {
+        env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    };
+    let mut args = small();
+    args.memory_mib = Some(var("SPIKE_MEM", 1024));
+    args.vcpus = Some(var("SPIKE_VCPUS", 1) as u8);
+    args.network = var("SPIKE_NET", 0) == 1;
+    let at_once = var("SPIKE_AT_ONCE", 1) as usize;
+    eprintln!("spike shape: {:?} MiB, {:?} vCPUs, network {}, {at_once} at once", args.memory_mib, args.vcpus, args.network);
+    let dir = home.root.join("snapshot");
+    let rounds: usize = var("SPIKE_ROUNDS", 5) as usize;
+    for i in 0..rounds {
+        let t = Instant::now();
+        let sandbox = home.sandbox(&args, None).await;
+        let made = t.elapsed();
+        let t = Instant::now();
+        let out = run(&sandbox, &["echo", "hi"], None).await.unwrap();
+        eprintln!("spike cold {i}: create {made:?} exec {:?} {out:?}", t.elapsed());
+        close(sandbox).await;
+    }
+    // SAFETY: the spike runs alone; machines spawned from here on inherit it.
+    unsafe { env::set_var("VIRTX_SNAPSHOT_SAVE", &dir) };
+    let t = Instant::now();
+    let made = home.making(&args, None, None).await;
+    eprintln!("spike save in {:?}: {:?}", t.elapsed(), made.err());
+    unsafe { env::remove_var("VIRTX_SNAPSHOT_SAVE") };
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let entry = entry.unwrap();
+        let meta = entry.metadata().unwrap();
+        eprintln!(
+            "spike file {:?} {} bytes, {} allocated",
+            entry.file_name(),
+            meta.len(),
+            std::os::unix::fs::MetadataExt::blocks(&meta) * 512
+        );
+    }
+    tokio::time::sleep(Duration::from_secs(var("SPIKE_AGE", 0).into())).await;
+    eprintln!(
+        "spike host clock now {}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    );
+    unsafe { env::set_var("VIRTX_SNAPSHOT_RESTORE", &dir) };
+    if at_once > 1 {
+        let t = Instant::now();
+        let made = join_all((0..at_once).map(|_| async {
+            let t = Instant::now();
+            let sandbox = home.making(&args, None, None).await;
+            let made_in = t.elapsed();
+            let out = match &sandbox {
+                Ok(sandbox) => format!("{:?}", run(sandbox, &["sh", "-c", "head -c 8 /dev/urandom | od -An -tx1; nc -z -w 5 8.8.8.8 443 && echo net-ok; date +%s"], None).await),
+                Err(e) => format!("failed: {e}"),
+            };
+            (made_in, out, sandbox)
+        }))
+        .await;
+        eprintln!("spike restore {at_once} at once, all up in {:?}", t.elapsed());
+        for (made_in, out, sandbox) in made {
+            eprintln!("  create {made_in:?} {out}");
+            if let Ok(sandbox) = sandbox {
+                close(sandbox).await;
+            }
+        }
+        unsafe { env::set_var("VIRTX_SNAPSHOT_RESTORE", "") };
+        unsafe { env::remove_var("VIRTX_SNAPSHOT_RESTORE") };
+        let t = Instant::now();
+        let made = join_all((0..at_once).map(|_| async {
+            let t = Instant::now();
+            let sandbox = home.sandbox(&args, None).await;
+            (t.elapsed(), sandbox)
+        }))
+        .await;
+        eprintln!("spike cold {at_once} at once, all up in {:?}", t.elapsed());
+        for (made_in, sandbox) in made {
+            eprintln!("  create {made_in:?}");
+            close(sandbox).await;
+        }
+        return;
+    }
+    for i in 0..rounds {
+        let t = Instant::now();
+        let made = home.making(&args, None, None).await;
+        let made_in = t.elapsed();
+        let sandbox = match made {
+            Ok(sandbox) => sandbox,
+            Err(e) => {
+                eprintln!("spike restore {i}: failed in {made_in:?}: {e}");
+                continue;
+            }
+        };
+        let t = Instant::now();
+        let out = run(&sandbox, &["echo", "hi"], None).await;
+        eprintln!("spike restore {i}: create {made_in:?} exec {:?} {out:?}", t.elapsed());
+        close(sandbox).await;
+    }
+    unsafe { env::remove_var("VIRTX_SNAPSHOT_RESTORE") };
+}
+
 fn main() -> ExitCode {
     // In this process and each machine's, before either does anything with a disk.
     assert!(set_disks(Arc::new(Embedded)), "said first");
@@ -3206,6 +3305,12 @@ fn main() -> ExitCode {
             images.insert_tag(&reference, &image).unwrap();
         }
     });
+
+    if env::var_os("SPIKE_ONLY").is_some() {
+        runtime.block_on(spike_snapshot(Home::new(&images, &scratch, "spike")));
+        let _ = std::fs::remove_dir_all(&scratch);
+        return ExitCode::SUCCESS;
+    }
 
     type Test = fn(Home) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
     macro_rules! tests {

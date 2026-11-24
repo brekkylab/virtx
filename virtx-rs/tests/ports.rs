@@ -104,8 +104,98 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     assert_eq!(answer(at.as_str()), "hello ping\n");
     sandbox.remove().wait().unwrap();
     // Its listener goes with it, a moment after.
-    thread::sleep(Duration::from_millis(500));
-    assert!(TcpStream::connect(at.as_str()).is_err());
+    let gone = until(|| TcpStream::connect(at.as_str()).is_err());
+    assert!(gone, "its listener outlived it");
+}
+
+/// A large answer reaches a reader that stops reading for a while, without holding up another
+/// port meanwhile; and the sandbox reaches its own published port, as any program in it would.
+#[test]
+fn a_port_carries_a_large_answer_to_a_reader_that_falls_behind() {
+    let client = common::client();
+    common::alpine(&client);
+    let args = SandboxCreateArgs::new(ALPINE).port(8000).port(8001);
+    let sandbox = client.create_sandbox(&args).wait().unwrap();
+    // 8 MiB of one 16-byte line on 8001, and `hello` and the line sent on 8000.
+    let serve = SandboxExecArgs {
+        timeout_ms: Some(60_000),
+        ..SandboxExecArgs::new([
+            "sh",
+            "-c",
+            "while true; do nc -l -p 8001 -e sh -c 'yes 0123456789abcde | head -c 8388608'; \
+             done & mkfifo /tmp/in; while true; do \
+             cat /tmp/in | (read line; echo \"hello $line\") | nc -l -p 8000 > /tmp/in; done",
+        ])
+    };
+    sandbox.exec(&serve).wait().unwrap();
+    let at = |i: usize| {
+        let url = sandbox.info().ports[i].url.clone().unwrap();
+        url.strip_prefix("http://").unwrap_or(&url).to_owned()
+    };
+
+    // Its first bytes once it listens; a connection before then is closed with nothing said.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut read = vec![0; 16];
+    let mut stream = loop {
+        assert!(Instant::now() < deadline, "nothing answered on 8001");
+        if let Ok(mut stream) = TcpStream::connect(at(1).as_str())
+            && stream.read_exact(&mut read).is_ok()
+        {
+            break stream;
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+    // Not read for a while, the rest held up behind it; the other port answers meanwhile.
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(answer(at(0).as_str()), "hello ping\n");
+    stream.read_to_end(&mut read).unwrap();
+    assert_eq!(read.len(), 8 << 20);
+    assert!(read.chunks(16).all(|line| line == b"0123456789abcde\n"));
+
+    let (lines, code) = common::run(
+        &sandbox,
+        &["sh", "-c", "echo ping | nc -w 5 127.0.0.1 8000"],
+    );
+    assert_eq!((lines, code), (vec!["hello ping".to_string()], 0));
+    sandbox.remove().wait().unwrap();
+}
+
+/// A client that says it is done sending still hears the answer to what it sent.
+#[test]
+fn a_port_carries_a_half_close_through() {
+    let client = common::client();
+    common::alpine(&client);
+    let args = SandboxCreateArgs::new(ALPINE).port(8002);
+    let sandbox = client.create_sandbox(&args).wait().unwrap();
+    // Counts what it is sent until the client half-closes, then says how much.
+    let serve = SandboxExecArgs {
+        timeout_ms: Some(60_000),
+        ..SandboxExecArgs::new(["sh", "-c", "while true; do nc -l -p 8002 -e wc -c; done"])
+    };
+    sandbox.exec(&serve).wait().unwrap();
+    let url = sandbox.info().ports[0].url.clone().unwrap();
+    let at = url.strip_prefix("http://").unwrap_or(&url).to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let answered = loop {
+        assert!(Instant::now() < deadline, "no answer after a half-close");
+        if let Ok(mut stream) = TcpStream::connect(at.as_str()) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut answered = String::new();
+            if stream.write_all(b"ping\n").is_ok()
+                && stream.shutdown(std::net::Shutdown::Write).is_ok()
+                && stream.read_to_string(&mut answered).is_ok()
+                && !answered.is_empty()
+            {
+                break answered;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(answered.trim(), "5");
+    sandbox.remove().wait().unwrap();
 }
 
 #[test]

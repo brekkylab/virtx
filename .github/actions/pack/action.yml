@@ -35,12 +35,12 @@ runs:
       run: |
         mkdir -p "$OUT"
         python -m pip install --quiet build~=1.6
-        python -m build --wheel --outdir "$RUNNER_TEMP/wheel" virtx-py
+        # Tagged here, not by auditwheel: `pipeline` checks the library links glibc alone.
+        plat=()
         if [ "$RUNNER_OS" = Linux ]; then
-          auditwheel repair --plat "manylinux_2_28_$(uname -m)" --wheel-dir "$OUT" "$RUNNER_TEMP"/wheel/*.whl
-        else
-          cp -v "$RUNNER_TEMP"/wheel/*.whl "$OUT/"
+          plat=("-C--build-option=--plat-name=manylinux_2_28_$(uname -m)")
         fi
+        python -m build --wheel "${plat[@]}" --outdir "$OUT" virtx-py
 
     - name: npm package
       shell: bash

@@ -583,6 +583,13 @@ fn check(client_only: bool) -> anyhow::Result<()> {
         eprintln!("xtask: the servers left out (--client)");
         return Ok(());
     }
+    match guest_tests() {
+        Outcome::Passed => {}
+        Outcome::Skipped(why) => {
+            eprintln!("xtask: the unit tests of {GUEST_PACKAGE} left out: {why}");
+        }
+        Outcome::Failed(why) => bail!("the unit tests of {GUEST_PACKAGE} failed: {why}"),
+    }
     if let Some(why) = servers_unready()? {
         eprintln!("xtask: the servers left out: {why} -- `cargo xtask init` readies them");
         return Ok(());
@@ -592,27 +599,30 @@ fn check(client_only: bool) -> anyhow::Result<()> {
         &["test", "-p", "virtx-uvm", "--lib"],
         "the unit tests of virtx-uvm",
     )?;
-    guest_tests()?;
     eprintln!("xtask: checked");
     Ok(())
 }
 
 /// The unit tests of the agent inside each machine, a workspace of its own: on Linux alone,
-/// the only OS it builds for.
-fn guest_tests() -> anyhow::Result<()> {
+/// the only OS it builds for. They need neither `init` nor a guest kernel.
+fn guest_tests() -> Outcome {
     if !cfg!(target_os = "linux") {
-        eprintln!("xtask: the unit tests of virtx-uvm-guest left out: they run on Linux");
-        return Ok(());
+        return Outcome::Skipped("they run on Linux, the only OS the agent builds for".into());
     }
-    let mut command = cargo();
-    command
-        .current_dir(root_path().join("virtx-uvm-guest"))
-        .arg("test");
-    eprintln!("xtask: the unit tests of virtx-uvm-guest");
-    let status = command.status().context("running cargo")?;
-    ensure!(status.success(), "the unit tests of virtx-uvm-guest failed");
-    Ok(())
+    eprintln!("xtask: the unit tests of {GUEST_PACKAGE}");
+    let ran = cargo()
+        .current_dir(root_path().join(GUEST_PACKAGE))
+        .arg("test")
+        .status();
+    match ran {
+        Ok(status) if status.success() => Outcome::Passed,
+        Ok(status) => Outcome::Failed(format!("`cargo test` {status}")),
+        Err(e) => Outcome::Failed(format!("`cargo test` did not run: {e}")),
+    }
 }
+
+/// The agent inside each machine: its crate, and the directory it is in.
+const GUEST_PACKAGE: &str = "virtx-uvm-guest";
 
 /// `check`'s clippy, alone: the client's, and the servers' once `init` has run -- with `gpu`,
 /// as a release builds them, the GPU libraries built first. Run on each host, it is the lint of
@@ -1928,6 +1938,7 @@ fn test_all() -> anyhow::Result<()> {
         };
         outcomes.push((name, outcome));
     }
+    outcomes.push((GUEST_PACKAGE, guest_tests()));
 
     let fixture = match &unready {
         Some(why) => Err(Outcome::Skipped(why.clone())),

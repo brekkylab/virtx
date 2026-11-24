@@ -395,7 +395,11 @@ fn main() -> ExitCode {
             eprintln!("{said}");
             // And to the kernel's log, which reaches the console libkrun logs on the host: the
             // stderr port libkrun gives this agent goes nowhere.
-            let _ = fs::write("/dev/kmsg", format!("<3>{said}\n"));
+            // Never created: a `/dev` with no devtmpfs on it yet would keep a file of it.
+            let _ = File::options()
+                .write(true)
+                .open("/dev/kmsg")
+                .and_then(|mut kmsg| kmsg.write_all(format!("<3>{said}\n").as_bytes()));
             ExitCode::FAILURE
         }
     }
@@ -643,17 +647,27 @@ fn find_in(dev: &Path, ports: &Path, name: &str, wait: Duration) -> io::Result<P
         if by_name.exists() {
             return Ok(by_name);
         }
-        // Absent, or not yet named: the port has not come yet.
-        for entry in fs::read_dir(ports).into_iter().flatten().flatten() {
-            let named = fs::read_to_string(entry.path().join("name")).unwrap_or_default();
-            if named.trim() == name {
-                return Ok(dev.join(entry.file_name()));
+        // Absent, or not yet named: the port has not come yet. The class unread is said once
+        // the wait is over, as the likelier cause.
+        let unread = match fs::read_dir(ports) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let named = fs::read_to_string(entry.path().join("name")).unwrap_or_default();
+                    if named.trim() == name {
+                        return Ok(dev.join(entry.file_name()));
+                    }
+                }
+                None
             }
-        }
+            Err(e) => Some(e),
+        };
         if Instant::now() >= until {
+            let why = unread
+                .map(|e| format!(": {}: {e}", ports.display()))
+                .unwrap_or_default();
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no virtio-console port named `{name}` after {wait:?}"),
+                format!("no virtio-console port named `{name}` after {wait:?}{why}"),
             ));
         }
         thread::sleep(Duration::from_millis(5));
@@ -1208,6 +1222,21 @@ mod tests {
             Duration::from_millis(50),
         );
         assert_eq!(found.unwrap_err().kind(), io::ErrorKind::NotFound);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_class_never_there_is_named_once_the_wait_is_over() {
+        let dir = scratch("no-class");
+        let ports = dir.join("ports");
+        let found = find_in(
+            &dir.join("dev"),
+            &ports,
+            PORT_NAME,
+            Duration::from_millis(50),
+        );
+        let said = found.unwrap_err().to_string();
+        assert!(said.contains(&ports.display().to_string()), "{said}");
         fs::remove_dir_all(dir).unwrap();
     }
 }

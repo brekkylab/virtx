@@ -360,6 +360,15 @@ impl Sandbox {
             }
         }
 
+        // Spike: each step's time, logged once it is up.
+        let spike_t0 = std::time::Instant::now();
+        let mut spike: Vec<(&str, f64)> = Vec::new();
+        let mut spike_at = spike_t0;
+        let mut spike_step = |name: &'static str| {
+            let now = std::time::Instant::now();
+            spike.push((name, (now - spike_at).as_secs_f64() * 1000.0));
+            spike_at = now;
+        };
         // Room for its machine before anything of it is made, held for its first boot.
         let room = crate::admit(&machine_spec(args))?;
         let backend = backing.get();
@@ -394,6 +403,7 @@ impl Sandbox {
                 backend.bring_up(Stored::Volume(&asked.volume)).await?;
             }
         }
+        spike_step("want");
         // What it boots as every time: the image by the digest it boots now.
         let mut args = args.clone();
         args.image = ImageName::Digest {
@@ -430,6 +440,7 @@ impl Sandbox {
             )
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
+        spike_step("build");
         // Its disk kept by the backend while its machine boots, the one not waiting on the other:
         // answered once its machine is up, the backend's answer taken then if it has come, and
         // otherwise after -- a refusal then closes the sandbox. The backend is asked before the
@@ -451,6 +462,7 @@ impl Sandbox {
             }
             None => None,
         };
+        spike_step("made");
         let booted = async {
             sandbox.wake_in(Some(room)).await?;
             match keys {
@@ -464,6 +476,7 @@ impl Sandbox {
             }
         };
         let booted = booted.await;
+        spike_step("boot");
         // The backend's answer now, if it has come or the machine did not boot.
         let kept_now = match kept.take() {
             Some(Keeping::Answered(answered)) => Some(answered),
@@ -505,6 +518,17 @@ impl Sandbox {
                 }
             });
         }
+        spike_step("after");
+        log::warn!(
+            "spike create {}: {} total={:.1}",
+            sandbox.id,
+            spike
+                .iter()
+                .map(|(name, ms)| format!("{name}={ms:.1}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            spike_t0.elapsed().as_secs_f64() * 1000.0
+        );
         Ok(sandbox)
     }
 
@@ -1067,6 +1091,7 @@ impl Sandbox {
         // Its disk and each volume it writes held here, brought up to what is kept, and each
         // volume it only reads brought up, where they are kept beyond this machine: what is
         // held, held until its machine is down.
+        let spike_t0 = Instant::now();
         let mut holding = Vec::new();
         if let Some(backend) = self.backing.get() {
             holding.push(backend.take(Stored::Disk(&self.id)).await?);
@@ -1083,7 +1108,9 @@ impl Sandbox {
         let mut config = config;
         let vm = self.vm.clone();
         let (booting, gib) = (Arc::clone(self), self.disk_gib.load(Ordering::Relaxed));
+        let spike_taken = spike_t0.elapsed();
         let machine = tokio::task::spawn_blocking(move || {
+            let spike_queued = spike_t0.elapsed();
             if let Some(upper) = &*booting.upper.lock().unwrap()
                 && let Err(e) = upper.grow(gib)
             {
@@ -1101,7 +1128,17 @@ impl Sandbox {
             *booting.served.lock().unwrap() = Some(source.is_some());
             config.sandbox_disk = Some(SandboxDisk { source });
             config.spec.outward = crate::outward::given(&booting.root);
-            Ok::<_, Error>((Machine::start(config, &vm)?, held))
+            let spike_served = spike_t0.elapsed();
+            let started = Machine::start(config, &vm)?;
+            log::warn!(
+                "spike wake {}: take={:.1} queued={:.1} grow+serve={:.1} start={:.1}",
+                booting.id,
+                spike_taken.as_secs_f64() * 1000.0,
+                (spike_queued - spike_taken).as_secs_f64() * 1000.0,
+                (spike_served - spike_queued).as_secs_f64() * 1000.0,
+                (spike_t0.elapsed() - spike_served).as_secs_f64() * 1000.0,
+            );
+            Ok::<_, Error>((started, held))
         });
         let (machine, held) = machine.await??;
         let machine = Arc::new(machine.holding(held));

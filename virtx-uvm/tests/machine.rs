@@ -2097,6 +2097,36 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     }
 }
 
+/// What a sandbox syncs to its disk is flushed there: its disk mounted with barriers, though it
+/// is mounted without them first.
+async fn a_sandbox_s_sync_flushes_its_disk(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let flushes = "awk '{print $16}' /sys/block/vdb/stat";
+    let script = format!("{flushes}; echo kept > /root/kept; sync; {flushes}");
+    let (lines, code) = run(&sandbox, &["sh", "-c", &script], None).await.unwrap();
+    assert_eq!((lines.len(), code), (2, 0), "{lines:?}");
+    let (before, after): (u64, u64) = (lines[0].parse().unwrap(), lines[1].parse().unwrap());
+    assert!(after > before, "{lines:?}");
+    close(sandbox).await;
+}
+
+async fn a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer(home: Home) {
+    let sandbox = home.sandbox(&small().memory_mib(4096), None).await;
+    let (lines, code) = run(&sandbox, &["dmesg"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line.contains("Linux version")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("software IO TLB: mapped")),
+        "{lines:?}"
+    );
+    close(sandbox).await;
+}
+
 #[cfg(target_arch = "aarch64")]
 async fn a_guest_s_kernel_boots_seeded_and_tests_none_of_its_crypto(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
@@ -3044,6 +3074,8 @@ fn main() -> ExitCode {
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
+        a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,
+        a_sandbox_s_sync_flushes_its_disk,
         a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
         sandboxes_made_at_once_each_run_their_own,

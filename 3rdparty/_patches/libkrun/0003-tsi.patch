@@ -7,7 +7,7 @@ Subject: tsi: a TsiPolicy says where a connect, datagram or listen goes
 
 A machine's network is TSI, and upstream opens whatever socket the guest asked for: a guest's listen binds the host's own port on every interface, and nothing says where a guest may connect.
 TsiPolicy is asked by the vsock muxer before a connect, a datagram's destination or a listen reaches a proxy, and answers with an address.
-virtx-uvm's policy (virtx-uvm/src/machine/net/policy.rs) is a sandbox's network mode, its published ports and its resolver.
+virtx-uvm's policy (virtx-uvm/src/machine/net/policy.rs) is whether a sandbox has a network, and its resolver.
 
 ## What it changes
 
@@ -15,16 +15,14 @@ A machine's network is libkrun's Transparent Socket Impersonation: the guest ker
 socket its own stack cannot answer to a vsock device, and libkrun opens the host socket that
 answers it. There is no interface, no address and no lease — nothing to configure in the guest
 and nothing to forward on the host. `machine/net` (virtx-uvm/src/machine/net/mod.rs) has the whole of
-it: where a guest's connections may go (`none`, `host` or `public`), and how a published port
-reaches a listener in the guest.
+it: where a guest's connections may go, and how a published port reaches a listener in the guest.
 
 **What TSI lacks is a say in where a socket goes.** Upstream opens whatever the
-guest asked for, so a guest's `listen` binds the host's own port on every
-interface, and its own published port is reached at the host's port rather than
-the guest's listener. The patch adds `TsiPolicy`, which the vsock muxer asks before a
+guest asked for. The patch adds `TsiPolicy`, which the vsock muxer asks before a
 `connect`, a datagram's destination or a `listen` reaches any proxy, and
 `VsockDevice::set_policy` to hand one over. An answer is an address, not a yes; what each
 request gets is the table in `net/policy.rs` (virtx-uvm/src/machine/net/policy.rs).
+virtx refuses every `listen`, which the guest kernel then takes on its own stack, and reaches a published port through the agent instead.
 In the muxer rather than in each proxy, because the muxer is the one place every
 request passes through on every host — the unix and Windows proxies below it are
 two implementations of the same thing.

@@ -215,6 +215,11 @@ pub(super) fn boot(
         nameserver: machine.spec.network.then(|| net::NAMESERVER.to_string()),
         workdir: workdir(&machine.config),
         ports: machine.ports.clone(),
+        seed: host_seed(),
+        now: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| (since.as_secs() as i64, since.subsec_nanos())),
     };
 
     // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
@@ -466,12 +471,21 @@ pub(super) fn boot(
     let vmm = vmm
         .acpi(true)
         .map_err(|e| Error::vmm("describing the machine in ACPI", e))?;
+    // Spike: a machine snapshotted as its agent waits, or restored from such a snapshot.
+    let save = std::env::var_os("VIRTX_SNAPSHOT_SAVE").map(std::path::PathBuf::from);
+    let restore = std::env::var_os("VIRTX_SNAPSHOT_RESTORE").map(std::path::PathBuf::from);
+    let vmm = vmm.payload(payload).devices(devices);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let vmm = match &restore {
+        Some(dir) => vmm.restore(dir),
+        None => vmm,
+    };
     let vmm = vmm
-        .payload(payload)
-        .devices(devices)
         .prefault_memory(prefault_memory())
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
+    let handle = vmm.handle().map_err(|e| Error::vmm("a handle on the machine", e))?;
+    let _ = &restore;
 
     // The root for the agent to build, then the host's messages on to it, and the agent's back -- `Ready` with where the ports
     // are published, which only this side knows. A host that has closed `ctrlin`, or written
@@ -488,8 +502,11 @@ pub(super) fn boot(
     let heard = Arc::new(Mutex::new(None::<Instant>));
     std::thread::spawn({
         let for_guest = Arc::clone(&for_guest);
+        let saving = save.is_some();
         move || {
-            let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
+            if !saving {
+                let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
+            }
             while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
                 let _ = wire::send(&mut *for_guest.lock().unwrap(), &message);
             }
@@ -502,6 +519,19 @@ pub(super) fn boot(
         let heard = Arc::clone(&heard);
         move || {
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
+                if let CtrlResp::Waiting = message {
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                    if let Some(dir) = &save {
+                        let started = Instant::now();
+                        match handle.snapshot(dir) {
+                            Ok(()) => log::warn!("snapshot written in {:?}", started.elapsed()),
+                            Err(e) => log::error!("snapshot: {e}"),
+                        }
+                        std::process::exit(0);
+                    }
+                    let _ = &handle;
+                    continue;
+                }
                 *heard.lock().unwrap() = Some(Instant::now());
                 let _ = match message {
                     CtrlResp::Ready(_) => {
@@ -555,6 +585,20 @@ pub(super) fn boot(
     let _held = holds;
     vmm.run();
     Err(Error::EventLoop)
+}
+
+/// 64 bytes of the host's randomness, or none where it has none to read.
+fn host_seed() -> Vec<u8> {
+    use std::io::Read;
+    let mut seed = vec![0; 64];
+    #[cfg(unix)]
+    if File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut seed))
+        .is_ok()
+    {
+        return seed;
+    }
+    Vec::new()
 }
 
 /// Take the ends the host left this process: from here on everything it says goes to

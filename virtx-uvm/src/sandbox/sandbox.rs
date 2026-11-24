@@ -1303,7 +1303,7 @@ impl Sandbox {
                     }
                 }
                 CtrlResp::Told(message) => crate::outward::told(&self.id, &self.root, message),
-                CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
+                CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong | CtrlResp::Waiting => {}
             }
         }
         // Nothing waits for a sync it will not say.

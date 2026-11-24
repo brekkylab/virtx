@@ -46,7 +46,10 @@ impl Waker {
                 .map(|_| Mutex::new(sender))
         });
         let sent = match waking {
-            Some(sender) => sender.lock().unwrap_or_else(PoisonError::into_inner).send(self),
+            Some(sender) => sender
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send(self),
             None => Err(mpsc::SendError(self)),
         };
         if let Err(mpsc::SendError(waker)) = sent {
@@ -134,7 +137,11 @@ pub(super) mod testing {
         pub fn await_counts(&self, counts: (usize, usize)) {
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.get() != counts {
-                assert!(Instant::now() < deadline, "{:?}, not {counts:?}", self.get());
+                assert!(
+                    Instant::now() < deadline,
+                    "{:?}, not {counts:?}",
+                    self.get()
+                );
                 thread::sleep(Duration::from_millis(1));
             }
         }

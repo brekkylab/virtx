@@ -295,7 +295,8 @@ mod tests {
         fn waker(gate: &Arc<Gate>) -> VirtxWaker {
             unsafe extern "C" fn wake(data: *mut std::ffi::c_void) {
                 let gate = unsafe { &*data.cast::<Gate>() };
-                gate.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                gate.entered
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 let open = gate.open.lock().unwrap();
                 let _ = gate
                     .opened
@@ -350,11 +351,14 @@ mod tests {
 
         answer_second.send(2).unwrap();
         let mut answered = None;
-        until("the second never answers while the first's wake blocks", || {
-            let (status, value) = poll(second, &counts);
-            answered = value;
-            status != VIRTX_PENDING
-        });
+        until(
+            "the second never answers while the first's wake blocks",
+            || {
+                let (status, value) = poll(second, &counts);
+                answered = value;
+                status != VIRTX_PENDING
+            },
+        );
         assert_eq!(answered, Some(Value::from(2)));
 
         gate.open();

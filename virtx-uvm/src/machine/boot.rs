@@ -463,9 +463,25 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let vmm = vmm
         .acpi(true)
         .map_err(|e| Error::vmm("describing the machine in ACPI", e))?;
-    // Spike: a machine snapshotted as its agent waits, or restored from such a snapshot.
-    let save = std::env::var_os("VIRTX_SNAPSHOT_SAVE").map(std::path::PathBuf::from);
-    let restore = std::env::var_os("VIRTX_SNAPSHOT_RESTORE").map(std::path::PathBuf::from);
+    // Spike: a machine snapshotted as its agent waits, or restored from such a snapshot. Beside
+    // the sandboxes' disks, one snapshot per shape: the first machine of it takes it and boots on,
+    // every later one is restored from it.
+    let shape = spike_shape(&machine, &info);
+    let (mut save, mut restore) = (
+        std::env::var_os("VIRTX_SNAPSHOT_SAVE").map(std::path::PathBuf::from),
+        std::env::var_os("VIRTX_SNAPSHOT_RESTORE").map(std::path::PathBuf::from),
+    );
+    let mut save_and_boot = false;
+    if save.is_none() && restore.is_none() && std::env::var_os("VIRTX_SPIKE_NO_AUTO").is_none() {
+        if let Some(dir) = shape {
+            if dir.join("state").exists() {
+                restore = Some(dir);
+            } else {
+                save = Some(dir);
+                save_and_boot = true;
+            }
+        }
+    }
     let vmm = vmm.payload(payload).devices(devices);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     let vmm = match &restore {
@@ -497,6 +513,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     std::thread::spawn({
         let for_guest = Arc::clone(&for_guest);
         let saving = save.is_some();
+        let info = info.clone();
         move || {
             if !saving {
                 let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
@@ -511,6 +528,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     });
     std::thread::spawn({
         let heard = Arc::clone(&heard);
+        let for_info = Arc::clone(&for_guest);
+        let info_after = info.clone();
         move || {
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
                 spike_mark(match &message {
@@ -522,11 +541,30 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     if let Some(dir) = &save {
                         let started = Instant::now();
-                        match handle.snapshot(dir) {
-                            Ok(()) => log::warn!("snapshot written in {:?}", started.elapsed()),
-                            Err(e) => log::error!("snapshot: {e}"),
+                        if !save_and_boot {
+                            match handle.snapshot(dir) {
+                                Ok(()) => log::warn!("snapshot written in {:?}", started.elapsed()),
+                                Err(e) => log::error!("snapshot: {e}"),
+                            }
+                            std::process::exit(0);
                         }
-                        std::process::exit(0);
+                        // Written aside and moved into place whole, so a machine restored from
+                        // it never reads one half written; the first of two to finish wins.
+                        let aside = dir.with_extension(format!("taking-{}", std::process::id()));
+                        match handle.snapshot(&aside) {
+                            Ok(()) => {
+                                spike_mark("snapshot taken");
+                                if std::fs::rename(&aside, dir).is_err() {
+                                    let _ = std::fs::remove_dir_all(&aside);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("snapshot: {e}");
+                                let _ = std::fs::remove_dir_all(&aside);
+                            }
+                        }
+                        let _ = handle.resume();
+                        let _ = wire::send(&mut *for_info.lock().unwrap(), &info_after);
                     }
                     let _ = &handle;
                     continue;
@@ -584,6 +622,30 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let _held = holds;
     vmm.run();
     Err(Error::EventLoop)
+}
+
+/// Spike: where a snapshot of a machine of this one's shape is kept -- beside the sandboxes'
+/// disks, named for everything a restored guest has to find as it was: its vCPUs, memory,
+/// devices, root image and upper disk's size. None off Linux x86_64 and for a GPU's machine.
+fn spike_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) || machine.spec.gpu {
+        return None;
+    }
+    let home = machine.upper.parent()?.parent()?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    machine.spec.vcpus.hash(&mut hash);
+    machine.spec.ram_mib.hash(&mut hash);
+    (machine.spec.network != Network::None || !machine.ports.is_empty()).hash(&mut hash);
+    info.shares.hash(&mut hash);
+    machine.rootfs.hash(&mut hash);
+    std::fs::metadata(&machine.upper).ok()?.len().hash(&mut hash);
+    // This binary, whose libkrun and agent wrote the snapshot.
+    let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
+    (exe.len(), exe.modified().ok()).hash(&mut hash);
+    let dir = home.join("snapshots");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("{:016x}", hash.finish())))
 }
 
 /// Spike: `what`, with this process's id and the wall clock in microseconds, appended to

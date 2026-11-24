@@ -1,0 +1,387 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Romeu Mello <romeumello@icloud.com>
+Date: Tue, 3 Nov 2026 00:51:54 -0300
+Subject: unix-half-close: the unix proxy carries the host's half-close to the guest as one
+
+## Why virtx needs it
+
+A published port reaches the guest through a unix socket libkrun listens on (`add_unix_port`), relayed from the port's listener by virtx-uvm/src/machine/net/relay.rs.
+Upstream answers the host's EOF on that socket with a reset, so a client that sends its request and shuts down its write side never hears the answer.
+virtx-rs/tests/ports.rs `a_port_carries_a_half_close_through` fails without it.
+
+## What it changes
+
+libkrun#973 (https://github.com/libkrun/libkrun/pull/973), its commit as it is, less the test it adds to libkrun's own suite.
+The host's EOF becomes a send-only vsock shutdown, ordered after the data already pushed; the guest's shutdown reaches the host socket one direction at a time; on macOS an accepted socket gets `SO_NOSIGPIPE`, since the guest may now write after the host side is gone.
+
+## When it can go
+
+When libkrun#973 is merged.
+---
+ .../src/virtio/vsock/unix_proxy/mod.rs        | 28 +++++-
+ .../src/virtio/vsock/unix_proxy/unix.rs       | 99 ++++++++++---------
+ .../src/virtio/vsock/unix_proxy/windows.rs    | 54 +++++++---
+ 3 files changed, 119 insertions(+), 62 deletions(-)
+
+diff --git a/src/devices/src/virtio/vsock/unix_proxy/mod.rs b/src/devices/src/virtio/vsock/unix_proxy/mod.rs
+index dcbf6c1b..f322590e 100644
+--- a/src/devices/src/virtio/vsock/unix_proxy/mod.rs
++++ b/src/devices/src/virtio/vsock/unix_proxy/mod.rs
+@@ -39,6 +39,7 @@ pub struct UnixProxy {
+     pub(crate) local_port: u32,
+     pub(crate) control_port: u32,
+     pub(crate) peer_shutdown: u32,
++    pub(crate) host_read_closed: bool,
+     pub(crate) peer_fwd_cnt: Wrapping<u32>,
+     pub(crate) peer_buf_alloc: u32,
+     pub(crate) tx_cnt: Wrapping<u32>,
+@@ -73,6 +74,7 @@ impl UnixProxy {
+             local_port,
+             control_port,
+             peer_shutdown: 0,
++            host_read_closed: false,
+             peer_fwd_cnt: Wrapping(0),
+             peer_buf_alloc: 0,
+             tx_cnt: Wrapping(0),
+@@ -101,6 +103,7 @@ impl UnixProxy {
+             peer_port,
+             control_port: 0,
+             peer_shutdown: 0,
++            host_read_closed: false,
+             fd,
+             status: ProxyStatus::ReverseInit,
+             mem,
+@@ -139,24 +142,39 @@ impl UnixProxy {
+         let mut wait_credit = false;
+         let mut queue = self.queue.lock().unwrap();
+ 
+-        while let Some(head) = queue.pop(&self.mem) {
++        while !self.host_read_closed {
++            let Some(head) = queue.pop(&self.mem) else {
++                break;
++            };
+             let len = match VsockPacket::from_rx_virtq_head(&head) {
+                 Ok(mut pkt) => match sys::recv_to_pkt(self, &mut pkt) {
+-                    RecvPkt::WaitForCredit => {
++                    Ok(RecvPkt::WaitForCredit) => {
+                         wait_credit = true;
+                         0
+                     }
+-                    RecvPkt::Read(cnt) => {
++                    Ok(RecvPkt::Read(cnt)) => {
+                         self.rx_cnt += Wrapping(cnt as u32);
+                         self.init_data_pkt(&mut pkt);
+                         pkt.set_len(cnt as u32);
+                         pkt.hdr().len() + cnt
+                     }
+-                    RecvPkt::Close => {
++                    // The host side stopped writing, but it may still read the
++                    // guest's reply: send a send-only shutdown, ordered after
++                    // the data already pushed, instead of a reset.
++                    Ok(RecvPkt::Close) => {
++                        self.host_read_closed = true;
++                        self.init_data_pkt(&mut pkt);
++                        pkt.set_op(uapi::VSOCK_OP_SHUTDOWN)
++                            .set_flags(uapi::VSOCK_FLAGS_SHUTDOWN_SEND)
++                            .set_len(0);
++                        pkt.hdr().len()
++                    }
++                    Ok(RecvPkt::Error) => 0,
++                    Err(e) => {
++                        debug!("recv_pkt: socket error: {e}");
+                         self.status = ProxyStatus::Closed;
+                         0
+                     }
+-                    RecvPkt::Error => 0,
+                 },
+                 Err(e) => {
+                     debug!("recv_pkt: RX queue error: {e:?}");
+diff --git a/src/devices/src/virtio/vsock/unix_proxy/unix.rs b/src/devices/src/virtio/vsock/unix_proxy/unix.rs
+index c8f839a3..09f91e1f 100644
+--- a/src/devices/src/virtio/vsock/unix_proxy/unix.rs
++++ b/src/devices/src/virtio/vsock/unix_proxy/unix.rs
+@@ -46,23 +46,26 @@ pub(crate) fn create_socket(id: u64) -> Result<PlatformHandle, ProxyError> {
+     };
+ 
+     #[cfg(target_os = "macos")]
+-    {
+-        // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
+-        let option_value: libc::c_int = 1;
+-        unsafe {
+-            libc::setsockopt(
+-                fd.as_raw_fd(),
+-                libc::SOL_SOCKET,
+-                libc::SO_NOSIGPIPE,
+-                &option_value as *const _ as *const libc::c_void,
+-                std::mem::size_of_val(&option_value) as libc::socklen_t,
+-            )
+-        };
+-    }
++    set_nosigpipe(&fd);
+ 
+     Ok(fd)
+ }
+ 
++#[cfg(target_os = "macos")]
++fn set_nosigpipe(fd: &OwnedFd) {
++    // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
++    let option_value: libc::c_int = 1;
++    unsafe {
++        libc::setsockopt(
++            fd.as_raw_fd(),
++            libc::SOL_SOCKET,
++            libc::SO_NOSIGPIPE,
++            &option_value as *const _ as *const libc::c_void,
++            std::mem::size_of_val(&option_value) as libc::socklen_t,
++        )
++    };
++}
++
+ pub(crate) fn switch_to_connected(proxy: &mut super::UnixProxy) {
+     proxy.status = ProxyStatus::Connected;
+     match fcntl(&proxy.fd, FcntlArg::F_GETFL) {
+@@ -93,7 +96,10 @@ fn push_connect_rsp(proxy: &super::UnixProxy, result: i32) {
+     push_packet(proxy.cid, rx, &proxy.rxq, &proxy.queue, &proxy.mem);
+ }
+ 
+-pub(crate) fn recv_to_pkt(proxy: &super::UnixProxy, pkt: &mut VsockPacket) -> RecvPkt {
++pub(crate) fn recv_to_pkt(
++    proxy: &super::UnixProxy,
++    pkt: &mut VsockPacket,
++) -> std::io::Result<RecvPkt> {
+     if let Some(buf) = pkt.buf_mut() {
+         let peer_credit = proxy.peer_avail_credit();
+         let max_len = std::cmp::min(buf.len(), peer_credit);
+@@ -106,7 +112,7 @@ pub(crate) fn recv_to_pkt(proxy: &super::UnixProxy, pkt: &mut VsockPacket) -> Re
+         );
+ 
+         if max_len == 0 {
+-            return RecvPkt::WaitForCredit;
++            return Ok(RecvPkt::WaitForCredit);
+         }
+ 
+         match recv(
+@@ -118,22 +124,17 @@ pub(crate) fn recv_to_pkt(proxy: &super::UnixProxy, pkt: &mut VsockPacket) -> Re
+                 debug!("recv cnt={cnt}");
+                 if cnt > 0 {
+                     debug!("recv rx_cnt={}", proxy.rx_cnt);
+-                    RecvPkt::Read(cnt)
++                    Ok(RecvPkt::Read(cnt))
+                 } else {
+-                    RecvPkt::Close
+-                }
+-            }
+-            Err(e) => {
+-                debug!("recv_pkt: recv error: {e:?}");
+-                match e {
+-                    Errno::EAGAIN | Errno::EINTR => RecvPkt::Error,
+-                    _ => RecvPkt::Close,
++                    Ok(RecvPkt::Close)
+                 }
+             }
++            Err(Errno::EAGAIN | Errno::EINTR) => Ok(RecvPkt::Error),
++            Err(e) => Err(e.into()),
+         }
+     } else {
+         debug!("recv_pkt: pkt without buf");
+-        RecvPkt::Error
++        Ok(RecvPkt::Error)
+     }
+ }
+ 
+@@ -224,13 +225,18 @@ pub(crate) fn sendmsg(proxy: &mut super::UnixProxy, pkt: &VsockPacket) -> ProxyU
+                 proxy.tx_cnt += Wrapping(sent as u32);
+                 sent as i32
+             }
++            Err(Errno::EAGAIN | Errno::EINTR) => 0,
+             Err(err) => {
+-                #[cfg(target_os = "macos")]
+-                let errno = -linux_errno_raw(err as i32);
+-
+-                #[cfg(target_os = "linux")]
+-                let errno = -(err as i32);
+-                errno
++                // The host side is gone (e.g. the peer fully closed): reset the
++                // connection instead of silently dropping the guest's writes, or
++                // the guest blocks once its send window fills.
++                warn!("unix proxy send error: id={}, err={}", proxy.id, err);
++                proxy.push_reset();
++                proxy.status = ProxyStatus::Closed;
++                update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
++                update.remove_proxy = ProxyRemoval::Deferred;
++                update.signal_queue = true;
++                return update;
+             }
+         }
+     } else {
+@@ -269,7 +275,10 @@ pub(crate) fn update_peer_credit(proxy: &mut super::UnixProxy, pkt: &VsockPacket
+     proxy.peer_buf_alloc = pkt.buf_alloc();
+     proxy.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
+ 
+-    if proxy.status != ProxyStatus::WaitingCreditUpdate || proxy.peer_avail_credit() == 0 {
++    if proxy.host_read_closed
++        || proxy.status != ProxyStatus::WaitingCreditUpdate
++        || proxy.peer_avail_credit() == 0
++    {
+         return ProxyUpdate::default();
+     }
+ 
+@@ -318,16 +327,14 @@ pub(crate) fn do_shutdown(proxy: &mut super::UnixProxy, pkt: &VsockPacket) {
+     let recv_off = pkt.flags() & super::uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
+     let send_off = pkt.flags() & super::uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
+ 
+-    let how = if recv_off && send_off {
+-        Shutdown::Both
+-    } else if recv_off {
+-        Shutdown::Read
+-    } else {
+-        Shutdown::Write
+-    };
+-
+-    if let Err(e) = shutdown(proxy.fd.as_raw_fd(), how) {
+-        warn!("error sending shutdown to socket: {e}");
++    // Shutdown each direction independently: on macOS, shutdown(SHUT_RDWR) on
++    // a socket whose peer already shut down its write side returns ENOTCONN,
++    // and the host never sees EOF until the proxy is reaped.
++    if send_off && let Err(e) = shutdown(proxy.fd.as_raw_fd(), Shutdown::Write) {
++        debug!("error sending shutdown(Write) to socket: {e}");
++    }
++    if recv_off && let Err(e) = shutdown(proxy.fd.as_raw_fd(), Shutdown::Read) {
++        debug!("error sending shutdown(Read) to socket: {e}");
+     }
+ }
+ 
+@@ -406,8 +413,8 @@ pub(crate) fn process_event(proxy: &mut super::UnixProxy, evset: EventSet) -> Pr
+                 update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+                 update.remove_proxy = ProxyRemoval::Deferred;
+                 return update;
+-            } else if proxy.status == ProxyStatus::WaitingCreditUpdate {
+-                debug!("process_event: WaitingCreditUpdate");
++            } else if proxy.host_read_closed || proxy.status == ProxyStatus::WaitingCreditUpdate {
++                debug!("process_event: disabling read polling");
+                 update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+             }
+         } else {
+@@ -539,6 +546,10 @@ pub(crate) fn process_acceptor_event(
+             Ok(accept_fd) => {
+                 // Safe because we've just obtained the FD from the `accept` call above.
+                 let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
++                // The guest can keep writing after the host side stops, and the
++                // host side may be gone by then: report EPIPE, don't raise SIGPIPE.
++                #[cfg(target_os = "macos")]
++                set_nosigpipe(&new_fd);
+                 update.new_proxy = Some((
+                     proxy.peer_port,
+                     new_fd,
+diff --git a/src/devices/src/virtio/vsock/unix_proxy/windows.rs b/src/devices/src/virtio/vsock/unix_proxy/windows.rs
+index 039394f9..61cdd347 100644
+--- a/src/devices/src/virtio/vsock/unix_proxy/windows.rs
++++ b/src/devices/src/virtio/vsock/unix_proxy/windows.rs
+@@ -3,8 +3,8 @@ use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket, RawSocket};
+ use std::path::Path;
+ use windows_sys::Win32::Networking::WinSock::{
+     AF_UNIX, FIONBIO, INVALID_SOCKET, SD_BOTH, SD_RECEIVE, SD_SEND, SOCK_STREAM, SOCKADDR,
+-    SOCKADDR_UN, SOCKET, SOCKET_ERROR, WSAECONNREFUSED, WSAEWOULDBLOCK, WSAGetLastError, accept,
+-    bind, connect, ioctlsocket, listen, recv, send, shutdown, socket,
++    SOCKADDR_UN, SOCKET, SOCKET_ERROR, WSAECONNREFUSED, WSAEINTR, WSAESHUTDOWN, WSAEWOULDBLOCK,
++    WSAGetLastError, accept, bind, connect, ioctlsocket, listen, recv, send, shutdown, socket,
+ };
+ 
+ use super::super::super::linux_errno::wsa_errno_to_linux;
+@@ -64,12 +64,15 @@ fn push_connect_rsp(proxy: &super::UnixProxy, result: i32) {
+     push_packet(proxy.cid, rx, &proxy.rxq, &proxy.queue, &proxy.mem);
+ }
+ 
+-pub(crate) fn recv_to_pkt(proxy: &super::UnixProxy, pkt: &mut VsockPacket) -> RecvPkt {
++pub(crate) fn recv_to_pkt(
++    proxy: &super::UnixProxy,
++    pkt: &mut VsockPacket,
++) -> std::io::Result<RecvPkt> {
+     if let Some(buf) = pkt.buf_mut() {
+         let peer_credit = proxy.peer_avail_credit();
+         let max_len = std::cmp::min(buf.len(), peer_credit);
+         if max_len == 0 {
+-            return RecvPkt::WaitForCredit;
++            return Ok(RecvPkt::WaitForCredit);
+         }
+ 
+         let res = unsafe {
+@@ -82,21 +85,24 @@ pub(crate) fn recv_to_pkt(proxy: &super::UnixProxy, pkt: &mut VsockPacket) -> Re
+         };
+ 
+         if res > 0 {
+-            RecvPkt::Read(res as usize)
++            Ok(RecvPkt::Read(res as usize))
+         } else if res == 0 {
+-            RecvPkt::Close
++            Ok(RecvPkt::Close)
+         } else {
+             let e = unsafe { WSAGetLastError() };
+-            if e == WSAEWOULDBLOCK {
++            if e == WSAEWOULDBLOCK || e == WSAEINTR {
+                 // Map WSAEWOULDBLOCK to an expected exit for the mod.rs loop without tearing down the proxy.
+-                RecvPkt::Error
++                Ok(RecvPkt::Error)
++            } else if e == WSAESHUTDOWN
++                && proxy.peer_shutdown & super::uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0
++            {
++                Ok(RecvPkt::Close)
+             } else {
+-                warn!("unix proxy recv error: id={}, err={}", proxy.id, e);
+-                RecvPkt::Error
++                Err(std::io::Error::from_raw_os_error(e))
+             }
+         }
+     } else {
+-        RecvPkt::Error
++        Ok(RecvPkt::Error)
+     }
+ }
+ 
+@@ -185,7 +191,26 @@ pub(crate) fn sendmsg(proxy: &mut super::UnixProxy, pkt: &VsockPacket) -> ProxyU
+             res
+         } else {
+             let e = unsafe { WSAGetLastError() };
+-            -wsa_errno_to_linux(e)
++            if e == WSAEWOULDBLOCK {
++                // The socket stays non-blocking on Windows, so a full host
++                // buffer is a transient condition, not a dead peer.
++                0
++            } else {
++                // The host side is gone (e.g. the peer fully closed): reset
++                // the connection instead of silently dropping the guest's
++                // writes, or the guest blocks once its send window fills.
++                warn!("unix proxy send error: id={}, err={}", proxy.id, e);
++                proxy.push_reset();
++                proxy.status = ProxyStatus::Closed;
++                update.polling = Some((
++                    proxy.id,
++                    proxy.fd.as_raw_socket() as RawFd,
++                    EventSet::empty(),
++                ));
++                update.remove_proxy = ProxyRemoval::Deferred;
++                update.signal_queue = true;
++                return update;
++            }
+         }
+     } else {
+         -22 // LINUX_EINVAL
+@@ -209,6 +234,9 @@ pub(crate) fn update_peer_credit(proxy: &mut super::UnixProxy, pkt: &VsockPacket
+     proxy.peer_buf_alloc = pkt.buf_alloc();
+     proxy.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
+     let mut update = ProxyUpdate::default();
++    if proxy.host_read_closed {
++        return update;
++    }
+ 
+     // If we were deadlocked waiting for credit, and credit is now restored:
+     if proxy.status == ProxyStatus::WaitingCreditUpdate && proxy.peer_avail_credit() > 0 {
+@@ -344,7 +372,7 @@ pub(crate) fn process_event(proxy: &mut super::UnixProxy, evset: EventSet) -> Pr
+                     EventSet::empty(),
+                 ));
+                 return update;
+-            } else if proxy.status == ProxyStatus::WaitingCreditUpdate {
++            } else if proxy.host_read_closed || proxy.status == ProxyStatus::WaitingCreditUpdate {
+                 update.polling = Some((
+                     proxy.id,
+                     proxy.fd.as_raw_socket() as RawFd,

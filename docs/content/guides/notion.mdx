@@ -1,11 +1,11 @@
 ---
-title: "Importing a Notion workspace"
-description: "Mount a Notion workspace in a sandbox, so an agent reads its pages and databases as files."
+title: "Attaching Notion to a sandbox"
+description: "Attach a Notion workspace to a sandbox, where its pages and databases are files."
 ---
 
 import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
-Mount a Notion workspace in a sandbox, and its pages and databases appear as read-only files an agent browses and reads with its usual filesystem tools.
+Mount a Notion workspace in a sandbox, and its pages and databases appear as read-only files that any program in the sandbox reads, with no Notion API.
 The files are read from Notion as they are opened, not copied in, so they follow the workspace as it changes.
 
 ## Connect Notion
@@ -104,7 +104,7 @@ Read the `markdown` field of `page.json` for the page body. Child pages appear i
 A database in a page appears in the page's directory beside its child pages, named `<title>__db__<database-id>`.
 Its `database.json` holds the database's schema in `properties` and one entry per row in `rows`.
 Each row carries its `page_id`, its directory name in `dir`, and its values in `properties`, as the Notion API returns them.
-The whole index comes from one query, so an agent reads `database.json` to pick rows rather than opening every row's directory.
+The whole index comes from one query, so read `database.json` to pick rows rather than opening every row's directory.
 
 ```sh
 cd '/context/notion/pages/<title>__<page-id>/<database>__db__<database-id>'

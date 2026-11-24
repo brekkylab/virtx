@@ -604,6 +604,17 @@ impl StorageBackend for Told {
 struct KeptOnceTaken {
     taken: tokio::sync::Notify,
     refusing: bool,
+    /// Whether the [`Held`] its take gave has dropped.
+    let_go: Arc<AtomicBool>,
+}
+
+/// A [`Held`] that says when it drops.
+struct Dropped(Arc<AtomicBool>);
+
+impl Drop for Dropped {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl StorageBackend for KeptOnceTaken {
@@ -619,12 +630,13 @@ impl StorageBackend for KeptOnceTaken {
 
     fn take<'a>(&'a self, _: Stored<'a>) -> BoxFuture<'a, Result<Held, Refusal>> {
         self.taken.notify_one();
-        Box::pin(async { Ok(Box::new(()) as Held) })
+        let let_go = Dropped(Arc::clone(&self.let_go));
+        Box::pin(async move { Ok(Box::new(let_go) as Held) })
     }
 }
 
 /// A sandbox's machine boots while its backend keeps its disk, the one not waiting on the
-/// other, and it is made once both are done.
+/// other, and it is answered once its machine is up.
 async fn a_sandbox_boots_while_its_backend_keeps_its_disk(home: Home) {
     let backing = Backing::default();
     assert!(backing.set(Arc::new(KeptOnceTaken::default()) as Arc<dyn StorageBackend>));
@@ -654,6 +666,7 @@ async fn a_sandbox_whose_disk_is_refused_as_it_boots_leaves_nothing(home: Home) 
         refusing: true,
         ..KeptOnceTaken::default()
     };
+    let let_go = Arc::clone(&refusing.let_go);
     assert!(backing.set(Arc::new(refusing) as Arc<dyn StorageBackend>));
     let args = small();
     let made = Sandbox::create(
@@ -674,6 +687,59 @@ async fn a_sandbox_whose_disk_is_refused_as_it_boots_leaves_nothing(home: Home) 
         refused.err()
     );
     assert_eq!(home.left(), Vec::<String>::new());
+    // What its machine took of the disk is let go of.
+    assert!(let_go.load(Ordering::SeqCst));
+}
+
+/// A backend that answers a disk made only once it is told to, and refuses it then.
+#[derive(Default)]
+struct RefusedLater {
+    told: tokio::sync::Notify,
+    let_go: Arc<AtomicBool>,
+}
+
+impl StorageBackend for RefusedLater {
+    fn made<'a>(&'a self, what: Stored<'a>, _: u64) -> BoxFuture<'a, Result<(), Refusal>> {
+        Box::pin(async move {
+            self.told.notified().await;
+            Err(Refusal::Exists(format!("{what:?} is kept already")))
+        })
+    }
+
+    fn take<'a>(&'a self, _: Stored<'a>) -> BoxFuture<'a, Result<Held, Refusal>> {
+        let let_go = Dropped(Arc::clone(&self.let_go));
+        Box::pin(async move { Ok(Box::new(let_go) as Held) })
+    }
+}
+
+/// A sandbox is answered once its machine is up, its backend still keeping its disk; refused
+/// after, it is closed, what its machine took of the disk let go of, and nothing of it left.
+async fn a_sandbox_whose_disk_is_refused_after_it_is_up_is_closed(home: Home) {
+    let backing = Backing::default();
+    let refusing = Arc::new(RefusedLater::default());
+    assert!(backing.set(Arc::clone(&refusing) as Arc<dyn StorageBackend>));
+    let args = small();
+    let made = Sandbox::create(
+        &home.images,
+        &home.root,
+        &home.volumes,
+        &args,
+        vm(),
+        None,
+        None,
+        Some(HashMap::new()),
+        &backing,
+    );
+    let sandbox = tokio::time::timeout(HANG, made)
+        .await
+        .expect("answered before its disk was kept")
+        .unwrap();
+    assert_eq!(run(&sandbox, &["true"], None).await.unwrap().1, 0);
+
+    refusing.told.notify_one();
+    until("closed", || home.left().is_empty()).await;
+    assert!(run(&sandbox, &["true"], None).await.is_err());
+    assert!(refusing.let_go.load(Ordering::SeqCst));
 }
 
 /// What a backend is asked as a sandbox is made, booted, parked, let go of and taken in again
@@ -725,6 +791,8 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
             format!("want {tag}"),
             "bring up Volume(\"rw\")".into(),
             "bring up Volume(\"ro\")".into(),
+            // Its disk made first, before its machine boots and takes it: what the backend
+            // takes as its own by then (`StorageBackend::made`).
             format!("made {disk} {}", u64::from(DEFAULT_DISK_GIB) << 30),
             format!("take {disk}"),
             "take Volume(\"rw\")".into(),
@@ -3282,6 +3350,7 @@ fn main() -> ExitCode {
         a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_runs,
         a_sandbox_boots_while_its_backend_keeps_its_disk,
         a_sandbox_whose_disk_is_refused_as_it_boots_leaves_nothing,
+        a_sandbox_whose_disk_is_refused_after_it_is_up_is_closed,
         a_machine_that_did_not_start_tells_why_without_this_host_s_paths,
         a_volume_two_sandboxes_mount_is_shared_and_held_until_both_go,
         a_sandbox_mounting_many_volumes_reaches_each,

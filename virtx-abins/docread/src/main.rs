@@ -47,8 +47,9 @@ const MAX_FILE_BYTES: u64 = 128 << 20;
 #[command(
     about = "Parse documents into text that keeps their headings, lists and tables",
     after_help = "Reads PDF, Word, PowerPoint, Excel, OpenDocument, RTF, HTML, Markdown, \
-                  AsciiDoc, LaTeX, CSV, EPUB, email, HWP and more. Writes Markdown, JSON, HTML, \
-                  text and DocLang.\n\n\
+                  AsciiDoc, LaTeX, CSV, EPUB, email, HWP and more, each by its file's extension: \
+                  --list-input-formats lists them. Writes Markdown, JSON, HTML, text and \
+                  DocLang.\n\n\
                   Uses docling inside, and its ML models where a file's structure has to be \
                   found, as in a PDF. There is no OCR: a scanned PDF has no text.\n\n\
                   Reading a PDF with the models takes up to about 2 GiB of memory, and a \
@@ -60,8 +61,12 @@ const MAX_FILE_BYTES: u64 = 128 << 20;
 )]
 struct Cli {
     /// Files or directories to convert; a directory's documents are found by their extension
-    #[arg(value_name = "SOURCE", required = true)]
+    #[arg(value_name = "SOURCE", required_unless_present = "list_input_formats")]
     sources: Vec<PathBuf>,
+
+    /// List the file extensions read, one a line, and exit
+    #[arg(long, exclusive = true)]
+    list_input_formats: bool,
 
     /// Input formats to accept, by docling's names (pdf, docx, pptx, xlsx, html, md, ...);
     /// defaults to all
@@ -302,6 +307,14 @@ enum Destination<'a> {
 /// The command, done: what goes to stdout, and a line for each document that failed. A line
 /// that cannot be carried out at all is the error.
 fn run(cli: &Cli) -> Result<(String, Vec<String>), String> {
+    if cli.list_input_formats {
+        let listed = InputFormat::supported_extensions()
+            .into_iter()
+            .filter(|ext| InputFormat::from_extension(ext).is_some_and(readable))
+            .map(|ext| format!("{ext}\n"))
+            .collect();
+        return Ok((listed, Vec::new()));
+    }
     let documents = documents(&cli.sources, &cli.from).map_err(|e| format!("{NAME}: {e}\n"))?;
     if documents.is_empty() {
         return Err(format!("{NAME}: no documents in what was given\n"));
@@ -685,6 +698,23 @@ mod tests {
             parse(&["a.pdf", "--page-range", "3"]).unwrap().page_range,
             Some((3, 3))
         );
+    }
+
+    /// The extensions listed are the ones a directory's documents are found by: what docling
+    /// reads, less what this build refuses.
+    #[test]
+    fn the_input_formats_listed_are_the_ones_read() {
+        let (listed, failed) = run(&parse(&["--list-input-formats"]).unwrap()).expect("listed");
+        assert!(failed.is_empty(), "{failed:?}");
+        let listed: Vec<_> = listed.lines().collect();
+        for ext in ["pdf", "docx", "docm", "hwp", "hwpx", "eml", "md", "txt"] {
+            assert!(listed.contains(&ext), "{ext}: {listed:?}");
+        }
+        for ext in ["py", "png", "mp3"] {
+            assert!(!listed.contains(&ext), "{ext}: {listed:?}");
+        }
+        let e = parse(&["--list-input-formats", "a.pdf"]).expect_err("nothing else with it");
+        assert_eq!(e.kind(), ClapErrorKind::ArgumentConflict);
     }
 
     /// Help is an answer, and bare `docread` is answered with it.

@@ -11,6 +11,8 @@ Arguments:
   <SOURCE>...  Files or directories to convert; a directory's documents are found by their extension
 
 Options:
+      --list-input-formats
+          List the file extensions read, one a line, and exit
       --from <FORMAT>
           Input formats to accept, by docling's names (pdf, docx, pptx, xlsx, html, md, ...); defaults to all
       --to <FORMAT>
@@ -40,7 +42,7 @@ Options:
   -h, --help
           Print help
 
-Reads PDF, Word, PowerPoint, Excel, OpenDocument, RTF, HTML, Markdown, AsciiDoc, LaTeX, CSV, EPUB, email, HWP and more. Writes Markdown, JSON, HTML, text and DocLang.
+Reads PDF, Word, PowerPoint, Excel, OpenDocument, RTF, HTML, Markdown, AsciiDoc, LaTeX, CSV, EPUB, email, HWP and more, each by its file's extension: --list-input-formats lists them. Writes Markdown, JSON, HTML, text and DocLang.
 
 Uses docling inside, and its ML models where a file's structure has to be found, as in a PDF. There is no OCR: a scanned PDF has no text.
 

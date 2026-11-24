@@ -25,39 +25,7 @@ const ABINS: &[(&str, &str)] = &[
 /// their `SKILL.md` and what each installs in `out`.
 pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
     let root = root_path();
-    let target = guest_target()?;
-    let arch = target.split('-').next().unwrap_or_default();
-    let sysroot = root.join(format!("build/musl-sysroot/{arch}/usr/include/stdio.h"));
-    if !sysroot.exists() {
-        let status = Command::new("sh")
-            .arg(root.join("xtask/scripts/fetch-musl-sysroot.sh"))
-            .status()
-            .context("running fetch-musl-sysroot.sh")?;
-        ensure!(status.success(), "fetching the musl sysroot failed");
-        ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
-    }
-
-    // What `musl-cc.sh` and `musl-ar.sh` run, asked for here rather than failing deep in
-    // cc-rs's output. Not where `CC_<triple>` names a compiler of the caller's own, which
-    // `virtx-abins/.cargo/config.toml` leaves to win.
-    let own_cc = env::var_os(format!("CC_{}", target.replace('-', "_"))).is_some();
-    let llvm_ar = [
-        "llvm-ar",
-        "/opt/homebrew/opt/llvm/bin/llvm-ar",
-        "/usr/local/opt/llvm/bin/llvm-ar",
-    ];
-    let on_path = |name: &str| Command::new(name).arg("--version").output().is_ok();
-    if !own_cc && (!Path::new("/usr/bin/clang").is_file() || !llvm_ar.iter().any(|ar| on_path(ar)))
-    {
-        bail!(
-            "building abin needs /usr/bin/clang and llvm-ar -- {}",
-            if cfg!(target_os = "macos") {
-                "xcode-select --install, and brew install lld llvm"
-            } else {
-                "install the clang, lld and llvm packages (apt-get install clang lld llvm)"
-            }
-        );
-    }
+    let target = cross_ready()?;
 
     let crate_dir = root.join("virtx-abins");
     let mut cargo = cross_cargo(&crate_dir);
@@ -123,8 +91,15 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
         if at.exists() {
             fs::remove_dir_all(&at).with_context(|| format!("removing {}", at.display()))?;
         }
-        if let Some(from) = out_dirs.get(*package).filter(|dir| dir.is_dir()) {
-            place_dir(from, &at)?;
+        // A package with a build script has its `OUT_DIR` in the messages, or what it installs
+        // would be missing from `/abin` with nothing said.
+        match out_dirs.get(*package) {
+            Some(from) if from.is_dir() => place_dir(from, &at)?,
+            Some(_) => {}
+            None => ensure!(
+                !crate_dir.join(program).join("build.rs").is_file(),
+                "cargo's messages name no OUT_DIR for {package}'s build script"
+            ),
         }
 
         let skill = crate_dir.join(program).join("SKILL.md");
@@ -138,6 +113,65 @@ pub(crate) fn build(debug: bool, out: &Path) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// The guest's target, with what cross-compiling `virtx-abins/` for it needs: the musl sysroot,
+/// fetched when there is none, and the compiler and archiver, asked for when they are missing.
+fn cross_ready() -> anyhow::Result<&'static str> {
+    let root = root_path();
+    let target = guest_target()?;
+    let arch = target.split('-').next().unwrap_or_default();
+    let sysroot = root.join(format!("build/musl-sysroot/{arch}/usr/include/stdio.h"));
+    if !sysroot.exists() {
+        let status = Command::new("sh")
+            .arg(root.join("xtask/scripts/fetch-musl-sysroot.sh"))
+            .status()
+            .context("running fetch-musl-sysroot.sh")?;
+        ensure!(status.success(), "fetching the musl sysroot failed");
+        ensure!(sysroot.exists(), "no musl sysroot at {}", sysroot.display());
+    }
+
+    // What `musl-cc.sh` and `musl-ar.sh` run, asked for here rather than failing deep in
+    // cc-rs's output. Not where `CC_<triple>` names a compiler of the caller's own, which
+    // `virtx-abins/.cargo/config.toml` leaves to win.
+    let own_cc = env::var_os(format!("CC_{}", target.replace('-', "_"))).is_some();
+    let llvm_ar = [
+        "llvm-ar",
+        "/opt/homebrew/opt/llvm/bin/llvm-ar",
+        "/usr/local/opt/llvm/bin/llvm-ar",
+    ];
+    let on_path = |name: &str| Command::new(name).arg("--version").output().is_ok();
+    if !own_cc && (!Path::new("/usr/bin/clang").is_file() || !llvm_ar.iter().any(|ar| on_path(ar)))
+    {
+        bail!(
+            "building abin needs /usr/bin/clang and llvm-ar -- {}",
+            if cfg!(target_os = "macos") {
+                "xcode-select --install, and brew install lld llvm"
+            } else {
+                "install the clang, lld and llvm packages (apt-get install clang lld llvm)"
+            }
+        );
+    }
+    Ok(target)
+}
+
+/// The tests of `virtx-abins/`, for the guest's target in the release profile `build` compiles
+/// their dependencies in: run on a Linux host, whose kernel runs the static musl binaries, and
+/// compiled alone on any other.
+pub(crate) fn test() -> anyhow::Result<()> {
+    let target = cross_ready()?;
+    let linux = cfg!(target_os = "linux");
+    let mut cargo = cross_cargo(&root_path().join("virtx-abins"));
+    cargo.args(["test", "--release", "--target", target]);
+    if !linux {
+        cargo.arg("--no-run");
+    }
+    let status = cargo.status().context("running cargo test for abin")?;
+    ensure!(status.success(), "the tests of abin failed");
+    if !linux {
+        eprintln!("xtask: compiled the tests of abin, which run on a Linux host");
+    }
     Ok(())
 }
 

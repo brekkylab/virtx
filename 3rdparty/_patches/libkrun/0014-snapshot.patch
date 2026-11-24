@@ -561,7 +561,7 @@ index 5534d224..b029b7b4 100644
          vm_resources.smbios_oem_strings = Some(builder_cfg.smbios_oem_strings);
      }
 diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
-index d13be75e..f866ab2f 100644
+index d13be75e..be9333ab 100644
 --- a/src/libkrun/src/vmm/builder.rs
 +++ b/src/libkrun/src/vmm/builder.rs
 @@ -120,6 +120,8 @@ use vm_memory::{Address, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
@@ -581,10 +581,12 @@ index d13be75e..f866ab2f 100644
              NetDeviceNotConfigured => {
                  write!(f, "The net device configuration is missing the tap device.")
              }
-@@ -805,6 +808,23 @@ pub fn build_microvm(
+@@ -804,6 +807,24 @@ pub fn build_microvm(
+     device_manager: Box<dyn crate::api::device_builders::DeviceManager<'_> + '_>,
  ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
      let payload = choose_payload(vm_resources)?;
- 
++    log::warn!(target: "spike", "libkrun: payload chosen");
++
 +    // A machine restored from a snapshot: its memory, vCPUs and devices are set from it, and
 +    // nothing of a boot is written into it.
 +    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
@@ -601,25 +603,26 @@ index d13be75e..f866ab2f 100644
 +    let restoring: Option<((), ())> = None;
 +    #[allow(unused_mut)]
 +    let mut restoring = restoring;
-+
+ 
      #[cfg(all(
          target_arch = "x86_64",
-         any(target_os = "linux", target_os = "windows")
-@@ -893,7 +913,13 @@ pub fn build_microvm(
+@@ -893,7 +914,15 @@ pub fn build_microvm(
          vm_resources.transparent_huge_pages,
          #[cfg(feature = "tee")]
          fw_range_for_mem,
 +        restoring.is_some(),
      )?;
 +    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
++    log::warn!(target: "spike", "libkrun: memory made");
 +    if let Some((dir, snapshot)) = &restoring {
 +        super::snapshot::map_memory(dir, &guest_memory, &snapshot.regions)
 +            .map_err(StartMicrovmError::Restore)?;
 +    }
++    log::warn!(target: "spike", "libkrun: memory mapped");
  
      let vcpu_config = vm_resources.vcpu_config();
  
-@@ -1283,7 +1309,9 @@ pub fn build_microvm(
+@@ -1283,7 +1312,9 @@ pub fn build_microvm(
              Some(intc.clone()),
          )?;
  
@@ -630,7 +633,7 @@ index d13be75e..f866ab2f 100644
  
          vcpus = create_vcpus_x86_64(
              &vm,
-@@ -1298,6 +1326,24 @@ pub fn build_microvm(
+@@ -1298,6 +1329,25 @@ pub fn build_microvm(
              _sender,
          )
          .map_err(StartMicrovmError::Internal)?;
@@ -652,10 +655,11 @@ index d13be75e..f866ab2f 100644
 +            vm.restore_state(&snapshot.vm)
 +                .map_err(|e| StartMicrovmError::Restore(format!("the VM's state: {e}")))?;
 +        }
++        log::warn!(target: "spike", "libkrun: vcpus made");
      }
  
      #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-@@ -1532,6 +1578,26 @@ pub fn build_microvm(
+@@ -1532,6 +1582,27 @@ pub fn build_microvm(
          )
          .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
  
@@ -679,10 +683,11 @@ index d13be75e..f866ab2f 100644
 +        }
 +    }
 +
++    log::warn!(target: "spike", "libkrun: devices attached");
      if let Some(s) = &vm_resources.kernel_cmdline.epilog {
          vmm.kernel_cmdline.insert_str(s).unwrap();
      }
-@@ -1562,7 +1628,9 @@ pub fn build_microvm(
+@@ -1562,7 +1633,9 @@ pub fn build_microvm(
      // populating boot_params for the Linux kernel (cmd_line_ptr already points here
      // via configure_system).
      #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
@@ -693,7 +698,7 @@ index d13be75e..f866ab2f 100644
      #[cfg(all(target_arch = "x86_64", feature = "tdx"))]
      if vm_resources.tee_firmware_config.is_some() {
          load_cmdline(&vmm)?;
-@@ -1606,6 +1674,7 @@ pub fn build_microvm(
+@@ -1606,6 +1679,7 @@ pub fn build_microvm(
      #[cfg(not(all(target_os = "linux", target_arch = "riscv64")))]
      let _riscv_isa_info: Option<()> = None;
  
@@ -701,7 +706,7 @@ index d13be75e..f866ab2f 100644
      vmm.configure_system(
          vcpus.as_slice(),
          &intc,
-@@ -1618,6 +1687,7 @@ pub fn build_microvm(
+@@ -1618,6 +1692,7 @@ pub fn build_microvm(
          &riscv_isa_info,
      )
      .map_err(StartMicrovmError::Internal)?;
@@ -709,7 +714,18 @@ index d13be75e..f866ab2f 100644
  
      #[cfg(feature = "tee")]
      {
-@@ -2137,6 +2207,7 @@ pub fn create_guest_memory(
+@@ -1653,8 +1728,10 @@ pub fn build_microvm(
+         println!("Starting TEE/microVM.");
+     }
+ 
++    log::warn!(target: "spike", "libkrun: configured");
+     vmm.start_vcpus(vcpus)
+         .map_err(StartMicrovmError::Internal)?;
++    log::warn!(target: "spike", "libkrun: vcpus started");
+ 
+     // Clippy thinks we don't need Arc<Mutex<...
+     // but we don't want to change the event_manager interface
+@@ -2137,6 +2214,7 @@ pub fn create_guest_memory(
      #[cfg(target_os = "macos")] ram_in_blocks: bool,
      #[cfg(target_os = "linux")] transparent_huge_pages: bool,
      #[cfg(feature = "tee")] firmware_range: Option<(u64, usize)>,
@@ -717,7 +733,7 @@ index d13be75e..f866ab2f 100644
  ) -> std::result::Result<
      (GuestMemoryMmap, ArchMemoryInfo, ShmManager, PayloadConfig),
      StartMicrovmError,
-@@ -2319,25 +2390,37 @@ pub fn create_guest_memory(
+@@ -2319,25 +2397,37 @@ pub fn create_guest_memory(
      let ram_in_blocks =
          ram_in_blocks && map_ram_in_blocks(&guest_mem, &arch_mem_info, map_guest_ram_in_blocks);
  
@@ -1084,10 +1100,10 @@ index 95117a2a..89c1652b 100644
  
 diff --git a/src/libkrun/src/vmm/snapshot.rs b/src/libkrun/src/vmm/snapshot.rs
 new file mode 100644
-index 00000000..4312cb86
+index 00000000..ec291c17
 --- /dev/null
 +++ b/src/libkrun/src/vmm/snapshot.rs
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,371 @@
 +//! A paused machine written to a directory, and read back to restore it in a fresh process on
 +//! the same host: KVM x86_64 only.
 +//!
@@ -1234,6 +1250,9 @@ index 00000000..4312cb86
 +    }
 +    let path = dir.join("memory");
 +    let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
++    if std::env::var_os("VIRTX_SPIKE_EAGER").is_some() {
++        return read_memory(&file, mem).map_err(|e| format!("reading {}: {e}", path.display()));
++    }
 +    let mut offset = 0u64;
 +    for region in mem.iter() {
 +        // SAFETY: replaces the region's own mapping, at its own address and length, with the
@@ -1258,6 +1277,64 @@ index 00000000..4312cb86
 +        offset += region.len();
 +    }
 +    Ok(())
++}
++
++/// Spike: the file's data read into the guest's own anonymous RAM, asked to be backed by huge
++/// pages, rather than mapped: what is not data stays the zero it already is.
++fn read_memory(file: &File, mem: &GuestMemoryMmap) -> io::Result<()> {
++    // The file's data extents, each with where it goes in the guest's RAM.
++    let mut extents: Vec<(u64, usize, usize)> = Vec::new();
++    let mut offset = 0i64;
++    for region in mem.iter() {
++        let len = region.len() as i64;
++        // SAFETY: the region's own mapping; the advice keeps its contents.
++        unsafe { libc::madvise(region.as_ptr().cast(), len as usize, libc::MADV_HUGEPAGE) };
++        let end = offset + len;
++        let mut at = offset;
++        while at < end {
++            // SAFETY: plain calls on an open file.
++            let data = unsafe { libc::lseek(file.as_raw_fd(), at, libc::SEEK_DATA) };
++            if data < 0 || data >= end {
++                break;
++            }
++            let hole = unsafe { libc::lseek(file.as_raw_fd(), data, libc::SEEK_HOLE) }.min(end);
++            // Split into pieces no larger than 8 MiB, so that threads share the work.
++            let mut piece = data;
++            while piece < hole {
++                let next = (piece + (8 << 20)).min(hole);
++                let host = region.as_ptr() as usize + (piece - offset) as usize;
++                extents.push((piece as u64, host, (next - piece) as usize));
++                piece = next;
++            }
++            at = hole;
++        }
++        offset = end;
++    }
++    let threads: usize = std::env::var("VIRTX_SPIKE_READERS")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(4);
++    let next = std::sync::atomic::AtomicUsize::new(0);
++    std::thread::scope(|scope| {
++        let workers: Vec<_> = (0..threads)
++            .map(|_| {
++                scope.spawn(|| -> io::Result<()> {
++                    loop {
++                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                        let Some(&(at, host, len)) = extents.get(i) else {
++                            return Ok(());
++                        };
++                        // SAFETY: within the guest's RAM, a piece no other thread writes.
++                        let into = unsafe { std::slice::from_raw_parts_mut(host as *mut u8, len) };
++                        file.read_exact_at(into, at)?;
++                    }
++                })
++            })
++            .collect();
++        workers
++            .into_iter()
++            .try_for_each(|worker| worker.join().unwrap())
++    })
 +}
 +
 +fn write_transport(out: &mut Writer, t: &TransportSnapshot) {

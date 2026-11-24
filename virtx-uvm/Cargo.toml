@@ -57,6 +57,8 @@ unicode-normalization = "0.1"
 anyhow = { workspace = true }
 # The errno values a served volume answers the guest in.
 libc = { workspace = true }
+# The directory a machine's published ports' sockets are in, its own and removed with it.
+tempfile = "3"
 # libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
 log = "0.4"
 # The storage an embedder's disk is read and written through ([`disks::imago`]): the version
@@ -101,9 +103,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [dev-dependencies]
-# The remote stores' tests: directories to read local files from, and a runtime with threads
-# for the mock servers they answer from.
-tempfile = "3"
+# The remote stores' tests: a runtime with threads for the mock servers they answer from.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 # The tests that boot machines: its own `main`, which becomes the machine when spawned to be one.

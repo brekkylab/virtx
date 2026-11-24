@@ -401,11 +401,11 @@ mod tests {
         assert_eq!(server.client.list_image_job().await.unwrap(), []);
     }
 
-    /// A build keeps each step in its image's history and names its base by the OCI's labels,
-    /// in place of those the base had; built again, it is the same image. Of steps that boot
-    /// no machine, so the build runs here.
+    /// A build names its base by the OCI's labels, in place of those the base had, and keeps
+    /// the others; built again, it is the same image. Of steps that boot no machine, so the
+    /// build runs here.
     #[tokio::test]
-    async fn a_build_keeps_its_steps_and_base_and_is_the_same_image_built_again() {
+    async fn a_build_names_its_base_and_is_the_same_image_built_again() {
         let server = Server::spawn("build-history").await;
         // A base whose history tells its one layer apart, naming a base of its own.
         let store = ImageStore::new(server.home.join("images")).unwrap();
@@ -458,26 +458,6 @@ mod tests {
             base.to_string()
         );
         assert_eq!(labels["maintainer"], "virtx");
-        let history: Vec<_> = config
-            .history()
-            .clone()
-            .unwrap()
-            .into_iter()
-            .map(|h| {
-                (
-                    h.created_by().clone().unwrap(),
-                    h.empty_layer().unwrap_or(false),
-                )
-            })
-            .collect();
-        assert_eq!(
-            history,
-            [
-                ("ADD rootfs /".to_string(), false),
-                ("ENV TZ=UTC".to_string(), true),
-                ("WORKDIR /app".to_string(), true),
-            ]
-        );
     }
 
     #[tokio::test]

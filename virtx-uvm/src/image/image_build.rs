@@ -343,4 +343,58 @@ mod tests {
         let config = image.config().clone().unwrap();
         assert_eq!(config.working_dir().as_deref(), Some("/srv"));
     }
+
+    /// Each step is kept after the base's history, as its instruction and with no layer of
+    /// its own; over a base whose history does not tell its layers apart, none is.
+    #[tokio::test]
+    async fn a_step_is_kept_in_the_history_where_the_history_tells_the_layers_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("images")).unwrap();
+        let spec = MachineSpec {
+            vcpus: 1,
+            ram_mib: 512,
+            gpu: false,
+            gpu_memory_mib: None,
+            network: false,
+        };
+        let steps = [Step::env("TZ", "UTC"), Step::workdir("/app")];
+        let layer: Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
+        let built = async |history: serde_json::Value| {
+            let mut image: ImageConfiguration = serde_json::from_value(serde_json::json!({
+                "architecture": "arm64",
+                "os": "linux",
+                "rootfs": {"type": "layers", "diff_ids": []},
+                "history": history,
+            }))
+            .unwrap();
+            let mut layers = vec![layer.clone()];
+            for step in &steps {
+                build_step(&store, &mut image, &mut layers, step, &[], &spec, |_| {})
+                    .await
+                    .unwrap();
+            }
+            image
+                .history()
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| {
+                    (
+                        h.created_by().clone().unwrap_or_default(),
+                        h.empty_layer().unwrap_or(false),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            built(serde_json::json!([{"created_by": "ADD rootfs /"}])).await,
+            [
+                ("ADD rootfs /".to_string(), false),
+                ("ENV TZ=UTC".to_string(), true),
+                ("WORKDIR /app".to_string(), true),
+            ]
+        );
+        assert_eq!(built(serde_json::json!([])).await, []);
+    }
 }

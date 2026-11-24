@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fstree::FsTree;
 use crate::machine::{
-    EgressLimits, Error, Network, Result,
+    Error, Network, Result,
     boot::{self, BootArgs, CONSOLE_TARGET},
     wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
@@ -184,10 +184,10 @@ pub struct MachineSpec {
     #[serde(default)]
     pub network: Network,
 
-    /// How many flows to the internet it may open on a [`Public`](Network::Public) network;
-    /// none is no limit. Ignored on any other.
+    /// What the embedder's [`Outward`](crate::outward::Outward) is given in this machine's
+    /// process, on a [`Public`](Network::Public) network.
     #[serde(default)]
-    pub egress_limits: Option<EgressLimits>,
+    pub outward: Option<serde_json::Value>,
 }
 
 /// A volume shown in the guest. Pointed at rather than carried, so its mounts' credentials stay
@@ -751,7 +751,7 @@ mod tests {
                 gpu: false,
                 gpu_memory_mib: None,
                 network: Network::Public,
-                egress_limits: None,
+                outward: None,
             },
             volumes: vec![VolumeMount {
                 path: PathBuf::from("/store/volume/data"),

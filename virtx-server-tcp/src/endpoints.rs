@@ -1153,7 +1153,7 @@ const BUILD_MACHINE: MachineSpec = MachineSpec {
     gpu: false,
     gpu_memory_mib: None,
     network: Network::Public,
-    egress_limits: None,
+    outward: None,
 };
 
 async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {

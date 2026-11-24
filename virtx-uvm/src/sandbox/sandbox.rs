@@ -1046,7 +1046,7 @@ impl Sandbox {
             let (source, held) = served.unzip();
             *booting.served.lock().unwrap() = Some(source.is_some());
             config.sandbox_disk = Some(SandboxDisk { source });
-            config.spec.egress_limits = super::egress::limits(&booting.root);
+            config.spec.outward = crate::outward::given(&booting.root);
             Ok::<_, Error>((Machine::start(config, &vm)?, held))
         });
         let (machine, held) = machine.await??;
@@ -1248,7 +1248,7 @@ impl Sandbox {
                         let _ = told.send(());
                     }
                 }
-                CtrlResp::Outbound(outbound) => super::egress::told(&self.id, &self.root, outbound),
+                CtrlResp::Told(message) => crate::outward::told(&self.id, &self.root, message),
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
@@ -1698,7 +1698,7 @@ fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
             false => Network::None,
         },
         // The embedder's, asked as each of its machines boots ([`Sandbox::wake`]).
-        egress_limits: None,
+        outward: None,
     }
 }
 

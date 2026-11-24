@@ -273,14 +273,93 @@ mod tests {
         assert_eq!(first.get(), (0, 1), "replaced, so released unwoken");
 
         send.send(7).unwrap();
-        last.await_wakes(1);
-        assert_eq!(last.get(), (1, 1));
+        last.await_counts((1, 1));
 
         assert_eq!(poll(future, &after), (0, Some(Value::from(7))));
         assert_eq!(poll(future, &after).0, VIRTX_ERROR);
         assert_eq!(after.get(), (0, 2), "a ready poll keeps no waker");
 
         unsafe { virtx_future_free(future) };
+    }
+
+    /// What a binding's `wake` blocks on until its own thread runs it, as koffi's waits for
+    /// Node's event loop: entered once called, and returning once opened.
+    #[derive(Default)]
+    struct Gate {
+        entered: std::sync::atomic::AtomicBool,
+        open: Mutex<bool>,
+        opened: std::sync::Condvar,
+    }
+
+    impl Gate {
+        fn waker(gate: &Arc<Gate>) -> VirtxWaker {
+            unsafe extern "C" fn wake(data: *mut std::ffi::c_void) {
+                let gate = unsafe { &*data.cast::<Gate>() };
+                gate.entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                let open = gate.open.lock().unwrap();
+                let _ = gate
+                    .opened
+                    .wait_timeout_while(open, Duration::from_secs(120), |open| !*open);
+            }
+            unsafe extern "C" fn release(data: *mut std::ffi::c_void) {
+                drop(unsafe { Arc::from_raw(data.cast::<Gate>()) });
+            }
+            VirtxWaker {
+                data: Arc::into_raw(Arc::clone(gate)).cast_mut().cast(),
+                wake,
+                release: Some(release),
+            }
+        }
+
+        fn open(&self) {
+            *self.open.lock().unwrap() = true;
+            self.opened.notify_all();
+        }
+    }
+
+    /// Until `done`, which a thread other than the test's makes so.
+    fn until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_wake_that_blocks_holds_up_no_other_request() {
+        // One thread to run every request: a wake that blocked it would hold up the rest.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let tasks = Mutex::new(JoinSet::new());
+        let (first, answer_first) = pending(&runtime, &tasks);
+        let (second, answer_second) = pending(&runtime, &tasks);
+        let gate = Arc::new(Gate::default());
+        let counts = Arc::default();
+
+        let mut out = empty();
+        let status = unsafe { virtx_future_poll(first, Gate::waker(&gate), &mut out) };
+        assert_eq!(status, VIRTX_PENDING);
+        assert_eq!(poll(second, &counts), (VIRTX_PENDING, None));
+        answer_first.send(1).unwrap();
+        until("the first's wake is never called", || {
+            gate.entered.load(std::sync::atomic::Ordering::SeqCst)
+        });
+
+        answer_second.send(2).unwrap();
+        let mut answered = None;
+        until("the second never answers while the first's wake blocks", || {
+            let (status, value) = poll(second, &counts);
+            answered = value;
+            status != VIRTX_PENDING
+        });
+        assert_eq!(answered, Some(Value::from(2)));
+
+        gate.open();
+        unsafe { virtx_future_free(first) };
+        unsafe { virtx_future_free(second) };
     }
 
     #[test]
@@ -306,7 +385,7 @@ mod tests {
 
         assert_eq!(poll(future, &counts), (VIRTX_PENDING, None));
         runtime.block_on(tasks.lock().unwrap().shutdown());
-        assert_eq!(counts.get(), (1, 1));
+        counts.await_counts((1, 1));
         assert_eq!(poll(future, &counts).0, VIRTX_ERROR);
 
         unsafe { virtx_future_free(future) };

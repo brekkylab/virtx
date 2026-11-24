@@ -2,6 +2,7 @@
 
 use std::{
     ffi::c_void,
+    sync::{Mutex, OnceLock, PoisonError, mpsc},
     thread::{self, Thread},
 };
 
@@ -30,7 +31,30 @@ impl Waker {
         Waker(waker)
     }
 
+    /// Wakes it, and then releases it, on the library's one waking thread: a binding's `wake`
+    /// may block until its own thread runs it (koffi waits for Node's event loop, ctypes for
+    /// Python's lock), which on a runtime's thread would hold up every request that thread
+    /// drives. Without that thread, where it is woken.
     pub(super) fn wake(self) {
+        static WAKING: OnceLock<Option<Mutex<mpsc::Sender<Waker>>>> = OnceLock::new();
+        let waking = WAKING.get_or_init(|| {
+            let (sender, woken) = mpsc::channel::<Waker>();
+            thread::Builder::new()
+                .name("virtx-wake".into())
+                .spawn(move || woken.into_iter().for_each(Waker::wake_here))
+                .ok()
+                .map(|_| Mutex::new(sender))
+        });
+        let sent = match waking {
+            Some(sender) => sender.lock().unwrap_or_else(PoisonError::into_inner).send(self),
+            None => Err(mpsc::SendError(self)),
+        };
+        if let Err(mpsc::SendError(waker)) = sent {
+            waker.wake_here();
+        }
+    }
+
+    fn wake_here(self) {
         unsafe { (self.0.wake)(self.0.data) };
     }
 }
@@ -97,11 +121,20 @@ pub(super) mod testing {
             (self.wakes.load(SeqCst), self.releases.load(SeqCst))
         }
 
-        /// Until `wakes` reaches `n`, which a runtime thread does.
+        /// Until `wakes` reaches `n`, which the waking thread does.
         pub fn await_wakes(&self, n: usize) {
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.wakes.load(SeqCst) < n {
                 assert!(Instant::now() < deadline, "never woken");
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// Until the wakes and releases are `counts`, which the waking thread makes them.
+        pub fn await_counts(&self, counts: (usize, usize)) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self.get() != counts {
+                assert!(Instant::now() < deadline, "{:?}, not {counts:?}", self.get());
                 thread::sleep(Duration::from_millis(1));
             }
         }

@@ -671,6 +671,17 @@ pub(crate) fn spike_mark(what: &str) {
         if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
             let _ = writeln!(file, "{} {now} {what}", std::process::id());
         }
+    } else if CTRLOUT.get().is_some() {
+        // To the host, which times its start by them.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        let _ = send(&CtrlResp::Log {
+            level: "WARN".into(),
+            target: "spike-mark".into(),
+            message: format!("{now} {what}"),
+        });
     }
 }
 

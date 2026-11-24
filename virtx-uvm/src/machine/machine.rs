@@ -253,6 +253,18 @@ impl Machine {
     /// `main` when it is run so, and on macOS be signed with the
     /// `com.apple.security.hypervisor` entitlement.
     pub fn start(config: MachineConfig, cmd: &[OsString]) -> Result<Machine> {
+        let spike_t0 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        let spike_ms = |micros: u128| (micros.saturating_sub(spike_t0)) as f64 / 1000.0;
+        let spike_now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+        };
+        let mut spike_marks = Vec::new();
         let Some((program, cmd)) = cmd.split_first() else {
             return Err(Error::NoCommand);
         };
@@ -298,9 +310,11 @@ impl Machine {
             &mut command,
             windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP,
         );
+        let spike_before = spike_ms(spike_now());
         let mut process = command
             .spawn()
             .map_err(|e| Error::io("starting the machine's process", e))?;
+        spike_marks.push(format!("prepared={spike_before:.1} spawned={:.1}", spike_ms(spike_now())));
         // The process's now: held here too, they would keep the channels open past its end.
         drop((their_ctrlin, their_ctrlout, their_ioin, their_ioout));
 
@@ -309,6 +323,12 @@ impl Machine {
         loop {
             match wire::recv(&mut ctrlout).ok().flatten() {
                 Some(CtrlResp::Ready(published)) => {
+                    eprintln!(
+                        "spike start {}: {} ready={:.1}",
+                        process.id(),
+                        spike_marks.join(" "),
+                        spike_ms(spike_now())
+                    );
                     return Ok(Machine {
                         process: Mutex::new(process),
                         ctrlin: Mutex::new(ctrlin),
@@ -318,6 +338,15 @@ impl Machine {
                         held: None,
                         _sockets: sockets,
                     });
+                }
+                Some(CtrlResp::Log {
+                    target, message, ..
+                }) if target == "spike-mark" => {
+                    if let Some((at, what)) = message.split_once(' ')
+                        && let Ok(at) = at.parse::<u128>()
+                    {
+                        spike_marks.push(format!("[{what}]={:.1}", spike_ms(at)));
+                    }
                 }
                 Some(CtrlResp::Log {
                     target, message, ..

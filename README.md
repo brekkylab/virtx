@@ -27,7 +27,7 @@
 
 <br>
 
-virtx is a microVM sandbox for AI agents. It lets you run tasks in a disposable Linux VM from your own code, on your machine, on a server you run, or on virtx cloud.
+virtx is a microVM sandbox for AI agents. From your own code, it runs tasks in a disposable Linux VM on your machine, on a server you run, or on virtx cloud.
 
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
 Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a volume you kept.

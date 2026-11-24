@@ -199,6 +199,7 @@ pub(super) fn boot(
     ctrlin: File,
     io: (File, File),
 ) -> Result<Infallible> {
+    spike_mark("boot entered");
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
@@ -480,10 +481,12 @@ pub(super) fn boot(
         Some(dir) => vmm.restore(dir),
         None => vmm,
     };
+    spike_mark("build start");
     let vmm = vmm
         .prefault_memory(prefault_memory())
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
+    spike_mark("build done");
     let handle = vmm.handle().map_err(|e| Error::vmm("a handle on the machine", e))?;
     let _ = &restore;
 
@@ -519,6 +522,11 @@ pub(super) fn boot(
         let heard = Arc::clone(&heard);
         move || {
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
+                spike_mark(match &message {
+                    CtrlResp::Waiting => "guest waiting",
+                    CtrlResp::Ready(_) => "guest ready",
+                    _ => "guest said",
+                });
                 if let CtrlResp::Waiting = message {
                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     if let Some(dir) = &save {
@@ -585,6 +593,21 @@ pub(super) fn boot(
     let _held = holds;
     vmm.run();
     Err(Error::EventLoop)
+}
+
+/// Spike: `what`, with this process's id and the wall clock in microseconds, appended to
+/// `VIRTX_SPIKE_TRACE`.
+pub(crate) fn spike_mark(what: &str) {
+    use std::io::Write;
+    if let Some(path) = std::env::var_os("VIRTX_SPIKE_TRACE") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+            let _ = writeln!(file, "{} {now} {what}", std::process::id());
+        }
+    }
 }
 
 /// 64 bytes of the host's randomness, or none where it has none to read.
@@ -664,6 +687,10 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record) {
+        if record.target() == "spike" {
+            spike_mark(&record.args().to_string());
+            return;
+        }
         let message = record.args().to_string();
         // A terminal ends its lines with `\r\n`, and libkrun takes off only the `\n`.
         let message = match record.target() {

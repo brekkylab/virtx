@@ -3237,9 +3237,11 @@ async fn spike_snapshot(home: Home) {
     args.network = var("SPIKE_NET", 0) == 1;
     let at_once = var("SPIKE_AT_ONCE", 1) as usize;
     eprintln!("spike shape: {:?} MiB, {:?} vCPUs, network {}, {at_once} at once", args.memory_mib, args.vcpus, args.network);
-    let dir = home.root.join("snapshot");
+    let dir = env::var_os("SPIKE_SNAPDIR").map(PathBuf::from).unwrap_or_else(|| home.root.join("snapshot"));
     let rounds: usize = var("SPIKE_ROUNDS", 5) as usize;
+    let epoch_us = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
     for i in 0..rounds {
+        eprintln!("spike mark {} cold {i} create", epoch_us());
         let t = Instant::now();
         let sandbox = home.sandbox(&args, None).await;
         let made = t.elapsed();
@@ -3307,6 +3309,7 @@ async fn spike_snapshot(home: Home) {
         return;
     }
     for i in 0..rounds {
+        eprintln!("spike mark {} restore {i} create", epoch_us());
         let t = Instant::now();
         let made = home.making(&args, None, None).await;
         let made_in = t.elapsed();

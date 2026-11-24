@@ -39,3 +39,5 @@ A page is rendered twice, by the preview and by virtx.sh, so it uses only what b
 Add the file under `content/` and its entry to `sidebar.json`. A `slug` is the page's path under
 `content/` without the extension; a `link` is an address under `/docs/` (`"/"` is the overview).
 virtx.sh builds its sidebar and the page order of its llms.txt from the same file.
+A tutorial or guide is listed in `content/index.mdx` too, under its group's heading and in the
+sidebar's order, which the link check verifies.

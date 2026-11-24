@@ -612,8 +612,8 @@ index d13be75e..be9333ab 100644
          fw_range_for_mem,
 +        restoring.is_some(),
      )?;
-+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
 +    log::warn!(target: "spike", "libkrun: memory made");
++    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
 +    if let Some((dir, snapshot)) = &restoring {
 +        super::snapshot::map_memory(dir, &guest_memory, &snapshot.regions)
 +            .map_err(StartMicrovmError::Restore)?;

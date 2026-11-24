@@ -645,7 +645,7 @@ fn spike_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<std:
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     machine.spec.vcpus.hash(&mut hash);
     machine.spec.ram_mib.hash(&mut hash);
-    (machine.spec.network != Network::None || !machine.ports.is_empty()).hash(&mut hash);
+    (machine.spec.network || !machine.ports.is_empty()).hash(&mut hash);
     info.shares.hash(&mut hash);
     machine.rootfs.hash(&mut hash);
     std::fs::metadata(&machine.upper).ok()?.len().hash(&mut hash);

@@ -41,7 +41,7 @@ use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
     Activity, BuildError, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
     HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
-    MachineSpec, Network, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
+    MachineSpec, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
     RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
     UnknownSandbox, VolumeError, VolumeStore, build_step, park_after, signal_number,
 };
@@ -1152,7 +1152,7 @@ const BUILD_MACHINE: MachineSpec = MachineSpec {
     ram_mib: DEFAULT_MEMORY_MIB,
     gpu: false,
     gpu_memory_mib: None,
-    network: Network::Public,
+    network: true,
 };
 
 async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {

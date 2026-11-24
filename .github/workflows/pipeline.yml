@@ -334,9 +334,12 @@ jobs:
           targets: x86_64-unknown-linux-musl
           components: clippy, rustfmt
 
+      # choco ends 0 having installed nothing, as when its feed is down: pkg-config.exe is looked
+      # for after it, so the job ends here rather than in a build script.
       - name: Toolchain
         run: |
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
+          where.exe pkg-config.exe || { echo "::error::no pkg-config.exe: Chocolatey did not install it"; exit 1; }
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2.9.3
@@ -467,7 +470,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
-          where.exe pkg-config.exe
+          where.exe pkg-config.exe || { echo "::error::no pkg-config.exe: Chocolatey did not install it"; exit 1; }
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
       # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.

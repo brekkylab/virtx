@@ -17,9 +17,9 @@
 //! Once built, it is kept in `OUT_DIR` and not built again until this file changes. A build for
 //! the host uses CMake's own compilers, so the tests run there too.
 //!
-//! And the models the program reads a PDF with, each checked against the sha256 pinned here,
-//! into `OUT_DIR/install/.models/`: what is in `OUT_DIR/install` is what the program installs
-//! beside itself in `/abin`.
+//! And the models the program reads a PDF with, and the fonts a PDF's text without an embedded
+//! font is drawn in, each checked against the sha256 pinned here, into `OUT_DIR/install/.models/`:
+//! what is in `OUT_DIR/install` is what the program installs beside itself in `/abin`.
 
 use std::{
     env, fs,
@@ -93,6 +93,29 @@ const MODEL_FILES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The fonts a page is drawn in where a PDF names a font it does not embed, which is what the
+/// layout model sees: Liberation, metric-compatible with Arial, Times New Roman and Courier New,
+/// and DejaVu Sans, docling's last resort for symbols. Each goes under `.models/fonts/` in a
+/// directory of its own, with its licence: the archive by its sha256, and the members taken from
+/// it, their first component dropped.
+const FONTS: &[(&str, &str, &str, &[&str])] = &[
+    (
+        "liberation",
+        "https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz",
+        "7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0",
+        &["liberation-fonts-ttf-2.1.5"],
+    ),
+    (
+        "dejavu",
+        "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2",
+        "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7",
+        &[
+            "dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf",
+            "dejavu-fonts-ttf-2.37/LICENSE",
+        ],
+    ),
+];
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let target = env::var("TARGET").expect("cargo names the target");
@@ -135,6 +158,29 @@ fn main() {
             fs::copy(&fetched, &at).expect("placing a model");
         }
     }
+    for (dir, url, sha256, members) in FONTS {
+        let at = models.join("fonts").join(dir);
+        if at.exists() {
+            continue;
+        }
+        let fetched = fetch(&out, url, |data| {
+            format!("{:x}", Sha256::digest(data)) == *sha256
+        });
+        // Unpacked under another name and renamed whole, as `fetch` does.
+        let part = at.with_extension("part");
+        if part.exists() {
+            fs::remove_dir_all(&part).expect("removing an unpacking cut off");
+        }
+        fs::create_dir_all(&part).expect("making .models/fonts");
+        run(Command::new("tar")
+            .arg("-xf")
+            .arg(&fetched)
+            .arg("-C")
+            .arg(&part)
+            .arg("--strip-components=1")
+            .args(*members));
+        fs::rename(&part, &at).expect("placing the fonts");
+    }
 
     if !fresh {
         if !source.join("cmake/deps.txt").exists() {
@@ -151,7 +197,7 @@ fn main() {
         }
         let protoc = protoc(&out, &source, &host);
 
-        let mut configure = Command::new("cmake");
+        let mut configure = cmake();
         configure
             .arg("-S")
             .arg(source.join("cmake"))
@@ -166,6 +212,10 @@ fn main() {
                 "-Donnxruntime_ENABLE_PYTHON=OFF",
                 "-Donnxruntime_BUILD_BENCHMARKS=OFF",
                 "-DFETCHCONTENT_QUIET=ON",
+                // Its dependencies are the ones `deps.txt` pins, never the host's: a Homebrew
+                // protobuf found by `find_package` generates headers the fetched runtime does
+                // not match.
+                "-DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER",
             ])
             .arg(format!(
                 "-DONNX_CUSTOM_PROTOC_EXECUTABLE={}",
@@ -173,18 +223,19 @@ fn main() {
             ));
         if musl {
             alpine_sysroot(&sysroot, &arch);
-            // The host's clang, which cross-compiles already, given Alpine's triple: the C++
+            // The system's clang, which cross-compiles already, given Alpine's triple: the C++
             // headers are the GCC installation's under `usr/lib/gcc/<arch>-alpine-linux-musl/`,
             // and clang finds their target-specific half only under the triple they were
-            // installed as.
+            // installed as. The system's, as `musl-cc.sh` takes, not the first on `PATH`: a
+            // Homebrew LLVM's own libc++ headers would win over the sysroot's libstdc++.
             let triple = format!("{arch}-alpine-linux-musl");
             configure
                 .args([
                     "-DCMAKE_SYSTEM_NAME=Linux".to_owned(),
                     format!("-DCMAKE_SYSTEM_PROCESSOR={arch}"),
-                    "-DCMAKE_C_COMPILER=clang".to_owned(),
-                    "-DCMAKE_CXX_COMPILER=clang++".to_owned(),
-                    "-DCMAKE_ASM_COMPILER=clang".to_owned(),
+                    "-DCMAKE_C_COMPILER=/usr/bin/clang".to_owned(),
+                    "-DCMAKE_CXX_COMPILER=/usr/bin/clang++".to_owned(),
+                    "-DCMAKE_ASM_COMPILER=/usr/bin/clang".to_owned(),
                     format!("-DCMAKE_C_COMPILER_TARGET={triple}"),
                     format!("-DCMAKE_CXX_COMPILER_TARGET={triple}"),
                     // MLAS's kernels are assembly, and without the triple they are Mach-O.
@@ -212,7 +263,7 @@ fn main() {
         // `all` leaves out the session library and re2, which only the shared library and the
         // tests depend on, and this links in place of both.
         let jobs = env::var("NUM_JOBS").unwrap_or_else(|_| "1".into());
-        run(Command::new("cmake").arg("--build").arg(&build).args([
+        run(cmake().arg("--build").arg(&build).args([
             "--parallel",
             &jobs,
             "--target",
@@ -402,6 +453,16 @@ fn link_static(path: &Path) {
     let dir = path.parent().expect("an archive in a directory");
     println!("cargo:rustc-link-search=native={}", dir.display());
     println!("cargo:rustc-link-lib=static={name}");
+}
+
+/// CMake, without the shell's compiler flags: a `CXXFLAGS=-stdlib=libc++` meant for the host
+/// would reach every compile, the musl target's included.
+fn cmake() -> Command {
+    let mut cmake = Command::new("cmake");
+    for flags in ["CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "ASMFLAGS"] {
+        cmake.env_remove(flags);
+    }
+    cmake
 }
 
 /// `command`, run to success.

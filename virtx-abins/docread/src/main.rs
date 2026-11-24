@@ -12,7 +12,8 @@
 //!
 //! A PDF is read through docling's models (`--pipeline standard`, the default), on the ONNX
 //! Runtime `build.rs` links in: the layout model finds the headings, tables and pictures on a
-//! page, and TableFormer a table's cells. The models are files in `.models/` beside the program.
+//! page, and TableFormer a table's cells. The models, and the fonts a page is drawn in, are files
+//! in `.models/` beside the program.
 //! `--pipeline native` reads the text layer alone. There is no OCR, so a scanned PDF has no text.
 //!
 //! Source code is refused, being text already (a `.txt` docling reads as Markdown); so are
@@ -50,6 +51,9 @@ const MAX_FILE_BYTES: u64 = 128 << 20;
                   text and DocLang.\n\n\
                   Uses docling inside, and its ML models where a file's structure has to be \
                   found, as in a PDF. There is no OCR: a scanned PDF has no text.\n\n\
+                  Reading a PDF with the models takes up to about 2 GiB of memory, and a \
+                  sandbox with less kills docread with exit code 137 and no message. \
+                  --pipeline native needs far less.\n\n\
                   One document in one format goes to stdout; more need --output.",
     long_about = None,
     arg_required_else_help = true
@@ -391,7 +395,45 @@ fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
+/// The models and fonts in `.models/` beside this program, named to docling by its own variables
+/// for them, and every other `DOCLING_*` variable dropped: docling otherwise looks in the working
+/// directory first and takes what the environment says, so what a document reads as would follow
+/// wherever and however `docread` is run, not its command line.
+fn use_models_beside_me() {
+    let models = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map(|exe| exe.with_file_name(".models"))
+        .unwrap_or_else(|_| PathBuf::from(".models"));
+    let docling: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_string_lossy().starts_with("DOCLING_"))
+        .collect();
+    let set = [
+        ("DOCLING_LAYOUT_ONNX", "layout_heron_int8.onnx"),
+        (
+            "DOCLING_TABLEFORMER_ENCODER",
+            "tableformer/encoder_fp16.onnx",
+        ),
+        ("DOCLING_TABLEFORMER_DECODER", "tableformer/decoder_kv.onnx"),
+        ("DOCLING_TABLEFORMER_BBOX", "tableformer/bbox.onnx"),
+        ("DOCLING_RS_FONT_DIRS", "fonts"),
+    ];
+    // SAFETY: called first in `main`, before anything has started another thread.
+    unsafe {
+        for name in docling {
+            std::env::remove_var(name);
+        }
+        for (name, file) in set {
+            std::env::set_var(name, models.join(file));
+        }
+        // The page image is the layout model's input: drawn in the fonts beside the program
+        // alone, it is the same on every machine.
+        std::env::set_var("DOCLING_RS_SYSTEM_FONTS", "0");
+    }
+}
+
 fn main() -> ExitCode {
+    use_models_beside_me();
     let (stdout, failed) = match run(&Cli::parse()) {
         Ok(done) => done,
         Err(said) => {

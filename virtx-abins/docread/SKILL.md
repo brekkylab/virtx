@@ -44,4 +44,6 @@ Reads PDF, Word, PowerPoint, Excel, OpenDocument, RTF, HTML, Markdown, AsciiDoc,
 
 Uses docling inside, and its ML models where a file's structure has to be found, as in a PDF. There is no OCR: a scanned PDF has no text.
 
+Reading a PDF with the models takes up to about 2 GiB of memory, and a sandbox with less kills docread with exit code 137 and no message. --pipeline native needs far less.
+
 One document in one format goes to stdout; more need --output.

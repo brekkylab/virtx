@@ -33,8 +33,8 @@ use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_dis
 use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
     Admission, DEFAULT_DISK_GIB, Files, ImageStore, Machine, MachineConfig, MachineError,
-    MachineSpec, Network, NoRoom, Reference, RegistryClient, Room, Sandbox, SandboxError,
-    SandboxJob, StorageBackend, VolumeError, VolumeMount, VolumeStore,
+    MachineSpec, NoRoom, Reference, RegistryClient, Room, Sandbox, SandboxError, SandboxJob,
+    StorageBackend, VolumeError, VolumeMount, VolumeStore,
 };
 
 /// What this binary is spawned with to be a machine.
@@ -2227,7 +2227,7 @@ async fn a_machine_that_did_not_start_tells_why_without_this_host_s_paths(home: 
             ram_mib: 512,
             gpu: false,
             gpu_memory_mib: None,
-            network: Network::None,
+            network: false,
         },
         volumes: vec![VolumeMount {
             path: volume.path().to_path_buf(),

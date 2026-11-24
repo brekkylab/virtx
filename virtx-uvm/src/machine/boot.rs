@@ -431,11 +431,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     if machine.spec.network != Network::None || !published.is_empty() {
         devices.add(net::attach(
             machine.spec.network,
-            machine.spec.egress_limits,
+            machine.spec.outward.clone().unwrap_or_default(),
             published,
-            |outbound| {
-                let _ = send(&CtrlResp::Outbound(outbound));
-            },
         )?);
     }
 
@@ -566,6 +563,12 @@ pub(super) unsafe fn hold(ctrlin: u64, ctrlout: u64) -> File {
         log::set_max_level(log::LevelFilter::Warn);
     }
     ctrlin
+}
+
+/// Tell the host what the embedder's code in this process told it: lost where it is not a
+/// machine's process.
+pub(crate) fn tell_host(message: serde_json::Value) {
+    let _ = send(&CtrlResp::Told(message));
 }
 
 /// Tell the host `message`.

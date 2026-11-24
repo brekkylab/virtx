@@ -18,7 +18,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -140,50 +140,9 @@ pub enum CtrlResp {
     },
     /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
     Pong,
-    /// A flow the guest opened to the internet, or was refused: said by the machine's process
-    /// of a machine on a public network, never by the agent.
-    Outbound(Outbound),
-}
-
-/// A flow a guest opened to the internet, or was refused.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Outbound {
-    pub at: SystemTime,
-    pub protocol: Protocol,
-    pub to: SocketAddr,
-    /// Why it was refused, and how many were refused so since the last of them said; none for
-    /// one let through.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refused: Option<Refused>,
-}
-
-/// What an [`Outbound`] flow is: a stream's connection, said once each, or a datagram
-/// socket's destination, said once each a minute however many datagrams go there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Protocol {
-    Tcp,
-    Udp,
-}
-
-/// Why flows were refused, and how many were since the last [`Outbound`] that said so: at
-/// most one a second says each reason.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Refused {
-    pub why: Refusal,
-    pub count: u32,
-}
-
-/// Why a flow was refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Refusal {
-    /// To SMTP's port 25, which no machine on a public network reaches.
-    Port,
-    /// Past the connections a second its machine may open.
-    Rate,
-    /// To an address past the distinct ones a minute its machine may reach.
-    Destinations,
+    /// What the embedder's code in the machine's process told its server: said by the
+    /// machine's process, never by the agent.
+    Told(serde_json::Value),
 }
 
 /// What became of a [`Stdin`](CtrlReq::Stdin) write, in its [`Written`](CtrlResp::Written).

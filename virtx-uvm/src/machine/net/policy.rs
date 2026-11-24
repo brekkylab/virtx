@@ -45,15 +45,6 @@
 //! **Its own published ports are the guest's under any of them**, [`None`](Network::None)
 //! included: they are in the machine, and reaching them leaves nothing.
 //!
-//! # What leaves for the internet, counted and said
-//!
-//! Under [`Public`](Network::Public), each flow to the internet -- a stream's `connect`, or a
-//! datagram socket's first destination in a minute -- is reported ([`Outbound`]) to the server
-//! that started the machine, which is the only record of which machine opened it: off the
-//! host, every machine's flows are the host's. Flows past the [`EgressLimits`] the server set
-//! are refused, as are flows to port 25, and the refusals are reported too, at most one a
-//! second for each reason with how many there were.
-//!
 //! # A published port, listened on
 //! A guest's `listen` on a port that was published is carried to this host's loopback at a
 //! port of this host's choosing, which [`relay`](super::relay) connects to. Kept per console
@@ -67,27 +58,12 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
 
-use super::{EgressLimits, NAMESERVER, Network};
-use crate::machine::wire::{Outbound, Protocol, Refusal, Refused};
+use super::{NAMESERVER, Network};
+use crate::outward::Outward;
 
 /// The DNS port, the one [`NAMESERVER`] answers on.
 const DNS_PORT: u16 = 53;
-
-/// SMTP's port between servers, which a machine on a public network never reaches: mail sent
-/// from a shared address is how that address is blocklisted for everyone behind it.
-const SMTP_PORT: u16 = 25;
-
-/// How long a destination counts toward [`EgressLimits::destinations_per_minute`], and how long
-/// a datagram destination, once reported, is not again.
-const MINUTE: Duration = Duration::from_secs(60);
-
-/// How often refusals for one reason are reported at most.
-const REFUSALS_EVERY: Duration = Duration::from_secs(1);
-
-/// Where a machine's [`Outbound`] flows are reported.
-pub(crate) type Report = Arc<dyn Fn(Outbound) + Send + Sync>;
 
 /// Everything a guest's request is judged by: where it may go, where names go, and which
 /// console ports are published.
@@ -111,84 +87,9 @@ pub(crate) struct Policy {
     /// [`relay`](super::relay) -- for a guest reaching its own port over v4.
     relays: HashMap<u16, SocketAddr>,
 
-    /// What flows to the internet it may open; none is no limit.
-    limits: Option<EgressLimits>,
-
-    /// Where its flows to the internet are reported; none reports nothing.
-    report: Option<Report>,
-
-    /// What it has opened and been refused lately, as the limits count it.
-    meter: Mutex<Meter>,
-}
-
-/// A machine's recent flows to the internet, as its [`EgressLimits`] count them.
-struct Meter {
-    /// The connections it may open now: one more every `1 / connects_per_second` seconds, up
-    /// to a second's worth.
-    tokens: f64,
-    filled: Option<Instant>,
-    /// Each address it reached in the last minute, by when it last did.
-    destinations: HashMap<IpAddr, Instant>,
-    /// Each datagram destination reported in the last minute, by when it was.
-    datagrams: HashMap<SocketAddr, Instant>,
-    /// When what is a minute old was last let go of.
-    pruned: Option<Instant>,
-    /// Each reason flows were refused for: how many since it was last reported, and when that
-    /// was.
-    refused: HashMap<Refusal, (u32, Option<Instant>)>,
-}
-
-impl Meter {
-    fn new() -> Self {
-        Meter {
-            tokens: 0.0,
-            filled: None,
-            destinations: HashMap::new(),
-            datagrams: HashMap::new(),
-            pruned: None,
-            refused: HashMap::new(),
-        }
-    }
-
-    /// Whatever is a minute old let go of, at most once a second.
-    fn prune(&mut self, now: Instant) {
-        if self.pruned.is_some_and(|at| now - at < REFUSALS_EVERY) {
-            return;
-        }
-        self.pruned = Some(now);
-        self.destinations.retain(|_, at| now - *at < MINUTE);
-        self.datagrams.retain(|_, at| now - *at < MINUTE);
-    }
-
-    /// Why a new flow to `to` is refused under `limits`, or none, the flow then counted.
-    fn admit(&mut self, to: IpAddr, limits: EgressLimits, now: Instant) -> Option<Refusal> {
-        let rate = f64::from(limits.connects_per_second);
-        let since = self.filled.map_or(1.0, |at| (now - at).as_secs_f64());
-        self.tokens = (self.tokens + since * rate).min(rate);
-        self.filled = Some(now);
-        if self.tokens < 1.0 {
-            return Some(Refusal::Rate);
-        }
-        if !self.destinations.contains_key(&to)
-            && self.destinations.len() >= limits.destinations_per_minute as usize
-        {
-            return Some(Refusal::Destinations);
-        }
-        self.tokens -= 1.0;
-        None
-    }
-
-    /// One more refused for `why`: the count to report now, which starts the count again, or
-    /// none while the last report of it is under a second old.
-    fn refused(&mut self, why: Refusal, now: Instant) -> Option<u32> {
-        let (count, at) = self.refused.entry(why).or_default();
-        *count += 1;
-        if at.is_some_and(|at| now - at < REFUSALS_EVERY) {
-            return None;
-        }
-        *at = Some(now);
-        Some(std::mem::take(count))
-    }
+    /// The embedder's say on each flow to the internet under [`Public`](Network::Public), and
+    /// what it was given for this machine.
+    outward: Option<(Arc<dyn Outward>, serde_json::Value)>,
 }
 
 /// Where on this host's loopback a guest's listeners on one console port are, in each
@@ -225,61 +126,19 @@ impl Policy {
             published: published.into_iter().collect(),
             listening: Mutex::new(HashMap::new()),
             relays: HashMap::new(),
-            limits: None,
-            report: None,
-            meter: Mutex::new(Meter::new()),
+            outward: None,
         }
     }
 
-    /// Its flows to the internet held to `limits`, where there are any, and reported to
-    /// `report`: what [`Public`](Network::Public) does with them, and nothing else does.
-    pub(crate) fn with_egress(mut self, limits: Option<EgressLimits>, report: Report) -> Self {
-        self.limits = limits;
-        self.report = Some(report);
+    /// Each flow to the internet under [`Public`](Network::Public) put to `outward`, with
+    /// `given`.
+    pub(crate) fn with_outward(
+        mut self,
+        outward: Arc<dyn Outward>,
+        given: serde_json::Value,
+    ) -> Self {
+        self.outward = Some((outward, given));
         self
-    }
-
-    /// Where a flow to `to`, which the internet routes, goes at `now`: there, or refused for
-    /// port 25 or past its limits. Reported either way, as the module says.
-    fn outward(&self, to: SocketAddr, protocol: Protocol, now: Instant) -> Option<SocketAddr> {
-        let ip = to.ip().to_canonical();
-        let (answer, refused) = {
-            let mut meter = self.meter.lock().unwrap();
-            meter.prune(now);
-            let why = match self.limits {
-                _ if to.port() == SMTP_PORT => Some(Refusal::Port),
-                // A datagram destination reported in the last minute is no new flow.
-                _ if protocol == Protocol::Udp && meter.datagrams.contains_key(&to) => {
-                    meter.destinations.insert(ip, now);
-                    return Some(to);
-                }
-                Some(limits) => meter.admit(ip, limits, now),
-                None => None,
-            };
-            match why {
-                Some(why) => (None, meter.refused(why, now).map(|count| (why, count))),
-                None => {
-                    if self.limits.is_some() {
-                        meter.destinations.insert(ip, now);
-                    }
-                    if protocol == Protocol::Udp {
-                        meter.datagrams.insert(to, now);
-                    }
-                    (Some(to), None)
-                }
-            }
-        };
-        if let Some(report) = &self.report
-            && (answer.is_some() || refused.is_some())
-        {
-            report(Outbound {
-                at: SystemTime::now(),
-                protocol,
-                to,
-                refused: refused.map(|(why, count)| Refused { why, count }),
-            });
-        }
-        answer
     }
 
     /// Say where each published console port's relay listens, so a guest's own v4 `connect`
@@ -323,10 +182,10 @@ impl Policy {
         listening.entry(console).or_default().set(family, port);
         Some(port)
     }
+}
 
-    /// Where a guest's request for `to` goes, a stream's or a datagram socket's: see the
-    /// module's table.
-    fn to(&self, to: SocketAddr, protocol: Protocol) -> Option<SocketAddr> {
+impl krun::TsiPolicy for Policy {
+    fn connect(&self, to: SocketAddr) -> Option<SocketAddr> {
         let ip = to.ip().to_canonical();
         if ip == IpAddr::V4(NAMESERVER) {
             return (self.network != Network::None && to.port() == DNS_PORT)
@@ -369,19 +228,11 @@ impl Policy {
         match self.network {
             Network::None => None,
             Network::Host => Some(to),
-            Network::Public if routed(ip) => self.outward(to, protocol, Instant::now()),
-            Network::Public => None,
+            Network::Public => (routed(ip)
+                && (self.outward.as_ref())
+                    .is_none_or(|(outward, given)| outward.outward(given, to)))
+            .then_some(to),
         }
-    }
-}
-
-impl krun::TsiPolicy for Policy {
-    fn connect(&self, to: SocketAddr) -> Option<SocketAddr> {
-        self.to(to, Protocol::Tcp)
-    }
-
-    fn datagram(&self, to: SocketAddr) -> Option<SocketAddr> {
-        self.to(to, Protocol::Udp)
     }
 
     fn listen(&self, at: SocketAddr) -> Option<SocketAddr> {
@@ -621,144 +472,40 @@ mod tests {
         );
     }
 
-    /// A policy under `Public`, held to `limits`, and what it reports.
-    fn reporting(limits: Option<EgressLimits>) -> (Policy, Arc<Mutex<Vec<Outbound>>>) {
-        let reports = Arc::new(Mutex::new(Vec::new()));
-        let kept = Arc::clone(&reports);
-        let policy = Policy::new(Network::Public, None, [80]).with_egress(
-            limits,
-            Arc::new(move |outbound| kept.lock().unwrap().push(outbound)),
-        );
-        (policy, reports)
-    }
+    /// What an embedder's `Outward` was asked: what it was given, and where to.
+    struct Asked(Mutex<Vec<(serde_json::Value, SocketAddr)>>);
 
-    /// A report: where to, how, and why refused if it was.
-    type Reported = (SocketAddr, Protocol, Option<(Refusal, u32)>);
-
-    /// What was reported since this was last asked.
-    fn taken(reports: &Mutex<Vec<Outbound>>) -> Vec<Reported> {
-        let reports = std::mem::take(&mut *reports.lock().unwrap());
-        (reports.into_iter())
-            .map(|o| (o.to, o.protocol, o.refused.map(|r| (r.why, r.count))))
-            .collect()
-    }
-
-    /// Each stream to the internet is reported, and each datagram destination once a minute;
-    /// what is not the internet's -- loopback, the resolver, private addresses -- is not.
-    #[test]
-    fn each_flow_to_the_internet_is_reported_and_nothing_else_is() {
-        let (policy, reports) = reporting(None);
-        let other = at(Ipv4Addr::new(1, 1, 1, 1), 53);
-        assert_eq!(policy.connect(PUBLIC), Some(PUBLIC));
-        assert_eq!(policy.connect(PUBLIC), Some(PUBLIC));
-        assert_eq!(policy.datagram(other), Some(other));
-        assert_eq!(policy.datagram(other), Some(other));
-        policy.connect(at(Ipv4Addr::LOCALHOST, 8080));
-        policy.connect(at(Ipv4Addr::new(10, 0, 0, 1), 80));
-        policy.datagram(at(NAMESERVER, 53));
-        assert_eq!(
-            taken(&reports),
-            [
-                (PUBLIC, Protocol::Tcp, None),
-                (PUBLIC, Protocol::Tcp, None),
-                (other, Protocol::Udp, None),
-            ]
-        );
-        // A minute on, a datagram destination is a new flow again.
-        let later = Instant::now() + MINUTE + REFUSALS_EVERY;
-        assert_eq!(policy.outward(other, Protocol::Udp, later), Some(other));
-        assert_eq!(taken(&reports), [(other, Protocol::Udp, None)]);
-    }
-
-    /// Nothing reaches port 25 on the internet, and the refusals are reported, at most one a
-    /// second with how many there were.
-    #[test]
-    fn port_25_is_refused_and_its_refusals_counted() {
-        let (policy, reports) = reporting(None);
-        let smtp = at(Ipv4Addr::new(142, 250, 0, 26), 25);
-        let now = Instant::now();
-        for _ in 0..3 {
-            assert_eq!(policy.outward(smtp, Protocol::Tcp, now), None);
+    impl Outward for Asked {
+        fn outward(&self, given: &serde_json::Value, to: SocketAddr) -> bool {
+            self.0.lock().unwrap().push((given.clone(), to));
+            to.port() != 25
         }
+    }
+
+    /// Under `Public`, the embedder says whether each flow to the internet goes, with what it
+    /// was given; nothing else is put to it, nor anything under `Host`.
+    #[test]
+    fn the_embedder_decides_each_flow_to_the_internet_and_nothing_else() {
+        let asked = Arc::new(Asked(Mutex::new(Vec::new())));
+        let given = serde_json::json!({ "sandbox": "a" });
+        let resolver = Ipv4Addr::new(192, 168, 1, 1);
+        let policy = Policy::new(Network::Public, Some(resolver), [80])
+            .with_outward(asked.clone(), given.clone());
+        let smtp = at(Ipv4Addr::new(142, 250, 0, 26), 25);
+        assert_eq!(policy.connect(PUBLIC), Some(PUBLIC));
+        assert_eq!(policy.connect(smtp), None);
+        assert_eq!(policy.connect(at(NAMESERVER, 53)), Some(at(resolver, 53)));
+        assert_eq!(policy.connect(at(Ipv4Addr::new(10, 0, 0, 1), 80)), None);
+        assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 8080)), None);
+        let here = policy.listen(at(Ipv4Addr::UNSPECIFIED, 80)).unwrap();
+        assert_eq!(policy.connect(at(Ipv4Addr::LOCALHOST, 80)), Some(here));
         assert_eq!(
-            policy.outward(smtp, Protocol::Tcp, now + REFUSALS_EVERY),
-            None
+            *asked.0.lock().unwrap(),
+            [(given.clone(), PUBLIC), (given.clone(), smtp)]
         );
-        assert_eq!(
-            taken(&reports),
-            [
-                (smtp, Protocol::Tcp, Some((Refusal::Port, 1))),
-                (smtp, Protocol::Tcp, Some((Refusal::Port, 3))),
-            ]
-        );
-        // Off the internet, port 25 is as any other port is under a network.
-        let host = Policy::new(Network::Host, None, []);
+
+        let host = Policy::new(Network::Host, None, []).with_outward(asked.clone(), given);
         assert_eq!(host.connect(smtp), Some(smtp));
-    }
-
-    /// Past its connections a second, a new flow is refused until the second's worth comes
-    /// back; a datagram destination already reported is no new flow.
-    #[test]
-    fn past_its_rate_a_new_flow_is_refused() {
-        let limits = EgressLimits {
-            connects_per_second: 2,
-            destinations_per_minute: 100,
-        };
-        let (policy, reports) = reporting(Some(limits));
-        let dns = at(Ipv4Addr::new(1, 1, 1, 1), 53);
-        let now = Instant::now();
-        assert_eq!(policy.outward(PUBLIC, Protocol::Tcp, now), Some(PUBLIC));
-        assert_eq!(policy.outward(dns, Protocol::Udp, now), Some(dns));
-        assert_eq!(policy.outward(PUBLIC, Protocol::Tcp, now), None);
-        assert_eq!(policy.outward(PUBLIC, Protocol::Tcp, now), None);
-        assert_eq!(policy.outward(dns, Protocol::Udp, now), Some(dns));
-        let second = now + Duration::from_secs(1);
-        assert_eq!(policy.outward(PUBLIC, Protocol::Tcp, second), Some(PUBLIC));
-        assert_eq!(policy.outward(PUBLIC, Protocol::Tcp, second), Some(PUBLIC));
-        assert_eq!(policy.outward(PUBLIC, Protocol::Tcp, second), None);
-        assert_eq!(
-            taken(&reports),
-            [
-                (PUBLIC, Protocol::Tcp, None),
-                (dns, Protocol::Udp, None),
-                (PUBLIC, Protocol::Tcp, Some((Refusal::Rate, 1))),
-                (PUBLIC, Protocol::Tcp, None),
-                (PUBLIC, Protocol::Tcp, None),
-                (PUBLIC, Protocol::Tcp, Some((Refusal::Rate, 2))),
-            ]
-        );
-    }
-
-    /// Past its distinct addresses a minute, a new address is refused and one reached already
-    /// is reached again; a minute on, the new one is reached.
-    #[test]
-    fn past_its_destinations_a_new_address_is_refused() {
-        let limits = EgressLimits {
-            connects_per_second: 100,
-            destinations_per_minute: 2,
-        };
-        let (policy, reports) = reporting(Some(limits));
-        let [a, b, c] = [1, 2, 3].map(|last| at(Ipv4Addr::new(93, 184, 215, last), 443));
-        let now = Instant::now();
-        assert_eq!(policy.outward(a, Protocol::Tcp, now), Some(a));
-        assert_eq!(policy.outward(b, Protocol::Tcp, now), Some(b));
-        assert_eq!(policy.outward(c, Protocol::Tcp, now), None);
-        let other_port = at(a.ip(), 80);
-        assert_eq!(
-            policy.outward(other_port, Protocol::Tcp, now),
-            Some(other_port)
-        );
-        let later = now + MINUTE + REFUSALS_EVERY;
-        assert_eq!(policy.outward(c, Protocol::Tcp, later), Some(c));
-        assert_eq!(
-            taken(&reports),
-            [
-                (a, Protocol::Tcp, None),
-                (b, Protocol::Tcp, None),
-                (c, Protocol::Tcp, Some((Refusal::Destinations, 1))),
-                (other_port, Protocol::Tcp, None),
-                (c, Protocol::Tcp, None),
-            ]
-        );
+        assert_eq!(asked.0.lock().unwrap().len(), 2, "not asked under Host");
     }
 }

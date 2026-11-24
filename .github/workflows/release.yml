@@ -35,10 +35,11 @@ jobs:
       contents: read
       actions: read
 
-  # What each platform packed and tried, and `@brekkylab/virtx`, packed once here for all of
-  # them: it names every platform's package and carries no library of its own. Every
-  # platform's files are counted in, so a platform that handed nothing on fails here rather
-  # than leaving the release without it. Handed on as `bundle`, with its SHA256SUMS.
+  # What each platform built and tried (`packages-<platform>`), `@brekkylab/virtx` among it:
+  # every platform packs it alike, since it names every platform's package and carries no
+  # library of its own, and the release takes Linux x86_64's. Every platform's files are
+  # counted in, so a platform that handed nothing on fails here rather than leaving the release
+  # without it. Handed on as `bundle`, with its SHA256SUMS.
   bundle:
     needs: pipeline
     runs-on: ubuntu-26.04
@@ -46,29 +47,27 @@ jobs:
     env:
       VERSION: ${{ needs.pipeline.outputs.version }}
     steps:
-      - uses: actions/checkout@v7.0.1
-
-      # npm 11's: npm 10 runs `prepare` in `npm pack --ignore-scripts` too.
-      - uses: actions/setup-node@v7.1.0
-        with:
-          node-version: 24
-
       - uses: actions/download-artifact@v8.0.2
         with:
-          pattern: release-*
-          path: dist/release
-          merge-multiple: true
-
-      # As `packages` packs it: the repository's README and LICENSE copied in, its scripts not run.
-      - name: "@brekkylab/virtx"
-        run: |
-          cp README.md LICENSE virtx-node/
-          (cd virtx-node && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/dist/release")
-          tar -xzOf "dist/release/brekkylab-virtx-$VERSION.tgz" package/package.json
+          pattern: packages-*
+          path: platforms
 
       - name: Every platform's files
-        working-directory: dist/release
         run: |
+          mkdir -p dist/release
+          for platform in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc; do
+            from="platforms/packages-$platform"
+            [ -d "$from" ] || { echo "::error::no packages-$platform"; fail=1; continue; }
+            find "$from" -type f ! -name "brekkylab-virtx-$VERSION.tgz" -exec cp -v {} dist/release/ \;
+          done
+          meta="platforms/packages-linux-x64-gnu/brekkylab-virtx-$VERSION.tgz"
+          if [ -f "$meta" ]; then
+            cp -v "$meta" dist/release/
+            tar -xzOf "$meta" package/package.json
+          else
+            echo "::error::no @brekkylab/virtx"; fail=1
+          fi
+          cd dist/release
           for platform in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc; do
             [ -f "brekkylab-virtx-$platform-$VERSION.tgz" ] || { echo "::error::no $platform npm package"; fail=1; }
           done

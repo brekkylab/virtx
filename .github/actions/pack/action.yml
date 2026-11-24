@@ -1,13 +1,15 @@
-# One platform's wheel and npm package, built from `virtx-cabi` by the packages' own tools:
-# setuptools-rust builds the wheel (`virtx-py/pyproject.toml`), which on Linux auditwheel tags
-# manylinux_2_28 and holds to that glibc; napi builds the library into the platform's package,
-# which `napi create-npm-dirs` writes from `virtx-node/package.json`, and npm packs it. Both
-# build in `release` for `target`, beside `cargo xtask build client`'s build of it.
+# Every package a platform's build gives, built from `virtx-cabi` by the packages' own tools,
+# and the one place they are built: setuptools-rust builds the wheel (`virtx-py/pyproject.toml`),
+# which on Linux auditwheel tags manylinux_2_28 and holds to that glibc; napi builds the library
+# into the platform's npm package, which `napi create-npm-dirs` writes from
+# `virtx-node/package.json`, and npm packs it. Both build in `release` for `target`, beside
+# `cargo xtask build client`'s build of it. `@brekkylab/virtx` itself, which names every
+# platform's package and carries no library, is packed beside them, the same on every platform.
 #
 # Python is the runner's on Linux, where the job runs in a manylinux image; set up here
-# elsewhere. `@brekkylab/virtx` itself is packed where it is installed from: see `packages`.
+# elsewhere.
 name: pack
-description: Build this platform's wheel and npm package into a directory.
+description: Build this platform's wheel and npm package, and @brekkylab/virtx, into a directory.
 
 inputs:
   platform:
@@ -23,6 +25,8 @@ inputs:
 runs:
   using: composite
   steps:
+    # npm 11's: npm 10 runs `prepare`, which builds the library from source, in `npm pack
+    # --ignore-scripts` too.
     - uses: actions/setup-node@v7.1.0
       with:
         node-version: 24
@@ -60,3 +64,13 @@ runs:
         npx napi build --platform --release --no-js --target "$TARGET" \
           --manifest-path ../virtx-cabi/Cargo.toml --output-dir "npm/$PLATFORM"
         npm pack "./npm/$PLATFORM" --pack-destination "$GITHUB_WORKSPACE/$OUT"
+
+    # npm packs only what is in `virtx-node/`, so the repository's README and LICENSE are
+    # copied in; its scripts, which build the library from source, are not run.
+    - name: "@brekkylab/virtx"
+      shell: bash
+      env:
+        OUT: ${{ inputs.out }}
+      run: |
+        cp README.md LICENSE virtx-node/
+        (cd virtx-node && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/$OUT")

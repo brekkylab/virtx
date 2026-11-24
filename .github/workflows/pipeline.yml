@@ -20,10 +20,13 @@
 #   has ended.
 #
 #   and, in a full run:
-#   build + packages (macos-aarch64,      guest         server, library, packages and their smoke,
-#     windows-x86_64)                                   in one job; macOS' clippy too
+#   build (macos-aarch64,                 guest         server, library and packages; macOS' clippy
+#     windows-x86_64)                                   too
 #   build (linux-x86_64, linux-aarch64)   guest         server, library and packages, in manylinux_2_28
-#   packages (linux-x86_64, -aarch64)     its build     the packages' smoke, on ubuntu-22.04
+#   packages (each platform)              its build     the packages' smoke, on a runner of their
+#                                                       own (`packages.yml`)
+#
+#   Every package is built by `.github/actions/pack`, the one place they are built.
 #
 # macOS has no lint or tests of its own: no runner here can boot a machine on it, and the
 # machines virtx is written on are Macs.
@@ -32,19 +35,19 @@
 # artifacts of the run: the guest parts, which only Linux can build (its kernel is built in a
 # Linux container, which neither macOS's runners, without Docker, nor Windows', with Windows
 # containers, can run; abin's C is cross-compiled by a shell script, and alib is built in a
-# container of each C library's image), and a Linux
-# platform's build, which is made in a container and tried on the runner below its glibc. A
-# cache only ever saves time here: a miss builds the thing again.
+# container of each C library's image), and each platform's build, `packages-<platform>`, which
+# is tried as a user installs it on a runner that did not build it -- a Linux one's below its
+# glibc. A cache only ever saves time here: a miss builds the thing again.
 #
-# For a release (`release: true`, with `full`) each platform's job also hands on what it packed
-# and tried -- its servers' archives, its npm package and its wheel -- for `release` to attach.
+# `packages-<platform>` is also what `release` attaches: its servers' archives, its npm package,
+# its wheel and `@brekkylab/virtx`, once every platform's have been tried.
 #
 # # Platforms
 #
 # | server         | client          | built on (see Runners)               | tried on         |
 # |----------------|-----------------|--------------------------------------|------------------|
-# | macos-aarch64  | darwin-arm64    | macos-15                             | the same job     |
-# | windows-x86_64 | win32-x64-msvc  | windows-2025                         | the same job     |
+# | macos-aarch64  | darwin-arm64    | macos-15                             | macos-15         |
+# | windows-x86_64 | win32-x64-msvc  | windows-2025                         | windows-2025     |
 # | linux-x86_64   | linux-x64-gnu   | ubuntu-26.04, in manylinux_2_28      | ubuntu-22.04     |
 # | linux-aarch64  | linux-arm64-gnu | ubuntu-26.04-arm, in manylinux_2_28  | ubuntu-22.04-arm |
 #
@@ -96,7 +99,7 @@ on:
         type: boolean
         default: false
       release:
-        description: Hand on what each platform packed, for a release to attach (with `full`)
+        description: A release's run, whose Windows tests compile from nothing, without sccache
         type: boolean
         default: false
     outputs:
@@ -398,10 +401,10 @@ jobs:
       - run: cargo xtask clippy --gpu
 
   # macOS and Windows: `virtx-stdio` and `virtx-server-tcp`, each archived with the kernel, abin
-  # and alib; `libvirtx_core`; and the platform's packages built with it and tried, all on one
-  # runner.
+  # and alib; `libvirtx_core`; and the platform's packages, handed to `packages-native` to be
+  # tried.
   build-native:
-    name: build + packages (${{ matrix.release }})
+    name: build (${{ matrix.release }})
     needs: [version, guest]
     if: inputs.full
     strategy:
@@ -488,8 +491,7 @@ jobs:
 
       # macOS links the kernel.c the Linux job built; Windows takes the library as it is. alib
       # stays in `guest/`, named as virtx's cache to the server build and `archive`, which take
-      # it from `alib/` there -- to those two steps only: the packages' smoke keeps a cache of
-      # its own.
+      # it from `alib/` there.
       - name: Put the kernel, abin and alib in place
         run: |
           tar -xf guest-${{ matrix.arch }}.tar
@@ -578,26 +580,16 @@ jobs:
           target: ${{ matrix.target }}
           out: dist/release
 
-      - uses: ./.github/actions/packages
+      # For `packages-native` to try, and a release to attach.
+      - uses: actions/upload-artifact@v7.0.2
         with:
-          version: ${{ needs.version.outputs.version }}
-          platform: ${{ matrix.platform }}
-
-      - if: inputs.release
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: release-${{ matrix.platform }}
-          path: |
-            dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
-            dist/release/virtx-server-tcp-${{ matrix.release }}.tar.gz
-            dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
-            dist/release/*.whl
+          name: packages-${{ matrix.platform }}
+          path: dist/release/
           overwrite: true
           retention-days: 1
 
-  # Linux: `virtx-stdio`, `virtx-server-tcp`, `libvirtx_core` and the platform's wheel and npm
-  # package, built in manylinux_2_28 and handed to `packages-linux` to be tried below the build
-  # runners' glibc.
+  # Linux: `virtx-stdio`, `virtx-server-tcp`, `libvirtx_core` and the platform's packages, built
+  # in manylinux_2_28 and handed to `packages-linux` to be tried below the build runners' glibc.
   build-linux:
     name: build (${{ matrix.release }})
     needs: guest
@@ -697,24 +689,45 @@ jobs:
         with:
           platform: ${{ matrix.platform }}
           target: ${{ matrix.target }}
-          out: built/dist/release
+          out: dist/release
 
-      - name: Hand the build on
+      - name: Servers' archives
         run: |
           VIRTX_HOME="$PWD/guest" cargo xtask archive --with-abin
-          mkdir -p built/dist/release
           cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz \
-            target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz built/dist/release/
+            target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz dist/release/
 
+      # For `packages-linux` to try, and a release to attach.
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: linux-${{ matrix.platform }}
-          path: built/
+          name: packages-${{ matrix.platform }}
+          path: dist/release/
           overwrite: true
           retention-days: 1
 
-  # A Linux platform's packages, as `build-linux` built them, tried on ubuntu-22.04, below the
-  # build runners' glibc.
+  # Each platform's packages, as its build handed them on, tried on a runner that built none of
+  # them (`packages.yml`): macOS' and Windows' on their build's image, Linux's on ubuntu-22.04,
+  # below the build runners' glibc. Two callers, so a platform waits only for its own kind of
+  # build.
+  packages-native:
+    name: packages (${{ matrix.release }})
+    needs: [version, build-native]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: macos-aarch64
+            platform: darwin-arm64
+            runner: macos-15
+          - release: windows-x86_64
+            platform: win32-x64-msvc
+            runner: windows-2025
+    uses: ./.github/workflows/packages.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      platform: ${{ matrix.platform }}
+      runner: ${{ matrix.runner }}
+
   packages-linux:
     name: packages (${{ matrix.release }})
     needs: [version, build-linux]
@@ -728,31 +741,11 @@ jobs:
           - release: linux-aarch64
             platform: linux-arm64-gnu
             runner: ubuntu-22.04-arm
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/download-artifact@v8.0.2
-        with:
-          name: linux-${{ matrix.platform }}
-
-      - uses: ./.github/actions/packages
-        with:
-          version: ${{ needs.version.outputs.version }}
-          platform: ${{ matrix.platform }}
-
-      - if: inputs.release
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: release-${{ matrix.platform }}
-          path: |
-            dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
-            dist/release/virtx-server-tcp-${{ matrix.release }}.tar.gz
-            dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
-            dist/release/*.whl
-          overwrite: true
-          retention-days: 1
+    uses: ./.github/workflows/packages.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      platform: ${{ matrix.platform }}
+      runner: ${{ matrix.runner }}
 
   # `cargo xtask test` with the servers built here: the crates' own tests, then the packages'
   # against the fixture, each booting machines, on KVM, which GitHub's Linux x86_64 runners have.

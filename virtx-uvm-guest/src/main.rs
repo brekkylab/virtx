@@ -426,20 +426,37 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
     // The boot root is shared by the time this runs, and a mount under a shared one cannot be
     // moved.
     mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
-    mount(
-        Some(&asked.lower_device),
-        LOWER_AT,
-        Some(&asked.lower_fstype),
-        libc::MS_RDONLY,
-        None,
-    )?;
-    mount(
-        Some(&asked.upper_device),
-        UPPER_AT,
-        Some(&asked.upper_fstype),
-        0,
-        None,
-    )?;
+    // The two disks at once: each mount waits on its own disk's reads.
+    std::thread::scope(|s| {
+        let lower = s.spawn(|| {
+            mount(
+                Some(&asked.lower_device),
+                LOWER_AT,
+                Some(&asked.lower_fstype),
+                libc::MS_RDONLY,
+                None,
+            )
+        });
+        // ext4 mounted with no barrier and given it back at once: the superblock it writes as it
+        // mounts waits on no flush of its own -- each flush after covers it -- and every write
+        // from then on is ordered as one with barriers is.
+        let ext4 = asked.upper_fstype == "ext4";
+        let upper = mount(
+            Some(&asked.upper_device),
+            UPPER_AT,
+            Some(&asked.upper_fstype),
+            0,
+            ext4.then_some("nobarrier"),
+        )
+        .and_then(|()| match ext4 {
+            true => mount(None, UPPER_AT, None, libc::MS_REMOUNT, Some("barrier")),
+            false => Ok(()),
+        });
+        lower
+            .join()
+            .map_err(|_| io::Error::other("mounting the lower disk panicked"))??;
+        upper
+    })?;
     fs::create_dir_all(UPPER_DIR)?;
     fs::create_dir_all(WORK_DIR)?;
     let layers = format!("lowerdir={LOWER_AT},upperdir={UPPER_DIR},workdir={WORK_DIR}");

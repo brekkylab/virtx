@@ -1,19 +1,21 @@
 ---
 name: browser
-description: "Drive Chrome from the command line, headless or in a window: open pages, read them as accessibility trees, click, type and take screenshots"
+description: "Drive Chromium from the command line, headless or in a window: open pages, read them as accessibility trees, click, type and take screenshots"
 ---
 
-Drive Chrome from the command line, headless or in a window: open pages, read them as accessibility trees, click, type and take screenshots
+Drive Chromium from the command line, headless or in a window: open pages, read them as accessibility trees, click, type and take screenshots
 
-This is vercel-labs/agent-browser 0.43.0 with Chrome for Testing 158, and the libraries and fonts Chrome needs installed with it: Latin, Chinese, Japanese and Korean text render as they should. An image needs nothing of its own for it, whatever its C library.
+This is vercel-labs/agent-browser 0.43.0 with Debian's Chromium 156, and the libraries and fonts Chromium needs installed with it: Latin, Chinese, Japanese and Korean text render as they should. An image needs nothing of its own for it, whatever its C library.
 
 agent-browser's own help and guides call it `agent-browser`. Here it is `browser`, with the same arguments.
 
-The first command starts the session's browser, and every command after it uses the same one, with its tabs, cookies and refs, until `browser close`. The browser lasts as long as the sandbox's machine is up: a machine nothing runs in is parked after a few minutes, and the browser goes with it. To keep a login past that, start the session with `--restore`, or save and load it with `browser state save <file>` and `--state <file>`.
+The first command starts the session's browser, and every command after it uses the same one, with its tabs, cookies and refs, until `browser close`. The browser lasts as long as the sandbox's machine is up: a machine nothing runs in is parked after a few minutes, and the browser goes with it: the next command says so on stderr, and answers as a new browser would, with `about:blank` and no refs. To keep a login past that, start the session with `--restore`, or save and load it with `browser state save <file>` and `--state <file>`.
 
 Pages outside the sandbox need a sandbox made with a network. `file://` pages and servers in the sandbox, at `localhost`, are reached without one.
 
-Chrome runs headless unless `--headed` says otherwise. `install` and `upgrade` are not for this one, which is already installed and fixed, and `--engine` has only `chrome`.
+Each session's browser takes about 200 to 550 MB of memory, so a sandbox with several needs 2 GiB or more: with too little, the machine hangs rather than a command failing.
+
+Chromium runs headless unless `--headed` says otherwise. `install` and `upgrade` are not for this one, which is already installed and fixed, and `--engine` has only `chrome`.
 
 ## The loop
 
@@ -92,7 +94,7 @@ browser close --all
 
 ## In a window
 
-`--headed` opens Chrome in a window, on the X display `DISPLAY` names; there is none without one, and Chrome fails to start. `display` makes one, and serves it over VNC for a person to watch and take over:
+`--headed` opens Chromium in a window, on the X display `DISPLAY` names; there is none without one, and Chromium fails to start. `display` makes one, and serves it over VNC for a person to watch and take over:
 
 ```bash
 display run -- sh -c 'browser --headed open https://example.com && browser snapshot -i && browser close'
@@ -100,7 +102,7 @@ display run -- sh -c 'browser --headed open https://example.com && browser snaps
 
 `--headed` given to a session whose browser is headless starts it again in a window, and the commands after it keep it there; `--headed false` goes back. A window lasts as long as the screen it is on, so close the browser before `display run`'s command ends. To leave a screen up for more than one command, run `display run` with no command and give each `browser --headed` `DISPLAY=:99`.
 
-The screen has no window manager, so nothing maximizes Chrome's window, and it comes up narrower than the screen. To fill it, place and size the window as the screen is: `--args '--window-position=0,0,--window-size=1920,1280'` for `display run --size 1920x1280`.
+The screen has no window manager, so nothing maximizes Chromium's window, and it comes up narrower than the screen. To fill it, place and size the window as the screen is: `--args '--window-position=0,0,--window-size=1920,1280'` for `display run --size 1920x1280`.
 
 ## More
 

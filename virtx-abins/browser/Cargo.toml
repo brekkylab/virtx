@@ -9,11 +9,10 @@ license.workspace = true
 name = "browser"
 path = "src/main.rs"
 
-# What `build.rs` fetches and unpacks: Chrome's zip, Debian's xz-compressed packages and their
-# index, and npm's gzipped tarball, each checked by its sha256.
+# What `build.rs` fetches and unpacks: Debian's xz-compressed packages and their indexes, and
+# npm's gzipped tarball, each checked by its sha256.
 [build-dependencies]
 flate2 = "1"
 lzma-rust2 = { version = "0.15", default-features = false, features = ["std", "xz"] }
 sha2 = "0.10"
 tar = "0.4"
-zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }

@@ -11,6 +11,7 @@
 //! What a sandbox is to a server beyond this -- how its ports are reached from outside the
 //! host -- is the server's.
 
+pub mod egress;
 mod error;
 mod job;
 mod record;

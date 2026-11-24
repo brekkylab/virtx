@@ -297,6 +297,7 @@ mod tests {
             gpu: false,
             gpu_memory_mib: None,
             network: Default::default(),
+            egress_limits: None,
         };
         let steps = [
             Step::Workdir("/app".into()),

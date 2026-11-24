@@ -30,6 +30,7 @@ use virtx_core::{
 };
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
+use virtx_uvm::egress::{self, EgressLimits, Protocol};
 use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
     Admission, DEFAULT_DISK_GIB, Files, ImageStore, Machine, MachineConfig, MachineError,
@@ -2183,6 +2184,64 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     }
 }
 
+/// Each flow a sandbox opens to the internet is told with its sandbox, its protocol and where it
+/// went, and one past the limits its embedder set, or to port 25, is refused and told so.
+async fn a_sandbox_s_flows_to_the_internet_are_told_and_held_to_its_limits(home: Home) {
+    let _woken = egress::subscribe();
+    let before = egress::since(0, usize::MAX).last;
+    // One address a minute, and as many connections as it likes: which flows are refused is
+    // then where they go, whenever each is opened.
+    let root = home.root.clone();
+    egress::set_limits(move |at| {
+        (at == root).then_some(EgressLimits {
+            connects_per_second: 100,
+            destinations_per_minute: 1,
+        })
+    });
+    let sandbox = home.sandbox(&small(), None).await;
+    let script = "nc -z -w 5 8.8.8.8 443; echo $?; \
+        nc -z -w 5 1.1.1.1 443; echo $?; \
+        nc -z -w 5 8.8.8.8 25; echo $?; \
+        nslookup -timeout=1 example.com 8.8.8.8 >/dev/null 2>&1; true";
+    let (lines, _) = run(&sandbox, &["sh", "-c", script], None).await.unwrap();
+    assert_eq!(lines[0], "0", "the first address is reached: {lines:?}");
+    assert_ne!(lines[1], "0", "a second address is refused: {lines:?}");
+    assert_ne!(lines[2], "0", "port 25 is refused: {lines:?}");
+    let id = sandbox.id().to_owned();
+    close(sandbox).await;
+
+    let told = egress::since(before, usize::MAX);
+    let ours: Vec<_> = (told.flows.into_iter())
+        .filter(|flow| flow.root == home.root)
+        .inspect(|flow| assert_eq!(flow.sandbox, id))
+        .map(|flow| {
+            let refused = flow.outbound.refused.map(|r| (r.why, r.count));
+            (
+                flow.outbound.to.to_string(),
+                flow.outbound.protocol,
+                refused,
+            )
+        })
+        .collect();
+    assert_eq!(
+        ours,
+        [
+            ("8.8.8.8:443".to_owned(), Protocol::Tcp, None),
+            (
+                "1.1.1.1:443".to_owned(),
+                Protocol::Tcp,
+                Some((egress::Refusal::Destinations, 1))
+            ),
+            (
+                "8.8.8.8:25".to_owned(),
+                Protocol::Tcp,
+                Some((egress::Refusal::Port, 1))
+            ),
+            ("8.8.8.8:53".to_owned(), Protocol::Udp, None),
+        ]
+    );
+}
+
 async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home: Home) {
     let mut args = SandboxCreateArgs::new(DEBIAN);
     args.memory_mib = Some(1024);
@@ -2362,6 +2421,7 @@ async fn a_machine_that_did_not_start_tells_why_without_this_host_s_paths(home: 
             gpu: false,
             gpu_memory_mib: None,
             network: Network::None,
+            egress_limits: None,
         },
         volumes: vec![VolumeMount {
             path: volume.path().to_path_buf(),
@@ -3203,6 +3263,7 @@ fn main() -> ExitCode {
         a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown,
         a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
+        a_sandbox_s_flows_to_the_internet_are_told_and_held_to_its_limits,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,

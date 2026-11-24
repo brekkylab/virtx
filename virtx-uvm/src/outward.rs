@@ -1,7 +1,7 @@
 //! What an embedder decides of each flow a sandbox's machine opens to the internet, and what it
 //! hears of them.
 //!
-//! Every flow a guest on a [`Public`](crate::Network::Public) network opens to an address the
+//! Every flow a guest with a [`network`](crate::MachineSpec::network) opens to an address the
 //! internet routes -- a `connect`, or a datagram socket's destination -- is put to the
 //! embedder's [`Outward`] in the machine's process, which is the embedder's own binary as
 //! [`Machine::start`](crate::Machine::start) spawns it. It says whether the flow goes, by what

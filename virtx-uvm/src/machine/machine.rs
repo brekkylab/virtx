@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fstree::FsTree;
 use crate::machine::{
-    Error, Network, Result,
+    Error, Result,
     boot::{self, BootArgs, CONSOLE_TARGET},
     wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
@@ -180,12 +180,15 @@ pub struct MachineSpec {
     /// Ignored without [`gpu`](MachineSpec::gpu).
     pub gpu_memory_mib: Option<u32>,
 
-    /// Where the guest's own connections may go: the way out.
+    /// Whether the guest's own connections go anywhere: on, to the addresses the internet
+    /// routes, and never to this host's loopback, its private and link-local ranges or cloud
+    /// metadata at `169.254.169.254`; off, nowhere, and no names resolve. A guest reaches its
+    /// own published ports either way.
     #[serde(default)]
-    pub network: Network,
+    pub network: bool,
 
     /// What the embedder's [`Outward`](crate::outward::Outward) is given in this machine's
-    /// process, on a [`Public`](Network::Public) network.
+    /// process, with a [`network`](MachineSpec::network).
     #[serde(default)]
     pub outward: Option<serde_json::Value>,
 }
@@ -223,6 +226,9 @@ pub struct Machine {
     /// What the embedder serves its disk with ([`Disks::serve`](crate::disks::Disks::serve)),
     /// held until its process has been killed and waited for.
     held: Option<crate::disks::Held>,
+    /// The directory its published ports' sockets are in, removed once its process has been
+    /// killed and waited for.
+    _sockets: tempfile::TempDir,
 }
 
 impl Drop for Machine {
@@ -255,8 +261,16 @@ impl Machine {
             io::pipe().map_err(|e| Error::io("making ctrlout", e))?;
         let (their_ioin, ioin) = io::pipe().map_err(|e| Error::io("making ioin", e))?;
         let (ioout, their_ioout) = io::pipe().map_err(|e| Error::io("making ioout", e))?;
+        // This machine's own, which no one else can have made first or reach into: in the
+        // temporary directory, which keeps a socket's path short of the hundred-odd bytes it
+        // may take.
+        let sockets = tempfile::Builder::new()
+            .prefix("virtx-")
+            .tempdir()
+            .map_err(|e| Error::io("making the published ports' directory", e))?;
         let args = BootArgs {
             config,
+            sockets: sockets.path().to_owned(),
             ctrlin: raw(&their_ctrlin),
             ctrlout: raw(&their_ctrlout),
             ioin: raw(&their_ioin),
@@ -302,6 +316,7 @@ impl Machine {
                         io: files(ioin, ioout),
                         published,
                         held: None,
+                        _sockets: sockets,
                     });
                 }
                 Some(CtrlResp::Log {
@@ -736,7 +751,7 @@ pub fn enter() -> Result<Infallible> {
     let ctrlin = unsafe { boot::hold(args.ctrlin, args.ctrlout) };
     // SAFETY: as above.
     let io = unsafe { (boot::from_raw(args.ioin), boot::from_raw(args.ioout)) };
-    let entered = boot::boot(args.config, ctrlin, io);
+    let entered = boot::boot(args.config, &args.sockets, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
         log::error!(target: TOLD_TARGET, "{}", e.told());
@@ -860,7 +875,7 @@ mod tests {
                 ram_mib: 2048,
                 gpu: false,
                 gpu_memory_mib: None,
-                network: Network::Public,
+                network: true,
                 outward: None,
             },
             volumes: vec![VolumeMount {

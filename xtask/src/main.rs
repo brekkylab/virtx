@@ -43,9 +43,9 @@ usage: cargo xtask init     [--force]
   test      every test: the crates' own, then the packages' against the fixture, each
             suite summed up at the end. With arguments, cargo test, the way run is, against
             the fixture where they name virtx or virtx-cli. With --no-run alone, compiles
-            and installs everything `test` would -- the crates' tests, the servers, abin, the
-            packages' cargo tests, the library they open and the bindings' packages -- and
-            runs none, which needs no guest kernel. With XTASK_TESTS_COMPILED set after it,
+            and installs everything `test` would -- the crates' tests, the agent's on Linux,
+            the servers, abin, the packages' cargo tests, the library they open and the
+            bindings' packages -- and runs none, which needs no guest kernel. With XTASK_TESTS_COMPILED set after it,
             `test` fails if cargo compiles anything
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
@@ -583,6 +583,13 @@ fn check(client_only: bool) -> anyhow::Result<()> {
         eprintln!("xtask: the servers left out (--client)");
         return Ok(());
     }
+    match guest_tests() {
+        Outcome::Passed => {}
+        Outcome::Skipped(why) => {
+            eprintln!("xtask: the unit tests of {GUEST_PACKAGE} left out: {why}");
+        }
+        Outcome::Failed(why) => bail!("the unit tests of {GUEST_PACKAGE} failed: {why}"),
+    }
     if let Some(why) = servers_unready()? {
         eprintln!("xtask: the servers left out: {why} -- `cargo xtask init` readies them");
         return Ok(());
@@ -594,6 +601,34 @@ fn check(client_only: bool) -> anyhow::Result<()> {
     )?;
     eprintln!("xtask: checked");
     Ok(())
+}
+
+/// The unit tests of the agent inside each machine, a workspace of its own: on Linux alone,
+/// the only OS it builds for. They need neither `init` nor a guest kernel.
+fn guest_tests() -> Outcome {
+    if !cfg!(target_os = "linux") {
+        return Outcome::Skipped("they run on Linux, the only OS the agent builds for".into());
+    }
+    eprintln!("xtask: the unit tests of {GUEST_PACKAGE}");
+    let ran = guest_cargo().arg("test").status();
+    match ran {
+        Ok(status) if status.success() => Outcome::Passed,
+        Ok(status) => Outcome::Failed(format!("`cargo test` {status}")),
+        Err(e) => Outcome::Failed(format!("`cargo test` did not run: {e}")),
+    }
+}
+
+/// The agent inside each machine: its crate, and the directory it is in.
+const GUEST_PACKAGE: &str = "virtx-uvm-guest";
+
+/// cargo in the agent's workspace, building into the root's target directory, where
+/// [`compiled_since`] sees what it compiles.
+fn guest_cargo() -> Command {
+    let mut command = cargo();
+    command
+        .current_dir(root_path().join(GUEST_PACKAGE))
+        .env("CARGO_TARGET_DIR", target_path());
+    command
 }
 
 /// `check`'s clippy, alone: the client's, and the servers' once `init` has run -- with `gpu`,
@@ -1859,6 +1894,18 @@ fn compile_tests() -> anyhow::Result<()> {
             &format!("the tests of {name}"),
         )?;
     }
+    // On Linux alone, as `test` runs them.
+    if cfg!(target_os = "linux") {
+        eprintln!("xtask: the tests of {GUEST_PACKAGE}");
+        let status = guest_cargo()
+            .args(["test", "--no-run"])
+            .status()
+            .context("running cargo")?;
+        ensure!(
+            status.success(),
+            "the tests of {GUEST_PACKAGE} failed to build"
+        );
+    }
     let servers = fixture_servers();
     compile_servers(&servers)?;
     if env::var_os(ABIN_BUILT).is_none() {
@@ -1910,6 +1957,7 @@ fn test_all() -> anyhow::Result<()> {
         };
         outcomes.push((name, outcome));
     }
+    outcomes.push((GUEST_PACKAGE, guest_tests()));
 
     let fixture = match &unready {
         Some(why) => Err(Outcome::Skipped(why.clone())),

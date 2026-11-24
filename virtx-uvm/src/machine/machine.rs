@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fstree::FsTree;
 use crate::machine::{
-    Error, Network, Result,
+    EgressLimits, Error, Network, Result,
     boot::{self, BootArgs, CONSOLE_TARGET},
     wire::{self, CtrlReq, CtrlResp, IoReq, IoResp},
 };
@@ -183,6 +183,11 @@ pub struct MachineSpec {
     /// Where the guest's own connections may go: the way out.
     #[serde(default)]
     pub network: Network,
+
+    /// How many flows to the internet it may open on a [`Public`](Network::Public) network;
+    /// none is no limit. Ignored on any other.
+    #[serde(default)]
+    pub egress_limits: Option<EgressLimits>,
 }
 
 /// A volume shown in the guest. Pointed at rather than carried, so its mounts' credentials stay
@@ -746,6 +751,7 @@ mod tests {
                 gpu: false,
                 gpu_memory_mib: None,
                 network: Network::Public,
+                egress_limits: None,
             },
             volumes: vec![VolumeMount {
                 path: PathBuf::from("/store/volume/data"),

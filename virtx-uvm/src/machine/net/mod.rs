@@ -51,6 +51,7 @@ use serde::{Deserialize, Serialize};
 use policy::Policy;
 pub(crate) use policy::routed;
 
+use super::wire::Outbound;
 use super::{Error, Result};
 
 /// Where the guest's own connections may go.
@@ -72,24 +73,45 @@ pub enum Network {
     Public,
 }
 
+/// How many flows to the internet a machine on a [`Public`](Network::Public) network may open:
+/// past either, a new one is refused, `ECONNREFUSED` in the guest as any refused `connect` is.
+/// A stream's connection is a flow, and so is a datagram socket's destination it has sent
+/// nothing to in the last minute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressLimits {
+    /// New flows a second, and as many at once.
+    pub connects_per_second: u32,
+    /// Distinct addresses reached in the last minute: one reached already is reached again.
+    pub destinations_per_minute: u32,
+}
+
 /// Start this machine's network and hand back the device that is its near end.
 ///
 /// `published` are the listeners on this host whose connections reach a port in the guest
 /// -- each one bound by the caller, which is the end that knows where it is and says so.
 /// Each gets a thread that carries its connections to wherever the guest is listening on
-/// that port by then.
-pub(crate) fn attach(network: Network, published: Vec<(u16, TcpListener)>) -> Result<VsockDevice> {
+/// that port by then. Under [`Public`](Network::Public), its flows to the internet are held to
+/// `limits` and each reported to `report`.
+pub(crate) fn attach(
+    network: Network,
+    limits: Option<EgressLimits>,
+    published: Vec<(u16, TcpListener)>,
+    report: impl Fn(Outbound) + Send + Sync + 'static,
+) -> Result<VsockDevice> {
     let resolver = match network {
         Network::None => None,
         Network::Host | Network::Public => resolver::host_resolvers().first().copied(),
     };
-    let policy = Arc::new(
-        Policy::new(network, resolver, published.iter().map(|(port, _)| *port)).with_relays(
+    let mut policy = Policy::new(network, resolver, published.iter().map(|(port, _)| *port))
+        .with_relays(
             published
                 .iter()
                 .filter_map(|(port, listener)| Some((*port, listener.local_addr().ok()?))),
-        ),
-    );
+        );
+    if network == Network::Public {
+        policy = policy.with_egress(limits, Arc::new(report));
+    }
+    let policy = Arc::new(policy);
     for (port, listener) in published {
         relay::spawn(port, listener, policy.clone()).map_err(|e| Error::Io {
             context: format!("relaying into guest port {port}"),

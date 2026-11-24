@@ -540,6 +540,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                         gpu: false,
                         gpu_memory_mib: None,
                         network: Network::Public,
+                        egress_limits: None,
                     },
                     &mut report,
                 )

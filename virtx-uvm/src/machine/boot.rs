@@ -427,7 +427,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 
     // The whole of what having neither is: no device -- see `net`.
     if machine.spec.network != Network::None || !published.is_empty() {
-        devices.add(net::attach(machine.spec.network, published)?);
+        devices.add(net::attach(
+            machine.spec.network,
+            machine.spec.egress_limits,
+            published,
+            |outbound| {
+                let _ = send(&CtrlResp::Outbound(outbound));
+            },
+        )?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module

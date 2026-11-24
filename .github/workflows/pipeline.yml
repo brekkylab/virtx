@@ -23,10 +23,7 @@
 #   build (macos-aarch64,                 guest         server, library and packages; macOS' clippy
 #     windows-x86_64)                                   too
 #   build (linux-x86_64, linux-aarch64)   guest         server, library and packages, in manylinux_2_28
-#   packages (each platform)              its build     the packages' smoke, on a runner of their
-#                                                       own (`packages.yml`)
-#
-#   Every package is built by `.github/actions/pack`, the one place they are built.
+#   packages (each platform)              its build     the packages' smoke (`packages.yml`)
 #
 # macOS has no lint or tests of its own: no runner here can boot a machine on it, and the
 # machines virtx is written on are Macs.
@@ -36,11 +33,8 @@
 # Linux container, which neither macOS's runners, without Docker, nor Windows', with Windows
 # containers, can run; abin's C is cross-compiled by a shell script, and alib is built in a
 # container of each C library's image), and each platform's build, `packages-<platform>`, which
-# is tried as a user installs it on a runner that did not build it -- a Linux one's below its
-# glibc. A cache only ever saves time here: a miss builds the thing again.
-#
-# `packages-<platform>` is also what `release` attaches: its servers' archives, its npm package,
-# its wheel and `@brekkylab/virtx`, once every platform's have been tried.
+# `packages.yml` tries and `release` attaches. A cache only ever saves time here: a miss builds
+# the thing again.
 #
 # # Platforms
 #
@@ -144,7 +138,7 @@ jobs:
           for f in virtx-rs/Cargo.toml virtx-cabi/Cargo.toml virtx-py/pyproject.toml; do
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
-          # The platform packages the npm package names are the ones released with it.
+          # optionalDependencies name this version.
           for dep in $(jq -r '.optionalDependencies | to_entries[] | "\(.key)=\(.value)"' virtx-node/package.json); do
             [ "${dep#*=}" = "$version" ] || wrong="$wrong virtx-node/package.json:$dep"
           done
@@ -334,8 +328,7 @@ jobs:
           targets: x86_64-unknown-linux-musl
           components: clippy, rustfmt
 
-      # choco ends 0 having installed nothing, as when its feed is down: pkg-config.exe is looked
-      # for after it, so the job ends here rather than in a build script.
+      # choco exits 0 even when it installs nothing.
       - name: Toolchain
         run: |
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
@@ -404,8 +397,7 @@ jobs:
       - run: cargo xtask clippy --gpu
 
   # macOS and Windows: `virtx-stdio` and `virtx-server-tcp`, each archived with the kernel, abin
-  # and alib; `libvirtx_core`; and the platform's packages, handed to `packages-native` to be
-  # tried.
+  # and alib; `libvirtx_core`; and the platform's packages.
   build-native:
     name: build (${{ matrix.release }})
     needs: [version, guest]
@@ -435,8 +427,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       # Before any checkout: Windows' git converts to CRLF, and the GPU libraries' builds run
-      # shell scripts written against LF; and checks a link out as a file holding its target,
-      # where the wheel reads the README through `virtx-py/README.md`.
+      # shell scripts written against LF; the wheel reads its README through a link.
       - name: Keep line endings and links as committed
         run: |
           git config --global core.autocrlf false
@@ -583,7 +574,6 @@ jobs:
           target: ${{ matrix.target }}
           out: dist/release
 
-      # For `packages-native` to try, and a release to attach.
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: packages-${{ matrix.platform }}
@@ -591,8 +581,7 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  # Linux: `virtx-stdio`, `virtx-server-tcp`, `libvirtx_core` and the platform's packages, built
-  # in manylinux_2_28 and handed to `packages-linux` to be tried below the build runners' glibc.
+  # Linux: the same, built in manylinux_2_28.
   build-linux:
     name: build (${{ matrix.release }})
     needs: guest
@@ -687,7 +676,7 @@ jobs:
           done
           exit ${fail:-0}
 
-      # In the image, which the wheel's manylinux_2_28 and the npm package's glibc are of.
+      # In the image, for manylinux_2_28's glibc.
       - uses: ./.github/actions/pack
         with:
           platform: ${{ matrix.platform }}
@@ -700,7 +689,6 @@ jobs:
           cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz \
             target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz dist/release/
 
-      # For `packages-linux` to try, and a release to attach.
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: packages-${{ matrix.platform }}
@@ -708,10 +696,7 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  # Each platform's packages, as its build handed them on, tried on a runner that built none of
-  # them (`packages.yml`): macOS' and Windows' on their build's image, Linux's on ubuntu-22.04,
-  # below the build runners' glibc. Two callers, so a platform waits only for its own kind of
-  # build.
+  # Two callers, so each waits only for its own builds; Linux's run below the build's glibc.
   packages-native:
     name: packages (${{ matrix.release }})
     needs: [version, build-native]

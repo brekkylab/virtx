@@ -1,13 +1,5 @@
-# One platform's packages, tried as a user installs them, on a runner of their platform that
-# built none of them: the npm package from a registry on localhost and the wheel pip picks, each
-# opening the library it carries; then the server that library fetches, from a release layout
-# served on localhost, started and asked to answer. `pipeline` calls it once a platform's build
-# has handed on `packages-<platform>`: its wheel, its npm package and `@brekkylab/virtx`, as
-# `.github/actions/pack` built them, and its servers' archives.
-#
-# `@brekkylab/virtx` names every platform's package and gets the one this runner is -- the
-# others are not in the registry, and an optional dependency that is not there is passed over,
-# as it is on a platform npm does not match.
+# Installs one platform's `packages-<platform>` as a user would, on a runner that did not build
+# it, and smoke-tests the packages and the server they fetch.
 name: packages
 
 on:
@@ -52,7 +44,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Exactly one platform's: a package missing would try nothing for it and pass.
+      # A package missing would pass untried.
       - name: What the build handed on
         working-directory: dist/release
         env:
@@ -69,8 +61,7 @@ jobs:
           [ "$(count 'virtx-stdio-*.tar.gz')" = 1 ] || { echo "::error::not one stdio server archive"; exit 1; }
           [ "$(count 'virtx-server-tcp-*.tar.gz')" = 1 ] || { echo "::error::not one HTTP server archive"; exit 1; }
 
-      # What a client checks the server it fetches against, over this platform's files. Python's,
-      # since macOS has no sha256sum.
+      # In Python: macOS has no sha256sum.
       - name: SHA256SUMS
         working-directory: dist/release
         run: |
@@ -82,12 +73,8 @@ jobs:
           print("\n".join(lines))
           EOF
 
-      # Published with an explicit --registry and a config of its own: the packages'
-      # publishConfig names npmjs, and nothing here may reach it. Verdaccio is installed on its
-      # own first: on Windows the install alone can outlast the wait for it to answer. It runs
-      # from a copy of its config under the job's temp directory, where it keeps its storage and
-      # its users: in the checkout they would outlive the job on a runner whose checkout is kept,
-      # and the next run's user and versions would already be there.
+      # An explicit --registry: publishConfig names npmjs. Its storage is under RUNNER_TEMP, so a
+      # kept checkout starts clean.
       - name: Install from a local registry
         run: |
           npm install --global --silent verdaccio@^6.11.2
@@ -125,7 +112,7 @@ jobs:
       - name: Smoke, Python
         run: '"$SMOKE_PYTHON" "$GITHUB_WORKSPACE/scripts/packages/smoke/python.py"'
 
-      # The layout a client fetches from, `<base>/v<version>/`, as a release would hang it.
+      # Served as a release is: `<base>/v<version>/`.
       - name: Smoke, server
         env:
           VERSION: ${{ inputs.version }}

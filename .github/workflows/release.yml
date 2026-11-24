@@ -35,11 +35,8 @@ jobs:
       contents: read
       actions: read
 
-  # What each platform built and tried (`packages-<platform>`), `@brekkylab/virtx` among it:
-  # every platform packs it alike, since it names every platform's package and carries no
-  # library of its own, and the release takes Linux x86_64's. Every platform's files are
-  # counted in, so a platform that handed nothing on fails here rather than leaving the release
-  # without it. Handed on as `bundle`, with its SHA256SUMS.
+  # Every platform's `packages-<platform>`, with `@brekkylab/virtx` from Linux x86_64's (each
+  # packs it alike), and SHA256SUMS. A platform missing fails here.
   bundle:
     needs: pipeline
     runs-on: ubuntu-26.04

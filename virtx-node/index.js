@@ -43,8 +43,7 @@ const PLATFORM = {
   'win32-x64': 'win32-x64-msvc',
 }[`${process.platform}-${process.arch}`]
 
-// The library as `napi build --platform` names it: beside this file from a source install, and
-// the `main` of this platform's package, which npm installs only here.
+// What `napi build --platform` writes beside this file, and this platform's package's `main`.
 const BUILT = PLATFORM && `virtx.${PLATFORM}.node`
 const PLATFORM_PACKAGE = PLATFORM && `@brekkylab/virtx-${PLATFORM}`
 

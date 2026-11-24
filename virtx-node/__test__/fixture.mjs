@@ -1,7 +1,6 @@
 // What every test file stands on, as Python's `conftest.py` is: `libvirtx_core`, opened as the
-// package finds it -- `$VIRTX_CORE_LIB`, else the one `npm test` built beside it; the servers
-// `cargo xtask fixture` serves, as it names them in the environment, which `npm test` runs the
-// tests under; and the steps tests share.
+// package finds it; the servers `cargo xtask fixture` serves, as it names them in the
+// environment, which `npm test` runs the tests under; and the steps tests share.
 
 import assert from 'node:assert/strict'
 import path from 'node:path'

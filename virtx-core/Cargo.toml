@@ -12,10 +12,7 @@ keywords = ["vm", "microvm", "sandbox", "agent", "virtualization"]
 categories = ["virtualization", "api-bindings"]
 
 [lib]
-# `rlib` alone: for Rust, this crate's tests and any crate that depends on it. The library for
-# C -- `libvirtx_core`, declared by `include/virtx.h` -- is `virtx-cabi`'s. A cdylib's file name
-# carries no hash of its features, so built here, with every build, each crate's tests' features
-# would write over the last and rebuild this crate, and all that depends on it, again.
+# `rlib` alone: the library for C, `libvirtx_core`, is `virtx-cabi`'s.
 crate-type = ["rlib"]
 
 [dependencies]

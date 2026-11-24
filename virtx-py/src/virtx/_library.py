@@ -40,9 +40,7 @@ else:
 
 
 def _bundled() -> Path | None:
-    """The library this package carries, ``virtx/_virtx_core``, where it is installed: named as
-    an extension module is by the Python that built the wheel (``_virtx_core.abi3.so``,
-    ``_virtx_core.pyd``, ...), which need not be the one running."""
+    """The library installed beside this file, named as an extension module (``_virtx_core.*``)."""
     return next(Path(__file__).parent.glob("_virtx_core.*"), None)
 
 

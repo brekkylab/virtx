@@ -1,8 +1,7 @@
-"""Opens ``libvirtx_core`` as the package finds it -- ``$VIRTX_CORE_LIB``, else the one its install
-built beside it -- and serves the fixture for the run: ``cargo xtask fixture --serve``, which
-builds the servers, serves them over a home of the run's own, and names them, unless the
-environment names them already, as ``cargo xtask test`` does. They boot machines, so they need
-``cargo xtask init`` and the guest kernel first."""
+"""Opens ``libvirtx_core`` as the package finds it, and serves the fixture for the run:
+``cargo xtask fixture --serve``, which builds the servers, serves them over a home of the run's
+own, and names them, unless the environment names them already, as ``cargo xtask test`` does.
+They boot machines, so they need ``cargo xtask init`` and the guest kernel first."""
 
 import itertools
 import os

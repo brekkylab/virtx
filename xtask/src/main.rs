@@ -987,9 +987,8 @@ fn run_target(args: Vec<OsString>, test: bool, vars: &[(&str, OsString)]) -> any
     run_tests(&targets, program_args, vars)
 }
 
-/// Build with cargo what `cargo_args` names, its tests if `test`, and say what it built to run,
-/// with its package's directory: each test binary if `test`, else each binary or example. The
-/// binaries a test spawns of its package are made ready to boot a VM.
+/// Build what `cargo_args` names (its tests if `test`), and return each executable with its
+/// package's directory, made ready to boot a VM.
 fn compile_targets(cargo_args: &[OsString], test: bool) -> anyhow::Result<Vec<(PathBuf, PathBuf)>> {
     // Anything but the client's packages, named each, may build the servers' patched trees.
     let mut packages: Vec<String> = Vec::new();
@@ -1071,8 +1070,7 @@ fn compile_targets(cargo_args: &[OsString], test: bool) -> anyhow::Result<Vec<(P
     Ok(targets)
 }
 
-/// Run each of the test binaries `targets` in its package's directory, with `program_args` and
-/// `vars`, failing once all have run if any did.
+/// Run each test binary in its package's directory; fail after all have run if any did.
 fn run_tests(
     targets: &[(PathBuf, PathBuf)],
     program_args: &[OsString],
@@ -1741,8 +1739,7 @@ fn compiled_since(since: std::time::SystemTime) -> Vec<String> {
     compiled
 }
 
-/// The library the packages' tests open, as virtx-rs's tests build it: `libvirtx_core` in the
-/// `dev` profile. setuptools-rust's editable build of virtx-py is this build of it too.
+/// `libvirtx_core` in `dev`, as virtx-rs's tests and virtx-py's editable install build it.
 fn build_test_library() -> anyhow::Result<()> {
     cargo_in_root(
         &["build", "-p", LIBRARY_PACKAGE],
@@ -1755,9 +1752,7 @@ fn test_library() -> PathBuf {
     target_path().join("debug").join(client_library())
 }
 
-/// Each binding's install, as its directory and its command, each a no-op once done: what
-/// `uv run` and `npm test` run with. virtx-py's builds the library, as an editable install
-/// does; virtx-node's leaves it to [`PACKAGES`]' run, which opens [`test_library`].
+/// Each binding's install: its directory and its command, a no-op once done.
 const INSTALLS: &[(&str, &[&str])] = &[
     ("virtx-py", &["uv", "sync"]),
     (
@@ -1787,10 +1782,8 @@ fn install_binding(dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The crates that link libkrun, whose tests [`test_all`] runs after `virtx-core`'s, each a suite
-/// of its own though one cargo compiles them all: libkrun is taken by path, so its `cdylib`'s
-/// file name carries no hash of its features, and a cargo for each crate would write over the
-/// one the last left and rebuild libkrun, and all on it, before each.
+/// The crates that link libkrun, compiled by one cargo: libkrun's cdylib name carries no feature
+/// hash, so a cargo per crate would rebuild libkrun before each.
 const MACHINE_CRATES: &[&str] = &["virtx-uvm", "virtx-server-stdio", "virtx-server-tcp"];
 
 /// The cargo arguments that name [`MACHINE_CRATES`].
@@ -1850,9 +1843,8 @@ fn sign_in_args(args: &[OsString]) -> Option<Vec<OsString>> {
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
 /// pytest, and virtx-node's with Node's own runner; the bindings with what [`INSTALLS`] installs.
-/// virtx-rs's tests build and open [`test_library`], and virtx-node's open it in
-/// `$VIRTX_CORE_LIB`, its `pretest` not run: napi would build it again under `target/<triple>/`,
-/// every crate under it with it, since napi always names the target.
+/// virtx-node's open [`test_library`] with `pretest` skipped: napi would rebuild every crate
+/// under `target/<triple>/`.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     (
         "virtx-rs",

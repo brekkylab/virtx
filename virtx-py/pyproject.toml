@@ -48,21 +48,18 @@ where = ["src"]
 [tool.setuptools.package-data]
 virtx = ["py.typed"]
 
-# `libvirtx_core`, built by cargo from `virtx-cabi` and put in the package as `virtx._virtx_core`,
-# named as an extension module is, for `_library.py` to open with ctypes: in `dev` for an
-# editable install, in `release` for a wheel.
+# `libvirtx_core`, which `_library.py` opens with ctypes.
 [[tool.setuptools-rust.ext-modules]]
 target = "virtx._virtx_core"
 path = "../virtx-cabi/Cargo.toml"
 binding = "NoBinding"
 
-# The library is no CPython extension, so one wheel serves every Python the package does.
+# No CPython extension: one wheel serves every Python.
 [tool.distutils.bdist_wheel]
 py-limited-api = "cp311"
 
 [tool.uv]
-# An editable install carries the library built from the crates, so it is built again when they
-# change.
+# The editable install's library is rebuilt when the crates change.
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "../Cargo.lock" },

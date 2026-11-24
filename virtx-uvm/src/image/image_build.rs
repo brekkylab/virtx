@@ -245,7 +245,7 @@ mod tests {
             ram_mib: 512,
             gpu: false,
             gpu_memory_mib: None,
-            network: Default::default(),
+            network: false,
             outward: None,
         };
         let steps = [

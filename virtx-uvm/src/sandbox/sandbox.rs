@@ -24,8 +24,8 @@ use super::{Error, Job};
 use crate::backend::{Backing, Held, Stored, Wanted};
 use crate::machine::wire::{CtrlResp, Taken};
 use crate::{
-    Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Network,
-    Ports, Reference, Room, SandboxDisk, VolumeHold, VolumeMount, VolumeStore,
+    Digest, ImageHold, ImageStore, ImageStoreError, Machine, MachineConfig, MachineSpec, Ports,
+    Reference, Room, SandboxDisk, VolumeHold, VolumeMount, VolumeStore,
 };
 
 /// A machine's size where a sandbox leaves it to the server.
@@ -1693,10 +1693,7 @@ fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
         ram_mib: args.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
         gpu: args.gpu.unwrap_or(false),
         gpu_memory_mib: args.gpu_memory_mib,
-        network: match args.network {
-            true => Network::Public,
-            false => Network::None,
-        },
+        network: args.network,
         // The embedder's, asked as each of its machines boots ([`Sandbox::wake`]).
         outward: None,
     }

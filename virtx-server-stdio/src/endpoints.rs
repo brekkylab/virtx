@@ -36,9 +36,9 @@ use virtx_core::{
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
-    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project,
-    ProjectError, Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError,
-    VolumeStore, build_step, park_after, signal_number,
+    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Os, Project, ProjectError,
+    Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
+    build_step, park_after, signal_number,
 };
 
 use crate::Host;
@@ -539,7 +539,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                         ram_mib: DEFAULT_MEMORY_MIB,
                         gpu: false,
                         gpu_memory_mib: None,
-                        network: Network::Public,
+                        network: true,
                         outward: None,
                     },
                     &mut report,

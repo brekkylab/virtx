@@ -6,28 +6,39 @@ use super::{
     manifest::{Child, Manifest},
     reference::{Reference, Target},
 };
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+
 use crate::{Error, Members, image::ImageListOutputItem, transport::TransportClient};
+
+/// How many of a listing's requests are in flight at once: one a tag, which over a remote
+/// server would otherwise each wait out a round trip in turn.
+const AT_ONCE: usize = 16;
 
 /// Every tag in every repository, with the digest it points at, sorted by reference.
 pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutputItem>, Error> {
-    let registry = Registry::new(client);
-    let mut images = Vec::new();
+    let registry = &Registry::new(client);
     // The catalog, a repository's tags and a tag's manifest are three requests, and another
     // client may remove a repository or a tag between them: what is gone is left out.
-    for name in registry.repositories().await? {
-        let Some(tags) = registry.tags(&name).await? else {
-            continue;
-        };
-        for tag in tags {
-            let Some(digest) = registry.manifest_digest_if_there(&name, &tag).await? else {
-                continue;
-            };
-            images.push(ImageListOutputItem {
+    let tagged: Vec<Vec<(String, String)>> = stream::iter(registry.repositories().await?)
+        .map(|name| async move {
+            let tags = registry.tags(&name).await?.unwrap_or_default();
+            Ok::<_, Error>(tags.into_iter().map(|tag| (name.clone(), tag)).collect())
+        })
+        .buffer_unordered(AT_ONCE)
+        .try_collect()
+        .await?;
+    let mut images: Vec<ImageListOutputItem> = stream::iter(tagged.into_iter().flatten())
+        .map(|(name, tag)| async move {
+            let digest = registry.manifest_digest_if_there(&name, &tag).await?;
+            Ok::<_, Error>(digest.map(|digest| ImageListOutputItem {
                 reference: format!("{name}:{tag}"),
                 digest,
-            });
-        }
-    }
+            }))
+        })
+        .buffer_unordered(AT_ONCE)
+        .try_filter_map(|image| async move { Ok(image) })
+        .try_collect()
+        .await?;
     images.sort_by(|a, b| a.reference.cmp(&b.reference));
     Ok(images)
 }
@@ -181,6 +192,63 @@ mod tests {
                 .map(|image| (image.reference.as_str(), image.digest.as_str()))
                 .collect::<Vec<_>>(),
             [("kept:latest", "sha256:ab12")]
+        );
+        client.close().await;
+    }
+
+    /// A listing asks for its repositories' tags at once, and then for every tag's manifest at
+    /// once, not each after the last has answered: here each of a stage's requests answers only
+    /// once every other of that stage has been asked for.
+    #[tokio::test]
+    async fn a_list_asks_for_its_tags_and_their_manifests_at_once() {
+        let every_tags = Arc::new(tokio::sync::Barrier::new(2));
+        let tags = |tags: &'static [&'static str]| {
+            let every_tags = Arc::clone(&every_tags);
+            get(move || async move {
+                every_tags.wait().await;
+                Json(json!({ "tags": tags }))
+            })
+        };
+        let every_manifest = Arc::new(tokio::sync::Barrier::new(3));
+        let manifest = |digest: &'static str| {
+            let every_manifest = Arc::clone(&every_manifest);
+            head(move || async move {
+                every_manifest.wait().await;
+                [
+                    (
+                        header::CONTENT_TYPE.as_str(),
+                        "application/vnd.oci.image.manifest.v1+json",
+                    ),
+                    ("docker-content-digest", digest),
+                ]
+                .into_response()
+            })
+        };
+        let router = Router::new()
+            .route(
+                "/images/oci/v2/_catalog",
+                get(|| async { Json(json!({"repositories": ["one", "two"]})) }),
+            )
+            .route("/images/oci/v2/one/tags/list", tags(&["a", "b"]))
+            .route("/images/oci/v2/two/tags/list", tags(&["c"]))
+            .route("/images/oci/v2/one/manifests/a", manifest("sha256:aa"))
+            .route("/images/oci/v2/one/manifests/b", manifest("sha256:bb"))
+            .route("/images/oci/v2/two/manifests/c", manifest("sha256:cc"));
+        let client = piped(router);
+        let listed = tokio::time::timeout(std::time::Duration::from_secs(60), list(&client))
+            .await
+            .expect("each stage's requests were asked for at once")
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|image| (image.reference.as_str(), image.digest.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("one:a", "sha256:aa"),
+                ("one:b", "sha256:bb"),
+                ("two:c", "sha256:cc")
+            ]
         );
         client.close().await;
     }

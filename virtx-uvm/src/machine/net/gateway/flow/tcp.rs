@@ -108,10 +108,7 @@ impl TcpFlow {
                         write: true,
                     };
                 }
-                Ok(Some(e)) | Err(e) => {
-                    log::warn!("DIAG connect: {e:?}");
-                    return self.fail(socket);
-                }
+                Ok(Some(_)) | Err(_) => return self.fail(socket),
             }
         }
 
@@ -127,10 +124,7 @@ impl TcpFlow {
                     break;
                 }
                 Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => {}
-                e => {
-                    log::warn!("DIAG write to host: {e:?}");
-                    return self.fail(socket);
-                }
+                _ => return self.fail(socket),
             }
         }
         if !self.guest_done
@@ -156,10 +150,7 @@ impl TcpFlow {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => {}
-                e => {
-                    log::warn!("DIAG read from host: {e:?}");
-                    return self.fail(socket);
-                }
+                _ => return self.fail(socket),
             }
         }
         Interest {

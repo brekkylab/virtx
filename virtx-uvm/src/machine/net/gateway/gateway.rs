@@ -172,7 +172,6 @@ impl Gateway {
                     if self.flows.find(IpProtocol::Tcp, ends).is_none()
                         && let Some(at) = self.egress.route(ends.1)
                         && let Ok(tcp) = TcpFlow::open(&mut self.sockets, ends.1, at)
-                            .inspect_err(|e| log::warn!("DIAG open {at}: {e:?}"))
                     {
                         self.flows
                             .insert(&self.poller, &mut self.sockets, ends, Flow::Tcp(tcp));

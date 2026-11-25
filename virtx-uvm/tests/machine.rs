@@ -653,7 +653,13 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
     // Parked, what it took is let go of.
     let let_go = [format!("let go {disk}"), "let go Volume(\"rw\")".into()];
     until("parked", || sandbox.up_since().is_none()).await;
-    assert_eq!(told.read(), let_go);
+    let mut said = Vec::new();
+    until("let go", || {
+        said.extend(told.read());
+        said.len() >= let_go.len()
+    })
+    .await;
+    assert_eq!(said, let_go);
 
     // Refused its disk, it does not boot; let, it does.
     told.refusing.store(true, Ordering::SeqCst);

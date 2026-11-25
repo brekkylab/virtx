@@ -142,13 +142,29 @@ type Starting = (Vec<String>, bool, oneshot::Sender<Result<Arc<Job>, String>>);
 
 /// Where a sandbox's machine is.
 enum State {
-    /// Up, with the room it was given ([`Admission`](crate::Admission)), held until it is down.
-    Up(Arc<Machine>, Option<Room>),
+    Up(Up),
     /// Stopped while the sandbox was in use by nothing, and booted again for what next needs
     /// it.
     Parked,
     /// Ended on its own, or with the sandbox: nothing boots it again.
     Exited,
+}
+
+/// A sandbox's machine while it is up, and what is held for it until it is down: dropped once
+/// it is.
+struct Up {
+    machine: Arc<Machine>,
+    /// The room it was given ([`Admission`](crate::Admission)).
+    _room: Option<Room>,
+    /// When it came up: by the wall clock, and by one no one sets.
+    since: (SystemTime, Instant),
+    /// What the sandbox's backing holds for it.
+    _holding: Vec<Held>,
+    /// Each command sent to it and not yet answered, in the order sent, and who waits for its
+    /// job: shared with what reads the machine, which answers them until the machine ends.
+    starting: Arc<Mutex<VecDeque<Starting>>>,
+    /// Who waits for its guest to say it has synced.
+    synced: Option<oneshot::Sender<()>>,
 }
 
 /// A sandbox: a machine booted as it was made, again whenever it is needed after it was
@@ -167,8 +183,6 @@ pub struct Sandbox {
     args: Mutex<SandboxCreateArgs>,
     /// The root it was made under, which [`runs`](super::runs) names it by beside its id.
     root: PathBuf,
-    /// When its machine came up, while it is up: by the wall clock, and by one no one sets.
-    up_since: Mutex<Option<(SystemTime, Instant)>>,
     /// Where its upper disk and its record are.
     dir: PathBuf,
     /// What is kept of it past its process, for one made so: `None` for one that goes with its
@@ -192,10 +206,8 @@ pub struct Sandbox {
     volume_holds: Mutex<Vec<VolumeHold>>,
     /// Each volume it mounts, by name, and whether read-only.
     mounted: Vec<(String, bool)>,
-    /// Where its disk and volumes are kept beyond this machine, if anywhere, and what that holds
-    /// for its machine while it is up.
+    /// Where its disk and volumes are kept beyond this machine, if anywhere.
     backing: Backing,
-    holding: Mutex<Vec<Held>>,
     /// What each of its machines boots, as large as it was last [resized](Sandbox::resize) to,
     /// and the process each runs as.
     config: Mutex<MachineConfig>,
@@ -209,11 +221,6 @@ pub struct Sandbox {
     turn: tokio::sync::Mutex<()>,
     /// Its jobs, by id, until each is removed.
     jobs: Mutex<BTreeMap<String, Arc<Job>>>,
-    /// Each command sent to the machine and not yet answered, in the order sent, and who waits
-    /// for its job.
-    starting: Mutex<VecDeque<Starting>>,
-    /// Who waits for its guest to say it has synced.
-    synced: Mutex<Option<oneshot::Sender<()>>>,
     /// Whether the embedder's disks served its disk to its last machine: `None` until one has
     /// booted in this process.
     served: Mutex<Option<bool>>,
@@ -537,7 +544,6 @@ impl Sandbox {
             name: args.name.clone(),
             args: Mutex::new(args.clone()),
             root: root.to_owned(),
-            up_since: Mutex::default(),
             dir,
             record: Mutex::new(record),
             image: digest,
@@ -562,7 +568,6 @@ impl Sandbox {
                 .map(|asked| (asked.volume.clone(), asked.readonly))
                 .collect(),
             backing,
-            holding: Mutex::default(),
             config: Mutex::new(config),
             vm,
             disk_gib: AtomicU32::new(disk_gib),
@@ -573,8 +578,6 @@ impl Sandbox {
             ended_for: Mutex::new(None),
             turn: tokio::sync::Mutex::new(()),
             jobs: Mutex::new(jobs),
-            starting: Mutex::default(),
-            synced: Mutex::default(),
             served: Mutex::default(),
             ports: Ports::default(),
             park_after,
@@ -603,7 +606,10 @@ impl Sandbox {
 
     /// When its machine came up, while it is up; `None` while it is parked or has exited.
     pub fn up_since(&self) -> Option<SystemTime> {
-        self.up_since.lock().unwrap().map(|(at, _)| at)
+        match &*self.state.lock().unwrap() {
+            State::Up(up) => Some(up.since.0),
+            _ => None,
+        }
     }
 
     /// The sandbox as the server answers it, each port with what it is for and how it is
@@ -671,14 +677,17 @@ impl Sandbox {
         let _activity = self.activity();
         let machine = self.wake().await?;
         let (waiter, started) = oneshot::channel();
+        // Its machine's own, which go with it: a command sent to one gone is never answered.
+        let starting = match &*self.state.lock().unwrap() {
+            State::Up(up) if Arc::ptr_eq(&up.machine, &machine) => Arc::clone(&up.starting),
+            _ => return Err(Error::Ended),
+        };
         {
-            let mut starting = self.starting.lock().unwrap();
-            if !self.is(&machine) {
-                return Err(Error::Ended);
-            }
+            let mut starting = starting.lock().unwrap();
             machine.exec(cmd.clone(), stdin)?;
             starting.push_back((cmd, stdin, waiter));
         }
+        drop(starting);
         let job = started
             .await
             .map_err(|_| Error::Ended)?
@@ -883,7 +892,7 @@ impl Sandbox {
         // Its machine neither boots nor stops meanwhile.
         let _turn = self.turn.lock().await;
         let machine = match &*self.state.lock().unwrap() {
-            State::Up(machine, _) => Arc::clone(machine),
+            State::Up(up) => Arc::clone(&up.machine),
             State::Parked => return Ok(true),
             State::Exited => return Err(Error::Ended),
         };
@@ -891,9 +900,12 @@ impl Sandbox {
     }
 
     /// `machine`, its own, synced as [`sync`](Self::sync) says, its turn held.
-    async fn synced_by(&self, machine: &Machine) -> Result<bool, Error> {
+    async fn synced_by(&self, machine: &Arc<Machine>) -> Result<bool, Error> {
         let (told, synced) = oneshot::channel();
-        *self.synced.lock().unwrap() = Some(told);
+        match &mut *self.state.lock().unwrap() {
+            State::Up(up) if Arc::ptr_eq(&up.machine, machine) => up.synced = Some(told),
+            _ => return Err(Error::Ended),
+        }
         machine.sync()?;
         let synced = tokio::time::timeout(SYNC_WAIT, synced).await;
         Ok(matches!(synced, Ok(Ok(()))))
@@ -913,7 +925,7 @@ impl Sandbox {
         // Its machine neither boots nor stops meanwhile, nor its disk goes.
         let _turn = self.turn.lock().await;
         let machine = match &*self.state.lock().unwrap() {
-            State::Up(machine, _) => Some(Arc::clone(machine)),
+            State::Up(up) => Some(Arc::clone(&up.machine)),
             State::Parked => None,
             State::Exited => return Err(Error::Ended),
         };
@@ -975,12 +987,11 @@ impl Sandbox {
         // Taken first, so that nothing its machine's stopping ends -- its exit, a job killed
         // with it -- is written into it: a job that runs now is kept as one that ran.
         let record = self.record.lock().unwrap().take();
-        if let State::Up(machine, _room) = state {
-            machine.stop();
-            self.went_down();
+        if let State::Up(up) = state {
+            up.machine.stop();
+            self.went_down(&up);
         }
         // Its machine down, and its disk and volumes still here: the backend's to keep now.
-        self.holding.lock().unwrap().clear();
         self.volume_holds.lock().unwrap().clear();
         if let Some(mut upper) = self.upper.lock().unwrap().take() {
             upper.kept = leaving && record.is_some();
@@ -1002,7 +1013,7 @@ impl Sandbox {
     async fn wake_in(self: &Arc<Self>, given: Option<Option<Room>>) -> Result<Arc<Machine>, Error> {
         let _turn = self.turn.lock().await;
         match &*self.state.lock().unwrap() {
-            State::Up(machine, _) => return Ok(Arc::clone(machine)),
+            State::Up(up) => return Ok(Arc::clone(&up.machine)),
             State::Exited => return Err(Error::Ended),
             State::Parked => {}
         }
@@ -1052,27 +1063,33 @@ impl Sandbox {
         });
         let (machine, held) = machine.await??;
         let machine = Arc::new(machine.holding(held));
-        *self.holding.lock().unwrap() = holding;
+        let starting = Arc::default();
         let closed = {
             let mut state = self.state.lock().unwrap();
             let closed = matches!(*state, State::Exited);
             if !closed {
-                *state = State::Up(Arc::clone(&machine), room.take());
+                let since = (SystemTime::now(), Instant::now());
+                *state = State::Up(Up {
+                    machine: Arc::clone(&machine),
+                    _room: room.take(),
+                    since,
+                    _holding: std::mem::take(&mut holding),
+                    starting: Arc::clone(&starting),
+                    synced: None,
+                });
                 // Told while the state is held, so its going down, however soon, is told after.
-                let at = SystemTime::now();
-                *self.up_since.lock().unwrap() = Some((at, Instant::now()));
-                super::runs::up(&self.id, &self.root, at);
+                super::runs::up(&self.id, &self.root, since.0);
             }
             closed
         };
-        // Closed while it booted: what booted goes with it, and then its room.
+        // Closed while it booted: what booted goes with it, and then what was held for it.
         if closed {
             tokio::task::spawn_blocking(move || machine.stop()).await?;
-            drop(room);
+            drop((holding, room));
             return Err(Error::Ended);
         }
         let (reading, read) = (Arc::clone(self), Arc::clone(&machine));
-        std::thread::spawn(move || reading.read(&read));
+        std::thread::spawn(move || reading.read(&read, &starting));
         if let Some(after) = self.park_after
             && !self.watching.swap(true, Ordering::Relaxed)
         {
@@ -1118,7 +1135,7 @@ impl Sandbox {
     /// [`park_if`](Self::park_if), called under its turn.
     async fn park_under_turn(&self, unused_for: Option<Duration>) -> Result<(), Error> {
         let idle = self.idle();
-        let (machine, room) = {
+        let up = {
             let mut state = self.state.lock().unwrap();
             match &*state {
                 State::Up(..) => {}
@@ -1137,39 +1154,32 @@ impl Sandbox {
                     Some(_) => {}
                 }
             }
-            let State::Up(machine, room) = std::mem::replace(&mut *state, State::Parked) else {
+            let State::Up(up) = std::mem::replace(&mut *state, State::Parked) else {
                 unreachable!("up, as matched under the same lock")
             };
-            (machine, room)
+            up
         };
-        // Its room is given back once it is down.
+        // What was held for it is let go of once it is down.
+        let machine = Arc::clone(&up.machine);
         let _ = tokio::task::spawn_blocking(move || machine.stop()).await;
-        self.holding.lock().unwrap().clear();
-        drop(room);
-        self.went_down();
+        self.went_down(&up);
         Ok(())
     }
 
-    /// Its machine told down, once it is, if it was told up: called by whatever took it out of
-    /// [`State::Up`], once, and before another can boot -- a park and a close hold the turn
-    /// while they do -- so that each machine's going down is told once and in its order.
-    fn went_down(&self) {
-        if let Some((started, since)) = self.up_since.lock().unwrap().take() {
-            super::runs::down(&self.id, &self.root, started, since);
-        }
+    /// `up` told down, once its machine is: called by whatever took it out of [`State::Up`],
+    /// and before another can boot -- a park and a close hold the turn while they do -- so that
+    /// each machine's going down is told once and in its order.
+    fn went_down(&self, up: &Up) {
+        let (started, since) = up.since;
+        super::runs::down(&self.id, &self.root, started, since);
     }
 
     /// Its machine while one runs.
     fn up(&self) -> Option<Arc<Machine>> {
         match &*self.state.lock().unwrap() {
-            State::Up(machine, _) => Some(Arc::clone(machine)),
+            State::Up(up) => Some(Arc::clone(&up.machine)),
             _ => None,
         }
-    }
-
-    /// Whether `machine` is its machine now.
-    fn is(&self, machine: &Arc<Machine>) -> bool {
-        matches!(&*self.state.lock().unwrap(), State::Up(up, _) if Arc::ptr_eq(up, machine))
     }
 
     /// Kill `job` if it runs, for `reason`.
@@ -1184,14 +1194,13 @@ impl Sandbox {
 
     /// What `machine` says, until it ends: each command's pid, as the job its waiter gets, and
     /// each job's output and end.
-    fn read(&self, machine: &Arc<Machine>) {
+    fn read(&self, machine: &Arc<Machine>, starting: &Mutex<VecDeque<Starting>>) {
         let _published = self.ports.publish(machine.published.clone());
         let mut running = HashMap::new();
         while let Some(message) = machine.recv() {
             match message {
                 CtrlResp::Started(started) => {
-                    let Some((cmd, stdin, waiter)) = self.starting.lock().unwrap().pop_front()
-                    else {
+                    let Some((cmd, stdin, waiter)) = starting.lock().unwrap().pop_front() else {
                         continue;
                     };
                     let started = started.map(|pid| {
@@ -1245,32 +1254,33 @@ impl Sandbox {
                     }
                 }
                 CtrlResp::Synced => {
-                    if let Some(told) = self.synced.lock().unwrap().take() {
+                    if let State::Up(up) = &mut *self.state.lock().unwrap()
+                        && Arc::ptr_eq(&up.machine, machine)
+                        && let Some(told) = up.synced.take()
+                    {
                         let _ = told.send(());
                     }
                 }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
-        // Nothing waits for a sync it will not say.
-        self.synced.lock().unwrap().take();
-        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Closed or
-        // let go of, it was stopped under them, for the reason `end` gave; otherwise it ended on
-        // its own, and nothing boots it again.
-        let mut starting = self.starting.lock().unwrap();
+        // Gone, and what ran in it with it: killed, as far as anything in it can tell. Parked,
+        // closed or let go of, it was taken out of its state under them, for the reason `end`
+        // gave where it was ended; otherwise it ended on its own, and nothing boots it again.
         let exited = {
             let mut state = self.state.lock().unwrap();
-            // Its room with it, since it is down.
-            let exited = matches!(&*state, State::Up(up, _) if Arc::ptr_eq(up, machine));
-            if exited {
-                *state = State::Exited;
-                self.went_down();
+            match &*state {
+                State::Up(up) if Arc::ptr_eq(&up.machine, machine) => {
+                    Some(std::mem::replace(&mut *state, State::Exited))
+                }
+                _ => None,
             }
-            exited
         };
-        if exited {
-            self.holding.lock().unwrap().clear();
+        // What was held for it let go of, since it is down, and whoever waits on it with it.
+        if let Some(State::Up(up)) = &exited {
+            self.went_down(up);
         }
+        let exited = exited.is_some();
         // Kept so, past its process, before any job is seen to end: a server started again
         // knows it exited.
         if exited && let Some(record) = &mut *self.record.lock().unwrap() {
@@ -1279,7 +1289,8 @@ impl Sandbox {
                 eprintln!("sandbox {}'s exit not kept: {e}", self.id);
             }
         }
-        starting.clear();
+        // A command it did not answer never will be.
+        starting.lock().unwrap().clear();
         let reason = match exited {
             true => SandboxJobEndReason::VmExited,
             false => self
@@ -1292,7 +1303,6 @@ impl Sandbox {
         for job in running.into_values() {
             job.cut(reason.clone());
         }
-        drop(starting);
         self.keep_jobs();
     }
 }

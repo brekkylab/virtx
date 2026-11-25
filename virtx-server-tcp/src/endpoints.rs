@@ -406,6 +406,18 @@ impl Home {
         true
     }
 
+    /// Close it as [`close`](Home::close) does, whatever lives here, and close every sandbox
+    /// as [`close_all`](Home::close_all) does. Each kept here and not known again is let go
+    /// of, its disk and record left where they are.
+    pub(crate) fn forget(&self) {
+        {
+            let _sandboxes = self.sandboxes.lock().unwrap();
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        self.close_all();
+        self.unknown.lock().unwrap().clear();
+    }
+
     /// Cancel every image job here, and close every sandbox, as removing each does, side by
     /// side: blocks until each machine has stopped and synced what it wrote.
     pub fn close_all(&self) {

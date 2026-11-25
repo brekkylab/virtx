@@ -479,11 +479,14 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
     let _ = std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd");
     mount(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)?;
 
-    // A guest whose interface cannot be set up, or an image whose `/etc/resolv.conf` cannot be
-    // written, reaches nothing or resolves no names, and runs anyway.
+    // A guest whose network interface cannot be set up, or an image whose `/etc/resolv.conf`
+    // cannot be written, reaches nothing or resolves no names, and runs anyway.
     if let Some(network) = &asked.network {
-        if let Err(e) = interface(network) {
-            eprintln!("{}: setting up {INTERFACE}: {e}", env!("CARGO_BIN_NAME"));
+        if let Err(e) = network_interface(network) {
+            eprintln!(
+                "{}: setting up {NETWORK_INTERFACE}: {e}",
+                env!("CARGO_BIN_NAME")
+            );
         }
         if let Some(nameserver) = network.nameserver
             && let Err(e) = fs::write("/etc/resolv.conf", format!("nameserver {nameserver}\n"))
@@ -499,14 +502,15 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
 }
 
 /// The guest's one virtio-net interface, which the kernel names first.
-const INTERFACE: &str = "eth0";
+const NETWORK_INTERFACE: &str = "eth0";
 
-/// Give [`INTERFACE`] its address, netmask and MTU, bring it up, and route everything off the
-/// link through the gateway. Connections to a published port arrive at the guest's loopback
-/// over the link, which the kernel takes as martian unless told otherwise (`route_localnet`).
-fn interface(network: &wire::GuestNetwork) -> io::Result<()> {
+/// Give [`NETWORK_INTERFACE`] its address, netmask and MTU, bring it up, and route everything
+/// off the link through the gateway. Connections to a published port arrive at the guest's
+/// loopback over the link, which the kernel takes as martian unless told otherwise
+/// (`route_localnet`).
+fn network_interface(network: &wire::GuestNetwork) -> io::Result<()> {
     fs::write(
-        format!("/proc/sys/net/ipv4/conf/{INTERFACE}/route_localnet"),
+        format!("/proc/sys/net/ipv4/conf/{NETWORK_INTERFACE}/route_localnet"),
         "1",
     )?;
     let ioctl = |fd: libc::c_int, request: libc::c_ulong, arg: *mut libc::c_void| {
@@ -536,7 +540,7 @@ fn interface(network: &wire::GuestNetwork) -> io::Result<()> {
 
     // SAFETY: zero is an empty request, filled in below.
     let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
-    for (to, from) in req.ifr_name.iter_mut().zip(INTERFACE.bytes()) {
+    for (to, from) in req.ifr_name.iter_mut().zip(NETWORK_INTERFACE.bytes()) {
         *to = from as libc::c_char;
     }
     req.ifr_ifru.ifru_addr = inet(network.address);

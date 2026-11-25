@@ -314,7 +314,10 @@ impl Machine {
         let mut process = command
             .spawn()
             .map_err(|e| Error::io("starting the machine's process", e))?;
-        spike_marks.push(format!("prepared={spike_before:.1} spawned={:.1}", spike_ms(spike_now())));
+        spike_marks.push(format!(
+            "prepared={spike_before:.1} spawned={:.1}",
+            spike_ms(spike_now())
+        ));
         // The process's now: held here too, they would keep the channels open past its end.
         drop((their_ctrlin, their_ctrlout, their_ioin, their_ioout));
 

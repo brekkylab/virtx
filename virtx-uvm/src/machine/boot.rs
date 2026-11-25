@@ -481,16 +481,21 @@ pub(super) fn boot(
         std::env::var_os("VIRTX_SNAPSHOT_RESTORE").map(std::path::PathBuf::from),
     );
     let mut save_and_boot = false;
-    if save.is_none() && restore.is_none() && std::env::var_os("VIRTX_SPIKE_NO_AUTO").is_none() {
-        if let Some(dir) = shape {
-            if dir.join("state").exists() {
-                restore = Some(dir);
-            } else {
-                save = Some(dir);
-                save_and_boot = true;
-            }
+    if save.is_none()
+        && restore.is_none()
+        && std::env::var_os("VIRTX_SPIKE_NO_AUTO").is_none()
+        && let Some(dir) = shape
+    {
+        if dir.join("state").exists() {
+            restore = Some(dir);
+        } else {
+            save = Some(dir);
+            save_and_boot = true;
         }
     }
+    // Read only where a snapshot is taken, on x86_64 Linux.
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = save_and_boot;
     let vmm = vmm.payload(payload).devices(devices);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     let vmm = match &restore {
@@ -503,7 +508,9 @@ pub(super) fn boot(
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
     spike_mark("build done");
-    let handle = vmm.handle().map_err(|e| Error::vmm("a handle on the machine", e))?;
+    let handle = vmm
+        .handle()
+        .map_err(|e| Error::vmm("a handle on the machine", e))?;
     let _ = &restore;
 
     // The root for the agent to build, then the host's messages on to it, and the agent's back -- `Ready` with where the ports
@@ -540,6 +547,9 @@ pub(super) fn boot(
         let for_info = Arc::clone(&for_guest);
         let info_after = info.clone();
         move || {
+            // Sent only after a snapshot, on x86_64 Linux.
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            let _ = (&for_info, &info_after);
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
                 spike_mark(match &message {
                     CtrlResp::Waiting => "guest waiting",
@@ -648,9 +658,14 @@ fn spike_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<std:
     (machine.spec.network || !machine.ports.is_empty()).hash(&mut hash);
     info.shares.hash(&mut hash);
     machine.rootfs.hash(&mut hash);
-    std::fs::metadata(&machine.upper).ok()?.len().hash(&mut hash);
+    std::fs::metadata(&machine.upper)
+        .ok()?
+        .len()
+        .hash(&mut hash);
     // Whether its disk offers the guest a write cache to flush, which the guest negotiated.
-    crate::disks::disks().flushed(&machine.upper).hash(&mut hash);
+    crate::disks::disks()
+        .flushed(&machine.upper)
+        .hash(&mut hash);
     // This binary, whose libkrun and agent wrote the snapshot.
     let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
     (exe.len(), exe.modified().ok()).hash(&mut hash);
@@ -668,7 +683,11 @@ pub(crate) fn spike_mark(what: &str) {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros();
-        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+        {
             let _ = writeln!(file, "{} {now} {what}", std::process::id());
         }
     } else if CTRLOUT.get().is_some() {

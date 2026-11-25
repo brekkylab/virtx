@@ -3229,17 +3229,30 @@ impl Outward for Refusing {
 /// Spike: cold boots against restores from a snapshot taken as a machine's agent waits.
 async fn spike_snapshot(home: Home) {
     let var = |name: &str, default: u32| -> u32 {
-        env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     };
     let mut args = small();
     args.memory_mib = Some(var("SPIKE_MEM", 1024));
     args.vcpus = Some(var("SPIKE_VCPUS", 1) as u8);
     args.network = var("SPIKE_NET", 0) == 1;
     let at_once = var("SPIKE_AT_ONCE", 1) as usize;
-    eprintln!("spike shape: {:?} MiB, {:?} vCPUs, network {}, {at_once} at once", args.memory_mib, args.vcpus, args.network);
-    let dir = env::var_os("SPIKE_SNAPDIR").map(PathBuf::from).unwrap_or_else(|| home.root.join("snapshot"));
+    eprintln!(
+        "spike shape: {:?} MiB, {:?} vCPUs, network {}, {at_once} at once",
+        args.memory_mib, args.vcpus, args.network
+    );
+    let dir = env::var_os("SPIKE_SNAPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.root.join("snapshot"));
     let rounds: usize = var("SPIKE_ROUNDS", 5) as usize;
-    let epoch_us = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+    let epoch_us = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
+    };
     for i in 0..rounds {
         eprintln!("spike mark {} cold {i} create", epoch_us());
         let t = Instant::now();
@@ -3247,7 +3260,10 @@ async fn spike_snapshot(home: Home) {
         let made = t.elapsed();
         let t = Instant::now();
         let out = run(&sandbox, &["echo", "hi"], None).await.unwrap();
-        eprintln!("spike cold {i}: create {made:?} exec {:?} {out:?}", t.elapsed());
+        eprintln!(
+            "spike cold {i}: create {made:?} exec {:?} {out:?}",
+            t.elapsed()
+        );
         close(sandbox).await;
     }
     // SAFETY: the spike runs alone; machines spawned from here on inherit it.
@@ -3269,7 +3285,10 @@ async fn spike_snapshot(home: Home) {
     tokio::time::sleep(Duration::from_secs(var("SPIKE_AGE", 0).into())).await;
     eprintln!(
         "spike host clock now {}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     );
     unsafe { env::set_var("VIRTX_SNAPSHOT_RESTORE", &dir) };
     if at_once > 1 {
@@ -3285,7 +3304,10 @@ async fn spike_snapshot(home: Home) {
             (made_in, out, sandbox)
         }))
         .await;
-        eprintln!("spike restore {at_once} at once, all up in {:?}", t.elapsed());
+        eprintln!(
+            "spike restore {at_once} at once, all up in {:?}",
+            t.elapsed()
+        );
         for (made_in, out, sandbox) in made {
             eprintln!("  create {made_in:?} {out}");
             if let Ok(sandbox) = sandbox {
@@ -3322,7 +3344,10 @@ async fn spike_snapshot(home: Home) {
         };
         let t = Instant::now();
         let out = run(&sandbox, &["echo", "hi"], None).await;
-        eprintln!("spike restore {i}: create {made_in:?} exec {:?} {out:?}", t.elapsed());
+        eprintln!(
+            "spike restore {i}: create {made_in:?} exec {:?} {out:?}",
+            t.elapsed()
+        );
         close(sandbox).await;
     }
     unsafe { env::remove_var("VIRTX_SNAPSHOT_RESTORE") };

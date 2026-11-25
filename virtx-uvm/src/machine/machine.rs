@@ -344,6 +344,11 @@ impl Machine {
                 }
                 Some(CtrlResp::Log {
                     target, message, ..
+                }) if target == "spike-guest" => {
+                    spike_marks.push(format!("guest[{message}]@{:.1}", spike_ms(spike_now())));
+                }
+                Some(CtrlResp::Log {
+                    target, message, ..
                 }) if target == "spike-mark" => {
                     if let Some((at, what)) = message.split_once(' ')
                         && let Ok(at) = at.parse::<u128>()

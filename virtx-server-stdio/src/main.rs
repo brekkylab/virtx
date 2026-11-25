@@ -290,9 +290,8 @@ mod tests {
     };
 
     use virtx_core::{
-        Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
-        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume,
-        Step,
+        Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, PortSpec, Recipe,
+        SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume, Step,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -549,13 +548,7 @@ mod tests {
             args.ports = ports.into_iter().map(PortSpec::new).collect();
             assert_eq!(refused(args).await, 400);
         }
-        // Inbound rules are kept by no server here, and a label is at most 128 characters.
-        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
-        assert_eq!(refused(here().port(ssh)).await, 400);
-        assert_eq!(
-            refused(here().port(PortSpec::new(22).inbound([]))).await,
-            400
-        );
+        // A label is at most 128 characters.
         let long = PortSpec::new(80).label("x".repeat(129));
         assert_eq!(refused(here().port(long)).await, 400);
         let long = "x".repeat(129);
@@ -1574,7 +1567,7 @@ mod tests {
                 "POST",
                 "/sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?}, not "5900""#,
             ),
             (
                 "GET",

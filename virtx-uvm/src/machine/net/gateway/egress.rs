@@ -16,28 +16,28 @@ use super::{LAN, resolver};
 /// The DNS port, the one the nameserver answers on.
 const DNS_PORT: u16 = 53;
 
-pub(super) struct Policy {
-    pub(super) egress: bool,
+pub(super) struct Egress {
+    pub(super) enabled: bool,
     /// Where a query to the nameserver goes, and `None` for a host that names no resolver --
     /// whose guest then resolves no names, which is what every other process there gets.
     pub(super) resolver: Option<SocketAddr>,
 }
 
-impl Policy {
-    pub(super) fn new(egress: bool) -> Policy {
-        let resolver = match egress {
+impl Egress {
+    pub(super) fn new(enabled: bool) -> Egress {
+        let resolver = match enabled {
             true => resolver::host_resolvers().first().copied(),
             false => None,
         };
-        Policy {
-            egress,
+        Egress {
+            enabled,
             resolver: resolver.map(|ip| SocketAddr::new(ip.into(), DNS_PORT)),
         }
     }
 
     /// Where a flow the guest sent to `to` goes on this host, or `None` for nowhere.
     pub(super) fn route(&self, to: SocketAddrV4) -> Option<SocketAddr> {
-        if !self.egress {
+        if !self.enabled {
             return None;
         }
         if *to.ip() == LAN.nameserver {
@@ -49,6 +49,9 @@ impl Policy {
 
 /// Whether the internet routes `ip`, taken canonical: an address no network but this
 /// host's own reaches is not, and neither is one every network reaches somewhere else.
+///
+/// This function is `pub(crate)` to give the image registry proxy the same destination
+/// check for connections it opens on the host.
 pub(crate) fn routed(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
@@ -93,9 +96,9 @@ mod tests {
 
     const PUBLIC: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(93, 184, 215, 14), 443);
 
-    fn on() -> Policy {
-        Policy {
-            egress: true,
+    fn on() -> Egress {
+        Egress {
+            enabled: true,
             resolver: Some(SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 53)),
         }
     }
@@ -129,11 +132,11 @@ mod tests {
     /// resolves nothing.
     #[test]
     fn the_nameserver_is_this_hosts_resolver() {
-        let policy = on();
+        let egress = on();
         let dns = SocketAddrV4::new(LAN.nameserver, 53);
-        assert_eq!(policy.route(dns), policy.resolver);
-        assert_eq!(policy.route(SocketAddrV4::new(LAN.nameserver, 80)), None);
-        let unnamed = Policy {
+        assert_eq!(egress.route(dns), egress.resolver);
+        assert_eq!(egress.route(SocketAddrV4::new(LAN.nameserver, 80)), None);
+        let unnamed = Egress {
             resolver: None,
             ..on()
         };
@@ -143,8 +146,8 @@ mod tests {
     /// Without a network, nothing is reached, the nameserver included.
     #[test]
     fn no_network_reaches_nothing() {
-        let off = Policy {
-            egress: false,
+        let off = Egress {
+            enabled: false,
             ..on()
         };
         for to in [PUBLIC, SocketAddrV4::new(LAN.nameserver, 53)] {

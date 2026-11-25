@@ -13,14 +13,14 @@
 //!   reap     the flows that are over
 //! ```
 
+mod egress;
 mod flow;
 mod gateway;
-mod policy;
 mod resolver;
 mod tcp;
 mod udp;
 
+pub(crate) use egress::routed;
 pub(super) use gateway::Gateway;
-pub(crate) use policy::routed;
 
 use super::{LAN, link};

@@ -12,9 +12,9 @@ use smoltcp::wire::{
 };
 
 use super::LAN;
+use super::egress::Egress;
 use super::flow::{Ends, Flow, Flows, Turn};
 use super::link::Link;
-use super::policy::Policy;
 use super::tcp::TcpFlow;
 use super::udp::{self, UdpFlow};
 
@@ -31,7 +31,7 @@ pub(in crate::machine::net) struct Gateway {
     link: Link,
     iface: Interface,
     sockets: SocketSet<'static>,
-    policy: Policy,
+    egress: Egress,
     flows: Flows,
     published: Vec<(u16, TcpListener)>,
     next_port: u16,
@@ -44,12 +44,12 @@ impl Gateway {
         egress: bool,
         published: Vec<(u16, TcpListener)>,
     ) -> io::Result<Self> {
-        Self::with_policy(link, Policy::new(egress), published)
+        Self::with_egress(link, Egress::new(egress), published)
     }
 
-    fn with_policy(
+    fn with_egress(
         mut link: Link,
-        policy: Policy,
+        egress: Egress,
         published: Vec<(u16, TcpListener)>,
     ) -> io::Result<Gateway> {
         let mut config = Config::new(EthernetAddress(LAN.gateway_mac).into());
@@ -84,7 +84,7 @@ impl Gateway {
             link,
             iface,
             sockets: SocketSet::new(Vec::new()),
-            policy,
+            egress,
             flows: Flows::default(),
             published,
             next_port: EPHEMERAL,
@@ -158,7 +158,7 @@ impl Gateway {
             match Frame::of(frame) {
                 Frame::Udp { ends, payload } => {
                     let key = self.flows.find(&ends).or_else(|| {
-                        let at = self.policy.route(ends.1)?;
+                        let at = self.egress.route(ends.1)?;
                         let flow = Flow::Udp(UdpFlow::open(ends, at).ok()?);
                         self.flows
                             .insert(&self.poller, &mut self.sockets, ends, flow)
@@ -172,7 +172,7 @@ impl Gateway {
                 }
                 Frame::Syn { ends } => {
                     if self.flows.find(&ends).is_none()
-                        && let Some(at) = self.policy.route(ends.1)
+                        && let Some(at) = self.egress.route(ends.1)
                         && let Ok(tcp) = TcpFlow::open(&mut self.sockets, ends.1, at)
                     {
                         self.flows
@@ -308,10 +308,10 @@ mod tests {
     }
 
     impl Guest {
-        fn new(policy: Policy, published: Vec<(u16, TcpListener)>) -> Guest {
+        fn new(egress: Egress, published: Vec<(u16, TcpListener)>) -> Guest {
             let (ours, theirs) = UnixStream::pair().unwrap();
             let stack =
-                Gateway::with_policy(Link::new(ours.into()).unwrap(), policy, published).unwrap();
+                Gateway::with_egress(Link::new(ours.into()).unwrap(), egress, published).unwrap();
             thread::spawn(move || stack.run());
             let mut link = Link::new(theirs.into()).unwrap();
             let config = Config::new(EthernetAddress(LAN.guest_mac).into());
@@ -360,9 +360,9 @@ mod tests {
 
     /// A network whose resolver is `at`, so what the guest sends to its nameserver reaches a
     /// socket of the test's.
-    fn resolved_at(at: SocketAddr) -> Policy {
-        Policy {
-            egress: true,
+    fn resolved_at(at: SocketAddr) -> Egress {
+        Egress {
+            enabled: true,
             resolver: Some(at),
         }
     }
@@ -475,8 +475,8 @@ mod tests {
     fn a_published_port_reaches_the_guests_loopback_listener() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let none = Policy {
-            egress: false,
+        let none = Egress {
+            enabled: false,
             resolver: None,
         };
         let mut guest = Guest::new(none, vec![(8080, listener)]);

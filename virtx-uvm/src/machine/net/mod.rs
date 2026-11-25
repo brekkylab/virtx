@@ -6,7 +6,7 @@
 //!   ──────────────────────────────────────────────────────────────────────────────────
 //!   eth0 ──► virtio-net ────────┼── libkrun ─┼──► Link ──► Gateway ──► Flow ──► host socket
 //!   10.0.2.15/24, via 10.0.2.2  │            │   (frames)    │
-//!                               │            │               Policy
+//!                               │            │               Egress
 //! ```
 //!
 //! [`device`] makes the device and starts the [`Gateway`] on its own thread. The gateway

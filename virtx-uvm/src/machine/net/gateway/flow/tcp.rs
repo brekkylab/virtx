@@ -96,18 +96,21 @@ impl TcpFlow {
         &self.host
     }
 
-    /// Move what each side has to the other.
-    pub(super) fn pump(&mut self, sockets: &mut SocketSet) -> Interest {
+    /// Move what each side has to the other. `ready` is whether the host socket was reported
+    /// since the last turn. While it connects it is waited on for writing alone, so it is
+    /// reported once its connect is answered: what tells that on every host, where Windows'
+    /// `getpeername` answers before the connect does.
+    pub(super) fn pump(&mut self, sockets: &mut SocketSet, ready: bool) -> Interest {
         let socket = sockets.get_mut::<SmolSocket>(self.handle);
         if self.connecting {
+            if !ready {
+                return Interest {
+                    read: false,
+                    write: true,
+                };
+            }
             match self.host.take_error() {
-                Ok(None) if self.host.peer_addr().is_ok() => self.connecting = false,
-                Ok(None) => {
-                    return Interest {
-                        read: false,
-                        write: true,
-                    };
-                }
+                Ok(None) => self.connecting = false,
                 Ok(Some(_)) | Err(_) => return self.fail(socket),
             }
         }

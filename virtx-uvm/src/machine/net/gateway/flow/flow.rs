@@ -53,7 +53,7 @@ impl Flow {
     /// `ready` is whether its host socket was reported since the last turn.
     fn pump(&mut self, turn: &mut Turn, ready: bool) -> Interest {
         match self {
-            Flow::Tcp(tcp) => tcp.pump(turn.sockets),
+            Flow::Tcp(tcp) => tcp.pump(turn.sockets, ready),
             Flow::Udp(udp) => udp.pump(turn.link, ready),
         }
     }

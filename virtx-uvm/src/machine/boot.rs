@@ -666,7 +666,7 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
 
 /// Mark each file in `dir` executable for the guest, and with `deep` each file under it: `/abin`'s
 /// programs, and what they install beside themselves, which they run by path too, such as
-/// `browser`'s Chrome. `alib/`'s directories hold libraries, which the guest's loader maps
+/// `browser`'s Chromium. `alib/`'s directories hold libraries, which the guest's loader maps
 /// whatever their mode, and many of them, so only its top level is marked.
 ///
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data

@@ -112,9 +112,12 @@ const DT_NEEDED: u64 = 1;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=fonts.conf");
+    println!("cargo:rerun-if-env-changed=VIRTX_ABIN_DOWNLOADS");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("cargo names the target's architecture");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo names OUT_DIR"));
-    let sha256 = |data: &[u8]| format!("{:x}", Sha256::digest(data));
+    let downloads =
+        env::var_os("VIRTX_ABIN_DOWNLOADS").map_or_else(|| out.join("downloads"), PathBuf::from);
+    fs::create_dir_all(&downloads).expect("making the downloads' directory");
 
     // Replaced whole, so that nothing a build before this one placed is left in it.
     let install = out.join("install");
@@ -133,19 +136,16 @@ fn main() {
         "x86_64" => "amd64",
         _ => panic!("no Debian packages for {arch}"),
     };
-    let dir = out.join(format!("debian/{debian_arch}"));
     let mut index: HashMap<String, (String, String, String)> = HashMap::new();
     let (_, sums) = INDEX_SUMS
         .iter()
         .find(|(a, _)| *a == debian_arch)
         .unwrap_or_else(|| panic!("no Debian index pinned for {debian_arch}"));
     for ((archive, dist), sum) in ARCHIVES.iter().zip(sums) {
-        let at = dir.join(dist);
-        fs::create_dir_all(&at).expect("making the packages' directory");
         let file = fetch(
-            &at,
+            &downloads,
             &format!("{archive}/dists/{dist}/main/binary-{debian_arch}/Packages.xz"),
-            |data| sha256(data) == *sum,
+            sum,
         );
         let mut text = String::new();
         io::Read::read_to_string(
@@ -199,7 +199,7 @@ fn main() {
     packages.extend(FONTS.iter().map(|(name, _)| name.to_string()));
 
     // Each unpacked together, checked by its sum.
-    let root = dir.join("root");
+    let root = out.join("root");
     if root.exists() {
         fs::remove_dir_all(&root).expect("removing the packages unpacked last");
     }
@@ -207,7 +207,7 @@ fn main() {
         let (url, sum, _) = index
             .get(name)
             .unwrap_or_else(|| panic!("no {name} in Debian's {RELEASE} for {debian_arch}"));
-        let deb = fetch(&dir, url, |data| sha256(data) == *sum);
+        let deb = fetch(&downloads, url, sum);
         // An ar archive: each member a 60-byte header, its name first and its size at 48, and
         // then its bytes, padded to an even length. The files are the member `data.tar.xz`.
         let data = fs::read(&deb).expect("reading a package");
@@ -402,19 +402,19 @@ fn main() {
         .unwrap_or_else(|| panic!("no agent-browser for {arch}"));
     let platform = if arch == "aarch64" { "arm64" } else { "x64" };
     let program = fetch(
-        &out,
+        &downloads,
         &format!(
             "https://github.com/vercel-labs/agent-browser/releases/download/v{AGENT_BROWSER}/agent-browser-linux-musl-{platform}"
         ),
-        |data| sha256(data) == *sum,
+        sum,
     );
     let at = home.join("agent-browser");
     fs::copy(&program, &at).expect("placing agent-browser");
     executable(&at);
     let package = fetch(
-        &out,
+        &downloads,
         &format!("https://registry.npmjs.org/agent-browser/-/agent-browser-{AGENT_BROWSER}.tgz"),
-        |data| sha256(data) == AGENT_BROWSER_NPM_SUM,
+        AGENT_BROWSER_NPM_SUM,
     );
     let file = fs::File::open(&package).expect("opening agent-browser's npm package");
     let mut tarball = tar::Archive::new(flate2::read::GzDecoder::new(file));
@@ -438,20 +438,24 @@ fn main() {
     }
 }
 
-/// `url`, fetched into `dir` unless it is there already, and the path it is at; `good` says
-/// whether the bytes are the ones pinned.
-fn fetch(dir: &Path, url: &str, good: impl Fn(&[u8]) -> bool) -> PathBuf {
-    let path = dir.join(url.rsplit('/').next().expect("a URL with a file name"));
-    if !fs::read(&path).is_ok_and(|data| good(&data)) {
+/// `url`, whose sha256 is pinned as `sum`, at `downloads/<sum>`: fetched there unless it is
+/// there already. `VIRTX_ABIN_DOWNLOADS` names a `downloads` that outlives `target/`, so a file is
+/// fetched again only when its pin changes.
+fn fetch(downloads: &Path, url: &str, sum: &str) -> PathBuf {
+    let sha256 = |data: &[u8]| format!("{:x}", Sha256::digest(data));
+    let path = downloads.join(sum);
+    if !fs::read(&path).is_ok_and(|data| sha256(&data) == sum) {
+        let part = downloads.join(format!("{sum}.part"));
         let status = Command::new("curl")
             .args(["-fsSL", "--retry", "3", "-o"])
-            .arg(&path)
+            .arg(&part)
             .arg(url)
             .status()
             .expect("running curl");
         assert!(status.success(), "fetching {url} failed");
-        let data = fs::read(&path).expect("reading what curl fetched");
-        assert!(good(&data), "{url} is not what is pinned for it");
+        let data = fs::read(&part).expect("reading what curl fetched");
+        assert!(sha256(&data) == sum, "{url} is not what is pinned for it");
+        fs::rename(&part, &path).expect("placing what curl fetched");
     }
     path
 }

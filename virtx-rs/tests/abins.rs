@@ -173,8 +173,8 @@ fn browser_drives_a_page_on_either_c_library() {
     }
 }
 
-/// `browser --headed` opens Chrome in a window on the screen `display` makes, where it is no
-/// headless Chrome to the page.
+/// `browser --headed` opens Chromium in a window on the screen `display` makes, where the page
+/// sees no headless browser.
 #[test]
 fn browser_opens_a_window_on_a_display() {
     let client = common::client();

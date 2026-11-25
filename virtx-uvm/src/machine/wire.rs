@@ -17,7 +17,7 @@
 //! to: a [`Write`](IoReq::Write), and a [`Data`](IoResp::Data).
 
 use std::io::{self, Read, Write};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -35,13 +35,9 @@ pub const IO_PORT_NAME: &str = "virtx-io";
 /// moves.
 pub const MAX_DATA: usize = 1 << 20;
 
-/// The vsock port a connection to a published guest port arrives on is this plus the guest
-/// port: above every TCP port, so one never stands for another.
-pub const VSOCK_PORT_BASE: u32 = 1 << 16;
-
 /// What the machine's process tells the agent first, before anything of the host's: the root to
-/// build. The overlay of the two disks, the shares mounted over it in this order, where the
-/// guest stands in it, and the ports the host reaches.
+/// build. The overlay of the two disks, the shares mounted over it in this order, and where the
+/// guest stands in it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineInfo {
     /// The read-only disk under the overlay, and the filesystem on it.
@@ -52,14 +48,23 @@ pub struct MachineInfo {
     pub upper_fstype: String,
     /// Each virtio-fs share, by the tag it is attached under, and where it is mounted.
     pub shares: Vec<(String, String)>,
-    /// The resolver `/etc/resolv.conf` names; `None` leaves the image's file as it is.
-    pub nameserver: Option<String>,
+    /// The guest's network interface, on a machine with one.
+    pub network: Option<GuestNetwork>,
     /// Where the agent, and so every command, stands.
     pub workdir: String,
-    /// The published guest ports. A connection from the host to one arrives on the vsock port
-    /// [`VSOCK_PORT_BASE`] plus it, and the agent carries it to the guest's loopback.
-    #[serde(default)]
-    pub ports: Vec<u16>,
+}
+
+/// What the agent makes of the guest's virtio-net interface: its address on the link to this
+/// host, the way off it, and the resolver `/etc/resolv.conf` names -- `None` leaves the image's
+/// file as it is. Its loopback is reached over the link too, which is where a published port's
+/// connections arrive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestNetwork {
+    pub address: Ipv4Addr,
+    pub prefix: u8,
+    pub gateway: Ipv4Addr,
+    pub mtu: u32,
+    pub nameserver: Option<Ipv4Addr>,
 }
 
 /// What the host tells the machine's process.

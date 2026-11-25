@@ -21,6 +21,7 @@ usage: cargo xtask init     [--force]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
        cargo xtask test     --no-run
+       cargo xtask test     abin
        cargo xtask fixture  -- <command>...
        cargo xtask fixture  --serve
 
@@ -46,7 +47,9 @@ usage: cargo xtask init     [--force]
             and installs everything `test` would -- the crates' tests, the agent's on Linux,
             the servers, abin, the packages' cargo tests, the library they open and the
             bindings' packages -- and runs none, which needs no guest kernel. With XTASK_TESTS_COMPILED set after it,
-            `test` fails if cargo compiles anything
+            `test` fails if cargo compiles anything. With abin alone, the tests of virtx-abins/,
+            built for the guest's musl target and run on a Linux host; on any other, compiled
+            and not run
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
@@ -1691,6 +1694,7 @@ fn test(args: Vec<OsString>) -> anyhow::Result<()> {
     }
     match args.as_slice() {
         [] => test_all(),
+        [abin] if abin == "abin" => abin::test(),
         // virtx-rs's tests are against the fixture too.
         _ if args.iter().any(|arg| arg == "virtx") => {
             let fixture = Fixture::start()?;

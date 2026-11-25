@@ -36,7 +36,7 @@ git submodule update --init 3rdparty/libkrun 3rdparty/rutabaga_gfx   # cargo rea
 
 The servers need more of the host than Rust, and Docker on every host, which builds the guest kernel:
 
-- **macOS**, Apple silicon: `brew install lld llvm meson ninja`, and Docker running Linux containers (Docker Desktop or colima). lld links the guest's init, llvm's `llvm-ar` archives `virtx-abins/` (Apple's `ar` writes a symbol table `rust-lld` reads as empty), and meson and ninja build the GPU libraries. Without Docker, `LIBKRUNFW_KERNEL_C=<path>` names a `kernel.c` built elsewhere.
+- **macOS**, Apple silicon: `brew install cmake lld llvm meson ninja`, and Docker running Linux containers (Docker Desktop or colima). lld links the guest's init, llvm's `llvm-ar` archives `virtx-abins/` (Apple's `ar` writes a symbol table `rust-lld` reads as empty), meson and ninja build the GPU libraries, and cmake and ninja the ONNX Runtime `docread` links. Without Docker, `LIBKRUNFW_KERNEL_C=<path>` names a `kernel.c` built elsewhere.
 - **Windows**, x86_64: the Windows Hypervisor Platform feature, MSVC build tools, clang and lld, and Docker in Linux-container mode. The `gpu` feature also needs `LIBCLANG_PATH` naming the directory `libclang.dll` is in, best set in `%USERPROFILE%\.cargo\config.toml` since the path is the machine's; no Vulkan SDK is needed. Smart App Control blocks every unsigned build script, failing with `os error 4551`, so it has to be off.
 
 ```bash
@@ -46,7 +46,7 @@ cargo xtask install --prefix ~/.local             # what was built, into ~/.loca
 export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, in place of a downloaded one
 ```
 
-- The first `build kernel` is a full kernel build, 10 to 20 minutes; `LIBKRUNFW_REBUILD=1` builds it again. `build abin` and `build alib` (which needs Docker) make what sandboxes get at `/abin` and `/alib`, and `install` copies them with the rest.
+- The first `build kernel` is a full kernel build, 10 to 20 minutes; `LIBKRUNFW_REBUILD=1` builds it again. `build abin` and `build alib` (which needs Docker) make what sandboxes get at `/abin` and `/alib`, and `install` copies them with the rest. The first `build abin` fetches about 560 MB, ONNX Runtime's source and dependencies and `docread`'s models, and builds ONNX Runtime, several minutes more; on Linux it needs the `cmake` and `ninja-build` packages.
 - `cargo xtask build` and `test` put the guest kernel beside a server, where it looks for it, and on macOS sign the server with `com.apple.security.hypervisor`, which Hypervisor.framework requires; `cargo xtask run` only signs. A plain `cargo build`, `run` or `test`, an IDE's Run button included, does neither, and its server cannot boot a machine.
 - Set no library search path for the servers: one wide enough to find the kernel lets another virglrenderer, such as krunkit's, stand in for the one in `build/`, silently.
 - `KRUN_LOG=debug` (or `info`, `warn`, `trace`) turns on libkrun's log, which reaches the server with the guest's console.
@@ -97,6 +97,7 @@ cargo xtask test -p virtx-uvm                     # its unit tests, and the test
 cargo xtask test -p virtx-server-stdio            # a server's own, its app served in the test's process
 cargo xtask test -p virtx                         # Rust, against the fixture
 cargo xtask test -p virtx-cli                     # the command's signing in, against the fixture
+cargo xtask test abin                             # virtx-abins/'s, for the guest's target: run on Linux, compiled alone elsewhere
 (cd virtx-py && uv run pytest)                    # Python; its conftest serves the fixture
 (cd virtx-node && npm install && npm test)        # Node; `npm test` serves the fixture
 cargo xtask fixture -- <command>                  # any command, against the fixture

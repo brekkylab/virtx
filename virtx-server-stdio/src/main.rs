@@ -292,6 +292,7 @@ mod tests {
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
         PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume,
+        Step,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -398,6 +399,65 @@ mod tests {
             .await;
         assert_eq!(status(built), 400);
         assert_eq!(server.client.list_image_job().await.unwrap(), []);
+    }
+
+    /// A build names its base by the OCI's labels, in place of those the base had, and keeps
+    /// the others; built again, it is the same image. Of steps that boot no machine, so the
+    /// build runs here.
+    #[tokio::test]
+    async fn a_build_names_its_base_and_is_the_same_image_built_again() {
+        let server = Server::spawn("build-history").await;
+        // A base whose history tells its one layer apart, naming a base of its own.
+        let store = ImageStore::new(server.home.join("images")).unwrap();
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {"Labels": {
+                "org.opencontainers.image.base.name": "alpine:3.20",
+                "maintainer": "virtx",
+            }},
+            "rootfs": {"type": "layers", "diff_ids": []},
+            "history": [{"created_by": "ADD rootfs /"}],
+        }))
+        .unwrap();
+        let base = store.insert_image(&config, &[layer]).unwrap();
+        store.insert_tag(&"base:1".parse().unwrap(), &base).unwrap();
+
+        let recipe = Recipe::new("base:1")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let built = async |reference: &str| {
+            let job = server
+                .client
+                .build_image(recipe.clone(), reference)
+                .await
+                .unwrap();
+            // A guard against a hang, not a measure of anything.
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let job = server.client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the build went on");
+            ended.digest.expect("the build failed")
+        };
+        let image = built("built:1").await;
+        assert_eq!(built("built:2").await, image);
+
+        let (config, _) = store.get_image(&image.parse().unwrap()).unwrap().unwrap();
+        let labels = config.config().clone().unwrap().labels().clone().unwrap();
+        assert_eq!(labels[virtx_uvm::ANNOTATION_BASE_IMAGE_NAME], "base:1");
+        assert_eq!(
+            labels[virtx_uvm::ANNOTATION_BASE_IMAGE_DIGEST],
+            base.to_string()
+        );
+        assert_eq!(labels["maintainer"], "virtx");
     }
 
     #[tokio::test]

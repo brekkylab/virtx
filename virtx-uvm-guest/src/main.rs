@@ -483,21 +483,15 @@ fn root(asked: &wire::MachineInfo, spike: &mut dyn FnMut(&str)) -> io::Result<()
                 None,
             )
         });
-        // ext4 mounted with no barrier and given it back at once: the superblock it writes as it
-        // mounts waits on no flush of its own -- each flush after covers it -- and every write
-        // from then on is ordered as one with barriers is.
-        let ext4 = asked.upper_fstype == "ext4";
+        // Spike: mounted once, with barriers: a remount after, to put them back, syncs what the
+        // mount wrote, a journal commit that takes longer than the flush it was to spare.
         let upper = mount(
             Some(&asked.upper_device),
             UPPER_AT,
             Some(&asked.upper_fstype),
             0,
-            ext4.then_some("nobarrier"),
-        )
-        .and_then(|()| match ext4 {
-            true => mount(None, UPPER_AT, None, libc::MS_REMOUNT, Some("barrier")),
-            false => Ok(()),
-        });
+            None,
+        );
         lower
             .join()
             .map_err(|_| io::Error::other("mounting the lower disk panicked"))??;

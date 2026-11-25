@@ -150,7 +150,8 @@ jobs:
               "$name-$version-"*) ;;
               *) echo "::error::$whl is not a wheel of $name $version"; exit 1 ;;
             esac
-            meta=$(unzip -p "$whl" '*.dist-info/METADATA')
+            # Windows' wheel has CRLF line ends.
+            meta=$(unzip -p "$whl" '*.dist-info/METADATA' | tr -d '\r')
             got="$(sed -n 's/^Name: //p' <<< "$meta") $(sed -n 's/^Version: //p' <<< "$meta")"
             [ "$(pep440 <<< "$got")" = "$name $version" ] || { echo "::error::$whl's metadata says $got"; exit 1; }
           done

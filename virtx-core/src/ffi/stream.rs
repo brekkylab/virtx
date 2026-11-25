@@ -269,7 +269,7 @@ mod tests {
 
         assert_eq!(poll(stream, &counts), (VIRTX_PENDING, None));
         runtime.block_on(tasks.lock().unwrap().shutdown());
-        assert_eq!(counts.get(), (1, 1));
+        counts.await_counts((1, 1));
         assert_eq!(poll(stream, &counts).0, VIRTX_ERROR);
         assert_eq!(poll(stream, &counts), (VIRTX_END, None));
 

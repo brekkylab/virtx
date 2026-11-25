@@ -167,6 +167,7 @@ impl Flows {
             .collect();
         for key in over {
             let entry = self.entries.remove(key);
+            log::warn!("DIAG reap {:?}", entry.ends);
             let _ = poller.delete(entry.flow.host());
             self.by_ends.remove(&entry.ends);
             entry.flow.close(sockets);

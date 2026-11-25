@@ -1249,6 +1249,11 @@ impl Sandbox {
                         let _ = told.send(());
                     }
                 }
+                CtrlResp::Log {
+                    target, message, ..
+                } if target.starts_with("virtx_uvm") => {
+                    eprintln!("DIAG machine [{target}] {message}");
+                }
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }

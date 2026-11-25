@@ -4,7 +4,7 @@
 //! `alib/` only once `cargo xtask build alib` has run, so the tests that need it are
 //! ignored without it.
 
-use virtx::{Client, ImageJobEnd, ImageJobEntry, SandboxCreateArgs};
+use virtx::{Client, Files, ImageJobEnd, ImageJobEntry, SandboxCreateArgs};
 
 mod common;
 
@@ -90,9 +90,7 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
     let (lines, code) = run(&sandbox, &["docread", "/root/docs/a.md"]);
     assert_eq!(code, 0, "{lines:?}");
     assert!(
-        lines
-            .iter()
-            .any(|line| line.ends_with("\tthe borrow checker")),
+        lines.iter().any(|line| line == "the borrow checker"),
         "{lines:?}"
     );
 
@@ -123,6 +121,85 @@ fn a_sandbox_runs_the_programs_in_abin_by_name() {
         "a sandbox made with no abins has no /abin"
     );
     none.remove().wait().unwrap();
+}
+
+/// `docread` reads a PDF's table with its models, and draws text in a font the PDF does not embed
+/// with the fonts beside it, not boxes: the PDF is written here, a ruled table in Helvetica.
+#[test]
+fn docread_reads_a_pdf_table_with_its_models() {
+    let client = common::client();
+    common::alpine(&client);
+    let sandbox = client
+        .create_sandbox(&SandboxCreateArgs::new(ALPINE).abin("docread"))
+        .wait()
+        .unwrap();
+
+    let rows = [
+        ["Region", "Units", "Revenue"],
+        ["North", "120", "4800"],
+        ["South", "95", "3610"],
+        ["East", "143", "5720"],
+    ];
+    let (top, height, left, width) = (690, 25, 72, 150);
+    let bottom = top - height * rows.len();
+    let mut content = String::from("BT /F1 18 Tf 72 730 Td (Units sold by region) Tj ET\n");
+    for (i, row) in rows.iter().enumerate() {
+        for (j, cell) in row.iter().enumerate() {
+            let (x, y) = (left + 6 + width * j, top - height * i - 17);
+            content += &format!("BT /F1 11 Tf {x} {y} Td ({cell}) Tj ET\n");
+        }
+    }
+    for i in 0..=rows.len() {
+        let y = top - height * i;
+        content += &format!("{left} {y} m {} {y} l S\n", left + width * 3);
+    }
+    for j in 0..=3 {
+        let x = left + width * j;
+        content += &format!("{x} {top} m {x} {bottom} l S\n");
+    }
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+         /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+            .to_owned(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+    ];
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (n, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf += &format!("{} 0 obj\n{object}\nendobj\n", n + 1);
+    }
+    let xref = pdf.len();
+    pdf += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+    for offset in offsets {
+        pdf += &format!("{offset:010} 00000 n \n");
+    }
+    pdf += &format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objects.len() + 1
+    );
+    sandbox.write_file("root/a.pdf", pdf, None).wait().unwrap();
+
+    let (lines, code) = run(&sandbox, &["docread", "/root/a.pdf"]);
+    assert_eq!(code, 0, "{lines:?}");
+    let row = |cells: &[&str]| {
+        lines.iter().any(|line| {
+            let found: Vec<_> = line.split('|').map(str::trim).collect();
+            found.len() == cells.len() + 2 && found[1..=cells.len()] == *cells
+        })
+    };
+    assert!(row(&rows[0]) && row(&rows[3]), "{lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("no fallback font")),
+        "{lines:?}"
+    );
+    sandbox.remove().wait().unwrap();
 }
 
 /// `/alib` is read-only, with Vulkan for each C library; a sandbox without a GPU is given none

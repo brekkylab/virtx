@@ -13,12 +13,12 @@ use smoltcp::socket::tcp::{Socket as SmolSocket, SocketBuffer, State};
 use smoltcp::wire::{IpAddress, IpListenEndpoint};
 use socket2::{Domain, Protocol, Socket, Type};
 
-use super::flow::Interest;
+use super::Interest;
 
 /// Each direction's buffer in smoltcp: room for a few of the link's segments in flight.
 const BUFFER: usize = 256 << 10;
 
-pub(super) struct TcpFlow {
+pub(in crate::machine::net::gateway) struct TcpFlow {
     /// The guest's side, in smoltcp's sockets.
     handle: SocketHandle,
     host: Socket,
@@ -33,7 +33,7 @@ pub(super) struct TcpFlow {
 impl TcpFlow {
     /// A connection the guest is opening with a SYN to `to`: a socket listening there for
     /// smoltcp to take the SYN with, and a host socket connecting to `at`.
-    pub(super) fn open(
+    pub(in crate::machine::net::gateway) fn open(
         sockets: &mut SocketSet<'static>,
         to: SocketAddrV4,
         at: SocketAddr,
@@ -66,7 +66,7 @@ impl TcpFlow {
 
     /// A connection a client of a published port opened, `host`: carried to `to` in the guest,
     /// from `from`.
-    pub(super) fn accept(
+    pub(in crate::machine::net::gateway) fn accept(
         sockets: &mut SocketSet<'static>,
         cx: &mut Context,
         host: Socket,

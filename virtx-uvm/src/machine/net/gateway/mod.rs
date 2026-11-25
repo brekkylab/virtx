@@ -17,8 +17,6 @@ mod egress;
 mod flow;
 mod gateway;
 mod resolver;
-mod tcp;
-mod udp;
 
 pub(crate) use egress::routed;
 pub(super) use gateway::Gateway;

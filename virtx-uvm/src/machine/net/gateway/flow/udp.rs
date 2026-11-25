@@ -15,14 +15,14 @@ use smoltcp::wire::{
 };
 use socket2::{Domain, Protocol, Socket, Type};
 
-use super::LAN;
-use super::flow::{Ends, Interest};
-use super::link::{Link, MAX_FRAME};
+use super::super::LAN;
+use super::super::link::{Link, MAX_FRAME};
+use super::{Ends, Interest};
 
 /// How long a flow nothing has crossed is kept.
-pub(super) const IDLE: Duration = Duration::from_secs(60);
+pub(in crate::machine::net::gateway) const IDLE: Duration = Duration::from_secs(60);
 
-pub(super) struct UdpFlow {
+pub(in crate::machine::net::gateway) struct UdpFlow {
     host: Socket,
     ends: Ends,
     last: Instant,
@@ -30,7 +30,10 @@ pub(super) struct UdpFlow {
 
 impl UdpFlow {
     /// A flow between `ends`, its host socket connected to `at`.
-    pub(super) fn open(ends: Ends, at: SocketAddr) -> io::Result<UdpFlow> {
+    pub(in crate::machine::net::gateway) fn open(
+        ends: Ends,
+        at: SocketAddr,
+    ) -> io::Result<UdpFlow> {
         let host = Socket::new(Domain::for_address(at), Type::DGRAM, Some(Protocol::UDP))?;
         host.set_nonblocking(true)?;
         host.connect(&at.into())?;
@@ -47,7 +50,7 @@ impl UdpFlow {
 
     /// Send what the guest sent. A datagram the host socket will not take now is dropped, as
     /// UDP may.
-    pub(super) fn send(&mut self, payload: &[u8]) {
+    pub(in crate::machine::net::gateway) fn send(&mut self, payload: &[u8]) {
         self.last = Instant::now();
         let _ = self.host.send(payload);
     }

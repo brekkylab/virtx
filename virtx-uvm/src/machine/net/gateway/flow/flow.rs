@@ -1,17 +1,3 @@
-//! A flow: what the guest sends between two ends, carried on a host socket of its own -- a
-//! [TCP connection](TcpFlow) or a [UDP flow](UdpFlow). Every flow is driven the same way, once
-//! a turn:
-//!
-//! ```text
-//!   pump    move what each side has to the other, and say what the host socket is waited on for
-//!   over    whether it is done, and so put away
-//! ```
-//!
-//! [`Flows`] keeps them, each under the key its host socket is waited on by in the poller, and
-//! by its two ends. Each host socket is waited on once at a time (`PollMode::Oneshot`), and
-//! asked for again only for what its flow waits on, so a socket the stack cannot keep up with is
-//! not reported again until it can.
-
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
 
@@ -20,30 +6,30 @@ use slab::Slab;
 use smoltcp::iface::SocketSet;
 use socket2::Socket;
 
-use super::link::Link;
+use super::super::link::Link;
 use super::tcp::TcpFlow;
 use super::udp::UdpFlow;
 
 /// A flow's two ends: the guest's, and the one it sent to.
-pub(super) type Ends = (SocketAddrV4, SocketAddrV4);
+pub(in crate::machine::net::gateway) type Ends = (SocketAddrV4, SocketAddrV4);
 
-pub(super) enum Flow {
+pub(in crate::machine::net::gateway) enum Flow {
     Tcp(TcpFlow),
     Udp(UdpFlow),
 }
 
 /// What a flow is pumped with: smoltcp's sockets, where a TCP connection's guest side is, and
 /// the link, which a UDP flow writes what comes back into.
-pub(super) struct Turn<'a> {
-    pub(super) sockets: &'a mut SocketSet<'static>,
-    pub(super) link: &'a mut Link,
+pub(in crate::machine::net::gateway) struct Turn<'a> {
+    pub(in crate::machine::net::gateway) sockets: &'a mut SocketSet<'static>,
+    pub(in crate::machine::net::gateway) link: &'a mut Link,
 }
 
 /// What a flow's host socket is waited on for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Interest {
-    pub(super) read: bool,
-    pub(super) write: bool,
+pub(in crate::machine::net::gateway) struct Interest {
+    pub(in crate::machine::net::gateway) read: bool,
+    pub(in crate::machine::net::gateway) write: bool,
 }
 
 impl Flow {
@@ -85,28 +71,28 @@ struct Entry {
 }
 
 #[derive(Default)]
-pub(super) struct Flows {
+pub(in crate::machine::net::gateway) struct Flows {
     entries: Slab<Entry>,
     by_ends: HashMap<Ends, usize>,
 }
 
 impl Flows {
-    pub(super) fn is_empty(&self) -> bool {
+    pub(in crate::machine::net::gateway) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// The key of the flow between `ends`, if there is one.
-    pub(super) fn find(&self, ends: &Ends) -> Option<usize> {
+    pub(in crate::machine::net::gateway) fn find(&self, ends: &Ends) -> Option<usize> {
         self.by_ends.get(ends).copied()
     }
 
-    pub(super) fn get_mut(&mut self, key: usize) -> Option<&mut Flow> {
+    pub(in crate::machine::net::gateway) fn get_mut(&mut self, key: usize) -> Option<&mut Flow> {
         self.entries.get_mut(key).map(|entry| &mut entry.flow)
     }
 
     /// Keep `flow` between `ends`, its host socket waited on by `poller` under the key this
     /// answers. A flow the poller will not take is closed, and `None`.
-    pub(super) fn insert(
+    pub(in crate::machine::net::gateway) fn insert(
         &mut self,
         poller: &Poller,
         sockets: &mut SocketSet<'static>,
@@ -131,7 +117,7 @@ impl Flows {
     }
 
     /// The poller reported the host socket under `key`, which it then waits on for nothing.
-    pub(super) fn ready(&mut self, key: usize) {
+    pub(in crate::machine::net::gateway) fn ready(&mut self, key: usize) {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.armed = Interest::default();
             entry.ready = true;
@@ -139,7 +125,7 @@ impl Flows {
     }
 
     /// Pump every flow, and ask the poller for what each now waits on.
-    pub(super) fn pump(&mut self, poller: &Poller, mut turn: Turn) {
+    pub(in crate::machine::net::gateway) fn pump(&mut self, poller: &Poller, mut turn: Turn) {
         for (key, entry) in self.entries.iter_mut() {
             let interest = entry.flow.pump(&mut turn, entry.ready);
             entry.ready = false;
@@ -153,7 +139,11 @@ impl Flows {
     }
 
     /// Put away every flow that is over.
-    pub(super) fn reap(&mut self, poller: &Poller, sockets: &mut SocketSet<'static>) {
+    pub(in crate::machine::net::gateway) fn reap(
+        &mut self,
+        poller: &Poller,
+        sockets: &mut SocketSet<'static>,
+    ) {
         let over: Vec<usize> = self
             .entries
             .iter()

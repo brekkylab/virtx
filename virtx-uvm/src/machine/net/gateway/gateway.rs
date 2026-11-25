@@ -13,10 +13,8 @@ use smoltcp::wire::{
 
 use super::LAN;
 use super::egress::Egress;
-use super::flow::{Ends, Flow, Flows, Turn};
+use super::flow::{Ends, Flow, Flows, TcpFlow, Turn, UDP_IDLE, UdpFlow};
 use super::link::Link;
-use super::tcp::TcpFlow;
-use super::udp::{self, UdpFlow};
 
 /// The link's key in the poller, below the one the poller keeps for itself. A published port's
 /// listener is under it, by its place; a flow's is its own key in [`Flows`].
@@ -108,7 +106,7 @@ impl Gateway {
                 .poll_delay(self.now(), &self.sockets)
                 .map(|delay| Duration::from_micros(delay.total_micros()));
             if !self.flows.is_empty() {
-                timeout = Some(timeout.map_or(udp::IDLE, |timeout| timeout.min(udp::IDLE)));
+                timeout = Some(timeout.map_or(UDP_IDLE, |timeout| timeout.min(UDP_IDLE)));
             }
             events.clear();
             self.poller.wait(&mut events, timeout)?;

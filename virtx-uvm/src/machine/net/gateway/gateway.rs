@@ -1,18 +1,3 @@
-//! The guest's network on this host: one thread, one poller over the link and every host socket,
-//! and smoltcp between the link and the TCP connections.
-//!
-//! Each turn of [`Stack::run`] waits for something to be ready, then:
-//!
-//! ```text
-//!   read     every whole frame the device has written
-//!   ingress  each frame: a SYN gets its connection opened first, so smoltcp finds a socket
-//!            listening for it, or none and resets it; UDP goes past smoltcp to its flow; the
-//!            rest smoltcp takes
-//!   pump     every flow
-//!   egress   what smoltcp has to send, then the link written
-//!   reap     the flows that are over
-//! ```
-
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::ops::Range;
@@ -40,7 +25,7 @@ const LINK: usize = usize::MAX - 1;
 /// The first port the gateway's end of a connection to a published port takes.
 const EPHEMERAL: u16 = 49152;
 
-pub(super) struct Stack {
+pub(in crate::machine::net) struct Gateway {
     // First, so it is dropped first: every source it waits on is still open when it goes.
     poller: Poller,
     link: Link,
@@ -53,12 +38,20 @@ pub(super) struct Stack {
     started: std::time::Instant,
 }
 
-impl Stack {
-    pub(super) fn new(
+impl Gateway {
+    pub(in crate::machine::net) fn new(
+        link: Link,
+        egress: bool,
+        published: Vec<(u16, TcpListener)>,
+    ) -> io::Result<Self> {
+        Self::with_policy(link, Policy::new(egress), published)
+    }
+
+    fn with_policy(
         mut link: Link,
         policy: Policy,
         published: Vec<(u16, TcpListener)>,
-    ) -> io::Result<Stack> {
+    ) -> io::Result<Gateway> {
         let mut config = Config::new(EthernetAddress(LAN.gateway_mac).into());
         config.random_seed =
             std::hash::BuildHasher::hash_one(&std::hash::RandomState::new(), std::process::id());
@@ -86,7 +79,7 @@ impl Stack {
             listener.set_nonblocking(true)?;
             unsafe { poller.add(listener, Event::readable(LINK - 1 - i))? };
         }
-        Ok(Stack {
+        Ok(Gateway {
             poller,
             link,
             iface,
@@ -100,7 +93,7 @@ impl Stack {
     }
 
     /// Carry the guest's network until the device closes its end of the link.
-    pub(super) fn run(mut self) -> io::Result<()> {
+    pub(in crate::machine::net) fn run(mut self) -> io::Result<()> {
         let mut events = Events::new();
         let mut link_armed = None;
         loop {
@@ -317,7 +310,8 @@ mod tests {
     impl Guest {
         fn new(policy: Policy, published: Vec<(u16, TcpListener)>) -> Guest {
             let (ours, theirs) = UnixStream::pair().unwrap();
-            let stack = Stack::new(Link::new(ours.into()).unwrap(), policy, published).unwrap();
+            let stack =
+                Gateway::with_policy(Link::new(ours.into()).unwrap(), policy, published).unwrap();
             thread::spawn(move || stack.run());
             let mut link = Link::new(theirs.into()).unwrap();
             let config = Config::new(EthernetAddress(LAN.guest_mac).into());

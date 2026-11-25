@@ -4,15 +4,13 @@
 //! ```text
 //!      guest                    │ hypervisor │                this process
 //!   ──────────────────────────────────────────────────────────────────────────────────
-//!   eth0 ──► virtio-net ────────┼── libkrun ─┼──► Link ──► Stack ──► Flow ──► host socket
+//!   eth0 ──► virtio-net ────────┼── libkrun ─┼──► Link ──► Gateway ──► Flow ──► host socket
 //!   10.0.2.15/24, via 10.0.2.2  │            │   (frames)    │
-//!                               │            │             Policy
+//!                               │            │               Policy
 //! ```
 //!
-//! Read in that order: [`device`] makes the device and starts the [`Stack`](stack::Stack) on a
-//! thread of its own; the stack turns frames from the [`Link`](link::Link) into
-//! [`Flow`](flow::Flow)s -- a [TCP connection](tcp::TcpFlow) or a [UDP flow](udp::UdpFlow), each
-//! carried on a host socket -- to where the [`Policy`](policy::Policy) says.
+//! [`device`] makes the device and starts the [`Gateway`] on its own thread. The gateway
+//! carries traffic between the [`Link`](link::Link) and host sockets.
 //!
 //! The guest has an interface of its own, which the agent sets up ([`GuestNetwork`]), and its
 //! own kernel's stack: its loopback, its listeners and its ports never leave it.
@@ -21,7 +19,7 @@
 //!
 //! Apart, as the protocol has them. A machine with a network reaches what the internet routes,
 //! and resolves names through this host's resolver; one without reaches nothing. A published
-//! port is a listener on this host whose connections the stack opens to that port at the
+//! port is a listener on this host whose connections the gateway opens to that port at the
 //! guest's loopback -- so a program listening on `127.0.0.1` alone is reached -- with or
 //! without a network.
 //!
@@ -34,25 +32,19 @@
 //!
 //! A machine with neither a network nor a published port gets no device.
 
-mod flow;
+mod gateway;
 mod link;
-mod policy;
-mod resolver;
-mod stack;
-mod tcp;
-mod udp;
 
 use std::net::{Ipv4Addr, TcpListener};
 
 use krun::{NetDevice, NetFlags};
 
-pub(crate) use policy::routed;
+pub(crate) use gateway::routed;
 
 use super::wire::GuestNetwork;
 use super::{Error, Result};
+use gateway::Gateway;
 use link::DeviceEnd;
-use policy::Policy;
-use stack::Stack;
 
 /// The link's addresses, as both ends of it are told: where every user-mode network since
 /// slirp has put them.
@@ -121,11 +113,10 @@ pub(crate) fn device(egress: bool, published: Vec<(u16, TcpListener)>) -> Result
     }
     .map_err(|e| Error::vmm("attaching the guest's network", e))?;
 
-    let policy = Policy::new(egress);
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            let run = || Stack::new(pending.connect()?, policy, published)?.run();
+            let run = || Gateway::new(pending.connect()?, egress, published)?.run();
             if let Err(e) = run() {
                 log::error!("the guest's network stopped: {e}");
             }

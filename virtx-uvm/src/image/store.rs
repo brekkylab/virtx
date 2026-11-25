@@ -410,12 +410,21 @@ impl Store {
 
     /// File an image of `layers`, bottom first, all of which must be here, and `config`, whose
     /// diff_ids are made to be the layers. Its digest -- its manifest's -- is returned. The
-    /// same config and layers are the same image.
+    /// same config and layers are the same image: its labels are written in order of their
+    /// names, as a map holds them in none.
     pub fn insert_image(&self, config: &ImageConfiguration, layers: &[Digest]) -> Result<Digest> {
         let mut config = config.clone();
         config
             .rootfs_mut()
             .set_diff_ids(layers.iter().map(Digest::to_string).collect());
+        let mut config = serde_json::to_value(&config)
+            .map_err(|e| Error::io("serializing a config", e.into()))?;
+        if let Some(labels) = config
+            .pointer_mut("/config/Labels")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            labels.sort_keys();
+        }
         let config_body =
             serde_json::to_vec(&config).map_err(|e| Error::io("serializing a config", e.into()))?;
         let config_digest: Digest = format!("{:x}", Sha256::digest(&config_body))
@@ -1165,6 +1174,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(self.0.root());
         }
+    }
+
+    /// Two configs alike but for the order their labels' maps hold them in are one image.
+    #[test]
+    fn a_config_s_labels_are_written_in_one_order() {
+        let scratch = Scratch::new("labels");
+        let filed = |names: &[&str]| {
+            let mut labels = std::collections::HashMap::new();
+            for name in names {
+                labels.insert(name.to_string(), format!("of {name}"));
+            }
+            let mut config = ImageConfiguration::default();
+            let mut inner = oci_spec::image::Config::default();
+            inner.set_labels(Some(labels));
+            config.set_config(Some(inner));
+            scratch.0.insert_image(&config, &[]).unwrap()
+        };
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let mut reversed = names;
+        reversed.reverse();
+        assert_eq!(filed(&names), filed(&reversed));
     }
 
     #[test]

@@ -43,7 +43,7 @@ use virtx_uvm::{
     HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
     RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
-    UnknownSandbox, VolumeError, VolumeStore, build_step, park_after, signal_number,
+    UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -404,6 +404,18 @@ impl Home {
         }
         self.closed.store(true, Ordering::SeqCst);
         true
+    }
+
+    /// Close it as [`close`](Home::close) does, whatever lives here, and close every sandbox
+    /// as [`close_all`](Home::close_all) does. Each kept here and not known again is let go
+    /// of, its disk and record left where they are.
+    pub(crate) fn forget(&self) {
+        {
+            let _sandboxes = self.sandboxes.lock().unwrap();
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        self.close_all();
+        self.unknown.lock().unwrap().clear();
     }
 
     /// Cancel every image job here, and close every sandbox, as removing each does, side by
@@ -1236,6 +1248,7 @@ async fn tag(
 /// pulled into the store now, anonymously, through `registries`, from `mirror` first if it is
 /// Docker Hub's and shared through `public`, and left untagged: a build tags only what it
 /// builds.
+/// Its config names it as what the build is based on ([`based_on`]).
 async fn base(
     images: &ImageStore,
     registries: &dyn RegistryProxy,
@@ -1263,9 +1276,10 @@ async fn base(
         }
     };
     let held = images.hold_image(&image)?;
-    let (config, layers) = images
+    let (mut config, layers) = images
         .get_image(&image)?
-        .ok_or(ImageStoreError::Missing(image))?;
+        .ok_or_else(|| ImageStoreError::Missing(image.clone()))?;
+    based_on(&mut config, base, &image);
     Ok((config, layers, Some(held)))
 }
 

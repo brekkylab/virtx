@@ -282,11 +282,10 @@ impl Frame {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{Shutdown, SocketAddr, TcpStream, UdpSocket};
-    use std::os::unix::net::UnixStream;
     use std::thread;
     use std::time::Instant as Clock;
 
@@ -294,6 +293,7 @@ mod tests {
     use smoltcp::socket::{tcp, udp};
     use smoltcp::wire::IpAddress;
 
+    use super::super::link::{self, DeviceEnd};
     use super::*;
 
     /// A guest at the far end of a stack's link: smoltcp of its own, at the guest's address and
@@ -306,12 +306,29 @@ mod tests {
     }
 
     impl Guest {
+        /// The link opened as the device's is, and the guest at the device's end of it.
         fn new(egress: Egress, published: Vec<(u16, TcpListener)>) -> Guest {
-            let (ours, theirs) = UnixStream::pair().unwrap();
-            let stack =
-                Gateway::with_egress(Link::new(ours.into()).unwrap(), egress, published).unwrap();
-            thread::spawn(move || stack.run());
-            let mut link = Link::new(theirs.into()).unwrap();
+            let (end, pending) = link::open().unwrap();
+            thread::spawn(move || {
+                Gateway::with_egress(pending.connect().unwrap(), egress, published)
+                    .unwrap()
+                    .run()
+            });
+            let theirs = match end {
+                #[cfg(unix)]
+                DeviceEnd::Fd(fd) => fd.into(),
+                #[cfg(windows)]
+                DeviceEnd::Path(path) => {
+                    let socket =
+                        socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+                            .unwrap();
+                    socket
+                        .connect(&socket2::SockAddr::unix(path).unwrap())
+                        .unwrap();
+                    socket
+                }
+            };
+            let mut link = Link::new(theirs).unwrap();
             let config = Config::new(EthernetAddress(LAN.guest_mac).into());
             let mut iface = Interface::new(config, &mut link, Instant::ZERO);
             iface.update_ip_addrs(|addrs| {

@@ -4,6 +4,7 @@ use std::net::SocketAddrV4;
 use polling::{Event, Poller};
 use slab::Slab;
 use smoltcp::iface::SocketSet;
+use smoltcp::wire::IpProtocol;
 use socket2::Socket;
 
 use super::super::link::Link;
@@ -33,6 +34,15 @@ pub(in crate::machine::net::gateway) struct Interest {
 }
 
 impl Flow {
+    /// What it carries, which with its ends is what tells it from another: TCP and UDP each
+    /// have ports of their own.
+    fn protocol(&self) -> IpProtocol {
+        match self {
+            Flow::Tcp(_) => IpProtocol::Tcp,
+            Flow::Udp(_) => IpProtocol::Udp,
+        }
+    }
+
     fn host(&self) -> &Socket {
         match self {
             Flow::Tcp(tcp) => tcp.host(),
@@ -64,7 +74,7 @@ impl Flow {
 
 struct Entry {
     flow: Flow,
-    ends: Ends,
+    ends: (IpProtocol, Ends),
     /// What the poller has been asked to report, and not yet reported.
     armed: Interest,
     ready: bool,
@@ -73,7 +83,7 @@ struct Entry {
 #[derive(Default)]
 pub(in crate::machine::net::gateway) struct Flows {
     entries: Slab<Entry>,
-    by_ends: HashMap<Ends, usize>,
+    by_ends: HashMap<(IpProtocol, Ends), usize>,
 }
 
 impl Flows {
@@ -81,9 +91,13 @@ impl Flows {
         self.entries.is_empty()
     }
 
-    /// The key of the flow between `ends`, if there is one.
-    pub(in crate::machine::net::gateway) fn find(&self, ends: &Ends) -> Option<usize> {
-        self.by_ends.get(ends).copied()
+    /// The key of the `protocol` flow between `ends`, if there is one.
+    pub(in crate::machine::net::gateway) fn find(
+        &self,
+        protocol: IpProtocol,
+        ends: Ends,
+    ) -> Option<usize> {
+        self.by_ends.get(&(protocol, ends)).copied()
     }
 
     pub(in crate::machine::net::gateway) fn get_mut(&mut self, key: usize) -> Option<&mut Flow> {
@@ -100,6 +114,7 @@ impl Flows {
         flow: Flow,
     ) -> Option<usize> {
         let key = self.entries.vacant_key();
+        let ends = (flow.protocol(), ends);
         // SAFETY: deleted from the poller in `reap` before the flow, and its socket, drops --
         // or the poller goes first, with the stack.
         if unsafe { poller.add(flow.host(), Event::none(key)) }.is_err() {

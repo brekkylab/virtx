@@ -155,7 +155,7 @@ impl Gateway {
         while let Some(frame) = self.link.peek() {
             match Frame::of(frame) {
                 Frame::Udp { ends, payload } => {
-                    let key = self.flows.find(&ends).or_else(|| {
+                    let key = self.flows.find(IpProtocol::Udp, ends).or_else(|| {
                         let at = self.egress.route(ends.1)?;
                         let flow = Flow::Udp(UdpFlow::open(ends, at).ok()?);
                         self.flows
@@ -169,7 +169,7 @@ impl Gateway {
                     self.link.skip();
                 }
                 Frame::Syn { ends } => {
-                    if self.flows.find(&ends).is_none()
+                    if self.flows.find(IpProtocol::Tcp, ends).is_none()
                         && let Some(at) = self.egress.route(ends.1)
                         && let Ok(tcp) = TcpFlow::open(&mut self.sockets, ends.1, at)
                     {
@@ -202,7 +202,7 @@ impl Gateway {
             let gateway = loop {
                 let gateway = SocketAddrV4::new(LAN.gateway, self.next_port);
                 self.next_port = self.next_port.checked_add(1).unwrap_or(EPHEMERAL);
-                if self.flows.find(&(guest, gateway)).is_none() {
+                if self.flows.find(IpProtocol::Tcp, (guest, gateway)).is_none() {
                     break gateway;
                 }
             };
@@ -462,6 +462,39 @@ mod tests {
         });
         told.send(()).unwrap();
         assert_eq!(host.join().unwrap(), sent);
+    }
+
+    /// A TCP connection and a UDP flow between the same two ends are each carried: each
+    /// protocol has ports of its own.
+    #[test]
+    fn a_connection_and_a_datagram_between_the_same_ends_are_both_carried() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let at = listener.local_addr().unwrap();
+        let host = UdpSocket::bind(at).unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut guest = Guest::new(resolved_at(at), vec![]);
+        let handle = guest.connect(DNS);
+        guest.until("the connection is up", |sockets| {
+            sockets.get::<tcp::Socket>(handle).state() == tcp::State::Established
+        });
+
+        let buffer =
+            || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 1 << 16]);
+        let mut socket = udp::Socket::new(buffer(), buffer());
+        socket.bind(40000).unwrap();
+        let udp = guest.sockets.add(socket);
+        guest
+            .sockets
+            .get_mut::<udp::Socket>(udp)
+            .send_slice(b"ping", (IpAddress::from(*DNS.ip()), DNS.port()))
+            .unwrap();
+        guest.until("the guest's datagram is out", |sockets| {
+            sockets.get::<udp::Socket>(udp).send_queue() == 0
+        });
+        let mut buf = [0; 16];
+        let n = host.recv(&mut buf).expect("the datagram reached the host");
+        assert_eq!(&buf[..n], b"ping");
     }
 
     /// A connection the policy sends nowhere -- this host, at the gateway -- is reset.

@@ -15,6 +15,7 @@
 
 mod egress;
 mod flow;
+#[allow(clippy::module_inception)]
 mod gateway;
 mod resolver;
 

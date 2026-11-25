@@ -12,6 +12,7 @@
 //! asked for again only for what its flow waits on, so a socket the stack cannot keep up with is
 //! not reported again until it can.
 
+#[allow(clippy::module_inception)]
 mod flow;
 mod tcp;
 mod udp;

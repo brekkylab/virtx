@@ -2067,15 +2067,6 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     // A public address by number, so no name has to resolve: Google's DNS, over HTTPS.
     let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
     let with = home.sandbox(&small(), None).await;
-    // TEMPORARY: diagnosing outbound TCP on Windows; removed once found.
-    let probe = "set -x; ip addr; ip route; cat /etc/resolv.conf; \
-        nc -v -w 5 8.8.8.8 443 </dev/null; echo nc=$?; \
-        nslookup example.com; \
-        printf 'GET / HTTP/1.0\\r\\nHost: example.com\\r\\n\\r\\n' | nc -w 5 example.com 80 | head -c 200; echo; echo http=$?; \
-        apk update; echo apk=$?; \
-        cat /proc/net/snmp; cat /proc/net/dev";
-    let (lines, code) = run(&with, &["sh", "-c", probe], None).await.unwrap();
-    eprintln!("DIAG probe ({code}):\n{}", lines.join("\n"));
     assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
     let named = ["nc", "-z", "-w", "5", "dns.google", "443"];
     let (lines, code) = run(&with, &named, None).await.unwrap();

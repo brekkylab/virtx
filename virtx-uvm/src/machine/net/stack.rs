@@ -368,7 +368,7 @@ mod tests {
     /// socket of the test's.
     fn resolved_at(at: SocketAddr) -> Policy {
         Policy {
-            network: true,
+            egress: true,
             resolver: Some(at),
         }
     }
@@ -482,7 +482,7 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let none = Policy {
-            network: false,
+            egress: false,
             resolver: None,
         };
         let mut guest = Guest::new(none, vec![(8080, listener)]);

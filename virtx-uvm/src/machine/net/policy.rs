@@ -17,27 +17,27 @@ use super::{LAN, resolver};
 const DNS_PORT: u16 = 53;
 
 pub(super) struct Policy {
-    pub(super) network: bool,
+    pub(super) egress: bool,
     /// Where a query to the nameserver goes, and `None` for a host that names no resolver --
     /// whose guest then resolves no names, which is what every other process there gets.
     pub(super) resolver: Option<SocketAddr>,
 }
 
 impl Policy {
-    pub(super) fn new(network: bool) -> Policy {
-        let resolver = match network {
+    pub(super) fn new(egress: bool) -> Policy {
+        let resolver = match egress {
             true => resolver::host_resolvers().first().copied(),
             false => None,
         };
         Policy {
-            network,
+            egress,
             resolver: resolver.map(|ip| SocketAddr::new(ip.into(), DNS_PORT)),
         }
     }
 
     /// Where a flow the guest sent to `to` goes on this host, or `None` for nowhere.
     pub(super) fn route(&self, to: SocketAddrV4) -> Option<SocketAddr> {
-        if !self.network {
+        if !self.egress {
             return None;
         }
         if *to.ip() == LAN.nameserver {
@@ -95,7 +95,7 @@ mod tests {
 
     fn on() -> Policy {
         Policy {
-            network: true,
+            egress: true,
             resolver: Some(SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 53)),
         }
     }
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn no_network_reaches_nothing() {
         let off = Policy {
-            network: false,
+            egress: false,
             ..on()
         };
         for to in [PUBLIC, SocketAddrV4::new(LAN.nameserver, 53)] {

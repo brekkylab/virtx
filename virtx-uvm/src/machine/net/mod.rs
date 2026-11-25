@@ -83,23 +83,23 @@ const LAN: Lan = Lan {
 };
 
 impl GuestNetwork {
-    /// What the agent sets the guest's interface up as: told of the nameserver if `network`.
-    pub(crate) fn new(network: bool) -> GuestNetwork {
+    /// What the agent sets the guest's interface up as: told of the nameserver if `egress`.
+    pub(crate) fn new(egress: bool) -> GuestNetwork {
         GuestNetwork {
             address: LAN.guest,
             prefix: LAN.prefix,
             gateway: LAN.gateway,
             mtu: LAN.mtu,
-            nameserver: network.then_some(LAN.nameserver),
+            nameserver: egress.then_some(LAN.nameserver),
         }
     }
 }
 
 /// The guest's virtio-net device, its stack started at the other end: out to what the internet
-/// routes if `network`, and in through `published`, the listeners on this host whose
+/// routes if `egress`, and in through `published`, the listeners on this host whose
 /// connections reach a port in the guest -- each bound by the caller, which is the end that
 /// knows where it is and says so.
-pub(crate) fn device(network: bool, published: Vec<(u16, TcpListener)>) -> Result<NetDevice> {
+pub(crate) fn device(egress: bool, published: Vec<(u16, TcpListener)>) -> Result<NetDevice> {
     // `VIRTIO_NET_F_CSUM`, `VIRTIO_NET_F_GUEST_CSUM` and `VIRTIO_NET_F_GUEST_TSO4`: see the
     // module doc.
     const FEATURES: u32 = (1 << 0) | (1 << 1) | (1 << 7);
@@ -121,7 +121,7 @@ pub(crate) fn device(network: bool, published: Vec<(u16, TcpListener)>) -> Resul
     }
     .map_err(|e| Error::vmm("attaching the guest's network", e))?;
 
-    let policy = Policy::new(network);
+    let policy = Policy::new(egress);
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {

@@ -53,12 +53,6 @@
   "dependencies": {
     "koffi": "^3.3.3"
   },
-  "optionalDependencies": {
-    "@brekkylab/virtx-darwin-arm64": "0.2.1",
-    "@brekkylab/virtx-linux-x64-gnu": "0.2.1",
-    "@brekkylab/virtx-linux-arm64-gnu": "0.2.1",
-    "@brekkylab/virtx-win32-x64-msvc": "0.2.1"
-  },
   "devDependencies": {
     "@biomejs/biome": "2.6.7",
     "@napi-rs/cli": "3.10.12",

@@ -138,10 +138,6 @@ jobs:
           for f in virtx-rs/Cargo.toml virtx-cabi/Cargo.toml virtx-py/pyproject.toml; do
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
-          # optionalDependencies name this version.
-          for dep in $(jq -r '.optionalDependencies | to_entries[] | "\(.key)=\(.value)"' virtx-node/package.json); do
-            [ "${dep#*=}" = "$version" ] || wrong="$wrong virtx-node/package.json:$dep"
-          done
           # The `virtx-core` a published `virtx` depends on is the one released with it.
           dep=$(sed -n 's/^virtx-core = {.*version = "\([^"]*\)".*/\1/p' virtx-rs/Cargo.toml)
           [ "$dep" = "$version" ] || wrong="$wrong virtx-rs/Cargo.toml:virtx-core=$dep"

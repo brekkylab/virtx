@@ -54,10 +54,6 @@ target = "virtx._virtx_core"
 path = "../virtx-cabi/Cargo.toml"
 binding = "NoBinding"
 
-# No CPython extension: one wheel serves every Python.
-[tool.distutils.bdist_wheel]
-py-limited-api = "cp311"
-
 [tool.uv]
 # The editable install's library is rebuilt when the crates change.
 cache-keys = [

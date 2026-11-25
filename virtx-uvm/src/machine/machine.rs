@@ -666,6 +666,28 @@ impl Descriptors {
             1.. => limit.min(libc::c_int::MAX.into()) as libc::c_int,
             _ => libc::c_int::MAX,
         };
+        // macOS's soft limit may be unlimited, `sysconf` then answering `LONG_MAX`; no descriptor
+        // is open past `kern.maxfilesperproc`.
+        #[cfg(target_os = "macos")]
+        let limit = {
+            let mut most: libc::c_int = 0;
+            let mut size = std::mem::size_of::<libc::c_int>();
+            // SAFETY: `most` is `size` bytes.
+            let read = unsafe {
+                libc::sysctlbyname(
+                    c"kern.maxfilesperproc".as_ptr(),
+                    (&raw mut most).cast(),
+                    &mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if read == 0 && most > 0 {
+                limit.min(most)
+            } else {
+                limit
+            }
+        };
         #[cfg(target_os = "macos")]
         let listed = {
             // SAFETY: with no buffer, `proc_pidinfo` answers how large one has to be.

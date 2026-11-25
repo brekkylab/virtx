@@ -260,12 +260,15 @@ jobs:
           path: target/release/abin
           key: abin-${{ matrix.arch }}-${{ hashFiles('virtx-abins/**', 'rust-toolchain.toml', 'xtask/scripts/musl-*.sh', 'xtask/scripts/fetch-musl-sysroot.sh', 'xtask/src/abin.rs') }}
 
+      # Its tests too, here where it changed: they are built for the guest's musl target, which
+      # this Linux host runs.
       - name: abin
         if: steps.abin.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld llvm
+          sudo apt-get install -y -qq clang lld llvm cmake ninja-build
           cargo xtask build abin
+          cargo xtask test abin
 
       - run: ls -la target/release/abin
 

@@ -308,19 +308,19 @@ impl Access {
 
     /// Take project `id`'s home away for good, whatever lives in it, for the caller to delete
     /// its directory: no request reaches it from now on, one already in it starts no sandbox or
-    /// image job, every image job in it is cancelled and every sandbox in it closed, as
-    /// [`Home::close_all`] does -- one kept there and not known again ([`UnknownSandbox`]) has
-    /// its disk and record deleted too. Blocks until each machine has stopped. Left to the
-    /// caller: the directory and what else is in it, its images and volumes; what a backend
-    /// keeps of it; and a sandbox another process holds there ([`Sandbox::lives_under`]).
+    /// image job, and every image job in it is cancelled and every sandbox in it closed, as
+    /// [`Home::close_all`] does. One kept there and not known again ([`UnknownSandbox`]) is let
+    /// go of, its disk held by this process no more. Blocks until each machine has stopped. Left
+    /// to the caller: the directory and what else is in it -- its images and volumes, and the
+    /// disk and record of each sandbox let go of -- what a backend keeps of it, and a sandbox
+    /// another process holds there ([`Sandbox::lives_under`]).
     /// [`release`](Access::release) lets requests reach it again.
     ///
     /// [`UnknownSandbox`]: virtx_uvm::UnknownSandbox
     pub fn forget(&self, id: &ProjectId) {
         let taken = self.homes.lock().unwrap().insert(*id, None).flatten();
         if let Some(home) = taken {
-            home.close_anyway();
-            home.close_all();
+            home.forget();
         }
     }
 
@@ -557,8 +557,8 @@ mod tests {
     }
 
     /// A project is forgotten whatever its home holds: a sandbox kept in it and not known again,
-    /// which keeps it from being closed, is removed, and its home leaves the homes made and is
-    /// reached by no request again.
+    /// which keeps it from being closed, is let go of, its files left for the caller, and its
+    /// home leaves the homes made and is reached by no request again.
     #[tokio::test]
     async fn a_project_is_forgotten_with_a_sandbox_not_known_again_in_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -588,9 +588,10 @@ mod tests {
         access.forget(&demo);
         assert!(access.homes().is_empty());
         assert!(access.home_of(&demo).await.unwrap().is_none());
-        assert!(!Sandbox::lives_under(&store.path(&demo)));
-        assert!(!sandbox.join("lost.ext4").exists());
-        assert!(!sandbox.join("lost.json").exists());
+        let lock = std::fs::File::open(sandbox.join("lost.ext4.lock")).unwrap();
+        assert!(lock.try_lock().is_ok(), "its disk held still");
+        assert!(sandbox.join("lost.ext4").exists());
+        assert!(sandbox.join("lost.json").exists());
         let pull = http::Request::post("/images/jobs/pull/")
             .header(header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(r#"{"reference": "alpine:3.20"}"#))

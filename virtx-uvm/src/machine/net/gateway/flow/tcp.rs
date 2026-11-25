@@ -160,9 +160,14 @@ impl TcpFlow {
     }
 
     /// Whether the connection is over on the guest's side, its last segment sent: closed and
-    /// its RST out, waiting out its close, or still listening for a SYN it did not take.
+    /// its RST out, waiting out its close, or still listening for a SYN it did not take. Not
+    /// while what the guest sent is still to reach the host, which smoltcp keeps past its close
+    /// -- unless the host's side failed.
     pub(super) fn over(&self, sockets: &SocketSet) -> bool {
         let socket = sockets.get::<SmolSocket>(self.handle);
+        if socket.can_recv() && !self.guest_done {
+            return false;
+        }
         match socket.state() {
             State::Closed => socket.remote_endpoint().is_none(),
             State::TimeWait | State::Listen => true,

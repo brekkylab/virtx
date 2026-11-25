@@ -285,7 +285,7 @@ impl Frame {
 #[cfg(all(test, unix))]
 mod tests {
     use std::io::{Read as _, Write as _};
-    use std::net::{SocketAddr, TcpStream, UdpSocket};
+    use std::net::{Shutdown, SocketAddr, TcpStream, UdpSocket};
     use std::os::unix::net::UnixStream;
     use std::thread;
     use std::time::Instant as Clock;
@@ -416,6 +416,52 @@ mod tests {
             got.len()
         );
         host.join().unwrap();
+    }
+
+    /// What the guest sends after the host has closed its side reaches the host whole, though
+    /// the guest's close is taken while the gateway still holds what the host has not: the
+    /// connection outlasts the close until it has.
+    #[test]
+    fn what_the_guest_sends_after_the_host_closes_reaches_the_host_whole() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut guest = Guest::new(resolved_at(listener.local_addr().unwrap()), vec![]);
+        let handle = guest.connect(DNS);
+        let (told, told_host) = std::sync::mpsc::channel();
+
+        let host = thread::spawn(move || {
+            let (mut host, _) = listener.accept().unwrap();
+            host.shutdown(Shutdown::Write).unwrap();
+            // A little at a time until the guest has closed, so its close arrives while the
+            // gateway still holds what the host has not taken.
+            let mut got = 0;
+            let mut step = vec![0; 8 << 10];
+            told_host.recv().unwrap();
+            while told_host.try_recv().is_err() {
+                host.read_exact(&mut step).unwrap();
+                got += step.len();
+                thread::sleep(Duration::from_millis(50));
+            }
+            let mut rest = Vec::new();
+            host.read_to_end(&mut rest).unwrap();
+            got + rest.len()
+        });
+        // As much as the way to the host holds, and the guest's own buffer full behind it.
+        let (chunk, mut sent, mut moved) = (vec![7; 64 << 10], 0, Clock::now());
+        guest.until("the way to the host is full", |sockets| {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            while socket.can_send() {
+                sent += socket.send_slice(&chunk).unwrap();
+                moved = Clock::now();
+            }
+            moved.elapsed() > Duration::from_millis(200)
+        });
+        guest.sockets.get_mut::<tcp::Socket>(handle).close();
+        told.send(()).unwrap();
+        guest.until("the guest's side has closed", |sockets| {
+            sockets.get::<tcp::Socket>(handle).state() == tcp::State::Closed
+        });
+        told.send(()).unwrap();
+        assert_eq!(host.join().unwrap(), sent);
     }
 
     /// A connection the policy sends nowhere -- this host, at the gateway -- is reset.

@@ -120,7 +120,7 @@ Each entry of `sandbox.ports` names the guest's `port` beside its `url`, in the 
 A port given twice, or port `0`, is refused.
 
 The `url` is given only when the sandbox is created, since it carries the port's credentials: forward the port `create_sandbox` answered, and keep it if you will reach the port later.
-A sandbox got again with `get_sandbox`, `find_sandbox` or `list_sandbox`, from this program or another, still has its `ports`, each with its `port`, `label`, `protocol` and any `address`, but no `url`, and a forwarder refuses to open such a port.
+A sandbox got again with `get_sandbox`, `find_sandbox` or `list_sandbox`, from this program or another, still has its `ports`, each with its `port` and `label`, but no `url`, and a forwarder refuses to open such a port.
 
 A connection made while nothing listens on the port in the guest is closed at once, as a closed port's would be: start the service before connecting.
 Through a server over HTTP, the forwarder says what it saw: a connection whose WebSocket is refused, or closed before the port sent a byte, with the reason the server gave if it gave one, is kept as the forwarder's last error, and logged as a warning that names the port and what the server answered -- never its `url`.
@@ -137,12 +137,8 @@ A server over HTTP answers a URL that only a `PortForwarder` opens, so use one e
 
 ## What a port is for
 
-A port in `ports` is a number for plain TCP, or a spec that says more: a `label` of up to 128 characters saying what it is for, and a `protocol`, `tcp` or `http`.
-Each comes back in `sandbox.ports` with its `label` and `protocol` as given.
-
-An `http` port is HTTP served in the sandbox, reached at its `url` by a browser as by any client, WebSockets included, with no forwarder.
-A server on this machine answers it a loopback address that a browser opens as it is.
-A server that cannot serve a port over HTTP refuses `http` with `400`, `invalid`: `virtx-server-tcp`'s URLs are a forwarder's alone, so it does.
+A port in `ports` is a number, or a spec with a `label` of up to 128 characters saying what it is for.
+The label comes back with the port wherever the sandbox is found again, which answers no `url`, so it is what tells its ports apart there:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -152,9 +148,11 @@ from virtx import PortSpec
 
 sandbox = await client.create_sandbox(
     "node:22",
-    ports=[PortSpec(5173, label="dev server", protocol="http")],
+    ports=[PortSpec(5173, label="dev server")],
 )
-print(sandbox.ports[0].url)  # open it in a browser
+
+found = await client.get_sandbox(sandbox.id)
+print(found.ports[0].label)  # dev server
 ```
 
 </TabItem>
@@ -162,70 +160,25 @@ print(sandbox.ports[0].url)  # open it in a browser
 
 ```js
 const sandbox = await client.createSandbox('node:22', {
-  ports: [{ port: 5173, label: 'dev server', protocol: 'http' }],
+  ports: [{ port: 5173, label: 'dev server' }],
 })
-console.log(sandbox.ports[0].url) // open it in a browser
+
+const found = await client.getSandbox(sandbox.id)
+console.log(found.ports[0].label) // dev server
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
-let web = PortSpec::new(5173)
-    .label("dev server")
-    .protocol(PortProtocol::Http);
+let dev_server = PortSpec::new(5173).label("dev server");
 let sandbox = client
-    .create_sandbox(&SandboxCreateArgs::new("node:22").port(web))
+    .create_sandbox(&SandboxCreateArgs::new("node:22").port(dev_server))
     .await?;
-println!("{}", sandbox.info().ports[0].url.as_deref().unwrap()); // open it in a browser
+
+let found = client.get_sandbox(sandbox.id()).await?;
+println!("{:?}", found.info().ports[0].label); // Some("dev server")
 ```
 
 </TabItem>
 </Tabs>
-
-A server reachable from other machines may also answer a `tcp` port with an `address`, `host:port`, where any TCP client reaches it directly, with no forwarder.
-Unlike the `url`, it is not secret: what listens on the port answers whoever connects, and has to authenticate them itself.
-
-## Who a port lets in
-
-A server may keep inbound rules for a port, as a security group does: the addresses it lets in.
-Each rule is a `source`, an IPv4 or IPv6 CIDR such as `203.0.113.0/24` or one address such as `203.0.113.7`, and an optional `description`.
-Give them as the sandbox is made, with `inbound` in the port's spec; an empty list lets in no one.
-
-<Tabs syncKey="lang">
-<TabItem label="Python">
-
-```python
-from virtx import InboundRule, PortSpec
-
-sandbox = await client.create_sandbox(
-    "alpine:latest",
-    ports=[PortSpec(22, inbound=[InboundRule("203.0.113.7", "office")])],
-)
-```
-
-</TabItem>
-<TabItem label="Node.js">
-
-```js
-const sandbox = await client.createSandbox('alpine:latest', {
-  ports: [{ port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }],
-})
-```
-
-</TabItem>
-<TabItem label="Rust">
-
-```rust
-let ssh = PortSpec::new(22).inbound([InboundRule::new("203.0.113.7").description("office")]);
-let sandbox = client
-    .create_sandbox(&SandboxCreateArgs::new("alpine:latest").port(ssh))
-    .await?;
-```
-
-</TabItem>
-</Tabs>
-
-A server that keeps no rules refuses a port given `inbound` with `400`, `invalid`, rather than open it to whoever the rules were meant to keep out: `virtx-stdio` and `virtx-server-tcp` keep none.
-A server that keeps them may open a port whose rules it could not set, such as past a quota, and say why in its `inbound_error` (`inboundError` in Node.js): a `code`, a `message`, and for a quota a `reason`.
-Such a port lets no one in, and has no `address`, until its rules are set.

@@ -240,8 +240,7 @@ impl Home {
     /// here: for a server built on this one that names its sandboxes itself, as one that moves
     /// them between servers does, each keeping the id and port URLs its client holds. Made and
     /// answered as `POST /sandboxes/` makes and answers one, each port's URL `ports/<key>`,
-    /// relative; but a port may be asked for over HTTP and carry inbound rules, which serving
-    /// and keeping are the embedder's. Refused `400` for an id that cannot be one, or keys that
+    /// relative. Refused `400` for an id that cannot be one, or keys that
     /// are not one for each port; `409` `exists` for an id a sandbox here has, has made or keeps
     /// -- one let go of here is [taken in](Home::take_in) instead -- or a key one opens a port
     /// by or is being made with; and as `POST /sandboxes/` is otherwise. See [`Given::keys`]
@@ -1557,21 +1556,6 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-    // A port's URL here is a tunnel for TCP, which a browser does not open.
-    if let Some(spec) = args.ports.iter().find(|spec| !spec.protocol.is_tcp()) {
-        return Err(invalid(format!(
-            "ports: {} is asked for over HTTP, which this server does not serve a port over",
-            spec.port
-        )));
-    }
-    // No inbound rules are kept here, so a port given some is refused rather than opened to
-    // whoever they were meant to keep out.
-    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
-        return Err(invalid(format!(
-            "ports: {}'s inbound rules are not kept by this server",
-            spec.port
-        )));
-    }
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since

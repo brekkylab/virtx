@@ -10,8 +10,7 @@ use std::{
 };
 
 use virtx::{
-    Error, PortForwarder, PortProtocol, PortSpec, SandboxCreateArgs, SandboxExecArgs, SandboxPort,
-    Source,
+    Error, PortForwarder, PortSpec, SandboxCreateArgs, SandboxExecArgs, SandboxPort, Source,
 };
 
 mod common;
@@ -76,16 +75,11 @@ fn serving(client: &virtx::Client, port: PortSpec) -> virtx::Sandbox {
 #[test]
 fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let client = common::client();
-    // Over HTTP, which the loopback carries as it carries any TCP, and saying what it is for.
-    let port = PortSpec::new(8000)
-        .label("greeting")
-        .protocol(PortProtocol::Http);
+    // Saying what it is for.
+    let port = PortSpec::new(8000).label("greeting");
     let sandbox = serving(&client, port);
     let opened = &sandbox.info().ports[0];
-    assert_eq!(
-        (opened.label.as_deref(), &opened.protocol, &opened.address),
-        (Some("greeting"), &PortProtocol::Http, &None)
-    );
+    assert_eq!(opened.label.as_deref(), Some("greeting"));
     let url = opened.url.as_deref().unwrap();
     let at = url.strip_prefix("http://").unwrap_or(url).to_owned();
     assert!(at.starts_with("127.0.0.1:"), "{at}");

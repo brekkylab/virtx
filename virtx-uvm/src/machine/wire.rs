@@ -50,7 +50,8 @@ pub struct MachineInfo {
     pub shares: Vec<(String, String)>,
     /// The guest's network interface, on a machine with one.
     pub network: Option<GuestNetwork>,
-    /// Where the agent, and so every command, stands.
+    /// Where the agent, and so every command, stands: made where the root has no such
+    /// directory.
     pub workdir: String,
 }
 

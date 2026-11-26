@@ -2156,6 +2156,31 @@ async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home:
     close(sandbox).await;
 }
 
+/// A sandbox of an image whose config names a working directory none of its layers has stands
+/// there, in a directory made as its machine boots.
+async fn a_sandbox_stands_in_its_image_s_working_directory_where_no_layer_has_it(home: Home) {
+    let alpine: Reference = ALPINE.parse().unwrap();
+    let alpine = home.images.get_tag(&alpine).unwrap().unwrap();
+    let (mut image, layers) = home.images.get_image(&alpine).unwrap().unwrap();
+    let mut config = image.config().clone().unwrap_or_default();
+    config.set_working_dir(Some("/made/here".into()));
+    image.set_config(Some(config));
+    let image = home.images.insert_image(&image, &layers).unwrap();
+
+    let mut args = small();
+    args.image = ImageName::Digest {
+        digest: image.to_string(),
+    };
+    let sandbox = home.sandbox(&args, None).await;
+    let ask = "pwd; stat -c %a . ..";
+    let (lines, code) = run(&sandbox, &["sh", "-c", ask], None).await.unwrap();
+    assert_eq!(
+        (lines, code),
+        (vec!["/made/here".into(), "755".into(), "755".into()], 0)
+    );
+    close(sandbox).await;
+}
+
 async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     for (vcpus, mib) in [(1, 512), (2, 1536)] {
         let sandbox = home
@@ -3162,6 +3187,7 @@ fn main() -> ExitCode {
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_s_published_ports_carry_megabytes_each_way,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
+        a_sandbox_stands_in_its_image_s_working_directory_where_no_layer_has_it,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,
         a_sandbox_s_sync_flushes_its_disk,

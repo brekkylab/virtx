@@ -29,16 +29,18 @@ Hand the agent an emulator, or a device kept for testing.
 
 ## Use it from a sandbox
 
-The sandbox is made with the client port `5037`, gets `adb` from Alpine's packages, and is told where the server is with `ADB_SERVER_SOCKET`, so every `adb` command in it reaches the device on your machine.
+The sandbox is made from an image with `adb` from Alpine's packages, with the client port `5037`, and is told where the server is with `ADB_SERVER_SOCKET`, so every `adb` command in it reaches the device on your machine.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-from virtx import ClientPortForwarder
+from virtx import ClientPortForwarder, Recipe
 
-sandbox = await client.create_sandbox("alpine:latest", client_ports=[5037])
-await sandbox.exec(["apk", "add", "-q", "android-tools"]).complete(print=True)
+recipe = Recipe("alpine:latest").run("apk add -q android-tools")
+await client.build_image(recipe, "adb:latest").complete(print=True)
+
+sandbox = await client.create_sandbox("adb:latest", client_ports=[5037])
 
 async def adb(*args):
     cmd = ["env", "ADB_SERVER_SOCKET=tcp:10.0.2.2:5037", "adb", *args]
@@ -57,10 +59,12 @@ screen = await sandbox.read_file("root/screen.png")
 <TabItem label="Node.js">
 
 ```js
-const { ClientPortForwarder } = require('@brekkylab/virtx')
+const { ClientPortForwarder, Recipe } = require('@brekkylab/virtx')
 
-const sandbox = await client.createSandbox('alpine:latest', { clientPorts: [5037] })
-await sandbox.exec(['apk', 'add', '-q', 'android-tools']).complete({ print: true })
+const recipe = new Recipe('alpine:latest').run('apk add -q android-tools')
+await client.buildImage(recipe, 'adb:latest').complete({ print: true })
+
+const sandbox = await client.createSandbox('adb:latest', { clientPorts: [5037] })
 
 const adb = (...args) =>
   sandbox
@@ -81,10 +85,11 @@ const screen = await sandbox.readFile('root/screen.png')
 <TabItem label="Rust">
 
 ```rust
-let args = SandboxCreateArgs::new("alpine:latest").client_port(5037);
+let recipe = Recipe::new("alpine:latest").step("apk add -q android-tools");
+client.build_image(recipe, "adb:latest").complete(true).await?;
+
+let args = SandboxCreateArgs::new("adb:latest").client_port(5037);
 let sandbox = client.create_sandbox(&args).await?;
-let install = SandboxExecArgs::new(["apk", "add", "-q", "android-tools"]);
-sandbox.exec(&install).complete(true).await?;
 
 let forwarder = ClientPortForwarder::open(&sandbox, 5037, None).await?;
 for args in [

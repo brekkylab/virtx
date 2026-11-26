@@ -17,6 +17,4 @@ mod flow;
 mod tcp;
 mod udp;
 
-pub(super) use flow::{Ends, Flows};
-
-use flow::Interest;
+pub(super) use flow::{EndpointPair, Flows};

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use polling::{Event, Poller};
 
-use super::flow::Ends;
+use super::flow::EndpointPair;
 use super::link::Link;
 
 /// The most queries waiting for an answer; one more is dropped, and the guest asks again.
@@ -28,7 +28,7 @@ pub(super) struct Dns {
     key: usize,
     /// Each query waiting, by the ID it was sent on with: where it came from, its own ID, and
     /// when it was sent.
-    pending: HashMap<u16, (Ends, u16, Instant)>,
+    pending: HashMap<u16, (EndpointPair, u16, Instant)>,
     /// What the IDs sent on are drawn from, so the resolver's answers cannot be guessed at.
     ids: RandomState,
     sent: u64,
@@ -68,7 +68,7 @@ impl Dns {
 
     /// Send on `query`, which the guest sent between `ends`. One too short to carry an ID, or
     /// past [`MAX_PENDING`], is dropped.
-    pub(super) fn query(&mut self, ends: Ends, query: &[u8]) {
+    pub(super) fn query(&mut self, ends: EndpointPair, query: &[u8]) {
         let Some(host) = &self.host else {
             return;
         };

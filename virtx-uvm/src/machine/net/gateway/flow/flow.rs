@@ -14,10 +14,14 @@ use super::tcp::TcpFlow;
 use super::udp::{self, UdpFlow};
 
 /// A flow's two ends: the guest's, and the one it sent to.
-pub(in crate::machine::net::gateway) type Ends = (SocketAddr, SocketAddr);
+pub(in crate::machine::net::gateway) type EndpointPair = (SocketAddr, SocketAddr);
 
 /// The first port the gateway's end of a connection to a published port takes.
 const EPHEMERAL: u16 = 49152;
+
+/// The most flows a machine holds at once: each holds a host socket, and a TCP connection
+/// half a megabyte of smoltcp's buffers.
+const MOST: usize = 1024;
 
 enum Flow {
     Tcp(TcpFlow),
@@ -72,7 +76,7 @@ impl Flow {
 
 struct Entry {
     flow: Flow,
-    ends: (IpProtocol, Ends),
+    ends: (IpProtocol, EndpointPair),
     /// What the poller has been asked to report, and not yet reported.
     armed: Interest,
     ready: bool,
@@ -80,9 +84,12 @@ struct Entry {
 
 pub(in crate::machine::net::gateway) struct Flows {
     entries: Slab<Entry>,
-    by_ends: HashMap<(IpProtocol, Ends), usize>,
+    by_ends: HashMap<(IpProtocol, EndpointPair), usize>,
     /// The port the gateway's end of the next connection to a published port tries.
     next_port: u16,
+    /// Past which no flow is opened: a SYN is reset, a datagram dropped, and a connection to a
+    /// published port closed.
+    most: usize,
 }
 
 impl Default for Flows {
@@ -91,6 +98,7 @@ impl Default for Flows {
             entries: Slab::new(),
             by_ends: HashMap::new(),
             next_port: EPHEMERAL,
+            most: MOST,
         }
     }
 }
@@ -108,10 +116,10 @@ impl Flows {
         &mut self,
         poller: &Poller,
         sockets: &mut SocketSet<'static>,
-        ends: Ends,
+        ends: EndpointPair,
         route: impl FnOnce() -> Option<SocketAddr>,
     ) {
-        if self.by_ends.contains_key(&(IpProtocol::Tcp, ends)) {
+        if self.by_ends.contains_key(&(IpProtocol::Tcp, ends)) || self.entries.len() >= self.most {
             return;
         }
         if let Some(at) = route()
@@ -127,12 +135,13 @@ impl Flows {
     pub(in crate::machine::net::gateway) fn udp(
         &mut self,
         poller: &Poller,
-        ends: Ends,
+        ends: EndpointPair,
         payload: &[u8],
         route: impl FnOnce() -> Option<SocketAddr>,
     ) {
         let key = match self.by_ends.get(&(IpProtocol::Udp, ends)) {
             Some(&key) => key,
+            None if self.entries.len() >= self.most => return,
             None => {
                 let Some(udp) = route().and_then(|at| UdpFlow::open(ends, at).ok()) else {
                     return;
@@ -158,6 +167,9 @@ impl Flows {
         host: Socket,
         guest: SocketAddr,
     ) {
+        if self.entries.len() >= self.most {
+            return;
+        }
         let gateway = loop {
             let gateway = SocketAddr::from((LAN.gateway, self.next_port));
             self.next_port = self.next_port.checked_add(1).unwrap_or(EPHEMERAL);
@@ -177,7 +189,7 @@ impl Flows {
 
     /// Keep `flow` between `ends`, its host socket waited on by `poller` under the key this
     /// answers; or give it back, for a poller that will not take it.
-    fn insert(&mut self, poller: &Poller, ends: Ends, flow: Flow) -> Result<usize, Flow> {
+    fn insert(&mut self, poller: &Poller, ends: EndpointPair, flow: Flow) -> Result<usize, Flow> {
         let key = self.entries.vacant_key();
         let ends = (flow.protocol(), ends);
         // SAFETY: deleted from the poller in `reap` before the flow, and its socket, drops --
@@ -240,5 +252,39 @@ impl Flows {
             self.by_ends.remove(&entry.ends);
             entry.flow.close(sockets);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, TcpListener, UdpSocket};
+
+    use super::*;
+
+    /// Past its most flows, no other is opened, a TCP connection's or a UDP flow's.
+    #[test]
+    fn past_its_most_flows_no_other_is_opened() {
+        let mut flows = Flows {
+            most: 2,
+            ..Flows::default()
+        };
+        let mut sockets = SocketSet::new(Vec::new());
+        // Declared after the flows, so it is dropped first.
+        let poller = Poller::new().unwrap();
+        let host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let to = SocketAddr::from((Ipv4Addr::new(1, 1, 1, 1), 53));
+        let from = |port| SocketAddr::from((LAN.guest, port));
+
+        for port in [40000, 40001, 40002] {
+            flows.udp(&poller, (from(port), to), b"ping", || {
+                host.local_addr().ok()
+            });
+        }
+        assert_eq!(flows.entries.len(), 2);
+        flows.syn(&poller, &mut sockets, (from(40003), to), || {
+            listener.local_addr().ok()
+        });
+        assert_eq!(flows.entries.len(), 2);
     }
 }

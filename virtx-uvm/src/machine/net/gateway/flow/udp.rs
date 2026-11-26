@@ -11,20 +11,20 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use super::super::link::Link;
-use super::{Ends, Interest};
+use super::flow::{EndpointPair, Interest};
 
 /// How long a flow nothing has crossed is kept.
 pub(super) const IDLE: Duration = Duration::from_secs(60);
 
 pub(super) struct UdpFlow {
     host: Socket,
-    ends: Ends,
+    ends: EndpointPair,
     last: Instant,
 }
 
 impl UdpFlow {
     /// A flow between `ends`, its host socket connected to `at`.
-    pub(super) fn open(ends: Ends, at: SocketAddr) -> io::Result<UdpFlow> {
+    pub(super) fn open(ends: EndpointPair, at: SocketAddr) -> io::Result<UdpFlow> {
         let host = Socket::new(Domain::for_address(at), Type::DGRAM, Some(Protocol::UDP))?;
         host.set_nonblocking(true)?;
         host.connect(&at.into())?;
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn a_datagram_goes_out_and_its_reply_comes_back_from_where_it_was_sent() {
         let public_v6 = Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111);
-        let both: [Ends; 2] = [
+        let both: [EndpointPair; 2] = [
             (
                 (LAN.guest, 40000).into(),
                 (Ipv4Addr::new(1, 1, 1, 1), 5000).into(),

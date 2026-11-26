@@ -14,7 +14,7 @@ use smoltcp::wire::{
 use super::LAN;
 use super::dns::Dns;
 use super::egress::{Egress, is_dns};
-use super::flow::{Ends, Flows};
+use super::flow::{EndpointPair, Flows};
 use super::link::Link;
 
 /// The link's key in the poller, below the one the poller keeps for itself. The nameserver's
@@ -210,9 +210,12 @@ impl Gateway {
 /// What a frame from the guest is, as far as the stack takes it apart.
 enum Frame {
     /// A TCP connection's first segment.
-    Syn { ends: Ends },
+    Syn { ends: EndpointPair },
     /// A datagram, its payload where it lies in the frame.
-    Udp { ends: Ends, payload: Range<usize> },
+    Udp {
+        ends: EndpointPair,
+        payload: Range<usize>,
+    },
     /// smoltcp's: ARP, the rest of TCP, ICMP to this end, and neighbor discovery.
     Smoltcp,
     /// Nothing to answer. ICMP to anywhere but this end is dropped rather than left to smoltcp,

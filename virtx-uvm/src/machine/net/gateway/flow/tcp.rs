@@ -17,7 +17,7 @@ use smoltcp::socket::tcp::{Socket as SmolSocket, SocketBuffer, State};
 use smoltcp::wire::{IpAddress, IpListenEndpoint};
 use socket2::{Domain, Protocol, Socket, Type};
 
-use super::Interest;
+use super::flow::Interest;
 
 /// Each direction's buffer in smoltcp: room for a few of the link's segments in flight.
 const BUFFER: usize = 256 << 10;

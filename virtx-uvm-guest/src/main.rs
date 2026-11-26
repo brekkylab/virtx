@@ -437,9 +437,6 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
                 None,
             )
         });
-        // Mounted once, with barriers: a remount after, to give them back to one mounted
-        // without, syncs what the mount wrote -- a journal commit, waited on, that takes longer
-        // than the one flush the mount waits on.
         let upper = mount(
             Some(&asked.upper_device),
             UPPER_AT,

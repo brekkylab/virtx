@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 # The server, on `virtx-core`'s protocol over stdio: what a client spawns. Also, as
-# `virtx-stdio vm`, the process that becomes a micro-VM, spawned by itself. The binary is
+# `virtx-stdio vm`, the process that becomes a microVM, spawned by itself. The binary is
 # named `virtx-stdio`: it is what a release archive carries and what virtx fetches.
 [[bin]]
 name = "virtx-stdio"

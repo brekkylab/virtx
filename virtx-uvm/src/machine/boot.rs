@@ -12,8 +12,8 @@
 //!            virtx-ctrl     the control channel to the agent, passed on to and from the host
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
-//! virtio-vsock              the guest's network, on a machine with one or with published
-//!                           ports -- see [`net`]
+//! virtio-net eth0           the guest's network, on a machine with one or with published
+//!                           ports -- see `net`
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag once the overlay is
@@ -45,7 +45,7 @@
 //! What the init runs is not a command but `virtx-uvm-guest`, the agent, built into this
 //! binary (see `build.rs`). The first thing it reads on its port is a
 //! [`MachineInfo`](wire::MachineInfo), which this process writes there: it builds the root
-//! that names -- the upper disk overlaid on the lower, the shares mounted, the resolver named
+//! that names -- the upper disk overlaid on the lower, the shares mounted, the network set up
 //! -- steps into it, and runs the commands the host sends.
 //!
 //! # `/abin` and `/alib`
@@ -70,7 +70,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "gpu")]
 use super::gpu;
+use super::wire::GuestNetwork;
 use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
 use super::{Error, MachineConfig, Result, STOP_TIMEOUT, net};
 use crate::volume::{Remote, Served};
@@ -131,12 +132,11 @@ const ALIB_HOST: &str = "alib";
 /// The log target libkrun gives what the guest's console prints.
 pub(super) const CONSOLE_TARGET: &str = "init_or_kernel";
 
-/// What a machine's process is spawned with, as one argument: the machine, its ends of the
-/// control channel and the I/O channel, and the directory its published ports' sockets go in.
+/// What a machine's process is spawned with, as one argument: the machine, and its ends of
+/// the control channel and the I/O channel.
 #[derive(Serialize, Deserialize)]
 pub(super) struct BootArgs {
     pub config: MachineConfig,
-    pub sockets: PathBuf,
     pub ctrlin: u64,
     pub ctrlout: u64,
     pub ioin: u64,
@@ -186,19 +186,13 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 
 /// Build `machine`, running the agent, and become it: load the guest kernel, lay the init over
 /// an empty root, attach the devices, pass `ctrlin` on to the agent and the agent on to
-/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, put the published ports'
-/// sockets in `sockets`, and run.
+/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, and run.
 ///
 /// **This does not return.** The VMM exits this process with the guest's own status, so what
 /// comes back is a machine that could not be built, or a failure of the event loop.
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
-pub(super) fn boot(
-    machine: MachineConfig,
-    sockets: &Path,
-    ctrlin: File,
-    io: (File, File),
-) -> Result<Infallible> {
+pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
     spike_mark("boot entered");
     let abin = machine.abin.clone();
     #[cfg(windows)]
@@ -213,9 +207,9 @@ pub(super) fn boot(
         upper_device: UPPER_DEVICE.to_owned(),
         upper_fstype: UPPER_FSTYPE.to_owned(),
         shares: Vec::new(),
-        nameserver: machine.spec.network.then(|| net::NAMESERVER.to_string()),
+        network: (machine.spec.network || !machine.ports.is_empty())
+            .then(|| GuestNetwork::new(machine.spec.network)),
         workdir: workdir(&machine.config),
-        ports: machine.ports.clone(),
         seed: host_seed(),
         now: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -443,11 +437,10 @@ pub(super) fn boot(
 
     // The whole of what having neither is: no device -- see `net`.
     if machine.spec.network || !published.is_empty() {
-        devices.add(net::attach(
+        devices.add(net::device(
             machine.spec.network,
             machine.spec.outward.clone().unwrap_or_default(),
             published,
-            sockets,
         )?);
     }
 
@@ -813,7 +806,7 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
             return refused("given twice");
         }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| Error::Io {
-            context: format!("binding a relay for guest port {port}"),
+            context: format!("publishing guest port {port}"),
             source: e,
         })?;
         published.push((port, listener));
@@ -824,7 +817,7 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
 /// The path of `what`, such as `/abin`, as libkrun takes it, which is a `&str`. Refused rather
 /// than lossily converted: a name with a replacement character in it opens some other file or
 /// none.
-pub(super) fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
+fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| Error::Io {
         context: format!("the path of {what} is not valid UTF-8, which libkrun cannot name"),
         source: std::io::Error::from(std::io::ErrorKind::InvalidInput),

@@ -9,7 +9,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 `create_sandbox` takes an image and these options, named here as in Python. Whatever is left out, the server picks.
 
-The image has to be on the server already, pulled or built as [Images](/docs/guides/images/) shows: a create does not pull it, and refuses a tag the server has no image by with `404`.
+The image has to be on the server already, pulled or built as [Images](/docs/tutorials/images/) shows: a create does not pull it, and refuses a tag the server has no image by with `404`.
 
 | Option | Default | What it does |
 | --- | --- | --- |
@@ -18,10 +18,10 @@ The image has to be on the server already, pulled or built as [Images](/docs/gui
 | `memory_mib` | 4096 | Its memory, in MiB. |
 | `disk_gib` | 2 | How much it may write over its image, in GiB, at most 1024. What it writes there goes when it is removed. |
 | `network` | `True` | `False` blocks its outbound connections and name lookups. With it on, it reaches public addresses, not this host's loopback or private ones. |
-| `ports` | none | Ports in it to reach from outside, even with `network` off: numbers for TCP, or specs with a `label`, an `http` `protocol` and `inbound` rules; see [Networks and ports](/docs/guides/networks-ports/). |
-| `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/guides/mounting-volumes/). |
-| `gpu`, `gpu_memory_mib` | none | A GPU and the memory it may hold; see [Using GPUs](/docs/guides/using-gpus/). |
-| `abins` | none | virtx's own programs, by name, such as `index`, `docread`, `display` and `browser`, at `/abin` and first on its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. The sandbox answers them as `abins`. |
+| `ports` | none | Ports in it to reach from outside, even with `network` off: numbers for TCP, or specs with a `label`, an `http` `protocol` and `inbound` rules; see [Networks and ports](/docs/tutorials/networks-ports/). |
+| `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/tutorials/mounting-volumes/). |
+| `gpu`, `gpu_memory_mib` | none | A GPU and the memory it may hold; see [Using GPUs](/docs/tutorials/using-gpus/). |
+| `abins` | none | virtx's own programs, by name, such as `index`, `docread`, `display` and `browser`, at `/abin` and first on its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. The sandbox answers them as `abins`; see [Using built-in programs](/docs/tutorials/built-in-programs/). |
 
 This makes a sandbox with 2 vCPUs, 2 GiB of memory, and no way out:
 
@@ -66,7 +66,7 @@ let sandbox = client.create_sandbox(&args).await?;
 - A VM is the size it booted with, so `vcpus` and `memory_mib` take effect at its next boot. A sandbox in which nothing runs has its VM stopped at once, and boots with its new size for its next command; one with a command running, or its files or ports in use, is refused with `409` and keeps its size.
 - `disk_gib` only grows, keeping what the sandbox wrote; one smaller than the disk the VM last booted with is refused with `400`, and one down to it takes back a grow not yet made. The disk grows at the VM's next boot too, but a resize of the disk alone stops nothing and is never refused for the sandbox being in use: it answers at once, `up` still `true` for a VM that is up, which keeps its old size until it is next stopped and boots again. A grow that cannot be made boots the VM on its disk as it was, and is tried again at each boot.
 
-A [server you run](/docs/guides/self-hosting/) keeps the new size across its restart.
+A [server you run](/docs/tutorials/self-hosting/) keeps the new size across its restart.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -102,7 +102,7 @@ let resized = sandbox.resize(&args).await?;
 
 `list_sandbox` lists every sandbox on the server, `get_sandbox` finds one by its id, and `find_sandbox` one by the `name` it was made with, answering none when no sandbox has it. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `name`, its `image`, and whether it is `running`. This is how to find one a program left behind.
 
-A [server you run](/docs/guides/self-hosting/) keeps its sandboxes when it is stopped: started again, it lists each with what it wrote, and boots it again for its next command. Their jobs are kept, each that ran then ended with code `137` and `reason` `restarted`, its log only that end. One it cannot start again, such as one whose image was deleted meanwhile, is listed with `running` false and an `error` saying why, and takes nothing but `remove`. The server `Client.spawn()` starts removes its sandboxes as your program ends.
+A [server you run](/docs/tutorials/self-hosting/) keeps its sandboxes when it is stopped: started again, it lists each with what it wrote, and boots it again for its next command. Their jobs are kept, each that ran then ended with code `137` and `reason` `restarted`, its log only that end. One it cannot start again, such as one whose image was deleted meanwhile, is listed with `running` false and an `error` saying why, and takes nothing but `remove`. The server `Client.spawn()` starts removes its sandboxes as your program ends.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -195,7 +195,7 @@ let sandbox = match client.find_sandbox("task-42").await? {
 </TabItem>
 </Tabs>
 
-A sandbox found so has each port without its `url`, which only `create_sandbox` answers; see [Networks and ports](/docs/guides/networks-ports/).
+A sandbox found so has each port without its `url`, which only `create_sandbox` answers; see [Networks and ports](/docs/tutorials/networks-ports/).
 
 ## Remove a sandbox
 

@@ -1,6 +1,6 @@
 # Each submodule is upstream's own repository, pinned to a commit of its main; what virtx changes
-# in it is its patches in 3rdparty/_patches/. libkrun's and rutabaga_gfx's are applied in their
-# own trees by `cargo xtask init`, since cargo takes their crates by path from there, and
+# in it is its patches in 3rdparty/_patches/. libkrun's, rutabaga_gfx's and smoltcp's are applied in
+# their own trees by `cargo xtask init`, since cargo takes their crates by path from there, and
 # `ignore = dirty` keeps that out of `git status`; the others' are applied to a copy under
 # build/ by the build. 3rdparty/README.md says how a patch is written and when one is taken out.
 [submodule "virglrenderer"]
@@ -23,5 +23,10 @@
 [submodule "rutabaga_gfx"]
 	path = 3rdparty/rutabaga_gfx
 	url = https://github.com/magma-gpu/rutabaga_gfx.git
+	branch = main
+	ignore = dirty
+[submodule "smoltcp"]
+	path = 3rdparty/smoltcp
+	url = https://github.com/smoltcp-rs/smoltcp.git
 	branch = main
 	ignore = dirty

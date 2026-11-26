@@ -226,9 +226,6 @@ pub struct Machine {
     /// What the embedder serves its disk with ([`Disks::serve`](crate::disks::Disks::serve)),
     /// held until its process has been killed and waited for.
     held: Option<crate::disks::Held>,
-    /// The directory its published ports' sockets are in, removed once its process has been
-    /// killed and waited for.
-    _sockets: tempfile::TempDir,
 }
 
 impl Drop for Machine {
@@ -236,6 +233,9 @@ impl Drop for Machine {
         let process = self.process.get_mut().unwrap();
         let _ = process.kill();
         let _ = process.wait();
+        // Its network's link, left behind by a process that ended before libkrun connected.
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(super::net::link_path(process.id()));
     }
 }
 
@@ -273,16 +273,8 @@ impl Machine {
             io::pipe().map_err(|e| Error::io("making ctrlout", e))?;
         let (their_ioin, ioin) = io::pipe().map_err(|e| Error::io("making ioin", e))?;
         let (ioout, their_ioout) = io::pipe().map_err(|e| Error::io("making ioout", e))?;
-        // This machine's own, which no one else can have made first or reach into: in the
-        // temporary directory, which keeps a socket's path short of the hundred-odd bytes it
-        // may take.
-        let sockets = tempfile::Builder::new()
-            .prefix("virtx-")
-            .tempdir()
-            .map_err(|e| Error::io("making the published ports' directory", e))?;
         let args = BootArgs {
             config,
-            sockets: sockets.path().to_owned(),
             ctrlin: raw(&their_ctrlin),
             ctrlout: raw(&their_ctrlout),
             ioin: raw(&their_ioin),
@@ -339,7 +331,6 @@ impl Machine {
                         io: files(ioin, ioout),
                         published,
                         held: None,
-                        _sockets: sockets,
                     });
                 }
                 Some(CtrlResp::Log {
@@ -367,6 +358,8 @@ impl Machine {
                     let status = process
                         .wait()
                         .map_err(|e| Error::io("waiting for the machine's process", e))?;
+                    #[cfg(windows)]
+                    let _ = std::fs::remove_file(super::net::link_path(process.id()));
                     return Err(did_not_start(status, tail.make_contiguous(), told));
                 }
             }
@@ -801,16 +794,62 @@ pub fn enter() -> Result<Infallible> {
     let args = std::env::args_os().last().unwrap_or_default();
     let args: BootArgs = serde_json::from_slice(args.as_encoded_bytes())
         .map_err(|e| Error::io("reading the machine to be", io::Error::other(e)))?;
+    #[cfg(unix)]
+    raise_open_files();
     // SAFETY: `start` left these open for this process, and named them to it alone.
     let ctrlin = unsafe { boot::hold(args.ctrlin, args.ctrlout) };
     // SAFETY: as above.
     let io = unsafe { (boot::from_raw(args.ioin), boot::from_raw(args.ioout)) };
-    let entered = boot::boot(args.config, &args.sockets, ctrlin, io);
+    let entered = boot::boot(args.config, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
         log::error!(target: TOLD_TARGET, "{}", e.told());
     }
     entered
+}
+
+/// Let this process hold as many files as it may, since each of its network's flows holds a
+/// socket: up to its hard limit, which on macOS is held to `kern.maxfilesperproc` whatever it
+/// says, and no more than a million.
+#[cfg(unix)]
+fn raise_open_files() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is the `rlimit` it fills in.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return;
+    }
+    let most = limit.rlim_max.min(1 << 20);
+    #[cfg(target_os = "macos")]
+    let most = {
+        let (mut per_process, mut len): (libc::c_int, _) = (0, size_of::<libc::c_int>());
+        // SAFETY: a NUL-terminated name, and an int to fill in with its size.
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&raw mut per_process).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        match read {
+            0 if per_process > 0 => most.min(per_process as libc::rlim_t),
+            _ => most,
+        }
+    };
+    if most > limit.rlim_cur {
+        limit.rlim_cur = most;
+        // SAFETY: as above.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+            log::warn!(
+                "raising the open files limit: {}",
+                io::Error::last_os_error()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2,13 +2,13 @@
 name = "virtx"
 version = "0.2.1"
 edition = "2024"
-description = "A virtx client for Rust, over libvirtx_core's C ABI."
+description = "microVM sandbox for AI agents: run commands in an isolated Linux VM from Rust, with no Docker or daemon to set up."
 license = "Apache-2.0"
 repository = "https://github.com/brekkylab/virtx"
 readme = "../README.md"
 homepage = "https://virtx.sh"
 documentation = "https://docs.rs/virtx"
-keywords = ["vm", "microvm", "sandbox", "agent", "virtualization"]
+keywords = ["microvm", "sandbox", "ai-agents", "virtualization", "code-execution"]
 categories = ["virtualization", "api-bindings", "asynchronous"]
 
 [features]

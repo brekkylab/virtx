@@ -2169,6 +2169,14 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
     let with = home.sandbox(&small(), None).await;
     assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
+    let named = ["nc", "-z", "-w", "5", "dns.google", "443"];
+    let (lines, code) = run(&with, &named, None).await.unwrap();
+    assert_eq!(code, 0, "reached no name: {lines:?}");
+    // The nameserver at its v6 address: the guest's v6 is up, though a host without v6 reaches
+    // nothing on it beyond.
+    let over_v6 = ["nslookup", "dns.google", "fd00::3"];
+    let (lines, code) = run(&with, &over_v6, None).await.unwrap();
+    assert_eq!(code, 0, "resolved nothing over v6: {lines:?}");
     close(with).await;
     // A published port gives the machine its network device, and still no way out.
     for ports in [vec![], vec![8080.into()]] {
@@ -2226,6 +2234,56 @@ async fn the_embedder_decides_and_hears_of_each_flow_to_the_internet(home: Home)
             .any(|m| m == &serde_json::json!({ "to": "8.8.8.8:53", "refused": false })),
         "a datagram's destination is put to it too: {told:?}"
     );
+}
+
+/// Each way through a port, the guest's listener on its loopback alone for the way in.
+async fn a_sandbox_s_published_ports_carry_megabytes_each_way(home: Home) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    const SIZE: usize = 4 << 20;
+    let args = SandboxCreateArgs {
+        network: false,
+        ports: vec![8080.into(), 8081.into()],
+        ..small()
+    };
+    let sandbox = home.sandbox(&args, None).await;
+    let listening = |port: u16| format!("until netstat -ltn | grep -q :{port}; do sleep 0.1; done");
+
+    let counting = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        async move {
+            run(
+                &sandbox,
+                &["sh", "-c", "nc -l -s 127.0.0.1 -p 8080 | wc -c"],
+                None,
+            )
+            .await
+        }
+    });
+    run(&sandbox, &["sh", "-c", &listening(8080)], None)
+        .await
+        .unwrap();
+    let mut stream = sandbox.connect(8080).await.unwrap();
+    stream.write_all(&vec![7; SIZE]).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let (lines, code) = counting.await.unwrap().unwrap();
+    assert_eq!((lines, code), (vec![SIZE.to_string()], 0));
+
+    let serving = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        let serve = format!("head -c {SIZE} /dev/zero | nc -l -p 8081");
+        async move { run(&sandbox, &["sh", "-c", &serve], None).await }
+    });
+    run(&sandbox, &["sh", "-c", &listening(8081)], None)
+        .await
+        .unwrap();
+    let mut stream = sandbox.connect(8081).await.unwrap();
+    let mut got = vec![1; SIZE];
+    stream.read_exact(&mut got).await.unwrap();
+    assert!(got.iter().all(|&b| b == 0));
+    drop(stream);
+    serving.await.unwrap().unwrap();
+    close(sandbox).await;
 }
 
 async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home: Home) {
@@ -3419,6 +3477,7 @@ fn main() -> ExitCode {
         a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         the_embedder_decides_and_hears_of_each_flow_to_the_internet,
+        a_sandbox_s_published_ports_carry_megabytes_each_way,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,

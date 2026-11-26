@@ -215,8 +215,8 @@ let client = Client::connect(
   - **클라이언트:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **서버:** 💻 로컬 (stdio) · 🖥️ 원격 (tcp) · ☁️ 클라우드
   - **호스트:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
-- **어떤 에이전트 프레임워크와도:** 샌드박스는 여느 도구와 같아서 어떤 프레임워크나 코딩 에이전트에서든 쓸 수 있습니다. 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 그중 하나입니다.
 - **설정은 최소한으로:** 패키지만 설치하면 바로 실행할 수 있고, Docker도 따로 띄워 둘 데몬도 필요 없습니다.
+- **어떤 에이전트 프레임워크와도:** 샌드박스는 여느 도구와 같아서 어떤 프레임워크나 코딩 에이전트에서든 쓸 수 있습니다. 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 그중 하나입니다.
 
 ## 요구 사항
 

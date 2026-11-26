@@ -2408,13 +2408,14 @@ async fn vulkan_devices(sandbox: &Arc<Sandbox>) -> Vec<String> {
     devices
 }
 
-/// A sandbox with a GPU of `memory_mib` (libkrun's 8 GiB for `None`) and the guest half
-/// installed.
+/// A sandbox with 1 GiB of RAM, as [`small`]'s, a GPU of `memory_mib` (1 GiB for `None`), and
+/// the guest half installed. Windows backs the GPU's window with committed memory, as it does
+/// RAM, so libkrun's 8 GiB window and 4 GiB of RAM each would not fit a host the suite shares.
 async fn gpu_sandbox(home: &Home, memory_mib: Option<u32>, park: Option<Duration>) -> Arc<Sandbox> {
-    let mut args = SandboxCreateArgs::new(GPU_IMAGE).gpu(true);
-    if let Some(mib) = memory_mib {
-        args = args.gpu_memory_mib(mib);
-    }
+    let mut args = SandboxCreateArgs::new(GPU_IMAGE)
+        .gpu(true)
+        .gpu_memory_mib(memory_mib.unwrap_or(1024));
+    args.memory_mib = Some(1024);
     let sandbox = home.sandbox(&args, park).await;
     apk_add(&sandbox, &GPU_GUEST).await;
     sandbox
@@ -2564,8 +2565,7 @@ async fn a_parked_gpu_sandbox_boots_again_with_its_gpu(home: Home) {
     close(sandbox).await;
 }
 
-/// Sandboxes with GPUs at once each have their own, and each gets its own work back. Each
-/// asks for 1 GiB, so two fit beside each other's RAM on any host these run on.
+/// Sandboxes with GPUs at once each have their own, and each gets its own work back.
 async fn gpu_sandboxes_made_at_once_each_compute_their_own(home: Home) {
     let made = join_all((0..2).map(|_| gpu_sandbox(&home, Some(1024), None))).await;
     join_all(made.iter().map(build_gpu_tool)).await;

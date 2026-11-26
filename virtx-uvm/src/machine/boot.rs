@@ -147,12 +147,12 @@ pub(super) struct BootArgs {
 /// first touches them: `VIRTX_PREFAULT_MEMORY=1`, off otherwise.
 ///
 /// Only WHP heeds it. There each first touch is a fault the hypervisor resolves on its own,
-/// and nested -- a Windows instance in a cloud, as a CI runner is -- one costs about 130µs:
+/// and nested -- a Windows instance in a cloud, as a spot CI runner is -- one costs about 130µs:
 /// the guest's struct pages alone, initialised before it reaches init, are 2s of a 3.8s
 /// boot, where faulting all 4 GiB in at once is 1.2s, and the machine tests there take 59s
 /// rather than 182. On a desktop the faults are cheap and the cost is all the other way:
 /// every machine holds its whole RAM on the host from the start, used or not. So it is for a
-/// runner to turn on, and nothing else.
+/// runner whose Windows is itself a virtual machine to turn on, and nothing else.
 fn prefault_memory() -> bool {
     std::env::var_os("VIRTX_PREFAULT_MEMORY").is_some_and(|v| v == "1")
 }

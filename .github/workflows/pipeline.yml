@@ -823,8 +823,11 @@ jobs:
   # Windows runners have no hypervisor (see Runners). Any runner labelled `whp` takes it -- a
   # spot instance of aws-ci-runners, launched for the job, or brekkylab's own machine with a
   # GPU, whichever is free first. Where the job finds a GPU (see `This runner`), the GPU's tests
-  # run too: the GPU libraries built, and `virtx-uvm` tested with its `gpu` feature. Each machine's RAM is prefaulted (`VIRTX_PREFAULT_MEMORY`): nested, the
-  # faults a guest takes as it first touches its memory are most of a boot.
+  # run too: the GPU libraries built, and `virtx-uvm` tested with its `gpu` feature. Where the
+  # runner's Windows is itself a virtual machine, as a spot instance is, each machine's RAM is
+  # prefaulted (`VIRTX_PREFAULT_MEMORY`): nested, the faults a guest takes as it first touches
+  # its memory are most of a boot. On bare metal they are cheap, and prefaulting would only hold
+  # every machine's RAM on a host whose memory the job shares with what else runs there.
   #
   # It starts with the run rather than after `guest`, and takes the kernel from it once it has
   # compiled its tests and `guest` has ended: a new runner's boot (about four minutes) and the
@@ -840,8 +843,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-    env:
-      VIRTX_PREFAULT_MEMORY: "1"
     steps:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
@@ -859,10 +860,14 @@ jobs:
           components: clippy, rustfmt
 
       # What this runner is: sccache's where it has its bucket (aws-ci-runners'), but for a
-      # release, which compiles from nothing; and the GPU's tests where it has a GPU -- a
+      # release, which compiles from nothing; the GPU's tests where it has a GPU -- a
       # display controller on its PCI bus that is not Windows' own basic one, and Vulkan's
-      # loader to reach it with. Found here rather than told: a job cannot read its runner's
-      # labels, and a runner that is told can be told wrong.
+      # loader to reach it with; and prefaulted machines where its Windows is itself a virtual
+      # machine, which its SMBIOS says (BIOS characteristics extension byte 2, bit 4) where
+      # `HypervisorPresent` cannot: Hyper-V's root on bare metal runs over a hypervisor too.
+      # Found here rather than told: a job cannot read its runner's labels, and a runner that
+      # is told can be told wrong. The host's free memory is logged beside it, for the next
+      # machine that fails to get some.
       - id: runner
         name: This runner
         env:
@@ -883,7 +888,30 @@ jobs:
             echo "VIRTX_TEST_GPU=1" >> "$GITHUB_ENV"
             echo "TEST_FEATURES=--features virtx-uvm/gpu" >> "$GITHUB_ENV"
           fi
+          cat > "$RUNNER_TEMP/host.ps1" <<'PS'
+          $t = (Get-CimInstance -Namespace root\wmi -ClassName MSSmBios_RawSMBiosTables).SMBiosData
+          $ext = $null
+          for ($i = 0; $i + 1 -lt $t.Length; $i = $j + 2) {
+            if ($t[$i] -eq 0) { if ($t[$i + 1] -gt 0x13) { $ext = $t[$i + 0x13] }; break }
+            for ($j = $i + $t[$i + 1]; $j + 1 -lt $t.Length -and ($t[$j] -ne 0 -or $t[$j + 1] -ne 0); $j++) {}
+          }
+          $cs = Get-CimInstance Win32_ComputerSystem
+          $os = Get-CimInstance Win32_OperatingSystem
+          if ($null -ne $ext -and ($ext -band 0x10)) { 'nested' } else { 'bare' }
+          if ($null -eq $ext) { 'no SMBIOS BIOS characteristics extension byte 2' }
+          else { 'SMBIOS BIOS characteristics extension byte 2 = 0x{0:x2}' -f $ext }
+          '{0} {1}' -f $cs.Manufacturer, $cs.Model
+          'commit {0:N1} of {1:N1} GB free, physical {2:N1} of {3:N1} GB free' -f
+            ($os.FreeVirtualMemory / 1MB), ($os.TotalVirtualMemorySize / 1MB),
+            ($os.FreePhysicalMemory / 1MB), ($os.TotalVisibleMemorySize / 1MB)
+          PS
+          mapfile -t host < <(powershell -NoProfile -ExecutionPolicy Bypass -File "$RUNNER_TEMP/host.ps1" | tr -d '\r')
+          if [ "${host[0]}" = nested ]; then
+            echo "VIRTX_PREFAULT_MEMORY=1" >> "$GITHUB_ENV"
+          fi
           echo "sccache: ${SCCACHE_BUCKET:+yes}; GPU: ${gpu:-none}"
+          echo "Windows: ${host[0]} (${host[1]}; ${host[2]}), so prefault: $([ "${host[0]}" = nested ] && echo yes || echo no)"
+          echo "memory: ${host[3]}"
 
       - uses: ./.github/actions/cargo-deps
 

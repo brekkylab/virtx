@@ -2123,8 +2123,7 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     }
 }
 
-/// What a sandbox syncs to its disk is flushed there: its disk mounted with barriers, though it
-/// is mounted without them first.
+/// What a sandbox syncs to its disk is flushed there: its disk mounted with barriers.
 async fn a_sandbox_s_sync_flushes_its_disk(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let flushes = "awk '{print $16}' /sys/block/vdb/stat";
@@ -2133,6 +2132,26 @@ async fn a_sandbox_s_sync_flushes_its_disk(home: Home) {
     assert_eq!((lines.len(), code), (2, 0), "{lines:?}");
     let (before, after): (u64, u64) = (lines[0].parse().unwrap(), lines[1].parse().unwrap());
     assert!(after > before, "{lines:?}");
+    close(sandbox).await;
+}
+
+/// A sandbox's disk is mounted once as its guest starts, never remounted.
+async fn a_sandbox_s_disk_is_mounted_once(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let (lines, code) = run(&sandbox, &["dmesg"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("EXT4-fs (vdb): mounted")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("EXT4-fs (vdb): re-mounted")),
+        "{lines:?}"
+    );
     close(sandbox).await;
 }
 
@@ -3106,6 +3125,7 @@ fn main() -> ExitCode {
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,
         a_sandbox_s_sync_flushes_its_disk,
+        a_sandbox_s_disk_is_mounted_once,
         a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
         sandboxes_made_at_once_each_run_their_own,

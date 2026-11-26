@@ -37,11 +37,13 @@ default-members = ["virtx-core"]
 # cross-compiles to `*-unknown-linux-musl` and embeds -- a workspace root of its own for the
 # same reason as `virtx-abins/`.
 #
-# `3rdparty/libkrun` and `3rdparty/rutabaga_gfx` are workspaces of their own, whose crates are
-# taken by path: libkrun's by `virtx-uvm`, rutabaga_gfx's by `[patch.crates-io]` below.
+# `3rdparty/libkrun`, `3rdparty/rutabaga_gfx` and `3rdparty/smoltcp` are projects of their own,
+# whose crates are taken by path: libkrun's by `virtx-uvm`, the others' by `[patch.crates-io]`
+# below.
 exclude = [
     "3rdparty/libkrun",
     "3rdparty/rutabaga_gfx",
+    "3rdparty/smoltcp",
     "virtx-abins",
     "virtx-uvm-guest",
 ]
@@ -72,3 +74,6 @@ tokio = "1"
 [patch.crates-io]
 rutabaga_gfx = { path = "3rdparty/rutabaga_gfx" }
 magma-gpu = { path = "3rdparty/rutabaga_gfx/third_party/mesa3d/src/virtio/magma-gpu-rs/lib" }
+# smoltcp's main, with `3rdparty/_patches/smoltcp` applied in its tree by `cargo xtask init`,
+# until a release stops a paused SYN|ACK from waking the guest's network at once.
+smoltcp = { path = "3rdparty/smoltcp" }

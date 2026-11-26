@@ -482,21 +482,16 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
                 None,
             )
         });
-        // ext4 mounted with no barrier and given it back at once: the superblock it writes as it
-        // mounts waits on no flush of its own -- each flush after covers it -- and every write
-        // from then on is ordered as one with barriers is.
-        let ext4 = asked.upper_fstype == "ext4";
+        // Mounted once, with barriers: a remount after, to give them back to one mounted
+        // without, syncs what the mount wrote -- a journal commit, waited on, that takes longer
+        // than the one flush the mount waits on.
         let upper = mount(
             Some(&asked.upper_device),
             UPPER_AT,
             Some(&asked.upper_fstype),
             0,
-            ext4.then_some("nobarrier"),
-        )
-        .and_then(|()| match ext4 {
-            true => mount(None, UPPER_AT, None, libc::MS_REMOUNT, Some("barrier")),
-            false => Ok(()),
-        });
+            None,
+        );
         lower
             .join()
             .map_err(|_| io::Error::other("mounting the lower disk panicked"))??;
@@ -754,8 +749,7 @@ fn forward(port: u16) -> io::Result<()> {
                 if guest.set_nonblocking(true).is_err() {
                     return;
                 }
-                let (Ok(host_back), Ok(guest_back)) = (host.try_clone(), guest.try_clone())
-                else {
+                let (Ok(host_back), Ok(guest_back)) = (host.try_clone(), guest.try_clone()) else {
                     return;
                 };
                 // Each direction ends with the half-close that says so, and the other keeps
@@ -921,10 +915,12 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         let code = code(&mut child);
         // Killed, and the kernel's OOM killer killed in its cgroup, or it was killed for
         // thrashing at its limit: its memory ran out. Read before the cgroup goes.
-        let starved = cgroup.as_ref().and_then(|own| WATCHED.lock().unwrap().remove(own));
+        let starved = cgroup
+            .as_ref()
+            .and_then(|own| WATCHED.lock().unwrap().remove(own));
         let starved = starved.is_some_and(|thrash| thrash.killed);
-        let oom = code == 128 + libc::SIGKILL
-            && (starved || cgroup.as_deref().is_some_and(oom_killed));
+        let oom =
+            code == 128 + libc::SIGKILL && (starved || cgroup.as_deref().is_some_and(oom_killed));
         // Its cgroup gone with it, unless a program it left running is in it still.
         if let Some(own) = &cgroup {
             let _ = fs::remove_dir(own);

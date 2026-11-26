@@ -1,90 +1,145 @@
 ---
 title: "Driving your browser from a sandbox"
-description: "Let an agent in a sandbox use a browser on your machine, which you watch and stay signed in to, through a client port."
+description: "Let an agent in a sandbox use the browser on your machine, which you watch and are signed in to, through a client port."
 ---
 
 import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+import reviewQueue from "../../images/your-browser-review-queue.mp4";
 
-An agent runs in a sandbox, but the browser it uses can stay on your machine: a window you watch, and step into when a page asks for a sign-in or a captcha.
+An agent runs in a sandbox, but the browser it uses can stay on your machine: the window you watch, signed in to what you are, and that you step into when a page asks for a captcha.
 The agent reaches the browser's debugging port through a [client port](/docs/tutorials/networks-ports/#client-ports), at `10.0.2.2`, and drives it with the Chrome DevTools Protocol, as Playwright, Puppeteer and browser-use do.
-This guide starts Chrome on your machine and has a Playwright script in a sandbox open a page in it.
+This guide lets the Chrome you are running be debugged and has a Playwright script in a sandbox go through the pull requests waiting for your review on GitHub, which you are signed in to there, and line them up smallest first.
 
 For a browser that runs in the sandbox itself, see [Driving a browser](/docs/guides/browser/).
 
-## Start a browser to hand over
+## Hand over your browser
 
-Start Chrome with its debugging port, and a profile of its own:
+In Chrome, open `chrome://inspect/#remote-debugging` and allow remote debugging for this browser instance.
+Chrome then listens at `127.0.0.1:9222`, and asks you in a dialog to allow each connection a program makes to it.
 
-```bash
-# macOS
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --remote-debugging-port=9222 --user-data-dir="$(mktemp -d)"
+It answers no HTTP request there, such as `/json/version`: a program connects to the browser's WebSocket, whose port and path Chrome writes to `DevToolsActivePort` in its profile's directory:
 
-# Linux
-google-chrome --remote-debugging-port=9222 --user-data-dir="$(mktemp -d)"
-```
-
-Chrome opens its debugging port only for a profile other than your everyday one, so this window starts signed in to nothing.
-Sign in to what the agent is to use in it, and nothing else.
+- macOS: `~/Library/Application Support/Google/Chrome/DevToolsActivePort`
+- Linux: `~/.config/google-chrome/DevToolsActivePort`
+- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data\DevToolsActivePort`
 
 <Aside type="caution">
-Whatever reaches the debugging port controls the whole browser: every site its profile is signed in to, the pages it can reach on your machine and network, and the files it can open.
-Hand the agent a profile made for it.
+A connection you allow controls the whole browser: every site you are signed in to, the pages it can reach on your machine and network, and the files it can open.
+Allow only the connection you expect, and turn remote debugging off when the agent is done.
 </Aside>
 
 ## Reach it from a sandbox
 
-The sandbox is made with the client port `9222`, and the forwarder carries its connections to `127.0.0.1:9222` on your machine.
-Here the sandbox has a network to install Playwright's library, and `libatomic1`, which the slim image lacks and Playwright's driver needs; it downloads no browser, since it drives yours.
+The agent's image is built first: Playwright's library, and `libatomic1`, which the slim image lacks and Playwright's driver needs.
+It holds no browser, since the agent drives yours.
+
+The sandbox is made with the client port Chrome listens at, and no network: the pages the agent reads are fetched by your browser, which the forwarder carries its connections to at `127.0.0.1` on your machine.
+The agent is given the browser's WebSocket at `10.0.2.2`, built from `DevToolsActivePort`.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
 
 ```python
-from virtx import ClientPortForwarder
+from pathlib import Path
+from virtx import ClientPortForwarder, Recipe
 
 AGENT = """
-from playwright.sync_api import sync_playwright
+import re, sys
+from playwright.sync_api import TimeoutError, sync_playwright
 
 with sync_playwright() as p:
-    browser = p.chromium.connect_over_cdp("http://10.0.2.2:9222")
+    browser = p.chromium.connect_over_cdp(sys.argv[1])
     page = browser.contexts[0].new_page()
-    page.goto("https://example.com")
-    print(page.title())
+    page.goto("https://github.com/pulls/reviews")
+    links = page.locator('a[data-hovercard-type="pull_request"]')
+    links.first.wait_for()
+    pulls = [(link.inner_text(), link.get_attribute("href")) for link in links.all()]
+
+    queue = []
+    for title, href in pulls:
+        page.goto(href)
+        lines = page.get_by_text("Lines changed:").first.text_content()
+        added, deleted = map(int, re.search("([0-9,]+) additions? & ([0-9,]+) deletions?", lines.replace(",", "")).groups())
+        checks = page.get_by_role("heading", name=re.compile("^(All|Some) checks"))
+        try:
+            status = checks.first.inner_text(timeout=5000)
+        except TimeoutError:
+            status = "No checks"
+        size = f"+{added} -{deleted}"
+        print(f"{size:>12}  {status:<32}  {title}")
+        queue.append((added + deleted, title, href))
+
+    print("Review queue, smallest first:")
+    for i, (_, title, href) in enumerate(sorted(queue), 1):
+        print(f"{i}. {title}  {href}")
 """
 
-await client.pull_image("python:3.12-slim").complete()
-sandbox = await client.create_sandbox("python:3.12-slim", client_ports=[9222])
-await sandbox.exec(["sh", "-c", "apt-get update -qq && apt-get install -y -qq libatomic1 && pip install -q playwright"]).complete(print=True)
+active = Path.home() / "Library/Application Support/Google/Chrome/DevToolsActivePort"
+port, path = active.read_text().split()
+cdp = f"ws://10.0.2.2:{port}{path}"
+
+recipe = Recipe("python:3.12-slim").run("apt-get update && apt-get install -y --no-install-recommends libatomic1 && pip install playwright")
+await client.build_image(recipe, "playwright:latest").complete(print=True)
+
+sandbox = await client.create_sandbox("playwright:latest", network=False, client_ports=[int(port)])
 await sandbox.write_file("agent.py", AGENT)
 
-async with await ClientPortForwarder.open(sandbox, 9222):
-    await sandbox.exec(["python", "/agent.py"]).complete(print=True)
+async with await ClientPortForwarder.open(sandbox, int(port)):
+    await sandbox.exec(["python", "-u", "/agent.py", cdp]).complete(print=True)
 ```
 
 </TabItem>
 <TabItem label="Node.js">
 
 ```js
-const { ClientPortForwarder } = require('@brekkylab/virtx')
+const { readFileSync } = require('node:fs')
+const { homedir } = require('node:os')
+const { join } = require('node:path')
+const { ClientPortForwarder, Recipe } = require('@brekkylab/virtx')
 
 const AGENT = `
-from playwright.sync_api import sync_playwright
+import re, sys
+from playwright.sync_api import TimeoutError, sync_playwright
 
 with sync_playwright() as p:
-    browser = p.chromium.connect_over_cdp("http://10.0.2.2:9222")
+    browser = p.chromium.connect_over_cdp(sys.argv[1])
     page = browser.contexts[0].new_page()
-    page.goto("https://example.com")
-    print(page.title())
+    page.goto("https://github.com/pulls/reviews")
+    links = page.locator('a[data-hovercard-type="pull_request"]')
+    links.first.wait_for()
+    pulls = [(link.inner_text(), link.get_attribute("href")) for link in links.all()]
+
+    queue = []
+    for title, href in pulls:
+        page.goto(href)
+        lines = page.get_by_text("Lines changed:").first.text_content()
+        added, deleted = map(int, re.search("([0-9,]+) additions? & ([0-9,]+) deletions?", lines.replace(",", "")).groups())
+        checks = page.get_by_role("heading", name=re.compile("^(All|Some) checks"))
+        try:
+            status = checks.first.inner_text(timeout=5000)
+        except TimeoutError:
+            status = "No checks"
+        size = f"+{added} -{deleted}"
+        print(f"{size:>12}  {status:<32}  {title}")
+        queue.append((added + deleted, title, href))
+
+    print("Review queue, smallest first:")
+    for i, (_, title, href) in enumerate(sorted(queue), 1):
+        print(f"{i}. {title}  {href}")
 `
 
-await client.pullImage('python:3.12-slim').complete()
-const sandbox = await client.createSandbox('python:3.12-slim', { clientPorts: [9222] })
-await sandbox.exec(['sh', '-c', 'apt-get update -qq && apt-get install -y -qq libatomic1 && pip install -q playwright']).complete({ print: true })
+const active = join(homedir(), 'Library/Application Support/Google/Chrome/DevToolsActivePort')
+const [port, path] = readFileSync(active, 'utf8').trim().split('\n')
+const cdp = `ws://10.0.2.2:${port}${path}`
+
+const recipe = new Recipe('python:3.12-slim').run('apt-get update && apt-get install -y --no-install-recommends libatomic1 && pip install playwright')
+await client.buildImage(recipe, 'playwright:latest').complete({ print: true })
+
+const sandbox = await client.createSandbox('playwright:latest', { network: false, clientPorts: [Number(port)] })
 await sandbox.writeFile('agent.py', AGENT)
 
-const forwarder = await ClientPortForwarder.open(sandbox, 9222)
-await sandbox.exec(['python', '/agent.py']).complete({ print: true })
+const forwarder = await ClientPortForwarder.open(sandbox, Number(port))
+await sandbox.exec(['python', '-u', '/agent.py', cdp]).complete({ print: true })
 forwarder.close()
 ```
 
@@ -93,36 +148,75 @@ forwarder.close()
 
 ```rust
 const AGENT: &str = r#"
-from playwright.sync_api import sync_playwright
+import re, sys
+from playwright.sync_api import TimeoutError, sync_playwright
 
 with sync_playwright() as p:
-    browser = p.chromium.connect_over_cdp("http://10.0.2.2:9222")
+    browser = p.chromium.connect_over_cdp(sys.argv[1])
     page = browser.contexts[0].new_page()
-    page.goto("https://example.com")
-    print(page.title())
+    page.goto("https://github.com/pulls/reviews")
+    links = page.locator('a[data-hovercard-type="pull_request"]')
+    links.first.wait_for()
+    pulls = [(link.inner_text(), link.get_attribute("href")) for link in links.all()]
+
+    queue = []
+    for title, href in pulls:
+        page.goto(href)
+        lines = page.get_by_text("Lines changed:").first.text_content()
+        added, deleted = map(int, re.search("([0-9,]+) additions? & ([0-9,]+) deletions?", lines.replace(",", "")).groups())
+        checks = page.get_by_role("heading", name=re.compile("^(All|Some) checks"))
+        try:
+            status = checks.first.inner_text(timeout=5000)
+        except TimeoutError:
+            status = "No checks"
+        size = f"+{added} -{deleted}"
+        print(f"{size:>12}  {status:<32}  {title}")
+        queue.append((added + deleted, title, href))
+
+    print("Review queue, smallest first:")
+    for i, (_, title, href) in enumerate(sorted(queue), 1):
+        print(f"{i}. {title}  {href}")
 "#;
 
-client.pull_image("python:3.12-slim", None).complete(false).await?;
-let args = SandboxCreateArgs::new("python:3.12-slim").client_port(9222);
+let home = std::env::var("HOME")?;
+let active = std::fs::read_to_string(format!(
+    "{home}/Library/Application Support/Google/Chrome/DevToolsActivePort"
+))?;
+let mut lines = active.split_whitespace();
+let (port, path) = (lines.next().unwrap(), lines.next().unwrap());
+let cdp = format!("ws://10.0.2.2:{port}{path}");
+let port: u16 = port.parse()?;
+
+let recipe = Recipe::new("python:3.12-slim").step("apt-get update && apt-get install -y --no-install-recommends libatomic1 && pip install playwright");
+client.build_image(recipe, "playwright:latest").complete(true).await?;
+
+let args = SandboxCreateArgs::new("playwright:latest").network(false).client_port(port);
 let sandbox = client.create_sandbox(&args).await?;
-let install = SandboxExecArgs::new(["sh", "-c", "apt-get update -qq && apt-get install -y -qq libatomic1 && pip install -q playwright"]);
-sandbox.exec(&install).complete(true).await?;
 sandbox.write_file("agent.py", AGENT, None).await?;
 
-let forwarder = ClientPortForwarder::open(&sandbox, 9222, None).await?;
-sandbox.exec(&SandboxExecArgs::new(["python", "/agent.py"])).complete(true).await?;
+let forwarder = ClientPortForwarder::open(&sandbox, port, None).await?;
+let run = SandboxExecArgs::new(["python", "-u", "/agent.py", cdp.as_str()]);
+sandbox.exec(&run).complete(true).await?;
 drop(forwarder);
 ```
 
 </TabItem>
 </Tabs>
 
-A new tab opens in your window, goes to example.com, and the script prints its title.
+Chrome asks you to allow the connection; once you do, a new tab opens in your window at the pull requests waiting for your review, goes to each in turn to read how much it changes and whether its checks pass, printing each as it goes, and the script ends with them smallest first.
+Python's `-u` has the agent's lines printed as it prints them, rather than when it ends.
+
+The script on the left and your window on the right, at twice the speed:
+
+<video src={reviewQueue} autoplay loop muted playsinline width="1440" height="808" aria-label="A terminal on the left builds the image and runs the agent; Chrome on the right opens the pull requests waiting for review one by one while the terminal prints each one's size and checks, then lists them smallest first."></video>
+
+The sandbox holds no GitHub token and has no network of its own: it reaches GitHub only as your browser does.
 The same address works for any tool that takes a CDP endpoint, such as browser-use's `cdp_url`.
 
 The address is a number, `10.0.2.2`, rather than a name, since Chrome's debugging port refuses a request whose `Host` is a name other than `localhost`.
 
 ## When it is not reached
 
-A connection to `10.0.2.2:9222` is refused, as one to a closed port is, while no forwarder is open, and while nothing listens on `127.0.0.1:9222` on your machine: start the browser before the agent connects.
-What the forwarder could not reach is logged as a warning, as the [tutorial](/docs/tutorials/networks-ports/#client-ports) says.
+A connection to `10.0.2.2` at the port is refused, as one to a closed port is, while nothing listens on `127.0.0.1` at it on your machine: allow remote debugging before the agent connects.
+Over HTTP it is refused too while no forwarder is open; a server started with `Client.spawn` reaches the port itself for as long as the sandbox lives, as the [tutorial](/docs/tutorials/networks-ports/#client-ports) says.
+What the forwarder could not reach is logged as a warning.

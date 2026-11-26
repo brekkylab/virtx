@@ -95,6 +95,49 @@ mod tests {
         Router::new().route("/user", get(who))
     }
 
+    /// Requests one after another go out over one connection, kept open; once the client is
+    /// set to four connections, through its four HTTP clients in turn, each over a connection of
+    /// its own: a burst over HTTPS is that many handshakes, its streams spread over them.
+    #[tokio::test]
+    async fn requests_go_out_over_one_connection_or_as_many_as_set() {
+        let peers = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let router = Router::new().route(
+            "/user",
+            get({
+                let peers = peers.clone();
+                move |axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<
+                    std::net::SocketAddr,
+                >| {
+                    let peers = peers.clone();
+                    async move {
+                        peers.lock().unwrap().insert(peer);
+                        Json("alice".to_owned())
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+        });
+        let client = TransportClient::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+        for _ in 0..8 {
+            http::get::<String>(&client, "/user").await.unwrap();
+        }
+        assert_eq!(peers.lock().unwrap().len(), 1);
+        peers.lock().unwrap().clear();
+        client.set_connections(4).unwrap();
+        for _ in 0..8 {
+            http::get::<String>(&client, "/user").await.unwrap();
+        }
+        assert_eq!(peers.lock().unwrap().len(), 4);
+    }
+
     #[tokio::test]
     async fn the_auth_given_at_connect_goes_with_every_request() {
         let url = serve(users()).await;

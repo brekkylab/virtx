@@ -613,6 +613,13 @@ export class Client {
    */
   setHeaders(headers: Record<string, string>): void
   /**
+   * Send the requests from now on through `connections` HTTP clients in turn, one until this
+   * says otherwise: over HTTPS, each one HTTP/2 connection where the server speaks it, so that a
+   * burst of requests is that many TLS handshakes, its streams spread over them. Over stdio, one
+   * connection already, nothing changes. None throws.
+   */
+  setConnections(connections: number): void
+  /**
    * Name `project` in every request from now on, over either transport, in place of a
    * `virtx-project` among the headers given. With null, that header names it where there is one,
    * and otherwise none is named, for the user's own project. A name no header carries throws,

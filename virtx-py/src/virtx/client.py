@@ -214,6 +214,20 @@ class Client:
         if status != OK:
             self._lib.take(status, error)
 
+    def set_connections(self, connections: int) -> None:
+        """Send the requests from now on through ``connections`` HTTP clients in turn, one until
+        this says otherwise: over HTTPS, each one HTTP/2 connection where the server speaks it, so
+        that a burst of requests is that many TLS handshakes, its streams spread over them. Over
+        stdio, one connection already, nothing changes. None raises."""
+        if connections < 0:
+            raise ValueError(f"connections: {connections} is not a count")
+        error = _Bytes()
+        status = self._lib.virtx_client_set_connections(
+            self._held(), connections, ctypes.byref(error)
+        )
+        if status != OK:
+            self._lib.take(status, error)
+
     def set_project(self, project: str | None) -> None:
         """Name ``project`` in every request from now on, over either transport, in place of a
         ``virtx-project`` among the headers given. With ``None``, that header names it where

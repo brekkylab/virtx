@@ -159,6 +159,18 @@ int virtx_client_set_headers(struct VirtxClient *client,
                              size_t headers_len,
                              struct VirtxBytes *error);
 
+// Send the requests from now on through `connections` HTTP clients in turn, as
+// [`Client::set_connections`] says. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is
+// refused written to `error`, the clients unchanged.
+//
+// # Safety
+//
+// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `error`
+// is null or writable.
+int virtx_client_set_connections(struct VirtxClient *client,
+                                 size_t connections,
+                                 struct VirtxBytes *error);
+
 // Name `project`, NUL-terminated UTF-8, in every request from now on, over either
 // transport, in place of a `virtx-project` among the headers given. With a null one, that
 // header names it where there is one, and otherwise none is named, for the user's own

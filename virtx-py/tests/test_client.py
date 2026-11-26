@@ -129,6 +129,21 @@ async def test_set_project_changes_what_a_request_reaches(client: Client) -> Non
     assert in_project not in await client.list_volume()
 
 
+async def test_set_connections_sends_through_as_many_and_refuses_none(
+    tcp_client: Client,
+) -> None:
+    tcp_client.set_connections(4)
+    names = [unique("over-four") for _ in range(8)]
+    made = await asyncio.gather(*(tcp_client.create_volume(name) for name in names))
+    assert sorted(v.name for v in made) == sorted(names)
+    with pytest.raises(VirtxError) as refused:
+        tcp_client.set_connections(0)
+    assert refused.value.source == "client"
+    with pytest.raises(ValueError):
+        tcp_client.set_connections(-1)
+    assert {v.name for v in await tcp_client.list_volume()} >= set(names)
+
+
 def test_a_project_no_header_carries_is_refused(client: Client) -> None:
     with pytest.raises(VirtxError):
         client.set_project("bad\nname")

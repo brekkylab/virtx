@@ -144,7 +144,7 @@ impl PortForwarder {
             Connection::Stdio(_) => PortForwarder::direct(url),
             Connection::Tcp(tcp) => match tcp.base.join(url) {
                 Ok(url) => PortForwarder::tunnel(
-                    tcp.http.clone(),
+                    tcp.upgrades.clone(),
                     Arc::clone(&tcp.credentials),
                     Arc::clone(&tcp.headers),
                     url,

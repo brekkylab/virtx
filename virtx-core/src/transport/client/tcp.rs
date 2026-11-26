@@ -1,6 +1,7 @@
 //! The client's end of HTTP over TCP: the server at a base URL, each endpoint a path under it.
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use http::{HeaderMap, header};
@@ -24,7 +25,12 @@ pub(super) fn current<T: Clone>(shared: &Shared<T>) -> T {
 
 /// The server at a base URL. Nothing to close: the server keeps nothing between requests.
 pub(super) struct Tcp {
-    pub(super) http: reqwest::Client,
+    /// What requests go out through, in turn ([`Tcp::client`]): one, until
+    /// [`set_connections`](Tcp::set_connections) says otherwise.
+    clients: RwLock<Vec<reqwest::Client>>,
+    next: AtomicUsize,
+    /// What a port's WebSocket is opened with: HTTP/1.1 alone, the version it upgrades from.
+    pub(super) upgrades: reqwest::Client,
     /// Ends in `/`, so a path joins under it.
     pub(super) base: Url,
     pub(super) credentials: Arc<Credentials>,
@@ -43,8 +49,14 @@ impl Tcp {
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
+        let upgrades = reqwest::Client::builder()
+            .http1_only()
+            .build()
+            .map_err(|e| Error::Client(format!("an HTTP/1.1 client: {e}")))?;
         Ok(Tcp {
-            http: reqwest::Client::new(),
+            clients: RwLock::new(vec![reqwest::Client::new()]),
+            next: AtomicUsize::new(0),
+            upgrades,
             base,
             credentials: Arc::new(Credentials::new(auth)),
             headers: Arc::new(RwLock::new(headers)),
@@ -63,6 +75,26 @@ impl Tcp {
         *self.headers.write().unwrap_or_else(PoisonError::into_inner) = headers;
     }
 
+    /// Send the requests from now on through `connections` HTTP clients in turn, each with a
+    /// pool of its own. Over HTTPS each speaks HTTP/2 where the server does, a request one stream
+    /// of its one connection: a burst of requests from a new client pays that many TLS handshakes
+    /// rather than one each, nor is all of it held up by one connection that stalls. Refused for
+    /// none.
+    pub(super) fn set_connections(&self, connections: usize) -> Result<(), Error> {
+        if connections == 0 {
+            return Err(Error::Client("connections: 0 sends nothing".into()));
+        }
+        *self.clients.write().unwrap_or_else(PoisonError::into_inner) =
+            (0..connections).map(|_| reqwest::Client::new()).collect();
+        Ok(())
+    }
+
+    /// The client the next request goes out through.
+    fn client(&self) -> reqwest::Client {
+        let clients = self.clients.read().unwrap_or_else(PoisonError::into_inner);
+        clients[self.next.fetch_add(1, Ordering::Relaxed) % clients.len()].clone()
+    }
+
     /// Send `request`, whose URI is a path under the base.
     pub(super) async fn send(
         &self,
@@ -77,7 +109,7 @@ impl Tcp {
         let mut headers = current(&self.headers);
         headers.extend(parts.headers);
         let request = self
-            .http
+            .client()
             .request(parts.method, url)
             .body(reqwest::Body::wrap(body));
         let token = self.credentials.token().await.map_err(Error::Client)?;

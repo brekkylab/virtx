@@ -35,6 +35,8 @@ runs:
       run: |
         mkdir -p "$OUT"
         python -m pip install --quiet build~=1.6 wheel~=0.48
+        # setuptools takes the LICENSE beside pyproject.toml.
+        cp LICENSE virtx-py/
         python -m build --wheel --outdir "$OUT" virtx-py
         # The library is no CPython extension, so any Python 3 opens it. The platform is named,
         # not the building Python's: setup-python's macOS one is universal2. On Linux, not
@@ -58,10 +60,12 @@ runs:
         npx napi create-npm-dirs
         npx napi build --platform --release --no-js --target "$TARGET" \
           --manifest-path ../virtx-cabi/Cargo.toml --output-dir "npm/$PLATFORM"
+        cp ../LICENSE "npm/$PLATFORM/"
         npm pack "./npm/$PLATFORM" --pack-destination "$GITHUB_WORKSPACE/$OUT"
 
     # npm packs only what is in `virtx-node/`. The platform packages are named here, not in
-    # package.json: its lock could not name a version not yet published.
+    # package.json: its lock could not name a version not yet published. What builds the
+    # package from a clone is left out.
     - name: "@brekkylab/virtx"
       shell: bash
       working-directory: virtx-node
@@ -73,4 +77,5 @@ runs:
         for dir in npm/*/; do
           npm pkg set "optionalDependencies.$(node -p "require('./${dir}package.json').name")=$version"
         done
+        npm pkg delete scripts devDependencies napi
         npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/$OUT"

@@ -52,6 +52,14 @@ pub struct MachineInfo {
     pub network: Option<GuestNetwork>,
     /// Where the agent, and so every command, stands.
     pub workdir: String,
+    /// Randomness from the host the guest's pool is seeded with before anything else runs: a
+    /// machine restored from a snapshot has the pool of every other restored from it.
+    #[serde(default)]
+    pub seed: Vec<u8>,
+    /// The host's wall clock, seconds and nanoseconds since the epoch, which the guest's is set
+    /// to: a restored machine's clock is the snapshot's.
+    #[serde(default)]
+    pub now: Option<(i64, u32)>,
 }
 
 /// What the agent makes of the guest's virtio-net interface: its address on the link to this
@@ -112,6 +120,9 @@ pub enum CtrlReq {
 /// What the machine's process tells the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CtrlResp {
+    /// The agent is up and waits for its [`MachineInfo`]: everything before is the same for
+    /// every machine of one shape, which is where a snapshot of it is taken. Not passed on.
+    Waiting,
     /// The machine has booted and the guest takes commands, with where on this host's loopback
     /// each published guest port is reached. Once per machine.
     Ready(Vec<(u16, SocketAddr)>),

@@ -1246,7 +1246,7 @@ impl Sandbox {
                         let _ = told.send(());
                     }
                 }
-                CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
+                CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong | CtrlResp::Waiting => {}
             }
         }
         // Nothing waits for a sync it will not say.

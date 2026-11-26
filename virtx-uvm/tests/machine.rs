@@ -2181,6 +2181,63 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     }
 }
 
+/// With snapshots on, a second machine of a shape is restored from the snapshot the first took
+/// as its agent waited, beside the sandboxes' disks, on x86_64 Linux; and comes up its own: its
+/// randomness not the first's, and its clock the host's rather than the snapshot's.
+async fn a_machine_is_restored_from_the_snapshot_its_shape_s_first_took(home: Home) {
+    // SAFETY: this test runs alone; the machines it starts inherit it.
+    unsafe { env::set_var("VIRTX_SNAPSHOTS", "1") };
+    let script = [
+        "sh",
+        "-c",
+        "head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n'; echo; date +%s",
+    ];
+    let first = home.sandbox(&small(), None).await;
+    let (a, code) = run(&first, &script, None).await.unwrap();
+    assert_eq!(code, 0, "{a:?}");
+    let second = home.sandbox(&small(), None).await;
+    let (b, code) = run(&second, &script, None).await.unwrap();
+    assert_eq!(code, 0, "{b:?}");
+    unsafe { env::remove_var("VIRTX_SNAPSHOTS") };
+
+    assert_ne!(a[0], b[0], "each machine's randomness its own");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let guest: i64 = b[1].parse().unwrap();
+    assert!(
+        (guest - now).abs() <= 5,
+        "the guest's clock {guest}, the host's {now}"
+    );
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        let taken = walkdir(&home.root).into_iter().any(|path| {
+            path.ends_with("state")
+                && path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .is_some_and(|p| p.ends_with("snapshots"))
+        });
+        assert!(taken, "a snapshot under {:?}", home.root);
+    }
+    close(first).await;
+    close(second).await;
+}
+
+/// Every file under `dir`, at any depth.
+fn walkdir(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(walkdir(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
 /// What a sandbox syncs to its disk is flushed there: its disk mounted with barriers, though it
 /// is mounted without them first.
 async fn a_sandbox_s_sync_flushes_its_disk(home: Home) {
@@ -3112,7 +3169,8 @@ fn main() -> ExitCode {
     // machines it started, the descriptors they hold -- or at the host's GPU, so it runs with
     // no other test beside it.
     let mut alone = Vec::from(tests![
-        a_machine_boots_only_with_room_given_back_as_it_goes_down
+        a_machine_boots_only_with_room_given_back_as_it_goes_down,
+        a_machine_is_restored_from_the_snapshot_its_shape_s_first_took
     ]);
     #[cfg(unix)]
     alone.extend(tests![

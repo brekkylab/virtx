@@ -209,6 +209,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         network: (machine.spec.network || !machine.ports.is_empty())
             .then(|| GuestNetwork::new(machine.spec.network)),
         workdir: workdir(&machine.config),
+        seed: host_seed(),
+        now: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| (since.as_secs() as i64, since.subsec_nanos())),
     };
 
     // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
@@ -452,12 +457,46 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let vmm = vmm
         .acpi(true)
         .map_err(|e| Error::vmm("describing the machine in ACPI", e))?;
+    // A machine snapshotted as its agent waits, or restored from such a snapshot. With
+    // `VIRTX_SNAPSHOTS=1`, which an embedder sets for its machines, one snapshot per shape beside
+    // the sandboxes' disks: the first machine of it takes it and boots on, every later one is
+    // restored from it. `VIRTX_SNAPSHOT_SAVE` and `VIRTX_SNAPSHOT_RESTORE` name one directory to
+    // take or to restore from instead.
+    let shape = snapshot_shape(&machine, &info);
+    let (mut save, mut restore) = (
+        std::env::var_os("VIRTX_SNAPSHOT_SAVE").map(std::path::PathBuf::from),
+        std::env::var_os("VIRTX_SNAPSHOT_RESTORE").map(std::path::PathBuf::from),
+    );
+    let mut save_and_boot = false;
+    if save.is_none()
+        && restore.is_none()
+        && std::env::var_os("VIRTX_SNAPSHOTS").is_some_and(|on| on == "1")
+        && let Some(dir) = shape
+    {
+        if dir.join("state").exists() {
+            restore = Some(dir);
+        } else {
+            save = Some(dir);
+            save_and_boot = true;
+        }
+    }
+    // Read only where a snapshot is taken, on x86_64 Linux.
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = save_and_boot;
+    let vmm = vmm.payload(payload).devices(devices);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let vmm = match &restore {
+        Some(dir) => vmm.restore(dir),
+        None => vmm,
+    };
     let vmm = vmm
-        .payload(payload)
-        .devices(devices)
         .prefault_memory(prefault_memory())
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
+    let handle = vmm
+        .handle()
+        .map_err(|e| Error::vmm("a handle on the machine", e))?;
+    let _ = &restore;
 
     // The root for the agent to build, then the host's messages on to it, and the agent's back -- `Ready` with where the ports
     // are published, which only this side knows. A host that has closed `ctrlin`, or written
@@ -474,8 +513,12 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let heard = Arc::new(Mutex::new(None::<Instant>));
     std::thread::spawn({
         let for_guest = Arc::clone(&for_guest);
+        let saving = save.is_some();
+        let info = info.clone();
         move || {
-            let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
+            if !saving {
+                let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
+            }
             while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
                 let _ = wire::send(&mut *for_guest.lock().unwrap(), &message);
             }
@@ -486,8 +529,44 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     });
     std::thread::spawn({
         let heard = Arc::clone(&heard);
+        let for_info = Arc::clone(&for_guest);
+        let info_after = info.clone();
         move || {
+            // Sent only after a snapshot, on x86_64 Linux.
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            let _ = (&for_info, &info_after);
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
+                if let CtrlResp::Waiting = message {
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                    if let Some(dir) = &save {
+                        let started = Instant::now();
+                        if !save_and_boot {
+                            match handle.snapshot(dir) {
+                                Ok(()) => log::warn!("snapshot written in {:?}", started.elapsed()),
+                                Err(e) => log::error!("snapshot: {e}"),
+                            }
+                            std::process::exit(0);
+                        }
+                        // Written aside and moved into place whole, so a machine restored from
+                        // it never reads one half written; the first of two to finish wins.
+                        let aside = dir.with_extension(format!("taking-{}", std::process::id()));
+                        match handle.snapshot(&aside) {
+                            Ok(()) => {
+                                if std::fs::rename(&aside, dir).is_err() {
+                                    let _ = std::fs::remove_dir_all(&aside);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("snapshot: {e}");
+                                let _ = std::fs::remove_dir_all(&aside);
+                            }
+                        }
+                        let _ = handle.resume();
+                        let _ = wire::send(&mut *for_info.lock().unwrap(), &info_after);
+                    }
+                    let _ = &handle;
+                    continue;
+                }
                 *heard.lock().unwrap() = Some(Instant::now());
                 let _ = match message {
                     CtrlResp::Ready(_) => {
@@ -541,6 +620,49 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let _held = holds;
     vmm.run();
     Err(Error::EventLoop)
+}
+
+/// Where a snapshot of a machine of this one's shape is kept -- beside the sandboxes'
+/// disks, named for everything a restored guest has to find as it was: its vCPUs, memory,
+/// devices, root image and upper disk's size. None off Linux x86_64 and for a GPU's machine.
+fn snapshot_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) || machine.spec.gpu {
+        return None;
+    }
+    let home = machine.upper.parent()?.parent()?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    machine.spec.vcpus.hash(&mut hash);
+    machine.spec.ram_mib.hash(&mut hash);
+    (machine.spec.network || !machine.ports.is_empty()).hash(&mut hash);
+    info.shares.hash(&mut hash);
+    machine.rootfs.hash(&mut hash);
+    std::fs::metadata(&machine.upper)
+        .ok()?
+        .len()
+        .hash(&mut hash);
+    // This binary, whose libkrun and agent wrote the snapshot.
+    let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
+    (exe.len(), exe.modified().ok()).hash(&mut hash);
+    let dir = home.join("snapshots");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("{:016x}", hash.finish())))
+}
+
+/// 64 bytes of the host's randomness, or none where it has none to read.
+fn host_seed() -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut seed = vec![0; 64];
+        if File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(&mut seed))
+            .is_ok()
+        {
+            return seed;
+        }
+    }
+    Vec::new()
 }
 
 /// Take the ends the host left this process: from here on everything it says goes to

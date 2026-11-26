@@ -57,8 +57,6 @@ unicode-normalization = "0.1"
 anyhow = { workspace = true }
 # The errno values a served volume answers the guest in.
 libc = { workspace = true }
-# The directory a machine's published ports' sockets are in, its own and removed with it.
-tempfile = "3"
 # libkrun's log, which a machine's process passes on to the host -- the guest's console among it.
 log = "0.4"
 # The storage an embedder's disk is read and written through ([`disks::imago`]): the version
@@ -68,7 +66,14 @@ imago = { version = "0.2.6", default-features = false, features = ["sync"] }
 # guest's root. Taken by path from the submodule `3rdparty/libkrun`, which is upstream's commit
 # with `3rdparty/_patches/libkrun` applied in its tree by `cargo xtask init`; what each patch is
 # for is in the patch.
-krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = ["blk"] }
+krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features = ["blk", "net"] }
+# The guest's network: the TCP/IP stack its virtio-net device's frames reach, one thread's
+# poller over the frames and every host socket the guest's connections are carried on, the
+# host sockets connected without blocking, and the connections by slot.
+smoltcp = { version = "0.14", default-features = false, features = ["std", "log", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-pause-synack", "iface-max-addr-count-3"] }
+polling = "3"
+socket2 = "0.6"
+slab = "0.4"
 krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = ["krun"] }
 # A display backend, which libkrun's virtio-gpu device has to be handed.
 krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
@@ -103,7 +108,11 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [dev-dependencies]
-# The remote stores' tests: a runtime with threads for the mock servers they answer from.
+# The guest's end of the network's own tests: a stack of its own, which sends UDP too.
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
+# The remote stores' tests: directories to read local files from, and a runtime with threads
+# for the mock servers they answer from.
+tempfile = "3"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 # The tests that boot machines: its own `main`, which becomes the machine when spawned to be one.

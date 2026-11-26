@@ -9,7 +9,7 @@ A sandbox's files can be read and written from your code directly, without a com
 A path is the path in the guest without its leading `/`: `etc/hostname` is `/etc/hostname`.
 
 <Aside type="note">
-A [volume](/docs/guides/mounting-volumes/) shares this file API with a sandbox.
+A [volume](/docs/tutorials/mounting-volumes/) shares this file API with a sandbox.
 Every call on this page works on it the same way, on its own files, and needs no sandbox running.
 </Aside>
 
@@ -157,4 +157,4 @@ The tag is checked before the content is written, and again once all of it has a
 ## Reading while the sandbox is stopped
 
 A sandbox's files are read through its VM, which is booted again if it had been stopped for being unused.
-To read the output of a task that is done with no VM at all, have the task write it to a volume and read it from there instead; see [Mounting volumes](/docs/guides/mounting-volumes/).
+To read the output of a task that is done with no VM at all, have the task write it to a volume and read it from there instead; see [Mounting volumes](/docs/tutorials/mounting-volumes/).

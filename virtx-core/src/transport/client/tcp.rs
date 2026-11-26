@@ -22,9 +22,24 @@ pub(super) fn current<T: Clone>(shared: &Shared<T>) -> T {
         .clone()
 }
 
+/// What requests go out through. Over HTTPS it speaks HTTP/2 where the server offers it, so
+/// requests at once are streams of one connection rather than a connection, and a TLS
+/// handshake, each.
+pub(super) fn requests() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+}
+
+/// What a port's WebSocket is opened with: HTTP/1.1 alone, the version a WebSocket upgrades
+/// from.
+pub(super) fn upgrades() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().http1_only()
+}
+
 /// The server at a base URL. Nothing to close: the server keeps nothing between requests.
 pub(super) struct Tcp {
     pub(super) http: reqwest::Client,
+    /// What a port's WebSocket is opened with ([`upgrades`]).
+    pub(super) upgrades: reqwest::Client,
     /// Ends in `/`, so a path joins under it.
     pub(super) base: Url,
     pub(super) credentials: Arc<Credentials>,
@@ -43,8 +58,14 @@ impl Tcp {
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
+        let built = |client: reqwest::ClientBuilder| {
+            client
+                .build()
+                .map_err(|e| Error::Client(format!("an HTTP client: {e}")))
+        };
         Ok(Tcp {
-            http: reqwest::Client::new(),
+            http: built(requests())?,
+            upgrades: built(upgrades())?,
             base,
             credentials: Arc::new(Credentials::new(auth)),
             headers: Arc::new(RwLock::new(headers)),
@@ -160,5 +181,31 @@ mod tests {
     fn without_a_token_the_headers_go_as_given() {
         let headers = sent(&[("authorization", "Bearer mine")], None);
         assert_eq!(headers[header::AUTHORIZATION], "Bearer mine");
+    }
+
+    /// Over HTTPS to a server that offers HTTP/2, requests sent at once once a connection is
+    /// open go as HTTP/2 streams of that one connection. The client trusts the test's own
+    /// certificate and is otherwise the one requests go out through.
+    #[tokio::test]
+    async fn over_https_requests_are_http2_streams_of_one_connection() {
+        let router = axum::Router::new().route(
+            "/version",
+            axum::routing::get(|version: http::Version| async move { format!("{version:?}") }),
+        );
+        let (url, certificate, accepted) = super::super::tls::serve(router).await;
+        let mut tcp = Tcp::connect(&url, Auth::None, HeaderMap::new()).unwrap();
+        tcp.http = requests().tls_certs_only([certificate]).build().unwrap();
+        let version = async || {
+            let request = http::Request::get("/version")
+                .body(super::super::full(""))
+                .unwrap();
+            let body = tcp.send(request).await.unwrap().into_body();
+            String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap()
+        };
+
+        assert_eq!(version().await, "HTTP/2.0");
+        let versions = futures_util::future::join_all((0..8).map(|_| version())).await;
+        assert!(versions.iter().all(|v| v == "HTTP/2.0"), "{versions:?}");
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

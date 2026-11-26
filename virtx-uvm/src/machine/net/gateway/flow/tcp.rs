@@ -22,7 +22,7 @@ use super::Interest;
 /// Each direction's buffer in smoltcp: room for a few of the link's segments in flight.
 const BUFFER: usize = 256 << 10;
 
-pub(in crate::machine::net::gateway) struct TcpFlow {
+pub(super) struct TcpFlow {
     /// The guest's side, in smoltcp's sockets.
     handle: SocketHandle,
     host: Socket,
@@ -37,7 +37,7 @@ pub(in crate::machine::net::gateway) struct TcpFlow {
 impl TcpFlow {
     /// A connection the guest is opening with a SYN to `to`: a socket listening there for
     /// smoltcp to take the SYN with, and a host socket connecting to `at`.
-    pub(in crate::machine::net::gateway) fn open(
+    pub(super) fn open(
         sockets: &mut SocketSet<'static>,
         to: SocketAddr,
         at: SocketAddr,
@@ -71,7 +71,7 @@ impl TcpFlow {
 
     /// A connection a client of a published port opened, `host`: carried to `to` in the guest,
     /// from `from`.
-    pub(in crate::machine::net::gateway) fn accept(
+    pub(super) fn accept(
         sockets: &mut SocketSet<'static>,
         cx: &mut Context,
         host: Socket,

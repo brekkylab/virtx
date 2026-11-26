@@ -5,24 +5,18 @@
 
 use std::io;
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use smoltcp::phy::ChecksumCapabilities;
-use smoltcp::wire::{
-    EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, IpProtocol, Ipv4Packet,
-    Ipv4Repr, Ipv6Packet, Ipv6Repr, UdpPacket,
-};
 use socket2::{Domain, Protocol, Socket, Type};
 
-use super::super::LAN;
-use super::super::link::{Link, MAX_FRAME};
+use super::super::link::Link;
 use super::{Ends, Interest};
 
 /// How long a flow nothing has crossed is kept.
-pub(in crate::machine::net::gateway) const IDLE: Duration = Duration::from_secs(60);
+pub(super) const IDLE: Duration = Duration::from_secs(60);
 
-pub(in crate::machine::net::gateway) struct UdpFlow {
+pub(super) struct UdpFlow {
     host: Socket,
     ends: Ends,
     last: Instant,
@@ -30,10 +24,7 @@ pub(in crate::machine::net::gateway) struct UdpFlow {
 
 impl UdpFlow {
     /// A flow between `ends`, its host socket connected to `at`.
-    pub(in crate::machine::net::gateway) fn open(
-        ends: Ends,
-        at: SocketAddr,
-    ) -> io::Result<UdpFlow> {
+    pub(super) fn open(ends: Ends, at: SocketAddr) -> io::Result<UdpFlow> {
         let host = Socket::new(Domain::for_address(at), Type::DGRAM, Some(Protocol::UDP))?;
         host.set_nonblocking(true)?;
         host.connect(&at.into())?;
@@ -50,7 +41,7 @@ impl UdpFlow {
 
     /// Send what the guest sent. A datagram the host socket will not take now is dropped, as
     /// UDP may.
-    pub(in crate::machine::net::gateway) fn send(&mut self, payload: &[u8]) {
+    pub(super) fn send(&mut self, payload: &[u8]) {
         self.last = Instant::now();
         let _ = self.host.send(payload);
     }
@@ -60,16 +51,12 @@ impl UdpFlow {
     pub(super) fn pump(&mut self, link: &mut Link, ready: bool) -> Interest {
         while ready && !link.full() {
             let mut got = None;
-            link.send(MAX_FRAME, |frame| {
-                let ip = if self.ends.0.is_ipv4() { 20 } else { 40 };
-                let at = EthernetFrame::<&[u8]>::header_len() + ip + 8;
+            link.datagram(self.ends.1, self.ends.0, |payload| {
                 // SAFETY: `recv` writes into what it is given and says how much it wrote, which
                 // is all of it that is read.
-                let payload =
-                    unsafe { &mut *(&mut frame[at..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
+                let payload = unsafe { &mut *(payload as *mut [u8] as *mut [MaybeUninit<u8>]) };
                 got = Some(self.host.recv(payload));
-                let len = *got.as_ref()?.as_ref().ok()?;
-                Some(self.frame(frame, len))
+                got.as_ref()?.as_ref().ok().copied()
             });
             match got {
                 Some(Ok(_)) => self.last = Instant::now(),
@@ -90,51 +77,76 @@ impl UdpFlow {
     pub(super) fn over(&self) -> bool {
         self.last.elapsed() >= IDLE
     }
+}
 
-    /// Write the headers before the `len` bytes of payload already in place, from the end the
-    /// guest sent to, and say how long the frame is.
-    fn frame(&self, frame: &mut [u8], len: usize) -> usize {
-        let (guest, sent_to) = self.ends;
-        let at = EthernetFrame::<&[u8]>::header_len();
-        let (ethertype, at) = match (sent_to.ip(), guest.ip()) {
-            (IpAddr::V4(src_addr), IpAddr::V4(dst_addr)) => {
-                let ip = Ipv4Repr {
-                    src_addr,
-                    dst_addr,
-                    next_header: IpProtocol::Udp,
-                    payload_len: 8 + len,
-                    hop_limit: 64,
-                };
-                ip.emit(
-                    &mut Ipv4Packet::new_unchecked(&mut frame[at..]),
-                    &ChecksumCapabilities::default(),
-                );
-                (EthernetProtocol::Ipv4, at + ip.buffer_len())
+#[cfg(all(test, unix))]
+mod tests {
+    use std::io::Read as _;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
+    use std::os::unix::net::UnixStream;
+
+    use smoltcp::wire::{EthernetFrame, Ipv4Packet, Ipv6Packet, UdpPacket};
+
+    use super::super::super::LAN;
+    use super::*;
+
+    /// What the guest sends goes out on the flow's host socket, and the reply reaches the guest
+    /// from where it sent, its checksum whole, on v4 and v6.
+    #[test]
+    fn a_datagram_goes_out_and_its_reply_comes_back_from_where_it_was_sent() {
+        let public_v6 = Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111);
+        let both: [Ends; 2] = [
+            (
+                (LAN.guest, 40000).into(),
+                (Ipv4Addr::new(1, 1, 1, 1), 5000).into(),
+            ),
+            ((LAN.guest_v6, 40000).into(), (public_v6, 5000).into()),
+        ];
+        for ends in both {
+            let host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut flow = UdpFlow::open(ends, host.local_addr().unwrap()).unwrap();
+            flow.send(b"ping");
+            let mut buf = [0; 16];
+            let (n, from) = host.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], b"ping");
+            host.send_to(b"pong", from).unwrap();
+
+            let (ours, mut theirs) = UnixStream::pair().unwrap();
+            let mut link = Link::new(ours.into()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !link.unsent() {
+                assert!(Instant::now() < deadline, "no reply reached the link");
+                flow.pump(&mut link, true);
             }
-            (IpAddr::V6(src_addr), IpAddr::V6(dst_addr)) => {
-                let ip = Ipv6Repr {
-                    src_addr,
-                    dst_addr,
-                    next_header: IpProtocol::Udp,
-                    payload_len: 8 + len,
-                    hop_limit: 64,
-                };
-                ip.emit(&mut Ipv6Packet::new_unchecked(&mut frame[at..]));
-                (EthernetProtocol::Ipv6, at + ip.buffer_len())
-            }
-            _ => unreachable!("a flow's ends are of one family, as the packet it came of"),
-        };
-        EthernetRepr {
-            src_addr: EthernetAddress(LAN.gateway_mac),
-            dst_addr: EthernetAddress(LAN.guest_mac),
-            ethertype,
+            link.flush().unwrap();
+            drop(link);
+            let mut got = Vec::new();
+            theirs.read_to_end(&mut got).unwrap();
+
+            let ip = EthernetFrame::new_checked(&got[4..]).unwrap().payload();
+            let (src, dst, udp) = match ends.0 {
+                SocketAddr::V4(_) => {
+                    let ip = Ipv4Packet::new_checked(ip).unwrap();
+                    (
+                        IpAddr::from(ip.src_addr()),
+                        IpAddr::from(ip.dst_addr()),
+                        ip.payload(),
+                    )
+                }
+                SocketAddr::V6(_) => {
+                    let ip = Ipv6Packet::new_checked(ip).unwrap();
+                    (
+                        IpAddr::from(ip.src_addr()),
+                        IpAddr::from(ip.dst_addr()),
+                        ip.payload(),
+                    )
+                }
+            };
+            let udp = UdpPacket::new_checked(udp).unwrap();
+            assert_eq!(SocketAddr::new(src, udp.src_port()), ends.1);
+            assert_eq!(SocketAddr::new(dst, udp.dst_port()), ends.0);
+            assert_eq!(udp.payload(), b"pong");
+            assert!(udp.verify_checksum(&src.into(), &dst.into()));
         }
-        .emit(&mut EthernetFrame::new_unchecked(&mut frame[..]));
-        let mut packet = UdpPacket::new_unchecked(&mut frame[at..at + 8 + len]);
-        packet.set_src_port(sent_to.port());
-        packet.set_dst_port(guest.port());
-        packet.set_len((8 + len) as u16);
-        packet.fill_checksum(&sent_to.ip().into(), &guest.ip().into());
-        at + 8 + len
     }
 }

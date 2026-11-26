@@ -12,16 +12,16 @@ use smoltcp::wire::{
 };
 
 use super::LAN;
-use super::egress::Egress;
-use super::flow::{Ends, Flow, Flows, TcpFlow, Turn, UDP_IDLE, UdpFlow};
+use super::dns::Dns;
+use super::egress::{Egress, is_dns};
+use super::flow::{Ends, Flows};
 use super::link::Link;
 
-/// The link's key in the poller, below the one the poller keeps for itself. A published port's
-/// listener is under it, by its place; a flow's is its own key in [`Flows`].
+/// The link's key in the poller, below the one the poller keeps for itself. The nameserver's
+/// socket is under it, and a published port's listener under that, by its place; a flow's is
+/// its own key in [`Flows`].
 const LINK: usize = usize::MAX - 1;
-
-/// The first port the gateway's end of a connection to a published port takes.
-const EPHEMERAL: u16 = 49152;
+const DNS: usize = LINK - 1;
 
 pub(in crate::machine::net) struct Gateway {
     // First, so it is dropped first: every source it waits on is still open when it goes.
@@ -31,8 +31,8 @@ pub(in crate::machine::net) struct Gateway {
     sockets: SocketSet<'static>,
     egress: Egress,
     flows: Flows,
+    dns: Dns,
     published: Vec<(u16, TcpListener)>,
-    next_port: u16,
     started: std::time::Instant,
 }
 
@@ -79,8 +79,9 @@ impl Gateway {
         unsafe { poller.add(link.socket(), Event::none(LINK))? };
         for (i, (_, listener)) in published.iter().enumerate() {
             listener.set_nonblocking(true)?;
-            unsafe { poller.add(listener, Event::readable(LINK - 1 - i))? };
+            unsafe { poller.add(listener, Event::readable(DNS - 1 - i))? };
         }
+        let dns = Dns::new(&poller, DNS, egress.resolver.filter(|_| egress.enabled));
         Ok(Gateway {
             poller,
             link,
@@ -88,8 +89,8 @@ impl Gateway {
             sockets: SocketSet::new(Vec::new()),
             egress,
             flows: Flows::default(),
+            dns,
             published,
-            next_port: EPHEMERAL,
             started: std::time::Instant::now(),
         })
     }
@@ -109,8 +110,8 @@ impl Gateway {
                 .iface
                 .poll_delay(self.now(), &self.sockets)
                 .map(|delay| Duration::from_micros(delay.total_micros()));
-            if !self.flows.is_empty() {
-                timeout = Some(timeout.map_or(UDP_IDLE, |timeout| timeout.min(UDP_IDLE)));
+            if let Some(idle) = self.flows.timeout() {
+                timeout = Some(timeout.map_or(idle, |timeout| timeout.min(idle)));
             }
             events.clear();
             self.poller.wait(&mut events, timeout)?;
@@ -122,7 +123,8 @@ impl Gateway {
                         link_ready = true;
                         link_armed = None;
                     }
-                    key if key >= LINK - self.published.len() => self.accept(LINK - 1 - key)?,
+                    DNS => self.dns.ready(),
+                    key if key >= DNS - self.published.len() => self.accept(DNS - 1 - key)?,
                     key => self.flows.ready(key),
                 }
             }
@@ -132,13 +134,9 @@ impl Gateway {
                 return Ok(());
             }
             self.ingress(now);
-            self.flows.pump(
-                &self.poller,
-                Turn {
-                    sockets: &mut self.sockets,
-                    link: &mut self.link,
-                },
-            );
+            self.flows
+                .pump(&self.poller, &mut self.sockets, &mut self.link);
+            self.dns.pump(&self.poller, &mut self.link);
             self.iface.poll_maintenance(now);
             while self
                 .iface
@@ -147,6 +145,7 @@ impl Gateway {
             {}
             self.link.flush()?;
             self.flows.reap(&self.poller, &mut self.sockets);
+            self.dns.reap();
         }
     }
 
@@ -158,28 +157,20 @@ impl Gateway {
     fn ingress(&mut self, now: Instant) {
         while let Some(frame) = self.link.peek() {
             match Frame::of(frame) {
+                Frame::Udp { ends, payload } if is_dns(ends.1) => {
+                    self.dns.query(ends, &frame[payload]);
+                    self.link.skip();
+                }
                 Frame::Udp { ends, payload } => {
-                    let key = self.flows.find(IpProtocol::Udp, ends).or_else(|| {
-                        let at = self.egress.route(ends.1)?;
-                        let flow = Flow::Udp(UdpFlow::open(ends, at).ok()?);
-                        self.flows
-                            .insert(&self.poller, &mut self.sockets, ends, flow)
+                    self.flows.udp(&self.poller, ends, &frame[payload], || {
+                        self.egress.route(ends.1)
                     });
-                    if let Some(Flow::Udp(udp)) = key.and_then(|key| self.flows.get_mut(key))
-                        && let Some(frame) = self.link.peek()
-                    {
-                        udp.send(&frame[payload]);
-                    }
                     self.link.skip();
                 }
                 Frame::Syn { ends } => {
-                    if self.flows.find(IpProtocol::Tcp, ends).is_none()
-                        && let Some(at) = self.egress.route(ends.1)
-                        && let Ok(tcp) = TcpFlow::open(&mut self.sockets, ends.1, at)
-                    {
-                        self.flows
-                            .insert(&self.poller, &mut self.sockets, ends, Flow::Tcp(tcp));
-                    }
+                    self.flows.syn(&self.poller, &mut self.sockets, ends, || {
+                        self.egress.route(ends.1)
+                    });
                     self.iface
                         .poll_ingress_single(now, &mut self.link, &mut self.sockets);
                 }
@@ -203,30 +194,16 @@ impl Gateway {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             };
-            let gateway = loop {
-                let gateway = SocketAddr::from((LAN.gateway, self.next_port));
-                self.next_port = self.next_port.checked_add(1).unwrap_or(EPHEMERAL);
-                if self.flows.find(IpProtocol::Tcp, (guest, gateway)).is_none() {
-                    break gateway;
-                }
-            };
-            if let Ok(tcp) = TcpFlow::accept(
+            self.flows.accept(
+                &self.poller,
                 &mut self.sockets,
                 self.iface.context(),
                 host.into(),
                 guest,
-                gateway,
-            ) {
-                self.flows.insert(
-                    &self.poller,
-                    &mut self.sockets,
-                    (guest, gateway),
-                    Flow::Tcp(tcp),
-                );
-            }
+            );
         }
         self.poller
-            .modify(&self.published[i].1, Event::readable(LINK - 1 - i))
+            .modify(&self.published[i].1, Event::readable(DNS - 1 - i))
     }
 }
 
@@ -518,39 +495,6 @@ mod tests {
         assert_eq!(host.join().unwrap(), sent);
     }
 
-    /// A TCP connection and a UDP flow between the same two ends are each carried: each
-    /// protocol has ports of its own.
-    #[test]
-    fn a_connection_and_a_datagram_between_the_same_ends_are_both_carried() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let at = listener.local_addr().unwrap();
-        let host = UdpSocket::bind(at).unwrap();
-        host.set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut guest = Guest::new(resolved_at(at), vec![]);
-        let handle = guest.connect(DNS);
-        guest.until("the connection is up", |sockets| {
-            sockets.get::<tcp::Socket>(handle).state() == tcp::State::Established
-        });
-
-        let buffer =
-            || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 1 << 16]);
-        let mut socket = udp::Socket::new(buffer(), buffer());
-        socket.bind(40000).unwrap();
-        let udp = guest.sockets.add(socket);
-        guest
-            .sockets
-            .get_mut::<udp::Socket>(udp)
-            .send_slice(b"ping", (IpAddress::from(DNS.ip()), DNS.port()))
-            .unwrap();
-        guest.until("the guest's datagram is out", |sockets| {
-            sockets.get::<udp::Socket>(udp).send_queue() == 0
-        });
-        let mut buf = [0; 16];
-        let n = host.recv(&mut buf).expect("the datagram reached the host");
-        assert_eq!(&buf[..n], b"ping");
-    }
-
     /// A connection the policy sends nowhere -- this host, at the gateway -- is reset.
     #[test]
     fn a_connection_the_policy_refuses_is_reset() {
@@ -601,10 +545,10 @@ mod tests {
         });
     }
 
-    /// A datagram reaches where the policy says, and the reply comes back from where the guest
-    /// sent it, on v4 and v6.
+    /// A query to the nameserver reaches the resolver, and its answer comes back from the
+    /// nameserver with the query's own ID, on v4 and v6.
     #[test]
-    fn a_datagram_goes_out_and_its_reply_comes_back_from_where_it_was_sent() {
+    fn a_query_is_answered_from_the_nameserver_with_its_own_id() {
         for dns in [DNS, DNS_V6] {
             let host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             let mut guest = Guest::new(resolved_at(host.local_addr().unwrap()), vec![]);
@@ -617,26 +561,78 @@ mod tests {
             guest
                 .sockets
                 .get_mut::<udp::Socket>(handle)
-                .send_slice(b"ping", to)
+                .send_slice(b"\x12\x34query", to)
                 .unwrap();
 
-            guest.until("the guest's datagram is out", |sockets| {
+            guest.until("the guest's query is out", |sockets| {
                 sockets.get::<udp::Socket>(handle).send_queue() == 0
             });
             let mut buf = [0; 16];
             let (n, from) = host.recv_from(&mut buf).unwrap();
-            assert_eq!(&buf[..n], b"ping");
-            host.send_to(b"pong", from).unwrap();
+            assert_eq!(&buf[2..n], b"query");
+            host.send_to(&[&buf[..2], b"answer"].concat(), from)
+                .unwrap();
             let mut reply = None;
-            guest.until("the reply has come back", |sockets| {
+            guest.until("the answer has come back", |sockets| {
                 if let Ok((data, meta)) = sockets.get_mut::<udp::Socket>(handle).recv() {
                     reply = Some((data.to_vec(), meta.endpoint));
                 }
                 reply.is_some()
             });
             let (data, endpoint) = reply.unwrap();
-            assert_eq!(data, b"pong");
+            assert_eq!(data, b"\x12\x34answer");
             assert_eq!(endpoint, to.into());
+        }
+    }
+
+    /// Queries from many ports, with the same ID, go to the resolver from one socket, and each
+    /// answer comes back to the port its query came from, whatever order they come in.
+    #[test]
+    fn queries_from_many_ports_share_one_socket_and_each_answer_finds_its_own() {
+        let host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut guest = Guest::new(resolved_at(host.local_addr().unwrap()), vec![]);
+        let to = (IpAddress::from(DNS.ip()), DNS.port());
+        let handles: Vec<_> = (0..8u8)
+            .map(|i| {
+                let buffer = || {
+                    udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 1 << 16])
+                };
+                let mut socket = udp::Socket::new(buffer(), buffer());
+                socket.bind(40000 + u16::from(i)).unwrap();
+                socket.send_slice(&[0, 1, i], to).unwrap();
+                guest.sockets.add(socket)
+            })
+            .collect();
+
+        guest.until("the guest's queries are out", |sockets| {
+            handles
+                .iter()
+                .all(|&handle| sockets.get::<udp::Socket>(handle).send_queue() == 0)
+        });
+        let mut got = Vec::new();
+        for _ in &handles {
+            let mut buf = [0; 16];
+            let (n, from) = host.recv_from(&mut buf).unwrap();
+            got.push((buf[..n].to_vec(), from));
+        }
+        assert!(
+            got.iter().all(|(_, from)| *from == got[0].1),
+            "the queries came from more than one socket: {got:?}"
+        );
+        for (query, from) in got.iter().rev() {
+            host.send_to(query, from).unwrap();
+        }
+        let mut answers = vec![None; handles.len()];
+        guest.until("every answer has come back", |sockets| {
+            for (answer, &handle) in answers.iter_mut().zip(&handles) {
+                if let Ok((data, _)) = sockets.get_mut::<udp::Socket>(handle).recv() {
+                    *answer = Some(data.to_vec());
+                }
+            }
+            answers.iter().all(Option::is_some)
+        });
+        for (i, answer) in answers.into_iter().enumerate() {
+            assert_eq!(answer.unwrap(), [0, 1, i as u8]);
         }
     }
 

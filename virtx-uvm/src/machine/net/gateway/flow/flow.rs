@@ -1,36 +1,34 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use polling::{Event, Poller};
 use slab::Slab;
-use smoltcp::iface::SocketSet;
+use smoltcp::iface::{Context, SocketSet};
 use smoltcp::wire::IpProtocol;
 use socket2::Socket;
 
+use super::super::LAN;
 use super::super::link::Link;
 use super::tcp::TcpFlow;
-use super::udp::UdpFlow;
+use super::udp::{self, UdpFlow};
 
 /// A flow's two ends: the guest's, and the one it sent to.
 pub(in crate::machine::net::gateway) type Ends = (SocketAddr, SocketAddr);
 
-pub(in crate::machine::net::gateway) enum Flow {
+/// The first port the gateway's end of a connection to a published port takes.
+const EPHEMERAL: u16 = 49152;
+
+enum Flow {
     Tcp(TcpFlow),
     Udp(UdpFlow),
 }
 
-/// What a flow is pumped with: smoltcp's sockets, where a TCP connection's guest side is, and
-/// the link, which a UDP flow writes what comes back into.
-pub(in crate::machine::net::gateway) struct Turn<'a> {
-    pub(in crate::machine::net::gateway) sockets: &'a mut SocketSet<'static>,
-    pub(in crate::machine::net::gateway) link: &'a mut Link,
-}
-
 /// What a flow's host socket is waited on for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(in crate::machine::net::gateway) struct Interest {
-    pub(in crate::machine::net::gateway) read: bool,
-    pub(in crate::machine::net::gateway) write: bool,
+pub(super) struct Interest {
+    pub(super) read: bool,
+    pub(super) write: bool,
 }
 
 impl Flow {
@@ -51,10 +49,10 @@ impl Flow {
     }
 
     /// `ready` is whether its host socket was reported since the last turn.
-    fn pump(&mut self, turn: &mut Turn, ready: bool) -> Interest {
+    fn pump(&mut self, sockets: &mut SocketSet, link: &mut Link, ready: bool) -> Interest {
         match self {
-            Flow::Tcp(tcp) => tcp.pump(turn.sockets, ready),
-            Flow::Udp(udp) => udp.pump(turn.link, ready),
+            Flow::Tcp(tcp) => tcp.pump(sockets, ready),
+            Flow::Udp(udp) => udp.pump(link, ready),
         }
     }
 
@@ -80,46 +78,112 @@ struct Entry {
     ready: bool,
 }
 
-#[derive(Default)]
 pub(in crate::machine::net::gateway) struct Flows {
     entries: Slab<Entry>,
     by_ends: HashMap<(IpProtocol, Ends), usize>,
+    /// The port the gateway's end of the next connection to a published port tries.
+    next_port: u16,
+}
+
+impl Default for Flows {
+    fn default() -> Flows {
+        Flows {
+            entries: Slab::new(),
+            by_ends: HashMap::new(),
+            next_port: EPHEMERAL,
+        }
+    }
 }
 
 impl Flows {
-    pub(in crate::machine::net::gateway) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+    /// How long the stack may wait before its next turn: as long as a UDP flow may be idle,
+    /// while there are flows to put away when they are.
+    pub(in crate::machine::net::gateway) fn timeout(&self) -> Option<Duration> {
+        (!self.entries.is_empty()).then_some(udp::IDLE)
     }
 
-    /// The key of the `protocol` flow between `ends`, if there is one.
-    pub(in crate::machine::net::gateway) fn find(
-        &self,
-        protocol: IpProtocol,
-        ends: Ends,
-    ) -> Option<usize> {
-        self.by_ends.get(&(protocol, ends)).copied()
-    }
-
-    pub(in crate::machine::net::gateway) fn get_mut(&mut self, key: usize) -> Option<&mut Flow> {
-        self.entries.get_mut(key).map(|entry| &mut entry.flow)
-    }
-
-    /// Keep `flow` between `ends`, its host socket waited on by `poller` under the key this
-    /// answers. A flow the poller will not take is closed, and `None`.
-    pub(in crate::machine::net::gateway) fn insert(
+    /// The guest's SYN between `ends`: a connection opened to where `route` says, unless one is
+    /// open between them already. With none, smoltcp finds no socket for the SYN, and resets it.
+    pub(in crate::machine::net::gateway) fn syn(
         &mut self,
         poller: &Poller,
         sockets: &mut SocketSet<'static>,
         ends: Ends,
-        flow: Flow,
-    ) -> Option<usize> {
+        route: impl FnOnce() -> Option<SocketAddr>,
+    ) {
+        if self.by_ends.contains_key(&(IpProtocol::Tcp, ends)) {
+            return;
+        }
+        if let Some(at) = route()
+            && let Ok(tcp) = TcpFlow::open(sockets, ends.1, at)
+            && let Err(flow) = self.insert(poller, ends, Flow::Tcp(tcp))
+        {
+            flow.close(sockets);
+        }
+    }
+
+    /// A datagram the guest sent between `ends`, sent on the flow between them -- opened to
+    /// where `route` says if there is none. One with nowhere to go is dropped.
+    pub(in crate::machine::net::gateway) fn udp(
+        &mut self,
+        poller: &Poller,
+        ends: Ends,
+        payload: &[u8],
+        route: impl FnOnce() -> Option<SocketAddr>,
+    ) {
+        let key = match self.by_ends.get(&(IpProtocol::Udp, ends)) {
+            Some(&key) => key,
+            None => {
+                let Some(udp) = route().and_then(|at| UdpFlow::open(ends, at).ok()) else {
+                    return;
+                };
+                let Ok(key) = self.insert(poller, ends, Flow::Udp(udp)) else {
+                    return;
+                };
+                key
+            }
+        };
+        if let Some(Flow::Udp(udp)) = self.entries.get_mut(key).map(|entry| &mut entry.flow) {
+            udp.send(payload);
+        }
+    }
+
+    /// A connection a client of a published port opened, `host`, carried to `guest` from a port
+    /// of the gateway's that no other connection to `guest` holds.
+    pub(in crate::machine::net::gateway) fn accept(
+        &mut self,
+        poller: &Poller,
+        sockets: &mut SocketSet<'static>,
+        cx: &mut Context,
+        host: Socket,
+        guest: SocketAddr,
+    ) {
+        let gateway = loop {
+            let gateway = SocketAddr::from((LAN.gateway, self.next_port));
+            self.next_port = self.next_port.checked_add(1).unwrap_or(EPHEMERAL);
+            if !self
+                .by_ends
+                .contains_key(&(IpProtocol::Tcp, (guest, gateway)))
+            {
+                break gateway;
+            }
+        };
+        if let Ok(tcp) = TcpFlow::accept(sockets, cx, host, guest, gateway)
+            && let Err(flow) = self.insert(poller, (guest, gateway), Flow::Tcp(tcp))
+        {
+            flow.close(sockets);
+        }
+    }
+
+    /// Keep `flow` between `ends`, its host socket waited on by `poller` under the key this
+    /// answers; or give it back, for a poller that will not take it.
+    fn insert(&mut self, poller: &Poller, ends: Ends, flow: Flow) -> Result<usize, Flow> {
         let key = self.entries.vacant_key();
         let ends = (flow.protocol(), ends);
         // SAFETY: deleted from the poller in `reap` before the flow, and its socket, drops --
         // or the poller goes first, with the stack.
         if unsafe { poller.add(flow.host(), Event::none(key)) }.is_err() {
-            flow.close(sockets);
-            return None;
+            return Err(flow);
         }
         self.entries.insert(Entry {
             flow,
@@ -128,7 +192,7 @@ impl Flows {
             ready: false,
         });
         self.by_ends.insert(ends, key);
-        Some(key)
+        Ok(key)
     }
 
     /// The poller reported the host socket under `key`, which it then waits on for nothing.
@@ -140,9 +204,14 @@ impl Flows {
     }
 
     /// Pump every flow, and ask the poller for what each now waits on.
-    pub(in crate::machine::net::gateway) fn pump(&mut self, poller: &Poller, mut turn: Turn) {
+    pub(in crate::machine::net::gateway) fn pump(
+        &mut self,
+        poller: &Poller,
+        sockets: &mut SocketSet<'static>,
+        link: &mut Link,
+    ) {
         for (key, entry) in self.entries.iter_mut() {
-            let interest = entry.flow.pump(&mut turn, entry.ready);
+            let interest = entry.flow.pump(sockets, link, entry.ready);
             entry.ready = false;
             if interest != entry.armed {
                 let event = Event::new(key, interest.read, interest.write);

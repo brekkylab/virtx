@@ -1,5 +1,5 @@
 //! A flow: what the guest sends between two ends, carried on a host socket of its own -- a
-//! [TCP connection](TcpFlow) or a [UDP flow](UdpFlow). Every flow is driven the same way, once
+//! [TCP connection](tcp::TcpFlow) or a [UDP flow](udp::UdpFlow). Every flow is driven the same way, once
 //! a turn:
 //!
 //! ```text
@@ -7,7 +7,7 @@
 //!   over    whether it is done, and so put away
 //! ```
 //!
-//! [`Flows`] keeps them, each under the key its host socket is waited on by in the poller, and
+//! [`Flows`] opens them, as the gateway's frames and published ports ask, and keeps them, each under the key its host socket is waited on by in the poller, and
 //! by its two ends. Each host socket is waited on once at a time (`PollMode::Oneshot`), and
 //! asked for again only for what its flow waits on, so a socket the stack cannot keep up with is
 //! not reported again until it can.
@@ -17,8 +17,6 @@ mod flow;
 mod tcp;
 mod udp;
 
-pub(super) use flow::{Ends, Flow, Flows, Turn};
-pub(super) use tcp::TcpFlow;
-pub(super) use udp::{IDLE as UDP_IDLE, UdpFlow};
+pub(super) use flow::{Ends, Flows};
 
 use flow::Interest;

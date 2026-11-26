@@ -47,6 +47,11 @@ impl Egress {
     }
 }
 
+/// Whether `to` is the nameserver's DNS, at either of its addresses.
+pub(super) fn is_dns(to: SocketAddr) -> bool {
+    to.port() == DNS_PORT && (to.ip() == LAN.nameserver || to.ip() == LAN.nameserver_v6)
+}
+
 /// Whether the internet routes `ip`, taken canonical: an address no network but this
 /// host's own reaches is not, and neither is one every network reaches somewhere else.
 ///

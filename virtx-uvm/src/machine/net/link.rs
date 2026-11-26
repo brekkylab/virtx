@@ -6,9 +6,14 @@
 //! it lies; written out as the stack makes them in place, a turn's frames in one write.
 
 use std::io::{self, Read as _, Write as _};
+use std::net::{IpAddr, SocketAddr};
 
 use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities, Medium};
 use smoltcp::time::Instant;
+use smoltcp::wire::{
+    EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, IpProtocol, Ipv4Packet,
+    Ipv4Repr, Ipv6Packet, Ipv6Repr, UdpPacket,
+};
 use socket2::Socket;
 
 use super::LAN;
@@ -189,6 +194,61 @@ impl Link {
             }
             None => self.tx.truncate(at),
         }
+    }
+
+    /// Make a datagram for the guest from `from` to `to`, in place: `payload` writes what it
+    /// carries where it lies and says how long it is, or `None` for no datagram.
+    pub(super) fn datagram(
+        &mut self,
+        from: SocketAddr,
+        to: SocketAddr,
+        payload: impl FnOnce(&mut [u8]) -> Option<usize>,
+    ) {
+        self.send(MAX_FRAME, |frame| {
+            let at = EthernetFrame::<&[u8]>::header_len();
+            let ip = if to.is_ipv4() { 20 } else { 40 };
+            let len = payload(&mut frame[at + ip + 8..])?;
+            let (ethertype, at) = match (from.ip(), to.ip()) {
+                (IpAddr::V4(src_addr), IpAddr::V4(dst_addr)) => {
+                    let ip = Ipv4Repr {
+                        src_addr,
+                        dst_addr,
+                        next_header: IpProtocol::Udp,
+                        payload_len: 8 + len,
+                        hop_limit: 64,
+                    };
+                    ip.emit(
+                        &mut Ipv4Packet::new_unchecked(&mut frame[at..]),
+                        &ChecksumCapabilities::default(),
+                    );
+                    (EthernetProtocol::Ipv4, at + ip.buffer_len())
+                }
+                (IpAddr::V6(src_addr), IpAddr::V6(dst_addr)) => {
+                    let ip = Ipv6Repr {
+                        src_addr,
+                        dst_addr,
+                        next_header: IpProtocol::Udp,
+                        payload_len: 8 + len,
+                        hop_limit: 64,
+                    };
+                    ip.emit(&mut Ipv6Packet::new_unchecked(&mut frame[at..]));
+                    (EthernetProtocol::Ipv6, at + ip.buffer_len())
+                }
+                _ => unreachable!("a datagram's ends are of one family"),
+            };
+            EthernetRepr {
+                src_addr: EthernetAddress(LAN.gateway_mac),
+                dst_addr: EthernetAddress(LAN.guest_mac),
+                ethertype,
+            }
+            .emit(&mut EthernetFrame::new_unchecked(&mut frame[..]));
+            let mut packet = UdpPacket::new_unchecked(&mut frame[at..at + 8 + len]);
+            packet.set_src_port(from.port());
+            packet.set_dst_port(to.port());
+            packet.set_len((8 + len) as u16);
+            packet.fill_checksum(&from.ip().into(), &to.ip().into());
+            Some(at + 8 + len)
+        });
     }
 
     /// Whether as much waits for the device as the stack may leave there, so it makes no more.

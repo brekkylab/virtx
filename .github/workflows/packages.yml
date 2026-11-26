@@ -90,8 +90,9 @@ jobs:
             http://localhost:4873/-/user/org.couchdb.user:ci | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')
           npmrc="$RUNNER_TEMP/npmrc"
           printf 'registry=http://localhost:4873/\n//localhost:4873/:_authToken=%s\n' "$token" > "$npmrc"
+          # npm 11 publishes a pre-release only under a tag.
           for tgz in "$GITHUB_WORKSPACE"/dist/release/*.tgz; do
-            npm publish "$tgz" --userconfig "$npmrc" --registry http://localhost:4873/
+            npm publish "$tgz" --tag ci --userconfig "$npmrc" --registry http://localhost:4873/
           done
           mkdir -p "$RUNNER_TEMP/project" && cd "$RUNNER_TEMP/project"
           echo '{"name":"project","private":true,"type":"module"}' > package.json

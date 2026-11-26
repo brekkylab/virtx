@@ -61,7 +61,7 @@ const HANG: Duration = Duration::from_secs(60);
 
 /// A sandbox of [`ALPINE`] with 1 GiB of memory: enough for what these tests run in it, and little
 /// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
-/// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
+/// it boots, as Windows does, where 4 GiB each does not.
 fn small() -> SandboxCreateArgs {
     let mut args = SandboxCreateArgs::new(ALPINE);
     args.memory_mib = Some(1024);
@@ -2464,7 +2464,9 @@ async fn a_gpu_sandbox_finds_the_host_s_gpu_through_venus(home: Home) {
 /// A sandbox that does not ask for one gets no GPU, in a build that has them and on a host
 /// that has one: the same guest, the same driver, and nothing for it to find.
 async fn a_sandbox_that_asks_for_no_gpu_finds_none(home: Home) {
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(GPU_IMAGE), None).await;
+    let mut args = SandboxCreateArgs::new(GPU_IMAGE);
+    args.memory_mib = Some(1024);
+    let sandbox = home.sandbox(&args, None).await;
     apk_add(&sandbox, &GPU_GUEST).await;
     let devices = vulkan_devices(&sandbox).await;
     assert!(

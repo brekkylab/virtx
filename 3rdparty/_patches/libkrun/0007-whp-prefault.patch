@@ -6,7 +6,7 @@ Subject: whp-prefault: a VmmBuilder option backs guest RAM with host pages befor
 ## Why virtx needs it
 
 Under WHP each page the guest first touches is a fault the hypervisor resolves on its own.
-Nested -- a Windows instance in a cloud, which is what a CI runner is -- one costs about 130us, and a guest kernel touches tens of thousands before it reaches init: its struct pages alone were 2s of a 3.8s boot on an m8i.
+Nested -- a Windows instance in a cloud, as a spot CI runner is -- one costs about 130us, and a guest kernel touches tens of thousands before it reaches init: its struct pages alone were 2s of a 3.8s boot on an m8i.
 VmmBuilder::prefault_memory(true) has memory_init ask WHvAdviseGpaRange to populate each region it maps, writable, which is 1.2s for 4 GiB.
 Off by default: populated, all of a guest's RAM is resident on the host from the start.
 virtx-uvm turns it on for VIRTX_PREFAULT_MEMORY=1.
@@ -15,7 +15,7 @@ virtx-uvm turns it on for VIRTX_PREFAULT_MEMORY=1.
 
 Under WHP each page the guest first touches is a fault the hypervisor resolves
 on its own, one page at a time. On a desktop that is cheap. Nested — a Windows
-instance in a cloud, which is what a CI runner is — one costs about 130µs, and
+instance in a cloud, as a spot CI runner is — one costs about 130µs, and
 a 4 GiB guest touches tens of thousands of pages before it reaches init:
 
 | what the guest is doing                      | pages  | time |
@@ -39,8 +39,8 @@ above, which saved 0.15s. So the commit gives the host the other side of it.
 `WHvAdviseGpaRange` to populate each region it maps, writable, which is 1.2s
 for 4 GiB at once. The price is that all of the guest's RAM is resident on the
 host from the start, used or not, so it is off by default; `boot.rs` turns it
-on for `VIRTX_PREFAULT_MEMORY=1`, which is for a runner and nothing else. The
-machine tests on that runner take 59s with it and 182s without.
+on for `VIRTX_PREFAULT_MEMORY=1`, which is for a runner whose Windows is itself
+a virtual machine and nothing else. The machine tests on such a runner take 59s with it and 182s without.
 
 ## When it can go
 

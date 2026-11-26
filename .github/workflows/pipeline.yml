@@ -901,7 +901,7 @@ jobs:
           if ($null -eq $ext) { 'no SMBIOS BIOS characteristics extension byte 2' }
           else { 'SMBIOS BIOS characteristics extension byte 2 = 0x{0:x2}' -f $ext }
           '{0} {1}' -f $cs.Manufacturer, $cs.Model
-          'commit {0:N1} of {1:N1} GB free, physical {2:N1} of {3:N1} GB free' -f
+          'commit {0:N1} of {1:N1} GiB free, physical {2:N1} of {3:N1} GiB free' -f
             ($os.FreeVirtualMemory / 1MB), ($os.TotalVirtualMemorySize / 1MB),
             ($os.FreePhysicalMemory / 1MB), ($os.TotalVisibleMemorySize / 1MB)
           PS

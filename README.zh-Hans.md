@@ -210,13 +210,13 @@ let client = Client::connect(
   - **客户端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **服务器：** 💻 本地 (stdio) · 🖥️ 远程 (tcp) · ☁️ 云端
   - **主机：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **适用于任何智能体框架：** 沙箱和其他工具一样，任何框架或编码智能体都能调用。开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 - **几乎不用配置：** 装好包就能直接跑，不需要 Docker，也不用另外跑守护进程。
 - **现有镜像拿来就用：** 可以从 Docker Hub 或任意 OCI 镜像仓库拉取，也可以用配方或 Dockerfile 构建，之后还能推回仓库或复制到另一台服务器。
 - **不开 shell 也能传文件：** 直接在代码里读写、复制和删除沙箱中的文件。
 - **沙箱里跑的服务都能访问：** 沙箱里的 Web 服务器、SSH、VNC 桌面或数据库，都可以通过本机上的地址直接访问。
 - **从上次中断的地方继续：** 把沙箱写下的内容存进卷留给下一个沙箱，让多个沙箱共享一个卷，还能把 Notion、Google Drive、OneDrive 当作普通文件挂载进来。
 - **同样能用 GPU：** 在沙箱里用宿主机的 GPU 跑深度学习等 Vulkan 任务。
-- **适用于任何智能体框架：** 沙箱和其他工具一样，任何框架或编码智能体都能调用。开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 
 ## 环境要求
 

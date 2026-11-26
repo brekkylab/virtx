@@ -210,13 +210,13 @@ let client = Client::connect(
   - **クライアント:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **サーバー:** 💻 ローカル (stdio) · 🖥️ リモート (tcp) · ☁️ クラウド
   - **ホスト:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **どのエージェントフレームワークでも:** サンドボックスは他のツールと同じように使えるので、どのフレームワークやコーディングエージェントからでも操作できます。オープンソースのエージェントSDK [Ailoy](https://github.com/brekkylab/ailoy) もその一つです。
 - **セットアップはほぼ不要:** パッケージを入れればすぐに使え、Dockerも常駐させるデーモンもいりません。
 - **いつものイメージがそのまま使える:** Docker Hubや任意のOCIレジストリからpullしたり、レシピやDockerfileからビルドしたりでき、pushし直すことも別のサーバーにコピーすることもできます。
 - **シェルを使わずにファイルをやり取り:** サンドボックス内のファイルの読み書き、コピー、削除をコードから直接行えます。
 - **サンドボックス内のサービスに接続:** サンドボックス内のWebサーバー、SSH、VNCデスクトップ、データベースに、手元のマシンのアドレスからアクセスできます。
 - **前回の続きから再開:** サンドボックスが書き込んだ内容をボリュームに残して次のサンドボックスに引き継いだり、ボリュームを複数のサンドボックスで共有したり、Notion、Google Drive、OneDriveを普通のファイルとしてマウントしたりできます。
 - **GPUも使える:** サンドボックスの中から、ホストのGPUでディープラーニングなどのVulkan処理を実行できます。
-- **どのエージェントフレームワークでも:** サンドボックスは他のツールと同じように使えるので、どのフレームワークやコーディングエージェントからでも操作できます。オープンソースのエージェントSDK [Ailoy](https://github.com/brekkylab/ailoy) もその一つです。
 
 ## 動作要件
 

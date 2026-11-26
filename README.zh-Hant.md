@@ -212,13 +212,13 @@ let client = Client::connect(
   - **用戶端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **伺服器：** 💻 本機 (stdio) · 🖥️ 遠端 (tcp) · ☁️ 雲端
   - **主機：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **適用於任何代理框架：** 沙箱跟其他工具一樣，任何框架或程式碼代理都能呼叫。開源代理 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 - **幾乎不用設定：** 裝好套件就能直接執行，不需要 Docker，也不用另外架設常駐程式。
 - **沿用你已經在用的映像檔：** 可以從 Docker Hub 或任何 OCI 映像檔倉庫拉取，也能用配方或 Dockerfile 建置，之後還能推送回去或複製到另一台伺服器。
 - **不開 shell 也能傳檔案：** 直接在程式碼裡讀取、寫入、複製和刪除沙箱中的檔案。
 - **連得到沙箱裡執行的服務：** 沙箱中的網頁伺服器、SSH、VNC 桌面或資料庫，都能透過你電腦上的位址連線。
 - **從上次停下的地方接著做：** 把沙箱寫下的內容存進磁碟區留給下一個沙箱、讓多個沙箱共用一個磁碟區，還能把 Notion、Google Drive、OneDrive 當成一般檔案掛載進來。
 - **GPU 也能帶進去：** 在沙箱裡使用主機的 GPU 執行深度學習和其他 Vulkan 工作。
-- **適用於任何代理框架：** 沙箱跟其他工具一樣，任何框架或程式碼代理都能呼叫。開源代理 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 
 ## 系統需求
 

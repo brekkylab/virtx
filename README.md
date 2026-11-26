@@ -211,13 +211,13 @@ let client = Client::connect(
   - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **Servers:** 💻 local (stdio) · 🖥️ remote (tcp) · ☁️ cloud
   - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **Works with any agent framework:** a sandbox is a tool like any other, so any framework or coding agent can drive it. [Ailoy](https://github.com/brekkylab/ailoy), an open-source agent SDK, is one that does.
 - **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
 - **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
 - **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
 - **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
 - **Pick up where you left off:** keep what a sandbox wrote in a volume for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
 - **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
-- **Works with any agent framework:** a sandbox is a tool like any other, so any framework or coding agent can drive it. [Ailoy](https://github.com/brekkylab/ailoy), an open-source agent SDK, is one that does.
 
 ## Requirements
 

@@ -1,25 +1,64 @@
 ---
-title: "Using virtx in coding agents"
-description: "Install the virtx skill for Claude or Codex and run sandbox tasks."
+title: "Using VirtX in coding agents"
+description: "Install the VirtX skill for Claude or Codex and run sandbox tasks."
 ---
 
-The virtx repository is a plugin marketplace.
-Install the agent skill without cloning the repository first:
+The VirtX skill teaches a coding agent, such as Claude Code or Codex, to run tasks in VirtX sandboxes from Python, Node.js or Rust.
+
+## Install the skill
+
+The VirtX repository is a plugin marketplace, so you can install the skill without cloning the repository. Run the line for your agent:
 
 ```bash
 claude plugin marketplace add brekkylab/virtx && claude plugin install virtx@brekkylab
 codex plugin marketplace add brekkylab/virtx && codex plugin add virtx@brekkylab
 ```
 
-The skill covers running tasks in Linux microVMs from Python, Node.js, or Rust.
-It needs the package and a virtx server, not a checkout of virtx; [Hello world](/docs/hello-world/) connects a client to a server.
+The agent also needs the VirtX package for its language and a server to run sandboxes on. See [Quick start](/docs/hello-world/).
 
 ## What the skill covers
 
-The skill follows this workflow:
+The skill tells the agent to follow this workflow:
 
 1. Install the package in the user's language and reach a server over stdio or HTTP.
-2. Prepare the image, building from a recipe or pulling from a registry, with the tools the commands need. Read the build or pull log through its end before booting from the tag.
-3. Create a sandbox with the volumes, ports, network access, CPUs, and memory the task needs. What it writes outside a volume is gone when it is removed, so keep what the next sandbox should start from in a volume, not a read-only one.
+2. Prepare the image, building from a recipe or pulling from a registry. Read the build or pull log through its end before booting from the tag.
+3. Create a sandbox with the volumes, ports, network access, CPUs and memory the task needs. Put files that later sandboxes need in a volume, and software they need in the image.
 4. Run commands and read their output: argv, a shell when one is needed, timeouts, signalling or removing jobs, and resuming a log after the last entry seen.
 5. Check the result in the files or the log lines, rather than the exit code alone, and remove the sandbox.
+
+Keep in mind:
+
+- The image must contain the tools the command needs.
+- Anything a sandbox writes outside a volume is deleted when the sandbox is removed.
+- Writes to a read-only volume fail.
+
+## Troubleshooting
+
+1. **A command fails inside the sandbox**
+
+   **Cause:** The image lacks the tool.
+
+   **Fix:** Build or pull an image that has it.
+
+2. **`exec` is refused, and no job starts**
+
+   **Cause:** The command can't start, as when it is not found.
+
+   **Fix:** Fix the command, or the image.
+
+3. **An output file is missing after the task says it is done**
+
+   **Cause:** It was written outside a volume, to a read-only volume, or by a step that failed.
+
+   **Fix:** Write outputs under a writable volume, and read the log to its end.
+
+4. **Out of space while installing**
+
+   **Cause:** A sandbox has 2 GiB over its image by default.
+
+   **Fix:** Create it with a larger `disk_gib`.
+
+## Next
+
+- [Quick start](/docs/hello-world/): connect a client to a server.
+- [Welcome to VirtX](/docs/#choose-your-path): every guide, by task.

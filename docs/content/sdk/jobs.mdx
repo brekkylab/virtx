@@ -1,0 +1,370 @@
+---
+title: "Jobs"
+description: "Reference for sandbox jobs and image jobs: follow one to its end, read its log, write to its stdin, signal or remove it."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A job is a sandbox's process, from [`exec`](/docs/sdk/sandboxes/#exec), or an image's build, pull or push.
+A call that starts one returns a `StartedJob`: awaited, it is the job; iterated, it yields the job's log; `complete` follows it to its end.
+See [Running commands](/docs/tutorials/running-commands/).
+
+| Member | Does |
+| --- | --- |
+| [`StartedJob`](#startedjob) | A job as it starts. |
+| [`SandboxJob`](#sandboxjob) | A process started in a sandbox. |
+| [`complete`](#complete) | Follows the job to its end, printing its output if `print`, and returns its exit code: `128 + signal` for one a signal ended. |
+| [`log`](#log) | Its output, from its start or after entry `after`, until its end entry: a `LogEntry` at a time, each numbered by `id` to resume from. |
+| [`signal`](#signal) | Sends a signal, such as `"SIGTERM"`, to its process and every process it started. |
+| [`write_stdin`](#write_stdin) | Writes to the stdin of a job started with `stdin`, and closes it if `eof`. |
+| [`get`](#get) | The job as the server has it now. |
+| [`remove`](#remove) | Kills its process if it runs, or cancels an image job, and forgets the job. |
+| [`ImageJob`](#imagejob) | A build, pull or push, from awaiting `build_image`, `pull_image` or `push_image`, or from `get_image_job(id)`. |
+| [`list_image_job`](#list_image_job) | The server's image jobs, or the one `id`. |
+
+## `StartedJob`
+
+A job as it starts. In Python, the job starts the first time the value is awaited or iterated, and only then; in Node.js and Rust, it starts at the call. It starts once, however the value is used: awaited, iterated, completed, or each. Each loop reads the log from its start; leaving one leaves the job running, which the job's `remove` cancels.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+class StartedJob(Generic[J, E]):
+    def __await__(self) -> Generator[Any, None, J]
+    def __aiter__(self) -> AsyncIterator[LogEntry[E]]
+    async def complete(print: bool = False) -> T
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+class StartedJob<J, E> extends Promise<J> implements AsyncIterable<E> {
+  complete(options?: { print?: boolean }): Promise<T>
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+impl<J, E> StartedJob<J, E> {
+    // awaited: Result<J, Error>
+    pub fn wait(self) -> Result<J, Error>
+    pub fn log(self) -> JobLog<J, E>
+    pub fn complete(self, print: bool) -> JobEnd<J>
+}
+```
+
+</TabItem>
+</Tabs>
+
+## `SandboxJob`
+
+A process started in a sandbox. It has its `id`, its `sandbox_id`, its `kind`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited`, `oom`, or `restarted`, for one that ran when its server restarted, keeping its sandbox. A reason this version doesn't know is kept as the string the server sent.
+Code that holds only ids gets the job back with `get_sandbox(id)`, then its `job(id)`. In Rust, `SandboxJob` has `id()`, `sandbox_id()` and `info()`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+class SandboxJob:
+    sandbox_id: str
+    id: str
+    kind: SandboxJobKind
+    pid: int
+    cmd: list[str]
+    running: bool
+    code: int | None
+    reason: SandboxJobEndReason | None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+class SandboxJob {
+  readonly sandboxId: string
+  id: string
+  kind: 'exec'
+  pid: number
+  cmd: string[]
+  running: boolean
+  code?: number
+  reason?: SandboxJobEndReason
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+impl SandboxJob {
+    pub fn id(&self) -> &str
+    pub fn sandbox_id(&self) -> &str
+    pub fn info(&self) -> &SandboxJobInfo
+}
+```
+
+</TabItem>
+</Tabs>
+
+## `complete`
+
+Follows the job to its end, printing its output if `print`, and returns its exit code: `128 + signal` for one a signal ended. An image job returns the digest it made, and raises the error it failed with.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def complete(print: bool = False) -> int   # ImageJob: -> str
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+complete(options?: { print?: boolean }): Promise<number>   // ImageJob: Promise<string>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn complete(&self, print: bool) -> JobEnd<SandboxJob>   // awaited: Result<i32, Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `log`
+
+Its output, from its start or after entry `after`, until its end entry: a `LogEntry` at a time, each numbered by `id` to resume from. A sandbox job's entries are `stdout`, `stderr`, `truncated` and `end`; an image job's are `log`, `truncated` and `end`, or the error it failed with in place of its end. An entry of a kind this version doesn't know is skipped in Python and Node.js, and is `SandboxJobEntry::Other` or `ImageJobEntry::Other` in Rust, which `complete` skips.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def log(after: int | None = None) -> AsyncIterator[LogEntry[SandboxJobEntry]]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+log(after?: number): AsyncGenerator<SandboxJobEntry>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn log(&self, after: Option<u64>) -> Events<LogEntry<SandboxJobEntry>>
+```
+
+</TabItem>
+</Tabs>
+
+## `signal`
+
+Sends a signal, such as `"SIGTERM"`, to its process and every process it started. Sandbox jobs only.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def signal(signal: str) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+signal(signal: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn signal(&self, signal: impl AsRef<str>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `write_stdin`
+
+Writes to the stdin of a job started with `stdin`, and closes it if `eof`. Await each write before the next.
+A write its process closed its stdin under part-way raises `409`, `ended`, its `written` how many bytes went in. One the server has no room for yet is turned away as `503` `capacity`, nothing of it taken, and, if its request is at most 1 MiB, sent again as [Errors](/docs/sdk/errors/) says.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def write_stdin(data: str | None = None, eof: bool = False) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+writeStdin(data?: string, eof?: boolean): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn write_stdin(&self, data: Option<impl Into<String>>, eof: bool) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `get`
+
+The job as the server has it now.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def get() -> SandboxJob
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+get(): Promise<SandboxJob>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn get(&self) -> Call<SandboxJob>
+```
+
+</TabItem>
+</Tabs>
+
+## `remove`
+
+Kills its process if it runs, or cancels an image job, and forgets the job.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+remove(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn remove(&self) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `ImageJob`
+
+A build, pull or push, from awaiting `build_image`, `pull_image` or `push_image`, or from `get_image_job(id)`. It has its `id`, its `kind`, the `reference` it points or pushes, whether it is `running`, and once it has ended, the `digest` it made or the `error` it failed with. It takes `get`, `complete`, `log` and `remove` as above. In Rust, `ImageJob` has `id()` and `info()`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+class ImageJob:
+    id: str
+    kind: ImageJobKind   # pull | push | build
+    reference: str
+    running: bool
+    digest: str | None
+    error: str | None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+class ImageJob {
+  id: string
+  kind: 'pull' | 'push' | 'build'
+  reference: string
+  running: boolean
+  digest?: string
+  error?: string
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+impl ImageJob {
+    pub fn id(&self) -> &str
+    pub fn info(&self) -> &ImageJobInfo
+}
+```
+
+</TabItem>
+</Tabs>
+
+## `list_image_job`
+
+The server's image jobs, or the one `id`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def list_image_job() -> list[ImageJob]
+async def get_image_job(id: str) -> ImageJob
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+listImageJob(): Promise<ImageJob[]>
+getImageJob(id: string): Promise<ImageJob>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn list_image_job(&self) -> Call<Vec<ImageJob>>
+pub fn get_image_job(&self, id: impl AsRef<str>) -> Call<ImageJob>
+```
+
+</TabItem>
+</Tabs>
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `404`, `not_found` | `get`, `log`, `job(id)` | The job was removed, or more than 100 jobs have ended since it did. Read its output sooner, or have the command write it to a volume. |
+| `the job was removed before it ended` | `complete` | The job was removed while `complete` waited for it. |
+| `409`, `ended` | `signal` | The job has already ended. |
+| `409`, `ended` | `write_stdin` | The job was started without `stdin`, its stdin is closed, or it has ended. A write cut part-way also has `written`, the bytes that went in. |
+| `503`, `capacity` | `write_stdin` | The process hasn't read earlier writes yet. Nothing was written; the client sends it again by itself. |
+| `source` `job` | `complete` on an `ImageJob` | The build, pull or push failed, such as a build step that exited nonzero. The log says why. |
+
+Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

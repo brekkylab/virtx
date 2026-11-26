@@ -37,7 +37,7 @@ The sandbox is made with the port Chrome listens at, on local, and no network: t
 The agent is given the browser's WebSocket at `10.0.2.2`, built from `DevToolsActivePort`.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from pathlib import Path
@@ -89,7 +89,7 @@ async with await PortForwarder.open(sandbox, int(port), on="local"):
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const { readFileSync } = require('node:fs')
@@ -147,7 +147,7 @@ forwarder.close()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 const AGENT: &str = r#"

@@ -3,7 +3,10 @@ title: "CLI"
 description: "Build and manage a server's images, and sign in, from a shell."
 ---
 
-The `virtx` command does two things from a shell: it does to a server's images what `docker` does to its own, and it signs a person in to a server, for a client to send the session's token.
+The `virtx` command does two things from a shell:
+
+- **Manages a server's images**, with commands like `docker`'s: build, pull, push, tag and remove.
+- **Signs you in to a server**, so that clients can send your session's token with each request.
 
 ## Installing
 
@@ -21,7 +24,7 @@ To have `virtx` on `PATH`, install it with one of:
 | uv | `uv tool install virtx` |
 | pipx | `pipx install virtx` |
 | npm | `npm install -g @brekkylab/virtx` |
-| Rust, from a clone of the [virtx repository](https://github.com/brekkylab/virtx) | `cargo install --path virtx-cli` |
+| Rust, from a clone of the [VirtX repository](https://github.com/brekkylab/virtx) | `cargo install --path virtx-cli` |
 
 Any of them will do: they all behave the same.
 
@@ -33,12 +36,12 @@ Any of them will do: they all behave the same.
 | `virtx images` | Lists images. |
 | `virtx inspect IMAGE…` | Prints images as JSON, each by a ref (`name:tag`), image ID or digest. |
 | `virtx tag SOURCE TARGET[:TAG]` | Points a ref at an image, moving the ref if it is in use. |
-| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. An image a sandbox or a build uses keeps its last ref. |
+| `virtx rmi IMAGE…` | Untags refs, removing an image with its last ref, or removes images by image ID or digest with every ref on them. An image a sandbox or a build uses keeps its last ref. Asks first before removing an image named by ID or digest that has several refs; `-f` skips asking. |
 | `virtx pull NAME[:TAG]` | Pulls an image from a registry, tagged as it is named. |
 | `virtx push NAME[:TAG]` | Pushes an image to the registry its ref names. |
 | `virtx save -o FILE IMAGE` | Writes an image to an OCI archive. |
 | `virtx load -i FILE -t NAME[:TAG]` | Tags the image in an OCI archive, uploading what the server lacks. |
-| `virtx image prune` | Removes every image no ref points at and no sandbox uses. |
+| `virtx image prune` | Removes every image no ref points at and no sandbox uses. Asks first; `-f` skips asking. |
 
 Each command is also `virtx image <command>`, with `ls` and `rm` for `images` and `rmi`. A registry that wants credentials gets them with `-u USER`, its password or access token read from stdin, or `--token-stdin` for a bearer token. Ctrl-C during a build, pull or push cancels the job.
 
@@ -52,7 +55,12 @@ virtx rmi jq:latest
 
 ### Which server
 
-Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names. `--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line. `--project NAME` (`$VIRTX_PROJECT`) names the project the requests belong to, a project of the user's by its name or any by its id, sent as the `virtx-project` header; without it, the requests are in the user's own, `default`. `--host` and `--server` together are refused; otherwise a flag wins over the environment and a host over a program, so `--server` starts its program with `$VIRTX_HOST` set, and `$VIRTX_HOST` is reached with `$VIRTX_STDIO` set. See [Hello world](/docs/hello-world/#run-it) for the two servers.
+Without options, the command starts `virtx-stdio` of its own version, fetched into the cache the first time, or the program `--server` (`$VIRTX_STDIO`) names.
+`--host URL` (`$VIRTX_HOST`) reaches a server over HTTP instead, with `$VIRTX_TOKEN` as its bearer token; the token comes from the environment alone, so it is never on a command line.
+
+`--project NAME` (`$VIRTX_PROJECT`) names the project the requests belong to, a project of the user's by its name or any by its id, sent as the `virtx-project` header; without it, the requests are in the user's own, `default`.
+
+You can't pass both `--host` and `--server`. Otherwise, a flag overrides the matching environment variable, and a host overrides a program: `--server` starts its program even when `$VIRTX_HOST` is set, and `$VIRTX_HOST` is used even when `$VIRTX_STDIO` is set. See [Pick a server](/docs/hello-world/#pick-a-server) for the kinds of server.
 
 ## Signing in
 
@@ -70,7 +78,11 @@ A local server, which `Client.spawn()` starts, needs no signing in.
 A client given a command for its token runs it each time it needs one: `uvx virtx token --json` (or `pipx run virtx token --json`, without uv) or `npx -y @brekkylab/virtx token --json` with nothing installed, or `virtx token --json` where an installed `virtx` is on `PATH`.  
 On Windows, where npm installs a command as a `.cmd`, the program is `npx.cmd`, or `virtx.cmd` for one `npm install -g` installed.
 
-A command is of the provider it names with `--issuer` and `--client-id`, or the one the server `login` is given names, and otherwise of what was signed in to last.
+Each sign-in command acts on one provider, chosen in this order:
+
+1. The provider named by `--issuer` and `--client-id`.
+2. The provider of the server URL given to `login`.
+3. The provider you signed in to most recently.
 
 ### A server's provider
 
@@ -78,4 +90,11 @@ A command is of the provider it names with `--issuer` and `--client-id`, or the 
 
 `virtx token` prints the ID token, which the server checks against the provider's keys. `virtx logout` asks the provider to end the session, where the provider takes that.
 
-The session is kept under `~/.config/virtx/`. The refresh token and the ID token last issued are kept in files. The files are named for the client and the provider: `virtx@idp.example.token` and `virtx@idp.example.id` for the `oidc` of the server in [Running your own server](/docs/tutorials/self-hosting/#configure). On Linux and macOS the directory is set to `0700`, the files are written `0600`, readable by their owner alone, and a file there that the directory's owner does not own is not read.
+The session is kept under `~/.config/virtx/`. The refresh token and the ID token last issued are kept in files, beside `oidc.json`, which holds the provider last signed in to, with its client secret if one was given. The token files are named for the client and the provider: `virtx@idp.example.token` and `virtx@idp.example.id` for the `oidc` of the server in [Running your own server](/docs/tutorials/self-hosting/#configure).
+
+On Linux and macOS the directory is set to `0700`, the files are written `0600`, readable by their owner alone, and a file there that the directory's owner does not own is not read.
+
+## Next
+
+- [Working with images](/docs/tutorials/images/): the same image calls from code.
+- [Running your own server](/docs/tutorials/self-hosting/): the server `virtx login` signs in to.

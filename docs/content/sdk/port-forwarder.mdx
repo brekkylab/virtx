@@ -1,0 +1,206 @@
+---
+title: "PortForwarder"
+description: "Reference for PortForwarder, which forwards a sandbox's TCP port, in the sandbox or on local, until it is closed."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A `PortForwarder` forwards one of a sandbox's ports until it is closed. A port is on one side:
+
+- **In the sandbox** (`on="sandbox"`, the default): a service listening in the sandbox, reached at the forwarder's `local` address on this machine.
+- **On local** (`on="local"`): a service on this machine. The sandbox's processes reach it at `10.0.2.2:<port>`, and the forwarder carries each connection to `local`.
+
+The sandbox has to be made with the port on that side, in `create_sandbox`'s `ports`. A forwarder runs on its client's session, so the client's last close stops it.
+See [Networks and ports](/docs/tutorials/networks-ports/).
+
+| Member | Does |
+| --- | --- |
+| [`open`](#open) | Forwards one of the sandbox's ports, on the side `on`. Returns once it is open. |
+| [`port`, `on`, `local`](#port-on-local) | The port, its side, and its local end as `host:port`. |
+| [`last_error`](#last_error) | Why the last connection that failed did; none again once a later connection reaches the port. |
+| [`wait_closed`](#wait_closed) | Waits until it has ended, and returns why. |
+| [`close`](#close) | Stops forwarding; the sandbox keeps its port. |
+
+## `open`
+
+Forwards the port `port` of `sandbox`, one it was made with on the side `on`, and returns once it is open.
+
+`local`, as `host:port`, is its local end:
+
+- **For a port in the sandbox:** the address it is reached at. Without it, a free port on `127.0.0.1`, or, from a server on this machine, the address the server returned for the port.
+- **For a port on local:** where its connections are carried, `127.0.0.1:<port>` without it.
+
+A port on local that the sandbox wasn't made with is refused with `404`.
+
+In Python, `open` is awaited, and the forwarder is a context manager: `async with await PortForwarder.open(sandbox, 8000) as forwarder:`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@classmethod
+async def open(
+    sandbox: Sandbox, port: int, *, on: PortSide = "sandbox", local: str | None = None
+) -> PortForwarder
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+static open(
+  sandbox: Sandbox,
+  port: number,
+  options?: { on?: PortSide; local?: string },
+): Promise<PortForwarder>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn open(
+    sandbox: &Sandbox,
+    port: u16,
+    on: PortSide,
+    local: Option<&str>,
+) -> Call<PortForwarder>
+```
+
+</TabItem>
+</Tabs>
+
+`PortSide` is `"sandbox"` or `"local"`; in Rust, `PortSide::Sandbox` or `PortSide::Local`.
+
+## `port`, `on`, `local`
+
+The port, its side, and its local end as `host:port`: for a port in the sandbox, the address it is reached at; for a port on local, where its connections are carried.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+port: int
+on: PortSide
+local: str
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+readonly port: number
+readonly on: PortSide
+readonly local: string
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn port(&self) -> u16
+pub fn on(&self) -> PortSide
+pub fn local(&self) -> &str
+```
+
+</TabItem>
+</Tabs>
+
+## `last_error`
+
+Why the last connection through the forwarder that failed did: its WebSocket refused, closed before the port sent a byte, or its target not reached, with the server's reason if it gave one. The message names the port, and `status` is the server's when it refused the WebSocket. It is none until a connection fails, and none again once a later connection reaches the port. Each failure is also logged as a warning.
+
+A server on this machine reaches the port itself, not through the forwarder, so a port in the sandbox at the server's own address, and a port on local over stdio, have no `last_error`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@property last_error: VirtxError | None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+readonly lastError: VirtxError | null
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn last_error(&self) -> Option<Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `wait_closed`
+
+Waits until the forwarder has ended, and returns the error that ended it: for a port on local, `404` once its sandbox is gone. A port in the sandbox is forwarded until it is closed.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def wait_closed() -> VirtxError
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+waitClosed(): Promise<VirtxError>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn wait_closed(&self) -> Closed // awaited, or .wait() without a runtime: Error
+```
+
+</TabItem>
+</Tabs>
+
+## `close`
+
+Stops forwarding; the sandbox keeps its port, and another forwarder can open it again. Closing twice does nothing. In Rust, dropping it does the same.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def close() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+close(): void
+[Symbol.dispose](): void
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+impl Drop for PortForwarder
+```
+
+</TabItem>
+</Tabs>
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `404` | `open` with `on="local"` | The sandbox wasn't made with this port on local. Create it with the port in `ports`, on local. |
+| `404` | `wait_closed` | The sandbox of a port on local is gone. |
+| A connection closes at once, and `last_error` is set | Connections through the forwarder | Nothing listens on the port in the sandbox yet, or, for a port on local, nothing listens at `local`. Start the service first, then connect again. |
+
+Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

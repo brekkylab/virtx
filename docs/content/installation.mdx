@@ -1,0 +1,133 @@
+---
+title: "Installation"
+description: "What the client and the machine that runs sandboxes need, where the server comes from, and fixes for a first run."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+VirtX has two parts: the client package your code imports, and a server that runs the sandboxes.
+You install the client on the machine your code runs on. The server runs on that machine too, unless you use VirtX cloud or your own server on another machine.
+
+## Requirements
+
+### Client
+
+- **Python:** 3.11 or later.
+- **Node.js:** 22 or later.
+- **Rust:** 1.89 or later.
+
+### The machine that runs sandboxes
+
+With `Client.spawn()`, this is your machine. With your own server, it is the server's machine.
+That machine is the host. The guest inside each sandbox is always Linux, whatever the host runs.
+
+- **Linux:** a kernel with KVM, `/dev/kvm` open to your user, and hardware virtualization enabled in the firmware. Most kernels have KVM built in.
+- **macOS:** Apple silicon only. `Hypervisor.framework` is built in, so there is nothing to turn on.
+- **Windows:** Windows 11 or later, x86_64 only, with the Windows Hypervisor Platform turned on (below).
+
+With VirtX cloud, your machine runs only the client, so these requirements don't apply.
+
+### Windows
+
+The Windows Hypervisor Platform is off by default.
+With virtualization enabled in the firmware, turn it on from an administrator PowerShell, then restart:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+```
+
+### GPU (optional)
+
+To give sandboxes a GPU, the host needs a Vulkan loader.
+Every sandbox already includes the guest side of Vulkan, so your image doesn't need it. See [Using GPUs](/docs/tutorials/using-gpus/).
+
+## Packages
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```sh
+pip install virtx
+```
+
+This also installs the `virtx` command, for signing in to a server and managing its images.
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```sh
+npm install @brekkylab/virtx
+```
+
+This also installs the `virtx` command, which `npx virtx` runs, for signing in to a server and managing its images.
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```sh
+cargo add virtx
+cargo add tokio --features macros,rt-multi-thread
+```
+
+`tokio` is the runtime the examples on these pages run on.
+
+</TabItem>
+</Tabs>
+
+## Where the server comes from
+
+You don't install the local server yourself.
+The first time your program calls `Client.spawn()` (`Client::spawn_virtx` in Rust), the client downloads `virtx-stdio`, the local server, from VirtX's GitHub releases. It downloads the version that matches the client, checks it against the release's `SHA256SUMS`, and caches it for later runs.
+
+The cache is a `virtx` folder in the platform's cache directory:
+
+- **Linux:** `$XDG_CACHE_HOME`, or `~/.cache`.
+- **macOS:** `~/Library/Caches`.
+- **Windows:** `%LOCALAPPDATA%`.
+
+To change this behavior, set one of these environment variables:
+
+- `VIRTX_HOME`: use another cache directory.
+- `VIRTX_DIST_URL`: download from a mirror instead of GitHub.
+- `VIRTX_STDIO`: run a `virtx-stdio` you already have, and download nothing.
+
+[Environment variables](/docs/sdk/environment-variables/) lists every variable.
+
+VirtX cloud needs no local server, only an API key from the [console](/signin/). To run a server for your team, see [Running your own server](/docs/tutorials/self-hosting/). [Pick a server](/docs/hello-world/#pick-a-server) in Quick start shows how to connect to each.
+
+## Troubleshooting
+
+1. **`boot_failed`, when a sandbox is created**
+
+   **Cause:** The machine that runs sandboxes can't boot a VM.
+
+   **Fix:** **Linux:** open `/dev/kvm` to your user with `sudo usermod -aG kvm $USER`, then log in again. **Windows:** turn on the [Hypervisor Platform](#windows). **Any OS:** enable virtualization (Intel VT-x, AMD-V) in the firmware. To see why, set `KRUN_LOG=debug` in the server's environment: the error then includes the hypervisor's messages after `last logged`.
+
+2. **`no virtx-stdio release v… is published for macos-x86_64`**
+
+   **Cause:** VirtX runs on Apple silicon only, not on an Intel Mac. The same message names any other platform without a release.
+
+   **Fix:** Use [VirtX cloud](/docs/hello-world/#virtx-cloud), or a [server of your own](/docs/tutorials/self-hosting/) on a supported machine.
+
+3. **`fetching …/virtx/releases/…`, on the first `Client.spawn()`**
+
+   **Cause:** The server's download failed.
+
+   **Fix:** Check the network or proxy, set `VIRTX_DIST_URL` to a mirror, or download the server yourself and point `VIRTX_STDIO` at it.
+
+4. **`… does not match its SHA256SUMS`**
+
+   **Cause:** The download came back changed, as a proxy may do.
+
+   **Fix:** Try again, or set `VIRTX_STDIO` as above.
+
+5. **`another fetch of virtx-stdio v… has held …`**
+
+   **Cause:** Another program on this machine has been downloading the same server for five minutes.
+
+   **Fix:** Wait for that download to finish, or stop that program, then run again.
+
+## Next
+
+- [Quick start](/docs/hello-world/): run a command in a sandbox.
+- [Setting up sandboxes](/docs/tutorials/setting-sandboxes/): give a sandbox the CPUs, memory, network and storage a task needs.

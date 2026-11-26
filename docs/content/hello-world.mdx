@@ -1,32 +1,40 @@
 ---
-title: "Hello world"
-description: "Pull an image, run echo in a sandbox, and read its output, on virtx cloud, on your machine, or on your own server."
+title: "Quick start"
+description: "Install the VirtX client, run echo in a sandbox, and read its output, on your machine, on VirtX cloud or on your own server."
 ---
 
-import { Tabs, TabItem } from "@astrojs/starlight/components";
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 import clientServer from "../images/client-server.svg";
 
-This page runs one program that prints `Hello, world!` from a sandbox.
-The program is the same wherever the sandbox runs; only the line that makes the client changes.
+In this tutorial you install the VirtX client and run a program that prints `Hello, world!` from inside a sandbox.
 
-## Install
+## Before you begin
+
+- Python 3.11 or later, Node.js 22 or later, or Rust 1.89 or later.
+- A server to run the sandbox on. The program below starts one on your machine, which requires Linux with KVM, macOS on Apple silicon, or Windows 11 (x86_64). See the [requirements](/docs/installation/#requirements).
+
+<Aside type="caution">
+If your machine can't run VMs, for example an Intel Mac, use [VirtX cloud](#virtx-cloud) or [your own server](#your-own-server) instead, and change one line of the program as that section shows.
+</Aside>
+
+## Step 1: Install the client
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```sh
 pip install virtx
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```sh
 npm install @brekkylab/virtx
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```sh
 cargo add virtx
@@ -36,13 +44,12 @@ cargo add tokio --features macros,rt-multi-thread
 </TabItem>
 </Tabs>
 
-## The program
+## Step 2: Run a command in a sandbox
 
-It pulls `alpine`, boots a sandbox from it, runs `echo` in it, prints what it wrote, and removes the sandbox.
-As written, it starts a server on your machine with `Client.spawn()`; [Run it](#run-it) shows the line for each kind of server.
+Save this program and run it:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 import asyncio
@@ -64,7 +71,7 @@ asyncio.run(main())
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const { Client } = require('@brekkylab/virtx')
@@ -88,7 +95,7 @@ main()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use virtx::{Client, SandboxCreateArgs, SandboxExecArgs};
@@ -100,8 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = client
         .create_sandbox(&SandboxCreateArgs::new("alpine:latest"))
         .await?;
-    sandbox.exec(&SandboxExecArgs::new(["echo", "Hello, world!"])).complete(true).await?;
-    sandbox.remove().await?;
+    let result = sandbox
+        .exec(&SandboxExecArgs::new(["echo", "Hello, world!"]))
+        .complete(true)
+        .await;
+    sandbox.remove().await?; // remove the sandbox even if the command failed
+    result?;
     Ok(())
 }
 ```
@@ -109,37 +120,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 </TabItem>
 </Tabs>
 
-It prints:
+The program prints:
 
 ```text frame="terminal" title="Output"
 Hello, world!
 ```
 
+The first run takes longer, because `Client.spawn()` downloads the server (`virtx-stdio`) and caches it for later runs.
 
-## Run it
+## What the program does
 
-The program is a client, and it needs a server to run the sandbox on.
-Pick one:
+1. `Client.spawn()` starts a VirtX server as a child process of your program. The server stops when the client closes.
+2. `pull_image` copies the `alpine:latest` image from Docker Hub to the server. A sandbox can only boot from an image the server already has.
+3. `create_sandbox` boots a sandbox from that image.
+4. `exec` starts `echo` in the sandbox, and `complete(print=True)` waits for it to finish and prints its output.
+5. `remove` deletes the sandbox and everything it wrote.
 
-- virtx cloud, hosted for you.
-- A server on your machine, which the client starts itself.
-- A server you run on another machine.
+## Pick a server
 
-<img src={clientServer.src} width={clientServer.width} height={clientServer.height} alt="A virtx client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by virtx." />
+The program is the same wherever the server runs. To use another server, replace the line that creates the client.
 
-### virtx cloud
+<img src={clientServer.src} width={clientServer.width} height={clientServer.height} alt="A VirtX client reaches a server that is local, on the client machine; remote, on another machine; or in the cloud, hosted by VirtX." />
 
-Sign in to the [console](/signin/) with Google, and make an API key in a project: every organization has one named `default`.
-The console shows the key once. Put it in the environment:
+### VirtX cloud
 
-```sh
-export VIRTX_API_KEY=vx_sk_...
-```
+1. Sign in to the [console](/signin/) with Google.
+2. Create an API key in a project. Every organization starts with a project named `default`. The console shows the key only once.
+3. Set the key in your environment:
 
-Then, in the program, connect to virtx cloud with the key in place of `Client.spawn()`:
+   ```sh
+   export VIRTX_API_KEY=vx_sk_...
+   ```
+
+4. Replace `Client.spawn()` with a client that connects to VirtX cloud with the key:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 import os
@@ -153,7 +169,7 @@ async with Client.connect(
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const client = Client.connect(
@@ -163,7 +179,7 @@ const client = Client.connect(
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use virtx::Auth;
@@ -179,32 +195,24 @@ let client = Client::connect(
 </TabItem>
 </Tabs>
 
-The key is its project's, so the program names no project, and `cloud.virtx.sh` answers from the region of virtx cloud nearest the machine it runs on.
+An API key belongs to one project, so you don't pass a project in code. `cloud.virtx.sh` answers from the VirtX cloud region nearest to the machine the program runs on.
 
-### On your machine (stdio)
+### Your own server
 
-Run the program as written.
-`Client.spawn()` starts a server as a child process of your program, talks to it over its stdin and stdout, and stops it when the client closes, so there is nothing to install or keep running.
-Your machine must meet the [requirements](https://github.com/brekkylab/virtx#requirements) for running VMs.
+Use this when your team runs `virtx-server-tcp`, as [Running your own server](/docs/tutorials/self-hosting/) describes.
 
-### On your own server (TCP)
+1. Sign in to the server once. `uvx` (or `pipx run`) and `npx` run the `virtx` command without installing it. To install it, see [Installing](/docs/reference/cli/#installing).
 
-Set up `virtx-server-tcp` on a machine of yours, as [Running your own server](/docs/tutorials/self-hosting/) shows.
+   ```sh
+   uvx virtx login https://virtx.example
+   # or
+   npx -y @brekkylab/virtx login https://virtx.example
+   ```
 
-Sign in to it once with the `virtx` command, which `uvx` or `npx` runs without installing; to install it instead, see [Installing](/docs/reference/cli/#installing):
-
-```sh
-uvx virtx login https://virtx.example                 # pipx run virtx, without uv
-
-# or
-
-npx -y @brekkylab/virtx login https://virtx.example
-```
-
-Then, in the program, connect with the token it prints in place of `Client.spawn()`:
+2. Replace `Client.spawn()` with a client that connects to the server. `CommandAuth` runs `virtx token` to get a token, and runs it again whenever the token expires:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import CommandAuth
@@ -216,7 +224,7 @@ async with Client.connect(
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const client = Client.connect(
@@ -226,7 +234,7 @@ const client = Client.connect(
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use virtx::Auth;
@@ -242,9 +250,24 @@ let client = Client::connect(
 </TabItem>
 </Tabs>
 
-`virtx token` gives the token, refreshed as needed; see the CLI's [Signing in](/docs/reference/cli/#signing-in).
+See [Signing in](/docs/reference/cli/#signing-in) in the CLI reference for `login`, `token` and `logout`.
 
-## Next
+## If something goes wrong
 
-- [Running commands](/docs/tutorials/running-commands/): how the command above is run, followed, and stopped.
-- [Mounting volumes](/docs/tutorials/mounting-volumes/): keep what a sandbox writes for the next one.
+1. **`boot_failed`**
+
+   **Cause:** Your machine can't boot a VM.
+
+   **Fix:** See [Troubleshooting](/docs/installation/#troubleshooting) in Installation.
+
+2. **`no virtx-stdio release ... is published for macos-x86_64`**
+
+   **Cause:** Intel Macs can't run sandboxes locally.
+
+   **Fix:** Use [VirtX cloud](#virtx-cloud).
+
+## Next steps
+
+- [Setting up sandboxes](/docs/tutorials/setting-sandboxes/): give a sandbox the CPUs, memory, network and storage a task needs.
+- [Running commands](/docs/tutorials/running-commands/): stream output, set timeouts, and stop commands.
+- [Installation](/docs/installation/): the full requirements and where the server is downloaded from.

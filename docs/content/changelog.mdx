@@ -1,0 +1,116 @@
+---
+title: "Changelog"
+description: "What changed in each VirtX release, newest first."
+tableOfContents:
+  maxHeadingLevel: 2
+---
+
+import { Aside } from "@astrojs/starlight/components";
+
+What changed in each release of VirtX, newest first. Each release's full notes, the pull requests behind them and the files to download are on [GitHub releases](https://github.com/brekkylab/virtx/releases).
+
+## v0.2.1
+
+*November 23, 2026*
+
+<Aside type="caution" title="Breaking changes, Rust only">
+
+Python and Node.js code written against 0.2.0 runs unchanged.
+
+- **`virtx::Error::Status` is a struct variant**, `Status { status, code, message, written }`. Match it with `Status { status, .. }`. ([#352](https://github.com/brekkylab/virtx/pull/352))
+- **`virtx_core::Error::Status` has a third field.** Match it with `Status(status, body, ..)`. ([#352](https://github.com/brekkylab/virtx/pull/352))
+- **`SandboxJobEntry` and `ImageJobEntry` are `#[non_exhaustive]`**, with `Other(UnknownEntry)` for a kind a later server adds, so a `match` on them needs a `_` arm. ([#352](https://github.com/brekkylab/virtx/pull/352))
+
+</Aside>
+
+### New features
+
+- **Sandboxes have names.** `create_sandbox` takes a `name` no other sandbox has, and [`find_sandbox`](/docs/sdk/sandboxes/#find_sandbox) finds the sandbox by it. ([#314](https://github.com/brekkylab/virtx/pull/314))
+- **A job's stdin.** A job started with stdin reads what is written to it, and one that doesn't read holds back only its writer. ([#321](https://github.com/brekkylab/virtx/pull/321))
+- **A job says why it ended**: its timeout, its cancelling, its sandbox's removal, or its machine's exit. ([#326](https://github.com/brekkylab/virtx/pull/326))
+- **A port says what it's for**, whether it speaks HTTP, and whom it lets in. ([#313](https://github.com/brekkylab/virtx/pull/313))
+- **Output and the end in one request.** An exec that accepts an event stream is answered with its log, and the clients read both in one request. ([#315](https://github.com/brekkylab/virtx/pull/315))
+- **Sign-in from the Python and Node.js packages.** The `virtx` command they carry has `login` and the other sign-in commands. ([#317](https://github.com/brekkylab/virtx/pull/317))
+
+### Improvements
+
+- A command's processes, memory and CPU are held in cgroups, so a fork bomb leaves its sandbox answering, and a command that runs out of memory ends with `oom`. ([#324](https://github.com/brekkylab/virtx/pull/324))
+- A job ends when its process does, not when a program it left running lets go of its output. ([#323](https://github.com/brekkylab/virtx/pull/323))
+- The clients retry a request the server turns away for now (`429` quota, `503` capacity), keep reading a job's log past a broken connection, and give the server's error code in the error. ([#305](https://github.com/brekkylab/virtx/pull/305))
+- A sandbox on a self-hosted server survives the server's restart, parked, and keeps its last 100 ended jobs. ([#310](https://github.com/brekkylab/virtx/pull/310))
+- A self-hosted server pulls Docker Hub images through the mirror its config names, none by default. ([#309](https://github.com/brekkylab/virtx/pull/309))
+- An image a sandbox stands on keeps its last tag: removing it is refused `409` and nothing is removed. ([#307](https://github.com/brekkylab/virtx/pull/307))
+- A forwarded port whose connection reaches nothing says why, as the forwarder's last error and a warning. ([#318](https://github.com/brekkylab/virtx/pull/318))
+- An image whose config sets an empty `WorkingDir` boots, and builds on it start in `/`. ([#329](https://github.com/brekkylab/virtx/pull/329))
+
+### Fixes
+
+- A guest that powers itself off ends its machine on x86_64 Linux, and one that halts or stops answering ends it once silent. ([#300](https://github.com/brekkylab/virtx/pull/300))
+- A `PATCH` to a file is refused, so no file is written in part. ([#301](https://github.com/brekkylab/virtx/pull/301))
+- The `virtx` command keeps its sign-in session in a directory only its owner can read, and its files `0600`. ([#298](https://github.com/brekkylab/virtx/pull/298))
+- `virtx-server-tcp` stops on Ctrl+Break on Windows as on Ctrl+C. ([#325](https://github.com/brekkylab/virtx/pull/325))
+
+## v0.2.0
+
+*November 18, 2026*
+
+<Aside type="caution" title="Breaking changes">
+
+0.2.0 replaces 0.1.x's client entirely: the console API is gone, and a sandbox runs on a server that a client spawns or connects to. Code written against 0.1.x doesn't run unchanged.
+
+- **One `Client` replaces `ConsoleClient` and `ImageClient`.** Start one with `Client.spawn()` (on this machine) or `Client.connect(url)` (a server elsewhere), then `client.create_sandbox(image, ...)`. The image calls (`build_image`, `pull_image`, `push_image`, `list_image`, `tag_image`, `remove_image`, ...) are on the client. Node.js has the same in camelCase.
+- **`console.exec(cmd)` is `sandbox.exec(cmd)`**, which answers a [job](/docs/sdk/jobs/): `.complete()` for its exit code, or read its log as it runs. ([#141](https://github.com/brekkylab/virtx/pull/141))
+- **Files go over WebDAV**: `sandbox.read_file`, `write_file` and the other [Files](/docs/sdk/files/) calls replace `console.read` and `console.write`. ([#109](https://github.com/brekkylab/virtx/pull/109))
+- **No start and stop.** A sandbox's machine stops when idle and boots again when used; `console.close()` is `sandbox.remove()`. ([#110](https://github.com/brekkylab/virtx/pull/110))
+- **Ports** are `create_sandbox(ports=[80])`, reached through a [PortForwarder](/docs/sdk/port-forwarder/) on a loopback address.
+- **Host mounts are gone, and with them the need for FUSE.** Use a [volume](/docs/tutorials/mounting-volumes/).
+- **`Recipe` takes only `run`, `env` and `workdir`**: `Step.copy` and `Recipe.from_dockerfile` are gone.
+- **Snapshots are no longer made or served.** ([#255](https://github.com/brekkylab/virtx/pull/255))
+- **`create_sandbox` doesn't pull its image.** A tag the server doesn't hold is refused `404`; call `pull_image` or `build_image` first. ([#146](https://github.com/brekkylab/virtx/pull/146))
+- **Python 3.11 or newer** (was 3.10), and **Node.js 22 or newer** (was 18). ([#220](https://github.com/brekkylab/virtx/pull/220))
+- **The server is `virtx-stdio`** (what `Client.spawn()` starts) or `virtx-server-tcp` (over HTTP), in place of `virtx-uvm`. `VIRTX_UVM_VERSION` is now `VIRTX_STDIO_VERSION`; `VIRTX_CONSOLE`, `VIRTX_MOUNT_*` and `VIRTX_UVM_PINNED_VERSION` are gone. See [Environment variables](/docs/sdk/environment-variables/). ([#107](https://github.com/brekkylab/virtx/pull/107))
+
+</Aside>
+
+### New features
+
+- **Sandboxes, images and volumes over plain HTTP**, with jobs, ports, cancellation, and files over WebDAV.
+- **[Projects](/docs/tutorials/projects/).** A server's images, volumes and sandboxes belong to a project, each with its own members; `set_project` or `VIRTX_PROJECT` names it. ([#257](https://github.com/brekkylab/virtx/pull/257))
+- **Sign-in with OpenID Connect** on a remote server, and `virtx login`. ([#205](https://github.com/brekkylab/virtx/pull/205))
+- **[The `virtx` command](/docs/reference/cli/)** builds, lists, tags, pulls, pushes and removes images. ([#84](https://github.com/brekkylab/virtx/pull/84))
+- **[Running your own server](/docs/tutorials/self-hosting/)**: `virtx-server-tcp` is released beside `virtx-stdio`. ([#212](https://github.com/brekkylab/virtx/pull/212), [#282](https://github.com/brekkylab/virtx/pull/282))
+- **VirtX's programs at `/abin` and its library at `/alib`** in every sandbox. ([#142](https://github.com/brekkylab/virtx/pull/142))
+- **`virtx-core` is on crates.io**, with `libvirtx_core` linked into `virtx`. ([#203](https://github.com/brekkylab/virtx/pull/203))
+- A client opens and closes without blocking on its runtime. ([#204](https://github.com/brekkylab/virtx/pull/204))
+
+### Fixes
+
+- `ensure_virtx()` fetches the server again when the one it has is stale. ([#81](https://github.com/brekkylab/virtx/pull/81))
+- A volume can't be removed while a sandbox mounts it. ([#201](https://github.com/brekkylab/virtx/pull/201))
+- A call for an image the server doesn't hold is refused `404 not_found`, naming the image. ([#209](https://github.com/brekkylab/virtx/pull/209))
+- A pull refused for want of credentials says the repository may not exist or may be private. ([#144](https://github.com/brekkylab/virtx/pull/144))
+- A path with a dot segment is refused by the server and resolved by the client. ([#192](https://github.com/brekkylab/virtx/pull/192))
+- Of two conditional `PUT`s to one file, one lands and the other is refused `412`. ([#207](https://github.com/brekkylab/virtx/pull/207))
+- `PortForwarder` no longer piles up completed tasks. ([#137](https://github.com/brekkylab/virtx/pull/137))
+- Races in the image store under concurrent pulls, builds and removals. ([#148](https://github.com/brekkylab/virtx/pull/148), [#187](https://github.com/brekkylab/virtx/pull/187))
+
+## v0.1.2
+
+*October 14, 2026*
+
+- `close()` waits until the session is over, and Python has `HostMount.unmount()`. ([#71](https://github.com/brekkylab/virtx/pull/71))
+- macOS needs FUSE-T 1.2.9 or newer. ([#70](https://github.com/brekkylab/virtx/pull/70))
+- A mount leaves the process's `SIGCHLD` handling as it found it. ([#42](https://github.com/brekkylab/virtx/pull/42))
+
+## v0.1.1
+
+*October 2, 2026*
+
+- `ensure_virtx()`, to fetch the server ahead of time. ([#64](https://github.com/brekkylab/virtx/pull/64))
+- The Linux packages run on glibc 2.28 and later. ([#62](https://github.com/brekkylab/virtx/pull/62))
+
+## v0.1.0
+
+*October 1, 2026*
+
+The first release: sessions in Linux microVMs booted from OCI images, with networking, volumes, image building, and packages on PyPI, npm and crates.io.

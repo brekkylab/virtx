@@ -20,21 +20,21 @@ The guest reaches public addresses, but not this host's loopback or private addr
 Pass `network=False` to `create_sandbox` to block its outbound connections and name lookups, for code that should not talk to anything.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 sandbox = await client.create_sandbox("alpine:latest", network=False)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const sandbox = await client.createSandbox('alpine:latest', { network: false })
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let sandbox = client
@@ -48,13 +48,13 @@ let sandbox = client
 ## Ports
 
 A port carries plain TCP, so it reaches any service that listens on one: a web server, SSH, a VNC desktop, a database, or your own protocol.
-virtx passes the bytes through without looking at them.
+VirtX passes the bytes through without looking at them.
 
 Each port is on one side: `on="sandbox"`, the default, or `on="local"`.
 A port is its side and its number, so 8080 in the sandbox and 8080 on local are two ports, and a sandbox can have both.
 Either is forwarded by a `PortForwarder`, and its local end, `forwarder.local`, is the address on your machine it connects: where you reach a port in the sandbox, or what the sandbox reaches through a port on local.
 
-<img src={portForwarding.src} width={portForwarding.width} height={portForwarding.height} alt="Your machine and the server machine, a port on each row. A port in the sandbox: a connection to the PortForwarder at 127.0.0.1:54321 is carried in a WebSocket to …/ports/8000, and the virtx server connects it to port 8000 in the sandbox. A port on local: a process in the sandbox connects to 10.0.2.2:9222, the virtx server carries it in a WebSocket to …/client-ports/9222, and the PortForwarder connects it to 127.0.0.1:9222. In both, the PortForwarder opens the WebSocket." />
+<img src={portForwarding.src} width={portForwarding.width} height={portForwarding.height} alt="Your machine and the server machine, a port on each row. A port in the sandbox: a connection to the PortForwarder at 127.0.0.1:54321 is carried in a WebSocket to …/ports/8000, and the VirtX server connects it to port 8000 in the sandbox. A port on local: a process in the sandbox connects to 10.0.2.2:9222, the VirtX server carries it in a WebSocket to …/client-ports/9222, and the PortForwarder connects it to 127.0.0.1:9222. In both, the PortForwarder opens the WebSocket." />
 
 ### A port in the sandbox
 
@@ -77,7 +77,7 @@ A sandbox found again with `get_sandbox`, `list_sandbox` or `find_sandbox`, from
 In the example below, the sandbox opens port 8000 and runs an HTTP server on it, and the forwarder makes it reachable at a local address that a browser or `curl` can open:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import PortForwarder
@@ -90,7 +90,7 @@ with await PortForwarder.open(sandbox, 8000) as forwarder:
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const { PortForwarder } = require('@brekkylab/virtx')
@@ -104,7 +104,7 @@ forwarder.close()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let sandbox = client
@@ -159,7 +159,7 @@ A port on local, like a port in the sandbox, does not need `network`.
 In the example below, the sandbox has no network, and reads what a browser started on your machine with `--remote-debugging-port=9222` says about itself:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import PortForwarder, PortSpec
@@ -173,7 +173,7 @@ async with await PortForwarder.open(sandbox, 9222, on="local"):
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const { PortForwarder } = require('@brekkylab/virtx')
@@ -189,7 +189,7 @@ forwarder.close()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let cdp = PortSpec::new(9222).on(PortSide::Local);
@@ -213,21 +213,21 @@ To carry the connections somewhere else than `127.0.0.1:<port>`, such as a devic
 The sandbox still sees the port it was made with:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 forwarder = await PortForwarder.open(sandbox, 9222, on="local", local="192.168.0.20:9222")
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const forwarder = await PortForwarder.open(sandbox, 9222, { on: 'local', local: '192.168.0.20:9222' })
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let forwarder =
@@ -253,7 +253,7 @@ A port in `ports` is a number, a port in the sandbox, or a spec with its side an
 The label comes back with the port wherever the sandbox is found again, so it is what tells its ports apart there:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import PortSpec
@@ -268,7 +268,7 @@ print(found.ports[0].label)  # dev server
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const sandbox = await client.createSandbox('node:22', {
@@ -280,7 +280,7 @@ console.log(found.ports[0].label) // dev server
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let dev_server = PortSpec::new(5173).label("dev server");
@@ -294,3 +294,37 @@ println!("{:?}", found.info().ports[0].label); // Some("dev server")
 
 </TabItem>
 </Tabs>
+
+## Troubleshooting
+
+1. **`400`, `invalid`, `ports: … is not a port, or is given twice`**
+
+   **Cause:** Port `0`, or a port listed twice on one side.
+
+   **Fix:** List each port once per side, from 1 to 65535.
+
+
+2. **`400`, `invalid`, `ports: …'s label is past 128 characters`**
+
+   **Cause:** The label is too long.
+
+   **Fix:** Shorten it to 128 characters.
+
+
+3. **`404` from `PortForwarder.open` with `on="local"`**
+
+   **Cause:** The sandbox wasn't made with that port on local.
+
+   **Fix:** Create the sandbox with the port in `ports`, as `PortSpec(port, on="local")`.
+
+
+4. **A connection closes at once, and the forwarder's last error is set**
+
+   **Cause:** Nothing listens on the port in the sandbox yet, or, for a port on local, nothing listens at the forwarder's local end.
+
+   **Fix:** Start the service first, then connect again.
+
+## Next
+
+- [Running commands](/docs/tutorials/running-commands/): start the service a port reaches.
+- [Driving your browser from a sandbox](/docs/guides/your-browser/): use a port on local to give an agent your browser.

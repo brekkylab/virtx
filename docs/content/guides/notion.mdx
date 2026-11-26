@@ -17,16 +17,16 @@ If a menu or tab differs, follow the [Notion authorization guide](https://develo
 
 1. As a workspace owner, create an internal connection and give it the **Read content** capability.
 2. On the top-level page you want to expose, open the **•••** menu, select **Add connections**, and choose your connection.
-3. Set `NOTION_API_KEY` in the environment of the program running the virtx client, using the API token from the connection's **Configuration** tab.
+3. Set `NOTION_API_KEY` in the environment of the program running the VirtX client, using the API token from the connection's **Configuration** tab.
 
 ## Mount and list pages
 
 With a connected client, mount Notion at `notion` inside a new volume, then mount that volume at `/context` in the sandbox. The command lists the top-level pages visible to the connection.
 
-The virtx server calls the Notion API, so a self-hosted server needs access to `api.notion.com` and the sandbox can run with its network disabled.
+The VirtX server calls the Notion API, so a self-hosted server needs access to `api.notion.com` and the sandbox can run with its network disabled.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 import os
@@ -45,7 +45,7 @@ await sandbox.exec(["ls", "/context/notion/pages"]).complete(print=True)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const apiKey = process.env.NOTION_API_KEY
@@ -62,7 +62,7 @@ await sandbox.exec(['ls', '/context/notion/pages']).complete({ print: true })
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use virtx::{MountSource, SandboxCreateArgs, SandboxExecArgs, SandboxVolume};

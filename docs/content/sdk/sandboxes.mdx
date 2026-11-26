@@ -1,0 +1,362 @@
+---
+title: "Sandboxes"
+description: "Reference for making, finding and removing sandboxes, and the ports they open."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A sandbox is a Linux microVM booted from an image. A `Sandbox` carries its client and acts on itself: it runs [jobs](/docs/sdk/jobs/) and reads and writes its [files](/docs/sdk/files/), its root as its processes see it.
+See [Setting up sandboxes](/docs/tutorials/setting-sandboxes/) for the options `create_sandbox` takes.
+
+| Member | Does |
+| --- | --- |
+| [`create_sandbox`](#create_sandbox) | Makes a sandbox of `image`, with the options given. |
+| [`list_sandbox`](#list_sandbox) | The server's sandboxes. |
+| [`get_sandbox`](#get_sandbox) | The sandbox `id`. |
+| [`find_sandbox`](#find_sandbox) | The sandbox made with `name`; none if no sandbox has it. |
+| [`Sandbox`](#sandbox) | A sandbox as the server returned it, and the client that reaches it. |
+| [`exec`](#exec) | **Job.** Runs `cmd`, an argv, and returns the [job](/docs/sdk/jobs/). |
+| [`jobs`](#jobs) | Its jobs, or the job `id` in it. |
+| [`resize`](#resize) | Changes its vCPUs and memory from its VM's next boot, and grows its disk. |
+| [`remove`](#remove) | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
+
+## `create_sandbox`
+
+Makes a sandbox of `image`, with the options given. `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`.
+A `name` is letters, digits, `.`, `_` and `-`, at most 128; one another sandbox has is refused with `409`. `disk_gib` is at most 1024.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def create_sandbox(
+    image: str | ImageName, *,
+    name: str | None = None,
+    network: bool = True,
+    ports: Iterable[int | PortSpec] = (),
+    vcpus: int | None = None,
+    memory_mib: int | None = None,
+    disk_gib: int | None = None,
+    gpu: bool | None = None,
+    gpu_memory_mib: int | None = None,
+    volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
+    abins: Iterable[str] = (),
+) -> Sandbox
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+createSandbox(image: string | ImageName, options?: {
+  name?: string
+  network?: boolean
+  ports?: PortSpec[]
+  vcpus?: number
+  memoryMib?: number
+  diskGib?: number
+  gpu?: boolean
+  gpuMemoryMib?: number
+  volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
+  abins?: string[]
+}): Promise<Sandbox>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn create_sandbox(&self, args: &SandboxCreateArgs) -> Call<Sandbox>
+```
+
+</TabItem>
+</Tabs>
+
+## `list_sandbox`
+
+The server's sandboxes, with their ports as `create_sandbox` returns them.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def list_sandbox() -> list[Sandbox]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+listSandbox(): Promise<Sandbox[]>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn list_sandbox(&self) -> Call<Vec<Sandbox>>
+```
+
+</TabItem>
+</Tabs>
+
+## `get_sandbox`
+
+The sandbox `id`, with its ports as `create_sandbox` returns them.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def get_sandbox(id: str) -> Sandbox
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+getSandbox(id: string): Promise<Sandbox>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn get_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox>
+```
+
+</TabItem>
+</Tabs>
+
+## `find_sandbox`
+
+The sandbox made with `name`, with its ports as `create_sandbox` returns them; none if no sandbox has it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def find_sandbox(name: str) -> Sandbox | None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+findSandbox(name: string): Promise<Sandbox | undefined>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn find_sandbox(&self, name: impl AsRef<str>) -> Call<Option<Sandbox>>
+```
+
+</TabItem>
+</Tabs>
+
+## `Sandbox`
+
+A sandbox as the server returned it, and the client that reaches it. It has its `id`, the `name` it was made with, the digest of its `image`, whether it is `running`, its `ports`, its `abins`, and an `error` for one its server kept across a restart but could not know again, such as one whose image is gone: that one takes nothing but `remove`.
+In Rust, `Sandbox` has `id()`, `name()` and `info()`, which holds the rest.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+class Sandbox(Files):
+    id: str
+    name: str | None
+    image: str
+    running: bool
+    ports: list[SandboxPort]
+    abins: list[str]
+    error: str | None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+class Sandbox extends Files {
+  id: string
+  name?: string
+  image: string
+  running: boolean
+  ports?: SandboxPort[]
+  abins?: string[]
+  error?: string
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+impl Sandbox {
+    pub fn id(&self) -> &str
+    pub fn name(&self) -> Option<&str>
+    pub fn info(&self) -> &SandboxInfo
+}
+```
+
+</TabItem>
+</Tabs>
+
+## `exec`
+
+**Job.** Runs `cmd`, an argv, and returns the [job](/docs/sdk/jobs/). With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out.
+Iterated before it is awaited, the job is started and its log read as one request if the server supports it. In Rust, `exec_with_log(args)` yields the job, then its log.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def exec(cmd: Iterable[str], *, stdin: bool = False,
+         timeout_ms: int | None = None) -> StartedJob[SandboxJob, SandboxJobEntry]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+exec(cmd: string[], options?: { stdin?: boolean; timeoutMs?: number }): StartedJob<SandboxJob, SandboxJobEntry>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn exec(&self, args: &SandboxExecArgs) -> StartedJob<SandboxJob, SandboxJobEntry>
+pub fn exec_with_log(&self, args: &SandboxExecArgs) -> Events<SandboxExecItem>
+```
+
+</TabItem>
+</Tabs>
+
+## `jobs`
+
+Its jobs, or the job `id` in it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def jobs() -> list[SandboxJob]
+async def job(id: str) -> SandboxJob
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+jobs(): Promise<SandboxJob[]>
+job(id: string): Promise<SandboxJob>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn jobs(&self) -> Call<Vec<SandboxJob>>
+pub fn job(&self, id: impl AsRef<str>) -> Call<SandboxJob>
+```
+
+</TabItem>
+</Tabs>
+
+## `resize`
+
+Changes its `vcpus` and `memory_mib` from its VM's next boot, and grows its disk to `disk_gib`; anything left out stays as it is.
+A sandbox in which nothing runs has its VM stopped at once for its vCPUs or memory to change; one in use is refused with `409`. A disk only grows: a smaller `disk_gib` is refused with `400`, and a resize of the disk alone stops nothing.
+Returns its size as it will be, and `up`, whether its VM is running now. See [Resize a sandbox](/docs/tutorials/setting-sandboxes/#resize-a-sandbox).
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def resize(*, vcpus: int | None = None, memory_mib: int | None = None,
+                 disk_gib: int | None = None) -> SandboxResources
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+resize(options?: { vcpus?: number, memoryMib?: number, diskGib?: number }): Promise<SandboxResources>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn resize(&self, args: &SandboxResizeArgs) -> Call<SandboxResources>
+```
+
+</TabItem>
+</Tabs>
+
+`SandboxResources` has `vcpus`, `memory_mib`, `disk_gib` and `up`. In Rust, `SandboxResizeArgs` is chained from `SandboxResizeArgs::default()`.
+
+## `remove`
+
+Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+remove(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn remove(&self) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## Ports
+
+A port in `create_sandbox`'s `ports` is a number, for a port in the sandbox, or a `PortSpec(port, label, on)`, where `on` is `"sandbox"` (the default) or `"local"`.
+In Node.js it is `{ port, on?, label? }`; in Rust, `PortSpec::new(port).on(PortSide::Local).label(...)`.
+
+Each comes back as a `SandboxPort`: its `port`, `on`, `url` and `label`.
+`create_sandbox`, `get_sandbox`, `list_sandbox` and `find_sandbox` all return the ports the same way.
+A port's `url` is a loopback address, set only by a server on this machine for a port in the sandbox; a server over HTTP sets none, and a port on local has none.
+
+Either side is forwarded with a [PortForwarder](/docs/sdk/port-forwarder/); see [Networks and ports](/docs/tutorials/networks-ports/).
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `404`, `not_found` | `create_sandbox` | The server has no image by that tag. Creating a sandbox doesn't pull: pull or build the image first. |
+| `400`, `invalid` | `create_sandbox` | An option is invalid, such as a bad `name`, `0` for a number, or a port listed twice on one side. The message names the option. |
+| `409`, `exists` | `create_sandbox` | Another sandbox has that `name`. Find it with `find_sandbox`, or remove it first. |
+| `422`, `unsupported` | `create_sandbox` with `gpu` | The server was built without GPU support. |
+| `boot_failed` | `create_sandbox` | The machine that runs sandboxes can't boot a VM. See [Installation](/docs/installation/#troubleshooting). |
+| `429`, `quota` | `create_sandbox` | You are at a limit, such as the number of sandboxes you can have. It fails at once: remove a sandbox first. |
+| `422`, `not_started` | `exec` | The command was not found or could not start, and no job was made. |
+| `400`, `invalid` | `exec` | The command was empty. |
+| `404`, `not_found` | Any call on a removed sandbox | The sandbox was removed, by you or by the server. |
+| `409` | `resize` | A command is running in the sandbox, or its files or ports are in use, so its VM can't be stopped to change its vCPUs or memory. Growing only the disk is never refused for this. |
+| `400` | `resize` | `disk_gib` is smaller than the disk the VM last booted with. A disk only grows. |
+| `409`, `ended` | Any call but `remove` | The sandbox's VM has stopped for good, or the server couldn't start it again after a restart, as its `error` says. Remove it and create another. |
+
+A command given as a string isn't refused in Python: `exec` takes any iterable, so `exec("ls")` runs `l` with the argument `s`. Pass a list, such as `["ls"]`. In Rust, a string doesn't compile.
+
+Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

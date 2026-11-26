@@ -5,12 +5,12 @@ description: "Put files into a sandbox, get what it wrote back out, and move, co
 
 import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
-A sandbox's files can be read and written from your code directly, without a command such as `cat` or `cp` in it.
-A path is the path in the guest without its leading `/`: `etc/hostname` is `/etc/hostname`.
+Your code can read and write a sandbox's files directly, without running a command such as `cat` or `cp` in the sandbox.
+Paths are relative to the sandbox's root, so leave out the leading `/`: `etc/hostname` means `/etc/hostname`.
 
 <Aside type="note">
-A [volume](/docs/tutorials/mounting-volumes/) shares this file API with a sandbox.
-Every call on this page works on it the same way, on its own files, and needs no sandbox running.
+[Volumes](/docs/tutorials/mounting-volumes/) have the same file API.
+Every call on this page also works on a volume's files, and needs no sandbox running.
 </Aside>
 
 ## Put a file in, and get one out
@@ -18,7 +18,7 @@ Every call on this page works on it the same way, on its own files, and needs no
 This writes an input file into the sandbox, runs a command on it, and reads what the command wrote:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 await sandbox.create_dir_all("work")
@@ -30,7 +30,7 @@ print(await sandbox.read_text("work/count.txt"))
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await sandbox.createDirAll('work')
@@ -42,7 +42,7 @@ console.log(await sandbox.readText('work/count.txt'))
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use virtx::Files;
@@ -59,17 +59,17 @@ println!("{}", sandbox.read_text("work/count.txt").await?);
 </TabItem>
 </Tabs>
 
-`write_file` writes a whole file, a string as UTF-8 or bytes, and its parent directory must exist; `create_dir_all` makes it and its parents, as `mkdir -p`.
-`read_text` reads a whole UTF-8 file, and `read_file` reads bytes, all of them or a range from an `offset`.
+`write_file` writes a whole file from a string (as UTF-8) or from bytes. The parent directory must exist, or the call fails with `409`. `create_dir_all` creates a directory and any missing parents, like `mkdir -p`.
+`read_text` reads a whole UTF-8 file. `read_file` reads bytes: the whole file, or a range starting at an `offset`.
 
 ## Look around
 
 `read_dir` lists a directory, each entry with its `name` and `metadata`.
-`stat_file` answers what is at a path: its size, when it was last modified, and its `etag`.
-`exists`, `is_file` and `is_dir` say whether anything, a file, or a directory is there.
+`stat_file` returns a path's metadata: its size, when it was last modified, and its `etag`.
+`exists`, `is_file` and `is_dir` check whether a path exists, is a file, or is a directory.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 for entry in await sandbox.read_dir("work"):
@@ -81,7 +81,7 @@ if await sandbox.is_file("work/count.txt"):
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 for (const entry of await sandbox.readDir('work')) {
@@ -95,7 +95,7 @@ if (await sandbox.isFile('work/count.txt')) {
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 for entry in sandbox.read_dir("work").await? {
@@ -113,12 +113,12 @@ if sandbox.is_file("work/count.txt").await? {
 
 ## Move, copy, and remove
 
-`rename_file` moves a file or a directory, and `copy_file` copies one with everything in it.
-Both refuse a destination that already exists unless `overwrite` is set.
-`remove_file` removes a file, or a directory with everything in it, and refuses a missing path unless `missing_ok` is set, as `rm -f`.
+`rename_file` moves a file or a directory. `copy_file` copies a file, or a directory and everything in it.
+Both fail with `412` if the destination exists, unless you set `overwrite`.
+`remove_file` removes a file, or a directory and everything in it. It fails if the path doesn't exist, unless you set `missing_ok`, like `rm -f`.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 await sandbox.copy_file("work/count.txt", "work/count.bak")
@@ -127,7 +127,7 @@ await sandbox.remove_file("work", missing_ok=True)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await sandbox.copyFile('work/count.txt', 'work/count.bak')
@@ -136,7 +136,7 @@ await sandbox.removeFile('work', true)
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 sandbox.copy_file("work/count.txt", "work/count.bak", false).await?;
@@ -149,12 +149,101 @@ sandbox.remove_file("work", true).await?;
 
 ## Write only if unchanged
 
-Pass a file's `etag` from `stat_file` as `if_match` to `write_file`, and the write goes through only while the file still has that tag.
-If something changed it in between, the write is refused with `412`, and nothing is overwritten.
-Of two such writes sent at once with one tag, one goes through and the other is refused with `412`: read the file again and retry.
-The tag is checked before the content is written, and again once all of it has arrived, just before it replaces the file.
+To avoid overwriting someone else's change, pass the file's `etag` from `stat_file` as `if_match` to `write_file`. The write succeeds only if the file still has that `etag`.
+If the file changed in the meantime, the write fails with `412` and the file is left as it was.
 
-## Reading while the sandbox is stopped
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
 
-A sandbox's files are read through its VM, which is booted again if it had been stopped for being unused.
-To read the output of a task that is done with no VM at all, have the task write it to a volume and read it from there instead; see [Mounting volumes](/docs/tutorials/mounting-volumes/).
+```python
+meta = await sandbox.stat_file("notes.txt")
+await sandbox.write_file("notes.txt", "updated\n", if_match=meta.etag)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const meta = await sandbox.statFile('notes.txt')
+await sandbox.writeFile('notes.txt', 'updated\n', meta.etag)
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+let meta = sandbox.stat_file("notes.txt").await?;
+sandbox.write_file("notes.txt", "updated\n", meta.etag.as_deref()).await?;
+```
+
+</TabItem>
+</Tabs>
+
+If two writes with the same `etag` arrive at the same time, one succeeds and the other fails with `412`. After a `412`, read the file again and retry.
+The server checks the `etag` before it starts writing, and again just before it replaces the file.
+
+## Reading files from an idle sandbox
+
+The server reads a sandbox's files through its VM. If the server stopped the VM because the sandbox was idle, reading a file boots the VM again first, which takes time.
+To read a finished task's output without booting a VM, have the task write its output to a volume, and read it from the volume. See [Mounting volumes](/docs/tutorials/mounting-volumes/).
+
+## Troubleshooting
+
+1. **`409`, from `write_file` or `create_dir`**
+
+   **Cause:** The parent directory does not exist.
+
+   **Fix:** Make it first with `create_dir_all`.
+
+2. **`405`, from `create_dir_all`**
+
+   **Cause:** A file is at that path.
+
+   **Fix:** Remove or rename the file.
+
+3. **`404`, from `remove_file`**
+
+   **Cause:** Nothing is at that path.
+
+   **Fix:** Pass `missing_ok` to treat that as done.
+
+4. **`412`, from `copy_file` or `rename_file`**
+
+   **Cause:** The destination exists.
+
+   **Fix:** Pass `overwrite`.
+
+5. **`412`, from `write_file` with `if_match`**
+
+   **Cause:** The file changed since its `etag` was read.
+
+   **Fix:** Read it again with `stat_file` and retry.
+
+6. **An error that mentions UTF-8, from `read_text`**
+
+   **Cause:** The file is not UTF-8 text.
+
+   **Fix:** Read its bytes with `read_file`.
+
+7. **`400`**
+
+   **Cause:** The path has `.` or `..` in it, or leads outside the sandbox's root.
+
+   **Fix:** Use a path inside the root.
+
+8. **`403`**
+
+   **Cause:** A write to a volume mounted read-only, or a move or remove of the root directory itself.
+
+   **Fix:** Mount the volume read-write, or use a path under the root.
+
+9. **`409`, `ended`**
+
+   **Cause:** The sandbox's VM has stopped permanently.
+
+   **Fix:** Create another sandbox. Keep outputs on a [volume](/docs/tutorials/mounting-volumes/) so they survive this.
+
+## Next
+
+- [Mounting volumes](/docs/tutorials/mounting-volumes/): keep files after a sandbox is removed, and share them between sandboxes.
+- [Running commands](/docs/tutorials/running-commands/): run what reads and writes the files.

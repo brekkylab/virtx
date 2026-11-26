@@ -29,6 +29,9 @@ A page is rendered twice, by the preview and by virtx.sh, so it uses only what b
   `tableOfContents`, ...).
 - Starlight's own components, imported from `@astrojs/starlight/components` (`Tabs`, `TabItem`,
   `Aside`, ...). Nothing imported from anywhere else: virtx.sh's files are not here.
+- Language tabs as `<Tabs syncKey="lang">`, so picking a language picks it on every page, with
+  each tab's logo: `<TabItem label="Python" icon="seti:python">`, `<TabItem label="Node.js"
+  icon="node">`, `<TabItem label="Rust" icon="seti:rust">`.
 - Links to other pages as absolute paths with `/docs/`: `[Networks and ports](/docs/tutorials/networks-ports/)`. They
   resolve the same in both, and the link check verifies them.
 - Links to virtx.sh's own pages (`/signin/`, `/signup/`) as plain paths. The preview does not
@@ -37,7 +40,13 @@ A page is rendered twice, by the preview and by virtx.sh, so it uses only what b
 ## Adding a page
 
 Add the file under `content/` and its entry to `sidebar.json`. A `slug` is the page's path under
-`content/` without the extension; a `link` is an address under `/docs/` (`"/"` is the overview).
+`content/` without the extension; a `link` is an address under `/docs/` (`"/"` is the Overview page).
 virtx.sh builds its sidebar and the page order of its llms.txt from the same file.
+
+virtx.sh splits the docs into two sections, each a tab in its header: the SDK reference, every
+group whose pages are all under `content/sdk/`, and the guides, every other group. A group lands
+in its section by where its pages are, so a new SDK page goes under `content/sdk/` and in a group
+of SDK pages.
+
 A tutorial or guide is listed in `content/index.mdx` too, under its group's heading and in the
 sidebar's order, which the link check verifies.

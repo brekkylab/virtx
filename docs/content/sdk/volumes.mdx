@@ -1,0 +1,206 @@
+---
+title: "Volumes"
+description: "Reference for volumes, which keep files across sandboxes, and the remote stores mounted in them."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A volume keeps what a sandbox writes for the next one. A `Volume` has its `name` and `size` (in Rust, `name()` and `info()`), and its [files](/docs/sdk/files/).
+See [Mounting volumes](/docs/tutorials/mounting-volumes/).
+
+| Member | Does |
+| --- | --- |
+| [`create_volume`](#create_volume) | Makes an empty volume. |
+| [`list_volume`](#list_volume) | The server's volumes, or the one named `name`. |
+| [`mount`](#mount) | Mounts a remote store at `path` in it, read-only: a Notion integration's pages, a Google Drive or a OneDrive. |
+| [`mounts`](#mounts) | The mounts in it, without their credentials. |
+| [`unmount`](#unmount) | Takes a mount away, leaving its store as it is. |
+| [`remove`](#remove) | Deletes it and everything in it. |
+
+## `create_volume`
+
+Makes an empty volume. Without a name, the server picks one.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def create_volume(name: str | None = None) -> Volume
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+createVolume(name?: string): Promise<Volume>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn create_volume(&self, name: Option<impl Into<String>>) -> Call<Volume>
+```
+
+</TabItem>
+</Tabs>
+
+## `list_volume`
+
+The server's volumes, or the one named `name`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def list_volume() -> list[Volume]
+async def get_volume(name: str) -> Volume
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+listVolume(): Promise<Volume[]>
+getVolume(name: string): Promise<Volume>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn list_volume(&self) -> Call<Vec<Volume>>
+pub fn get_volume(&self, name: impl AsRef<str>) -> Call<Volume>
+```
+
+</TabItem>
+</Tabs>
+
+## `mount`
+
+Mounts a remote store at `path` in it, read-only: a Notion integration's pages, a Google Drive or a OneDrive.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def mount(path: str, source: NotionSource | GdriveSource | OnedriveSource) -> VolumeMountListOutputItem
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+mount(path: string, source: MountSource): Promise<VolumeMountListOutputItem>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn mount(&self, path: impl AsRef<str>, source: MountSource) -> Call<VolumeMountListOutputItem>
+```
+
+</TabItem>
+</Tabs>
+
+## `mounts`
+
+The mounts in it, without their credentials.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def mounts() -> list[VolumeMountListOutputItem]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+mounts(): Promise<VolumeMountListOutputItem[]>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn mounts(&self) -> Call<Vec<VolumeMountListOutputItem>>
+```
+
+</TabItem>
+</Tabs>
+
+## `unmount`
+
+Takes a mount away, leaving its store as it is.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def unmount(path: str) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+unmount(path: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn unmount(&self, path: impl AsRef<str>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `remove`
+
+Deletes it and everything in it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+remove(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn remove(&self) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `409`, `exists` | `create_volume` | Another volume has that name. |
+| `404`, `not_found` | Any call naming a volume | No volume has that name. Check it against `list_volume`. |
+| `409`, `exists` | `mount` | A store is already mounted at that path. `unmount` it first, or use another path. |
+| `400`, `invalid`, `… would be inside or over the mount at …` | `mount` | A mount inside or over another one, or at the volume's root. Mount each store in its own subdirectory. |
+| `400`, `invalid`, `making the mount's store: …` | `mount` | The store couldn't be made from what was given, such as malformed credentials. `mount` doesn't contact the store, so a wrong key isn't caught here: it fails later, when something in the mount is read. |
+| `403` | `remove_file`, `rename_file`, `copy_file` | The path is or holds a mount, or a copy lands on one. `unmount` it first. |
+| `400`, `invalid`, `… another volume is there` | `create_sandbox` with `volumes` | Two volumes are mounted at one path. Give each its own path. |
+| `409`, `in_use` | `remove` | A sandbox still mounts the volume. Remove that sandbox first. |
+
+Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

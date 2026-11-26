@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">Disposable Linux VMs for your code and your AI agents.</h3>
+<h3 align="center">The microVM sandbox for AI agents.</h3>
+
+<p align="center">No Docker, no daemon to set up.</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,13 +27,10 @@
 
 <br>
 
-virtx lets you run tasks in disposable Linux VMs from your own code.
+virtx is a microVM sandbox for AI agents. From your own code, it runs tasks in a disposable Linux VM on your machine, on a server you run, or on virtx cloud.
 
 It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
 Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
-
-> [!TIP]
-> Building an AI agent on virtx? [Ailoy](https://github.com/brekkylab/ailoy), our open-source agent SDK, is built on it and gives every agent a sandbox of its own, so its commands and file tools run in a VM with no setup.
 
 ## Quickstart
 
@@ -148,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Remote
 
-Set up `virtx-server-tcp` on a machine of yours, as [Running your own server](https://virtx.sh/docs/guides/self-hosting/) shows.
+Set up `virtx-server-tcp` on a machine of yours, as [Running your own server](https://virtx.sh/docs/tutorials/self-hosting/) shows.
 
 Sign in to it once with the `virtx` command, which `uvx` or `npx` runs without installing, and connect with the token it prints in place of `Client.spawn()`.
 The rest is the same as the local example.
@@ -208,16 +207,16 @@ let client = Client::connect(
 ## Features
 
 - **Keep untrusted code off your machine:** every sandbox is a microVM with its own kernel, walled off by the hypervisor, not just by namespaces, and its network can be cut entirely.
-- **Run it wherever you work:** any client works with any server on any host, and moving from a local server to a remote one or the cloud changes one line.
+- **Boots in milliseconds:** a new sandbox is ready to run commands in 35 ms, with 1 vCPU and 128 MB of memory (on an M3 Pro Mac).
+- **Optimized for building AI agents:** a sandbox is ready for AI agent work, such as RAG, browser use and GUI automation. See the guides for [RAG](https://virtx.sh/docs/guides/implementing-rag/), [browser use](https://virtx.sh/docs/guides/browser/) and [GUI programs](https://virtx.sh/docs/guides/gui-programs/).
+- **Bring in outside context:** mount Notion, Google Drive or OneDrive in a sandbox as plain files.
+- **Use the GPU:** the host's GPU is paravirtualized on Linux, macOS and Windows, so a sandbox can run deep learning models and graphics workloads on it.
+- **Run anywhere:** any client works with any server on any host, and moving from a local server to a remote one or the cloud changes one line.
   - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **Servers:** 💻 local (stdio) · 🖥️ remote (tcp) · ☁️ cloud
   - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
-- **Start from any image you already use:** pull from Docker Hub or any OCI registry, or build from a recipe or a Dockerfile, then push it back or copy it to another server.
-- **Move files in and out without a shell:** read, write, copy and remove a sandbox's files straight from your code.
-- **Reach anything running inside:** a web server, SSH, a VNC desktop or a database in the sandbox, at an address on your machine.
-- **Pick up where you left off:** keep what a sandbox wrote in a volume for the next one, share a volume among sandboxes, and mount Notion, Google Drive or OneDrive as plain files.
-- **Bring the GPU along:** run deep learning and other Vulkan work on the host's GPU from inside the sandbox.
+- **Works with any agent framework:** a sandbox is a tool like any other, so any framework or coding agent can drive it. [Ailoy](https://github.com/brekkylab/ailoy), an open-source agent SDK, is one that does.
 
 ## Requirements
 
@@ -250,7 +249,7 @@ Guests are always Linux.
 
 #### (Optional) GPU
 
-Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](https://virtx.sh/docs/guides/using-gpus/).
+Only for sandboxes that use the GPU: a Vulkan loader on the host. The guest's half of Vulkan comes with every sandbox, so the image needs none. See [Using GPUs](https://virtx.sh/docs/tutorials/using-gpus/).
 
 ## How it works
 

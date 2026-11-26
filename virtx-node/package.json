@@ -1,13 +1,16 @@
 {
   "name": "@brekkylab/virtx",
   "version": "0.2.1",
-  "description": "A virtx client for Node, over libvirtx_core's C ABI.",
+  "description": "microVM sandbox for AI agents: run commands in an isolated Linux VM from Node.js, with no Docker or daemon to set up.",
   "license": "Apache-2.0",
   "keywords": [
     "vm",
     "microvm",
     "sandbox",
-    "agent"
+    "agent",
+    "ai-agents",
+    "code-execution",
+    "llm"
   ],
   "homepage": "https://virtx.sh",
   "repository": {

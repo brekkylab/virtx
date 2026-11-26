@@ -1,6 +1,6 @@
 # AGENTS.md
 
-virtx runs tasks in disposable Linux micro-VMs from your own code. This repository is both ends of it: the client, one library with packages for Python, Node and Rust over it, and the server that runs the VMs. Read this before changing anything.
+virtx is a microVM sandbox for AI agents: it runs tasks in disposable Linux microVMs from your own code. This repository is both ends of it: the client, one library with packages for Python, Node and Rust over it, and the server that runs the VMs. Read this before changing anything.
 
 ## One behaviour, two ends
 
@@ -17,8 +17,8 @@ virtx runs tasks in disposable Linux micro-VMs from your own code. This reposito
 - `virtx-rs/`, `virtx-py/`, `virtx-node/` — the packages: Rust over `libloading`, Python over `ctypes`, Node over `koffi`. The Python package builds `virtx-cabi` with setuptools-rust (`virtx-py/pyproject.toml`), the Node package with napi-rs (`virtx-node/package.json`).
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), the sandboxes the servers make of them and the jobs run in each (`sandbox/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
 - `virtx-server-stdio/` and `virtx-server-tcp/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-stdio` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in. `virtx-server-tcp` is a library too, which its binary and a server with an authenticator and routes of its own are built from.
-- `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs a sandbox gets at `/abin`, those its `abins` name; each one's `SKILL.md` is its `--help` copied by hand, so a clap string that changes is a `SKILL.md` to regenerate. What every VM gets at `/alib` is built by `xtask/scripts/build-alib.sh`.
-- `3rdparty/` — libkrun, rutabaga_gfx, virglrenderer, MoltenVK and SPIRV-Cross as submodules, virglrenderer and MoltenVK each built by its own script there, `3rdparty/_scripts/build-virglrenderer.*` and `build-moltenvk.sh`, which `xtask/scripts/build-deps.*` runs in order for the server's `gpu` feature. The guest kernel, libkrunfw, is built there too, by `3rdparty/_scripts/build-libkrunfw.sh` from upstream's tag, with no submodule and no patch. None is a fork: each is upstream's own repository pinned to a commit of its `main`, and what virtx changes in it is its patches in `3rdparty/_patches/`; each patch's message says why virtx needs it and when it can go. libkrun's and rutabaga_gfx's are applied in each submodule's own tree by `cargo xtask init`, since cargo takes their crates from there by path, and the others' to a copy under `build/` by their build. `3rdparty/README.md` says how a patch is written and when one is taken out, and a project virtx comes to change is taken the same way.
+- `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs a sandbox gets at `/abin`, those its `abins` name; each one's `SKILL.md` is what an agent reads to use it: its `--help` copied by hand, so a clap string that changes is a `SKILL.md` to regenerate, or, for `browser`, which runs another's program, a guide to that program written for it. What every VM gets at `/alib` is built by `xtask/scripts/build-alib.sh`.
+- `3rdparty/` — libkrun, rutabaga_gfx, smoltcp, virglrenderer, MoltenVK and SPIRV-Cross as submodules, virglrenderer and MoltenVK each built by its own script there, `3rdparty/_scripts/build-virglrenderer.*` and `build-moltenvk.sh`, which `xtask/scripts/build-deps.*` runs in order for the server's `gpu` feature. The guest kernel, libkrunfw, is built there too, by `3rdparty/_scripts/build-libkrunfw.sh` from upstream's tag, with no submodule and no patch. None is a fork: each is upstream's own repository pinned to a commit of its `main`, and what virtx changes in it is its patches in `3rdparty/_patches/`; each patch's message says why virtx needs it and when it can go. libkrun's, rutabaga_gfx's and smoltcp's are applied in each submodule's own tree by `cargo xtask init`, since cargo takes their crates from there by path, and the others' to a copy under `build/` by their build. `3rdparty/README.md` says how a patch is written and when one is taken out, and a project virtx comes to change is taken the same way.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
 - `scripts/packages/` — what the workflows run to smoke-test the client's packages. `.github/actions/pack` is the one place they are built, each platform's with the packages' own tools, and `.github/workflows/packages.yml` tries them on a runner that did not build them.
 - `.github/workflows/` — `pipeline` lints and tests every platform, and in full also builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and smoke-tests them (`packages`); `ci` runs it on a pull request (lint and tests) and on `main` (in full), and `release` runs it in full on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `pipeline` refuses any other spelling of), runs `publish`'s checks over what was built, and attaches it to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
@@ -29,7 +29,7 @@ Every step is `cargo xtask`, run from a clone of this repository; `cargo xtask -
 
 ```bash
 git clone https://github.com/brekkylab/virtx && cd virtx
-git submodule update --init 3rdparty/libkrun 3rdparty/rutabaga_gfx   # cargo reads their crates' manifests, whatever it builds
+git submodule update --init 3rdparty/libkrun 3rdparty/rutabaga_gfx 3rdparty/smoltcp   # cargo reads their crates' manifests, whatever it builds
 ```
 
 ### Server
@@ -40,7 +40,7 @@ The servers need more of the host than Rust, and Docker on every host, which bui
 - **Windows**, x86_64: the Windows Hypervisor Platform feature, MSVC build tools, clang and lld, and Docker in Linux-container mode. The `gpu` feature also needs `LIBCLANG_PATH` naming the directory `libclang.dll` is in, best set in `%USERPROFILE%\.cargo\config.toml` since the path is the machine's; no Vulkan SDK is needed. Smart App Control blocks every unsigned build script, failing with `os error 4551`, so it has to be off.
 
 ```bash
-cargo xtask init                                  # checks out the submodules, applies libkrun's and rutabaga_gfx's patches and adds the guest's musl target; the servers need it
+cargo xtask init                                  # checks out the submodules, applies libkrun's, rutabaga_gfx's and smoltcp's patches and adds the guest's musl target; the servers need it
 cargo xtask build kernel server-stdio server-tcp  # the guest kernel and both servers, signed on macOS
 cargo xtask install --prefix ~/.local             # what was built, into ~/.local/bin
 export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, in place of a downloaded one
@@ -63,7 +63,7 @@ The Python and Node packages, and the Rust crate without its `embedded` feature,
 - `cargo build -p virtx-cabi` builds the library alone; `cargo xtask build client` builds it and `libvirtx_core.a` in `release`, and `cargo xtask install` copies the library out.
 - `VIRTX_CORE_LIB` names a library to open in place of the one a package carries; `load(path)` opens one from the program itself; a process opens one.
 - A module that takes a client from another opens the file `library_path()` answers, and takes the client from the pointer `client.clone().into_raw()` answers, with `Client.from_raw`. In Node, `libraryPath()`, `intoRaw()` and `fromRaw`.
-- A change to the client needs nothing of `init`, only those two submodules checked out, as every cargo command does. A change to the servers needs `init` and the guest kernel, and `init` again after a pull that changed their patches in `3rdparty/_patches/` or their pins: a server is not built from a tree `init` has not brought to them. It is `init` that moves those two to a new pin, not `git submodule update` or `git pull --recurse-submodules`, which git refuses over a tree with the patches applied.
+- A change to the client needs nothing of `init`, only those three submodules checked out, as every cargo command does. A change to the servers needs `init` and the guest kernel, and `init` again after a pull that changed their patches in `3rdparty/_patches/` or their pins: a server is not built from a tree `init` has not brought to them. It is `init` that moves those three to a new pin, not `git submodule update` or `git pull --recurse-submodules`, which git refuses over a tree with the patches applied.
 
 ## Tests
 

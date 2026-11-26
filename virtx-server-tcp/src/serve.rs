@@ -370,10 +370,7 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::VolumeListOutputItem;
-    use virtx_core::{
-        Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
-        SandboxCreateArgs, Step,
-    };
+    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs, Step};
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
         FsTree, ImageStore, ProjectId, PublicRegistries, Reference, RegistryProxy, StorageBackend,
@@ -1327,7 +1324,7 @@ mod tests {
                 "POST",
                 "sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?}, not "5900""#,
             ),
             (
                 "GET",
@@ -1518,16 +1515,6 @@ mod tests {
         // A port that is none, and a sandbox of an image nobody filed, are refused before it
         // boots.
         let args = SandboxCreateArgs::new("a:b").port(0);
-        assert_eq!(status(client.create_sandbox(&args).await), 400);
-        // So are a port asked for over HTTP, which a port's tunnel here does not serve, and one
-        // with inbound rules, which this server keeps none of.
-        let web = PortSpec::new(5173).protocol(PortProtocol::Http);
-        let args = SandboxCreateArgs::new("a:b").port(web);
-        let refused = client.create_sandbox(&args).await.unwrap_err();
-        assert_eq!(refused.status(), Some(400), "{refused}");
-        assert!(refused.to_string().contains("HTTP"), "{refused}");
-        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
-        let args = SandboxCreateArgs::new("a:b").port(ssh);
         assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);
@@ -2208,9 +2195,8 @@ mod tests {
 
     /// A sandbox made under an id and keys given it is refused, before its machine boots, an id
     /// a sandbox here has or one made meanwhile takes, a key one here opens a port by or one
-    /// being made was given, an id that cannot be one and keys that are not one for each port;
-    /// a port over HTTP and with inbound rules is not refused for it. Nothing of it is made,
-    /// and a key a making that failed was given is given back.
+    /// being made was given, an id that cannot be one and keys that are not one for each port.
+    /// Nothing of it is made, and a key a making that failed was given is given back.
     #[tokio::test]
     async fn a_sandbox_made_under_an_id_and_keys_given_it_is_refused_only_what_it_cannot_be() {
         use crate::endpoints::{Given, Home};
@@ -2237,11 +2223,8 @@ mod tests {
         let home = home.backed_by(Arc::clone(&backend) as Arc<dyn StorageBackend>);
         assert!(home.sandboxes().get("kept").is_some());
 
-        let web = PortSpec::new(8080)
-            .protocol(PortProtocol::Http)
-            .inbound([InboundRule::new("10.0.0.0/8")]);
         let made = async |image: &str, id: &str, keys: &[(&str, u16)]| {
-            let args = SandboxCreateArgs::new(image).port(web.clone());
+            let args = SandboxCreateArgs::new(image).port(8080);
             let keys = keys.iter().map(|(key, port)| (key.to_string(), *port));
             let given = Given {
                 id: id.to_owned(),

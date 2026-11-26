@@ -1779,7 +1779,7 @@ pub(crate) mod ffi {
 
     /// Answers with the sandboxes, as
     /// `[{"id": "...", "image": "algorithm:hex", "running": bool,
-    /// "ports"?: [{"port": n, "label"?, "protocol"?, "address"?}]}, ...]`.
+    /// "ports"?: [{"port": n, "label"?}]}, ...]`.
     ///
     /// # Safety
     ///
@@ -1793,13 +1793,13 @@ pub(crate) mod ffi {
 
     /// Makes a sandbox, given
     /// `{"image": {...}, "name": "...", "network": bool,
-    /// "ports": [n | {"port": n, "label": "...", "protocol": "tcp" | "http", "inbound": [...]}],
+    /// "ports": [n | {"port": n, "label": "..."}],
     /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
     /// sandbox as `virtx_client_list_sandbox` answers each, its
-    /// `"ports": [{"port": n, "url": "...", "label"?, "protocol"?, "address"?, "inbound_error"?}]`
+    /// `"ports": [{"port": n, "url": "...", "label"?}]`
     /// with their `url`s here only.
     ///
     /// # Safety

@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jhlee525 <bmrcreative90@gmail.com>
+Date: Thu, 26 Nov 2026 17:32:28 +0900
+Subject: poll_at: a socket whose SYN|ACK is paused waits for what arrives, not at once
+
+## Why virtx needs it
+
+A machine's network answers a guest's SYN only once the host socket it opens for that connection has connected, so the guest's `connect` fails or times out as one from the host does. It holds the SYN|ACK with `pause_synack` until then (`virtx-uvm/src/machine/net/gateway/flow/tcp.rs`), and sleeps on its poller for as long as `Interface::poll_delay` says. Without the patch that delay is zero while any SYN|ACK is held, and the network's thread turns some 70,000 times a second, doing nothing, for as long as the host's connect waits: about 75 s for a destination that drops SYNs.
+
+## What it changes
+
+`dispatch()` sends nothing for a socket in SYN-RECEIVED whose SYN|ACK is paused, but `poll_at()` did not know that: the SYN|ACK is still a flag to transmit, so it answered `PollAt::Now`. It now answers when the socket's timeout ends, which `dispatch()` still enforces, or for what arrives, with no timeout.
+
+## When it can go
+
+When a smoltcp release has smoltcp-rs/smoltcp#1214 fixed, and `virtx-uvm` takes that release.
+---
+ src/socket/tcp.rs | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/socket/tcp.rs b/src/socket/tcp.rs
+index 2b86f74..d8e3ac7 100644
+--- a/src/socket/tcp.rs
++++ b/src/socket/tcp.rs
+@@ -2954,6 +2954,15 @@ impl<'a> Socket<'a> {
+     #[allow(clippy::if_same_then_else)]
+     pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
+         // The logic here mirrors the beginning of dispatch() closely.
++        #[cfg(feature = "socket-tcp-pause-synack")]
++        if self.state == State::SynReceived && self.synack_paused {
++            // dispatch() sends nothing while the SYN|ACK is paused, but still times it out.
++            return match (self.remote_last_ts, self.timeout) {
++                (Some(last), Some(timeout)) => PollAt::Time(last + timeout),
++                _ => PollAt::Ingress,
++            };
++        }
++
+         if self.tuple.is_none() {
+             // No one to talk to, nothing to transmit.
+             PollAt::Ingress
+@@ -3690,8 +3699,17 @@ mod test {
+         s.pause_synack(true);
+         recv_nothing!(s);
+         assert_eq!(s.state, State::SynReceived);
++        assert_eq!(s.socket.poll_at(&mut s.cx), PollAt::Ingress);
++
++        s.set_timeout(Some(Duration::from_secs(2)));
++        assert_eq!(
++            s.socket.poll_at(&mut s.cx),
++            PollAt::Time(Instant::from_secs(2))
++        );
++        s.set_timeout(None);
+ 
+         s.pause_synack(false);
++        assert_eq!(s.socket.poll_at(&mut s.cx), PollAt::Now);
+         recv!(
+             s,
+             [TcpRepr {

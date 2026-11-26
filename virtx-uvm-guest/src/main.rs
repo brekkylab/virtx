@@ -504,7 +504,7 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
 /// The guest's one virtio-net interface, which the kernel names first.
 const NETWORK_INTERFACE: &str = "eth0";
 
-/// Give [`NETWORK_INTERFACE`] its address, netmask and MTU, bring it up, and route everything
+/// Give [`NETWORK_INTERFACE`] its v4 and v6 addresses and MTU, bring it up, and route everything
 /// off the link through the gateway. Connections to a published port arrive at the guest's
 /// loopback over the link, which the kernel takes as martian unless told otherwise
 /// (`route_localnet`).
@@ -563,7 +563,65 @@ fn network_interface(network: &wire::GuestNetwork) -> io::Result<()> {
     route.rt_genmask = inet(std::net::Ipv4Addr::UNSPECIFIED);
     route.rt_gateway = inet(network.gateway);
     route.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
-    ioctl(fd, libc::SIOCADDRT, &mut route as *mut _ as _)
+    ioctl(fd, libc::SIOCADDRT, &mut route as *mut _ as _)?;
+
+    // v6 is given by hand too, as the gateway sends no router advertisements; duplicate address
+    // detection, which would hold the address back a second, finds nothing on a link of two.
+    fs::write(
+        format!("/proc/sys/net/ipv6/conf/{NETWORK_INTERFACE}/accept_dad"),
+        "0",
+    )?;
+    // SAFETY: a socket, closed when `fd6` drops.
+    let fd6 =
+        match unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) } {
+            -1 => return Err(io::Error::last_os_error()),
+            fd => unsafe { OwnedFd::from_raw_fd(fd) },
+        };
+    let fd6 = fd6.as_raw_fd();
+    let name = std::ffi::CString::new(NETWORK_INTERFACE).map_err(io::Error::other)?;
+    // SAFETY: a NUL-terminated name.
+    let index = match unsafe { libc::if_nametoindex(name.as_ptr()) } {
+        0 => return Err(io::Error::last_os_error()),
+        index => index as libc::c_int,
+    };
+    let mut address = libc::in6_ifreq {
+        ifr6_addr: libc::in6_addr {
+            s6_addr: network.address_v6.octets(),
+        },
+        ifr6_prefixlen: u32::from(network.prefix_v6),
+        ifr6_ifindex: index,
+    };
+    ioctl(fd6, libc::SIOCSIFADDR, &mut address as *mut _ as _)?;
+    // The kernel's `struct in6_rtmsg`, whose fields libc keeps private.
+    #[repr(C)]
+    struct In6Rtmsg {
+        dst: libc::in6_addr,
+        src: libc::in6_addr,
+        gateway: libc::in6_addr,
+        kind: u32,
+        dst_len: u16,
+        src_len: u16,
+        metric: u32,
+        info: libc::c_ulong,
+        flags: u32,
+        ifindex: libc::c_int,
+    }
+    let any = libc::in6_addr { s6_addr: [0; 16] };
+    let mut route = In6Rtmsg {
+        dst: any,
+        src: any,
+        gateway: libc::in6_addr {
+            s6_addr: network.gateway_v6.octets(),
+        },
+        kind: 0,
+        dst_len: 0,
+        src_len: 0,
+        metric: 1,
+        info: 0,
+        flags: u32::from(libc::RTF_UP | libc::RTF_GATEWAY),
+        ifindex: index,
+    };
+    ioctl(fd6, libc::SIOCADDRT, &mut route as *mut _ as _)
 }
 
 /// `mount(2)`, its failure naming what was being mounted where.

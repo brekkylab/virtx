@@ -17,7 +17,7 @@
 //! to: a [`Write`](IoReq::Write), and a [`Data`](IoResp::Data).
 
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -55,7 +55,7 @@ pub struct MachineInfo {
 }
 
 /// What the agent makes of the guest's virtio-net interface: its address on the link to this
-/// host, the way off it, and the resolver `/etc/resolv.conf` names -- `None` leaves the image's
+/// host and the way off it, on v4 and v6, and the resolver `/etc/resolv.conf` names -- `None` leaves the image's
 /// file as it is. Its loopback is reached over the link too, which is where a published port's
 /// connections arrive.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +63,9 @@ pub struct GuestNetwork {
     pub address: Ipv4Addr,
     pub prefix: u8,
     pub gateway: Ipv4Addr,
+    pub address_v6: Ipv6Addr,
+    pub prefix_v6: u8,
+    pub gateway_v6: Ipv6Addr,
     pub mtu: u32,
     pub nameserver: Option<Ipv4Addr>,
 }

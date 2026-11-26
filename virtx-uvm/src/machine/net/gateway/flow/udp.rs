@@ -5,13 +5,13 @@
 
 use std::io;
 use std::mem::MaybeUninit;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, IpProtocol, Ipv4Packet,
-    Ipv4Repr, UdpPacket,
+    Ipv4Repr, Ipv6Packet, Ipv6Repr, UdpPacket,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -61,7 +61,8 @@ impl UdpFlow {
         while ready && !link.full() {
             let mut got = None;
             link.send(MAX_FRAME, |frame| {
-                let at = EthernetFrame::<&[u8]>::header_len() + 20 + 8;
+                let ip = if self.ends.0.is_ipv4() { 20 } else { 40 };
+                let at = EthernetFrame::<&[u8]>::header_len() + ip + 8;
                 // SAFETY: `recv` writes into what it is given and says how much it wrote, which
                 // is all of it that is read.
                 let payload =
@@ -94,30 +95,46 @@ impl UdpFlow {
     /// guest sent to, and say how long the frame is.
     fn frame(&self, frame: &mut [u8], len: usize) -> usize {
         let (guest, sent_to) = self.ends;
-        let ip = Ipv4Repr {
-            src_addr: *sent_to.ip(),
-            dst_addr: *guest.ip(),
-            next_header: IpProtocol::Udp,
-            payload_len: 8 + len,
-            hop_limit: 64,
+        let at = EthernetFrame::<&[u8]>::header_len();
+        let (ethertype, at) = match (sent_to.ip(), guest.ip()) {
+            (IpAddr::V4(src_addr), IpAddr::V4(dst_addr)) => {
+                let ip = Ipv4Repr {
+                    src_addr,
+                    dst_addr,
+                    next_header: IpProtocol::Udp,
+                    payload_len: 8 + len,
+                    hop_limit: 64,
+                };
+                ip.emit(
+                    &mut Ipv4Packet::new_unchecked(&mut frame[at..]),
+                    &ChecksumCapabilities::default(),
+                );
+                (EthernetProtocol::Ipv4, at + ip.buffer_len())
+            }
+            (IpAddr::V6(src_addr), IpAddr::V6(dst_addr)) => {
+                let ip = Ipv6Repr {
+                    src_addr,
+                    dst_addr,
+                    next_header: IpProtocol::Udp,
+                    payload_len: 8 + len,
+                    hop_limit: 64,
+                };
+                ip.emit(&mut Ipv6Packet::new_unchecked(&mut frame[at..]));
+                (EthernetProtocol::Ipv6, at + ip.buffer_len())
+            }
+            _ => unreachable!("a flow's ends are of one family, as the packet it came of"),
         };
         EthernetRepr {
             src_addr: EthernetAddress(LAN.gateway_mac),
             dst_addr: EthernetAddress(LAN.guest_mac),
-            ethertype: EthernetProtocol::Ipv4,
+            ethertype,
         }
         .emit(&mut EthernetFrame::new_unchecked(&mut frame[..]));
-        let at = EthernetFrame::<&[u8]>::header_len();
-        ip.emit(
-            &mut Ipv4Packet::new_unchecked(&mut frame[at..]),
-            &ChecksumCapabilities::default(),
-        );
-        let at = at + ip.buffer_len();
         let mut packet = UdpPacket::new_unchecked(&mut frame[at..at + 8 + len]);
         packet.set_src_port(sent_to.port());
         packet.set_dst_port(guest.port());
         packet.set_len((8 + len) as u16);
-        packet.fill_checksum(&ip.src_addr.into(), &ip.dst_addr.into());
+        packet.fill_checksum(&sent_to.ip().into(), &guest.ip().into());
         at + 8 + len
     }
 }

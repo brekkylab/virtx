@@ -10,7 +10,7 @@
 //! on the host's side resets the guest's.
 
 use std::io::{self, Read as _, Write as _};
-use std::net::{Shutdown, SocketAddr, SocketAddrV4};
+use std::net::{Shutdown, SocketAddr};
 
 use smoltcp::iface::{Context, SocketHandle, SocketSet};
 use smoltcp::socket::tcp::{Socket as SmolSocket, SocketBuffer, State};
@@ -39,7 +39,7 @@ impl TcpFlow {
     /// smoltcp to take the SYN with, and a host socket connecting to `at`.
     pub(in crate::machine::net::gateway) fn open(
         sockets: &mut SocketSet<'static>,
-        to: SocketAddrV4,
+        to: SocketAddr,
         at: SocketAddr,
     ) -> io::Result<TcpFlow> {
         let host = Socket::new(Domain::for_address(at), Type::STREAM, Some(Protocol::TCP))?;
@@ -55,7 +55,7 @@ impl TcpFlow {
         let mut socket = smol_socket();
         socket
             .listen(IpListenEndpoint {
-                addr: Some((*to.ip()).into()),
+                addr: Some(to.ip().into()),
                 port: to.port(),
             })
             .map_err(io::Error::other)?;
@@ -75,8 +75,8 @@ impl TcpFlow {
         sockets: &mut SocketSet<'static>,
         cx: &mut Context,
         host: Socket,
-        to: SocketAddrV4,
-        from: SocketAddrV4,
+        to: SocketAddr,
+        from: SocketAddr,
     ) -> io::Result<TcpFlow> {
         host.set_nonblocking(true)?;
         host.set_tcp_nodelay(true)?;
@@ -84,8 +84,8 @@ impl TcpFlow {
         socket
             .connect(
                 cx,
-                (IpAddress::from(*to.ip()), to.port()),
-                (IpAddress::from(*from.ip()), from.port()),
+                (IpAddress::from(to.ip()), to.port()),
+                (IpAddress::from(from.ip()), from.port()),
             )
             .map_err(io::Error::other)?;
         Ok(TcpFlow {

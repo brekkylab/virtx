@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::SocketAddrV4;
+use std::net::SocketAddr;
 
 use polling::{Event, Poller};
 use slab::Slab;
@@ -12,7 +12,7 @@ use super::tcp::TcpFlow;
 use super::udp::UdpFlow;
 
 /// A flow's two ends: the guest's, and the one it sent to.
-pub(in crate::machine::net::gateway) type Ends = (SocketAddrV4, SocketAddrV4);
+pub(in crate::machine::net::gateway) type Ends = (SocketAddr, SocketAddr);
 
 pub(in crate::machine::net::gateway) enum Flow {
     Tcp(TcpFlow),

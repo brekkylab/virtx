@@ -70,7 +70,7 @@ krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features
 # The guest's network: the TCP/IP stack its virtio-net device's frames reach, one thread's
 # poller over the frames and every host socket the guest's connections are carried on, the
 # host sockets connected without blocking, and the connections by slot.
-smoltcp = { version = "0.14", default-features = false, features = ["std", "log", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-pause-synack"] }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "log", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-pause-synack", "iface-max-addr-count-3"] }
 polling = "3"
 socket2 = "0.6"
 slab = "0.4"
@@ -109,7 +109,7 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 # The guest's end of the network's own tests: a stack of its own, which sends UDP too.
-smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp"] }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 # The remote stores' tests: directories to read local files from, and a runtime with threads
 # for the mock servers they answer from.
 tempfile = "3"

@@ -2071,6 +2071,11 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     let named = ["nc", "-z", "-w", "5", "dns.google", "443"];
     let (lines, code) = run(&with, &named, None).await.unwrap();
     assert_eq!(code, 0, "reached no name: {lines:?}");
+    // The nameserver at its v6 address: the guest's v6 is up, though a host without v6 reaches
+    // nothing on it beyond.
+    let over_v6 = ["nslookup", "dns.google", "fd00::3"];
+    let (lines, code) = run(&with, &over_v6, None).await.unwrap();
+    assert_eq!(code, 0, "resolved nothing over v6: {lines:?}");
     close(with).await;
     // A published port gives the machine its network device, and still no way out.
     for ports in [vec![], vec![8080.into()]] {

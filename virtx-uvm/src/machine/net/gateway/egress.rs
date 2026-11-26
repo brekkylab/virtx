@@ -1,15 +1,15 @@
 //! Where a guest's flow goes, asked once per flow: for a TCP connection at its SYN, for UDP at
 //! the first datagram between two ends.
 //!
-//! A machine with a network reaches what the internet routes, and the nameserver it is told of
-//! is this host's resolver, for DNS alone: it is how the guest's names resolve at all. Nothing
+//! A machine with a network reaches what the internet routes, on v4 and v6, and the nameserver
+//! it is told of -- at either of its addresses -- is this host's resolver, for DNS alone: it is how the guest's names resolve at all. Nothing
 //! else of this host's is the guest's to reach -- its loopback, its private network, its
 //! cloud's metadata. A machine without reaches nothing.
 //!
 //! What goes nowhere: a SYN is reset, as a port nothing listens on is, and a datagram is
 //! dropped.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use super::{LAN, resolver};
 
@@ -36,14 +36,14 @@ impl Egress {
     }
 
     /// Where a flow the guest sent to `to` goes on this host, or `None` for nowhere.
-    pub(super) fn route(&self, to: SocketAddrV4) -> Option<SocketAddr> {
+    pub(super) fn route(&self, to: SocketAddr) -> Option<SocketAddr> {
         if !self.enabled {
             return None;
         }
-        if *to.ip() == LAN.nameserver {
+        if to.ip() == LAN.nameserver || to.ip() == LAN.nameserver_v6 {
             return self.resolver.filter(|_| to.port() == DNS_PORT);
         }
-        routed((*to.ip()).into()).then_some(SocketAddr::V4(to))
+        routed(to.ip()).then_some(to)
     }
 }
 
@@ -94,7 +94,16 @@ pub(crate) fn routed(ip: IpAddr) -> bool {
 mod tests {
     use super::*;
 
-    const PUBLIC: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(93, 184, 215, 14), 443);
+    use std::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
+
+    const PUBLIC: SocketAddr =
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(93, 184, 215, 14), 443));
+    const PUBLIC_V6: SocketAddr = SocketAddr::V6(SocketAddrV6::new(
+        Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111),
+        443,
+        0,
+        0,
+    ));
 
     fn on() -> Egress {
         Egress {
@@ -103,16 +112,18 @@ mod tests {
         }
     }
 
-    /// With a network, what the internet routes is reached where it was sent.
+    /// With a network, what the internet routes is reached where it was sent, on v4 and v6.
     #[test]
     fn a_network_reaches_what_the_internet_routes() {
-        assert_eq!(on().route(PUBLIC), Some(PUBLIC.into()));
+        for to in [PUBLIC, PUBLIC_V6] {
+            assert_eq!(on().route(to), Some(to));
+        }
     }
 
     /// With a network, nothing of this host's or its network's is reached, the gateway included.
     #[test]
     fn a_network_reaches_nothing_the_internet_does_not_route() {
-        for ip in [
+        let v4 = [
             LAN.gateway,
             Ipv4Addr::LOCALHOST,
             Ipv4Addr::new(10, 1, 2, 3),
@@ -123,24 +134,35 @@ mod tests {
             Ipv4Addr::new(224, 0, 0, 251),
             Ipv4Addr::BROADCAST,
             Ipv4Addr::UNSPECIFIED,
-        ] {
-            assert_eq!(on().route(SocketAddrV4::new(ip, 80)), None, "{ip}");
+        ]
+        .map(IpAddr::from);
+        let v6 = [
+            LAN.gateway_v6,
+            LAN.guest_v6,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+        ]
+        .map(IpAddr::from);
+        for ip in v4.into_iter().chain(v6) {
+            assert_eq!(on().route(SocketAddr::new(ip, 80)), None, "{ip}");
         }
     }
 
-    /// The nameserver is this host's resolver, for DNS and nothing else; a host with none
-    /// resolves nothing.
+    /// The nameserver, at either address, is this host's resolver, for DNS and nothing else; a
+    /// host with none resolves nothing.
     #[test]
     fn the_nameserver_is_this_hosts_resolver() {
         let egress = on();
-        let dns = SocketAddrV4::new(LAN.nameserver, 53);
-        assert_eq!(egress.route(dns), egress.resolver);
-        assert_eq!(egress.route(SocketAddrV4::new(LAN.nameserver, 80)), None);
         let unnamed = Egress {
             resolver: None,
             ..on()
         };
-        assert_eq!(unnamed.route(dns), None);
+        for ip in [IpAddr::from(LAN.nameserver), LAN.nameserver_v6.into()] {
+            let dns = SocketAddr::new(ip, 53);
+            assert_eq!(egress.route(dns), egress.resolver, "{ip}");
+            assert_eq!(egress.route(SocketAddr::new(ip, 80)), None, "{ip}");
+            assert_eq!(unnamed.route(dns), None, "{ip}");
+        }
     }
 
     /// Without a network, nothing is reached, the nameserver included.
@@ -150,7 +172,11 @@ mod tests {
             enabled: false,
             ..on()
         };
-        for to in [PUBLIC, SocketAddrV4::new(LAN.nameserver, 53)] {
+        for to in [
+            PUBLIC,
+            PUBLIC_V6,
+            SocketAddr::new(LAN.nameserver.into(), 53),
+        ] {
             assert_eq!(off.route(to), None, "{to}");
         }
     }

@@ -35,7 +35,7 @@
 mod gateway;
 mod link;
 
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
 
 use krun::{NetDevice, NetFlags};
 
@@ -57,6 +57,12 @@ struct Lan {
     /// name: `127.0.0.53` behind systemd, a VPN's, one that changes when a laptop does.
     nameserver: Ipv4Addr,
     prefix: u8,
+    /// The same three on v6, in a unique local prefix: a source the guest prefers v4 over for
+    /// a name with both, so a host without v6 is no different to it.
+    guest_v6: Ipv6Addr,
+    gateway_v6: Ipv6Addr,
+    nameserver_v6: Ipv6Addr,
+    prefix_v6: u8,
     /// The largest IP packet: the most libkrun's device carries in a frame, less the Ethernet
     /// header, rounded down as slirp's is.
     mtu: u32,
@@ -69,6 +75,10 @@ const LAN: Lan = Lan {
     gateway: Ipv4Addr::new(10, 0, 2, 2),
     nameserver: Ipv4Addr::new(10, 0, 2, 3),
     prefix: 24,
+    guest_v6: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x15),
+    gateway_v6: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2),
+    nameserver_v6: Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 3),
+    prefix_v6: 64,
     mtu: 65520,
     guest_mac: [0x02, 0x76, 0x78, 0x00, 0x00, 0x0f],
     gateway_mac: [0x02, 0x76, 0x78, 0x00, 0x00, 0x02],
@@ -81,6 +91,9 @@ impl GuestNetwork {
             address: LAN.guest,
             prefix: LAN.prefix,
             gateway: LAN.gateway,
+            address_v6: LAN.guest_v6,
+            prefix_v6: LAN.prefix_v6,
+            gateway_v6: LAN.gateway_v6,
             mtu: LAN.mtu,
             nameserver: egress.then_some(LAN.nameserver),
         }

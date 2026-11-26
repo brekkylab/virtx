@@ -1,5 +1,5 @@
 use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -7,8 +7,8 @@ use polling::{Event, Events, Poller};
 use smoltcp::iface::{Config, Interface, PollResult, Route, SocketSet};
 use smoltcp::time::Instant;
 use smoltcp::wire::{
-    EthernetAddress, EthernetFrame, EthernetProtocol, IpCidr, IpProtocol, Ipv4Packet, TcpPacket,
-    UdpPacket,
+    EthernetAddress, EthernetFrame, EthernetProtocol, IpCidr, IpProtocol, Ipv4Packet, Ipv6Packet,
+    TcpPacket, UdpPacket,
 };
 
 use super::LAN;
@@ -56,6 +56,10 @@ impl Gateway {
         let mut iface = Interface::new(config, &mut link, Instant::ZERO);
         iface.update_ip_addrs(|addrs| {
             let _ = addrs.push(IpCidr::new(LAN.gateway.into(), LAN.prefix));
+            let _ = addrs.push(IpCidr::new(LAN.gateway_v6.into(), LAN.prefix_v6));
+            // On the guest's link, so the guest asks for it by neighbor discovery, which smoltcp
+            // answers only for an address of its own.
+            let _ = addrs.push(IpCidr::new(LAN.nameserver_v6.into(), LAN.prefix_v6));
         });
         // Every address the guest sends to is this end's to answer for, as the policy says.
         iface.set_any_ip(true);
@@ -192,7 +196,7 @@ impl Gateway {
     /// port at the guest's loopback, from the gateway.
     fn accept(&mut self, i: usize) -> io::Result<()> {
         let port = self.published[i].0;
-        let guest = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+        let guest = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         loop {
             let host = match self.published[i].1.accept() {
                 Ok((host, _)) => host,
@@ -200,7 +204,7 @@ impl Gateway {
                 Err(_) => break,
             };
             let gateway = loop {
-                let gateway = SocketAddrV4::new(LAN.gateway, self.next_port);
+                let gateway = SocketAddr::from((LAN.gateway, self.next_port));
                 self.next_port = self.next_port.checked_add(1).unwrap_or(EPHEMERAL);
                 if self.flows.find(IpProtocol::Tcp, (guest, gateway)).is_none() {
                     break gateway;
@@ -232,10 +236,11 @@ enum Frame {
     Syn { ends: Ends },
     /// A datagram, its payload where it lies in the frame.
     Udp { ends: Ends, payload: Range<usize> },
-    /// smoltcp's: ARP, the rest of TCP, and ICMP to this end.
+    /// smoltcp's: ARP, the rest of TCP, ICMP to this end, and neighbor discovery.
     Smoltcp,
     /// Nothing to answer. ICMP to anywhere but this end is dropped rather than left to smoltcp,
-    /// which answers for every address and would echo a ping to one the guest cannot reach.
+    /// which answers for every address and would echo a ping to one the guest cannot reach. So
+    /// is a v6 packet with extension headers, which the guest's TCP and UDP do not send.
     Drop,
 }
 
@@ -244,39 +249,65 @@ impl Frame {
         let Ok(ethernet) = EthernetFrame::new_checked(frame) else {
             return Frame::Drop;
         };
-        if ethernet.ethertype() != EthernetProtocol::Ipv4 {
-            return Frame::Smoltcp;
-        }
-        let Ok(ip) = Ipv4Packet::new_checked(ethernet.payload()) else {
-            return Frame::Drop;
+        let (src, dst, protocol, payload, header_len, fragment) = match ethernet.ethertype() {
+            EthernetProtocol::Ipv4 => match Ipv4Packet::new_checked(ethernet.payload()) {
+                Ok(ip) => (
+                    IpAddr::from(ip.src_addr()),
+                    IpAddr::from(ip.dst_addr()),
+                    ip.next_header(),
+                    ip.payload(),
+                    ip.header_len() as usize,
+                    ip.more_frags() || ip.frag_offset() != 0,
+                ),
+                Err(_) => return Frame::Drop,
+            },
+            EthernetProtocol::Ipv6 => match Ipv6Packet::new_checked(ethernet.payload()) {
+                Ok(ip) => (
+                    IpAddr::from(ip.src_addr()),
+                    IpAddr::from(ip.dst_addr()),
+                    ip.next_header(),
+                    ip.payload(),
+                    ip.header_len(),
+                    false,
+                ),
+                Err(_) => return Frame::Drop,
+            },
+            _ => return Frame::Smoltcp,
         };
-        let (src, dst) = (ip.src_addr(), ip.dst_addr());
-        let fragment = ip.more_frags() || ip.frag_offset() != 0;
-        match ip.next_header() {
-            IpProtocol::Tcp if !fragment => match TcpPacket::new_checked(ip.payload()) {
+        let this_end = [
+            LAN.gateway.into(),
+            LAN.nameserver.into(),
+            LAN.gateway_v6.into(),
+            LAN.nameserver_v6.into(),
+        ]
+        .contains(&dst);
+        match protocol {
+            IpProtocol::Tcp if !fragment => match TcpPacket::new_checked(payload) {
                 Ok(tcp) if tcp.syn() && !tcp.ack() => Frame::Syn {
                     ends: (
-                        SocketAddrV4::new(src, tcp.src_port()),
-                        SocketAddrV4::new(dst, tcp.dst_port()),
+                        SocketAddr::new(src, tcp.src_port()),
+                        SocketAddr::new(dst, tcp.dst_port()),
                     ),
                 },
                 Ok(_) => Frame::Smoltcp,
                 Err(_) => Frame::Drop,
             },
-            IpProtocol::Udp if !fragment => match UdpPacket::new_checked(ip.payload()) {
+            IpProtocol::Udp if !fragment => match UdpPacket::new_checked(payload) {
                 Ok(udp) => {
-                    let at = EthernetFrame::<&[u8]>::header_len() + ip.header_len() as usize;
+                    let at = EthernetFrame::<&[u8]>::header_len() + header_len;
                     Frame::Udp {
                         ends: (
-                            SocketAddrV4::new(src, udp.src_port()),
-                            SocketAddrV4::new(dst, udp.dst_port()),
+                            SocketAddr::new(src, udp.src_port()),
+                            SocketAddr::new(dst, udp.dst_port()),
                         ),
                         payload: at + 8..at + udp.len() as usize,
                     }
                 }
                 Err(_) => Frame::Drop,
             },
-            IpProtocol::Icmp if dst == LAN.gateway || dst == LAN.nameserver => Frame::Smoltcp,
+            IpProtocol::Icmp if this_end => Frame::Smoltcp,
+            // Neighbor discovery goes to multicast groups as well as to this end.
+            IpProtocol::Icmpv6 if this_end || dst.is_multicast() => Frame::Smoltcp,
             _ => Frame::Drop,
         }
     }
@@ -338,11 +369,13 @@ mod tests {
                 addrs
                     .push(IpCidr::new(Ipv4Addr::LOCALHOST.into(), 8))
                     .unwrap();
+                addrs
+                    .push(IpCidr::new(LAN.guest_v6.into(), LAN.prefix_v6))
+                    .unwrap();
             });
-            iface
-                .routes_mut()
-                .add_default_ipv4_route(LAN.gateway)
-                .unwrap();
+            let routes = iface.routes_mut();
+            routes.add_default_ipv4_route(LAN.gateway).unwrap();
+            routes.add_default_ipv6_route(LAN.gateway_v6).unwrap();
             Guest {
                 link,
                 iface,
@@ -364,10 +397,10 @@ mod tests {
             }
         }
 
-        fn connect(&mut self, to: SocketAddrV4) -> SocketHandle {
+        fn connect(&mut self, to: SocketAddr) -> SocketHandle {
             let buffer = || tcp::SocketBuffer::new(vec![0; 256 << 10]);
             let mut socket = tcp::Socket::new(buffer(), buffer());
-            let to = (IpAddress::from(*to.ip()), to.port());
+            let to = (IpAddress::from(to.ip()), to.port());
             socket.connect(self.iface.context(), to, 40000).unwrap();
             self.sockets.add(socket)
         }
@@ -382,57 +415,61 @@ mod tests {
         }
     }
 
-    const DNS: SocketAddrV4 = SocketAddrV4::new(LAN.nameserver, 53);
+    const DNS: SocketAddr = SocketAddr::new(IpAddr::V4(LAN.nameserver), 53);
+    const DNS_V6: SocketAddr = SocketAddr::new(IpAddr::V6(LAN.nameserver_v6), 53);
 
-    /// A connection carries a megabyte each way, and each side's close reaches the other.
+    /// A connection carries a megabyte each way, and each side's close reaches the other, on v4
+    /// and v6.
     #[test]
     fn a_connection_carries_both_ways_and_ends_from_each_side() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let mut guest = Guest::new(resolved_at(listener.local_addr().unwrap()), vec![]);
-        let handle = guest.connect(DNS);
-        let sent: Vec<u8> = (0..1 << 20).map(|i| (i % 251) as u8).collect();
+        for dns in [DNS, DNS_V6] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut guest = Guest::new(resolved_at(listener.local_addr().unwrap()), vec![]);
+            let handle = guest.connect(dns);
+            let sent: Vec<u8> = (0..1 << 20).map(|i| (i % 251) as u8).collect();
 
-        let host = thread::spawn({
-            let sent = sent.clone();
-            move || {
-                let (mut host, _) = listener.accept().unwrap();
-                let mut got = Vec::new();
-                host.read_to_end(&mut got).unwrap();
-                assert!(
-                    got == sent,
-                    "the host got {} bytes, not what was sent",
-                    got.len()
-                );
-                host.write_all(&sent).unwrap();
-            }
-        });
-        let mut at = 0;
-        guest.until("the guest has sent it all", |sockets| {
-            let socket = sockets.get_mut::<tcp::Socket>(handle);
-            if socket.can_send() {
-                at += socket.send_slice(&sent[at..]).unwrap();
-                if at == sent.len() {
-                    socket.close();
+            let host = thread::spawn({
+                let sent = sent.clone();
+                move || {
+                    let (mut host, _) = listener.accept().unwrap();
+                    let mut got = Vec::new();
+                    host.read_to_end(&mut got).unwrap();
+                    assert!(
+                        got == sent,
+                        "the host got {} bytes, not what was sent",
+                        got.len()
+                    );
+                    host.write_all(&sent).unwrap();
                 }
-            }
-            at == sent.len()
-        });
-        let mut got = Vec::new();
-        guest.until("the host's end has closed", |sockets| {
-            let socket = sockets.get_mut::<tcp::Socket>(handle);
-            while socket.can_recv() {
-                socket
-                    .recv(|buf| (buf.len(), got.extend_from_slice(buf)))
-                    .unwrap();
-            }
-            !socket.may_recv() && got.len() == sent.len()
-        });
-        assert!(
-            got == sent,
-            "the guest got {} bytes, not what was sent",
-            got.len()
-        );
-        host.join().unwrap();
+            });
+            let mut at = 0;
+            guest.until("the guest has sent it all", |sockets| {
+                let socket = sockets.get_mut::<tcp::Socket>(handle);
+                if socket.can_send() {
+                    at += socket.send_slice(&sent[at..]).unwrap();
+                    if at == sent.len() {
+                        socket.close();
+                    }
+                }
+                at == sent.len()
+            });
+            let mut got = Vec::new();
+            guest.until("the host's end has closed", |sockets| {
+                let socket = sockets.get_mut::<tcp::Socket>(handle);
+                while socket.can_recv() {
+                    socket
+                        .recv(|buf| (buf.len(), got.extend_from_slice(buf)))
+                        .unwrap();
+                }
+                !socket.may_recv() && got.len() == sent.len()
+            });
+            assert!(
+                got == sent,
+                "the guest got {} bytes, not what was sent",
+                got.len()
+            );
+            host.join().unwrap();
+        }
     }
 
     /// What the guest sends after the host has closed its side reaches the host whole, though
@@ -504,7 +541,7 @@ mod tests {
         guest
             .sockets
             .get_mut::<udp::Socket>(udp)
-            .send_slice(b"ping", (IpAddress::from(*DNS.ip()), DNS.port()))
+            .send_slice(b"ping", (IpAddress::from(DNS.ip()), DNS.port()))
             .unwrap();
         guest.until("the guest's datagram is out", |sockets| {
             sockets.get::<udp::Socket>(udp).send_queue() == 0
@@ -520,7 +557,7 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut guest = Guest::new(resolved_at(listener.local_addr().unwrap()), vec![]);
-        let handle = guest.connect(SocketAddrV4::new(LAN.gateway, port));
+        let handle = guest.connect(SocketAddr::from((LAN.gateway, port)));
         guest.until("the connection is reset", |sockets| {
             sockets.get::<tcp::Socket>(handle).state() == tcp::State::Closed
         });
@@ -565,40 +602,42 @@ mod tests {
     }
 
     /// A datagram reaches where the policy says, and the reply comes back from where the guest
-    /// sent it.
+    /// sent it, on v4 and v6.
     #[test]
     fn a_datagram_goes_out_and_its_reply_comes_back_from_where_it_was_sent() {
-        let host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let mut guest = Guest::new(resolved_at(host.local_addr().unwrap()), vec![]);
-        let buffer =
-            || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 1 << 16]);
-        let mut socket = udp::Socket::new(buffer(), buffer());
-        socket.bind(40000).unwrap();
-        let handle = guest.sockets.add(socket);
-        let to = (IpAddress::from(*DNS.ip()), DNS.port());
-        guest
-            .sockets
-            .get_mut::<udp::Socket>(handle)
-            .send_slice(b"ping", to)
-            .unwrap();
+        for dns in [DNS, DNS_V6] {
+            let host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut guest = Guest::new(resolved_at(host.local_addr().unwrap()), vec![]);
+            let buffer =
+                || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 1 << 16]);
+            let mut socket = udp::Socket::new(buffer(), buffer());
+            socket.bind(40000).unwrap();
+            let handle = guest.sockets.add(socket);
+            let to = (IpAddress::from(dns.ip()), dns.port());
+            guest
+                .sockets
+                .get_mut::<udp::Socket>(handle)
+                .send_slice(b"ping", to)
+                .unwrap();
 
-        guest.until("the guest's datagram is out", |sockets| {
-            sockets.get::<udp::Socket>(handle).send_queue() == 0
-        });
-        let mut buf = [0; 16];
-        let (n, from) = host.recv_from(&mut buf).unwrap();
-        assert_eq!(&buf[..n], b"ping");
-        host.send_to(b"pong", from).unwrap();
-        let mut reply = None;
-        guest.until("the reply has come back", |sockets| {
-            if let Ok((data, meta)) = sockets.get_mut::<udp::Socket>(handle).recv() {
-                reply = Some((data.to_vec(), meta.endpoint));
-            }
-            reply.is_some()
-        });
-        let (data, endpoint) = reply.unwrap();
-        assert_eq!(data, b"pong");
-        assert_eq!(endpoint, to.into());
+            guest.until("the guest's datagram is out", |sockets| {
+                sockets.get::<udp::Socket>(handle).send_queue() == 0
+            });
+            let mut buf = [0; 16];
+            let (n, from) = host.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], b"ping");
+            host.send_to(b"pong", from).unwrap();
+            let mut reply = None;
+            guest.until("the reply has come back", |sockets| {
+                if let Ok((data, meta)) = sockets.get_mut::<udp::Socket>(handle).recv() {
+                    reply = Some((data.to_vec(), meta.endpoint));
+                }
+                reply.is_some()
+            });
+            let (data, endpoint) = reply.unwrap();
+            assert_eq!(data, b"pong");
+            assert_eq!(endpoint, to.into());
+        }
     }
 
     /// A connection to a published port reaches the guest's listener on that port at its

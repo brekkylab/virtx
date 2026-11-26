@@ -483,8 +483,9 @@ fn root(asked: &wire::MachineInfo, spike: &mut dyn FnMut(&str)) -> io::Result<()
                 None,
             )
         });
-        // Spike: mounted once, with barriers: a remount after, to put them back, syncs what the
-        // mount wrote, a journal commit that takes longer than the flush it was to spare.
+        // Mounted once, with barriers: a remount after, to give them back to one mounted
+        // without, syncs what the mount wrote -- a journal commit, waited on, that takes longer
+        // than the one flush the mount waits on.
         let upper = mount(
             Some(&asked.upper_device),
             UPPER_AT,

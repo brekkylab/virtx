@@ -1,0 +1,128 @@
+---
+title: "Driving your browser from a sandbox"
+description: "Let an agent in a sandbox use a browser on your machine, which you watch and stay signed in to, through a client port."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+An agent runs in a sandbox, but the browser it uses can stay on your machine: a window you watch, and step into when a page asks for a sign-in or a captcha.
+The agent reaches the browser's debugging port through a [client port](/docs/tutorials/networks-ports/#client-ports), at `10.0.2.2`, and drives it with the Chrome DevTools Protocol, as Playwright, Puppeteer and browser-use do.
+This guide starts Chrome on your machine and has a Playwright script in a sandbox open a page in it.
+
+For a browser that runs in the sandbox itself, see [Driving a browser](/docs/guides/browser/).
+
+## Start a browser to hand over
+
+Start Chrome with its debugging port, and a profile of its own:
+
+```bash
+# macOS
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 --user-data-dir="$(mktemp -d)"
+
+# Linux
+google-chrome --remote-debugging-port=9222 --user-data-dir="$(mktemp -d)"
+```
+
+Chrome opens its debugging port only for a profile other than your everyday one, so this window starts signed in to nothing.
+Sign in to what the agent is to use in it, and nothing else.
+
+<Aside type="caution">
+Whatever reaches the debugging port controls the whole browser: every site its profile is signed in to, the pages it can reach on your machine and network, and the files it can open.
+Hand the agent a profile made for it.
+</Aside>
+
+## Reach it from a sandbox
+
+The sandbox is made with the client port `9222`, and the forwarder carries its connections to `127.0.0.1:9222` on your machine.
+Here the sandbox has a network to install Playwright's library; it downloads no browser, since it drives yours.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import ClientPortForwarder
+
+AGENT = """
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://10.0.2.2:9222")
+    page = browser.contexts[0].new_page()
+    page.goto("https://example.com")
+    print(page.title())
+"""
+
+await client.pull_image("python:3.12-slim").complete()
+sandbox = await client.create_sandbox("python:3.12-slim", client_ports=[9222])
+await sandbox.exec(["pip", "install", "-q", "playwright"]).complete(print=True)
+await sandbox.write_file("agent.py", AGENT)
+
+async with await ClientPortForwarder.open(sandbox, 9222):
+    await sandbox.exec(["python", "/agent.py"]).complete(print=True)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const { ClientPortForwarder } = require('@brekkylab/virtx')
+
+const AGENT = `
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://10.0.2.2:9222")
+    page = browser.contexts[0].new_page()
+    page.goto("https://example.com")
+    print(page.title())
+`
+
+await client.pullImage('python:3.12-slim').complete()
+const sandbox = await client.createSandbox('python:3.12-slim', { clientPorts: [9222] })
+await sandbox.exec(['pip', 'install', '-q', 'playwright']).complete({ print: true })
+await sandbox.writeFile('agent.py', AGENT)
+
+const forwarder = await ClientPortForwarder.open(sandbox, 9222)
+await sandbox.exec(['python', '/agent.py']).complete({ print: true })
+forwarder.close()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+const AGENT: &str = r#"
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://10.0.2.2:9222")
+    page = browser.contexts[0].new_page()
+    page.goto("https://example.com")
+    print(page.title())
+"#;
+
+client.pull_image("python:3.12-slim", None).complete(false).await?;
+let args = SandboxCreateArgs::new("python:3.12-slim").client_port(9222);
+let sandbox = client.create_sandbox(&args).await?;
+let install = SandboxExecArgs::new(["pip", "install", "-q", "playwright"]);
+sandbox.exec(&install).complete(true).await?;
+sandbox.write_file("agent.py", AGENT, None).await?;
+
+let forwarder = ClientPortForwarder::open(&sandbox, 9222, None).await?;
+sandbox.exec(&SandboxExecArgs::new(["python", "/agent.py"])).complete(true).await?;
+drop(forwarder);
+```
+
+</TabItem>
+</Tabs>
+
+A new tab opens in your window, goes to example.com, and the script prints its title.
+The same address works for any tool that takes a CDP endpoint, such as browser-use's `cdp_url`.
+
+The address is a number, `10.0.2.2`, rather than a name, since Chrome's debugging port refuses a request whose `Host` is a name other than `localhost`.
+
+## When it is not reached
+
+A connection to `10.0.2.2:9222` is refused, as one to a closed port is, while no forwarder is open, and while nothing listens on `127.0.0.1:9222` on your machine: start the browser before the agent connects.
+What the forwarder could not reach is logged as a warning, as the [tutorial](/docs/tutorials/networks-ports/#client-ports) says.

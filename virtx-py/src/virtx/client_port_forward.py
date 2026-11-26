@@ -28,10 +28,8 @@ class ClientPortForwarder:
     ) -> ClientPortForwarder:
         """Take the client port ``port`` of ``sandbox``, one it was made with, its connections
         carried to ``target``, ``host:port``, or ``127.0.0.1:{port}`` without one, over its
-        client's session: answered once it is taken. Over HTTP it is reached while this is
-        held, beside any other client's; a server on this machine reaches ``127.0.0.1:{port}``
-        itself, and refuses another ``target``. Refused ``404`` for a port the sandbox was not
-        made with."""
+        client's session: answered once it is taken. It is reached while this is held, beside
+        any other's that takes it. Refused ``404`` for a port the sandbox was not made with."""
         client = sandbox.client
         lib = client._lib
         request = args(sandbox=sandbox.id, port=port, target=target)
@@ -49,14 +47,17 @@ class ClientPortForwarder:
 
     async def wait_closed(self) -> VirtxError:
         """Wait until it is no longer taken, and answer why: ``404`` once the sandbox is gone, and
-        what else ended it."""
+        what else ended it, such as its closing."""
         if self._handle is None:
             raise VirtxError("the client port is closed")
+        handle = self._handle
         try:
-            while (await self._lib.next_item(self._handle))[0]:
+            while (await self._lib.next_item(handle, lambda: self._handle is None))[0]:
                 pass
         except VirtxError as error:
             return error
+        if self._handle is None:
+            return VirtxError(f"client port {self.port} was closed")
         return VirtxError(f"client port {self.port} ended")
 
     def close(self) -> None:

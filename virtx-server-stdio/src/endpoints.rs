@@ -19,6 +19,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
+use futures_util::StreamExt as _;
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
@@ -180,7 +181,7 @@ impl Drop for Naming<'_> {
 }
 
 /// A sandbox, its ports with the loopback address each is reached at, and what takes each of
-/// their connections and its client ports', until the sandbox goes.
+/// their connections, until the sandbox goes.
 struct Held {
     sandbox: Arc<Sandbox>,
     ports: Vec<SandboxPort>,
@@ -282,6 +283,10 @@ pub fn router() -> Router {
             get(sandbox_get)
                 .patch(sandbox_resize)
                 .delete(sandbox_remove),
+        )
+        .route(
+            "/sandboxes/{id}/client-ports/{port}",
+            get(sandbox_client_port),
         )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
@@ -837,29 +842,6 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     )
     .await?;
     let mut listening = JoinSet::new();
-    // Each client port reached on this machine, which the client is on, at its loopback: taken
-    // by this server for as long as the sandbox is, as its ports are answered at this server's.
-    for spec in &args.client_ports {
-        let port = spec.port;
-        let taker = sandbox.take_client_port(port)?;
-        let sandbox = Arc::clone(&sandbox);
-        listening.spawn(async move {
-            while let Some(connection) = taker.next().await {
-                let activity = sandbox.activity();
-                tokio::spawn(async move {
-                    // Not reached, dropped: refused, as a port nothing listens on is.
-                    let Ok(mut reached) = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await
-                    else {
-                        return;
-                    };
-                    let _activity = activity;
-                    if let Ok(mut carried) = connection.accept().await {
-                        let _ = tokio::io::copy_bidirectional(&mut carried, &mut reached).await;
-                    }
-                });
-            }
-        });
-    }
     for (port, listener) in listeners {
         let sandbox = Arc::clone(&sandbox);
         listening.spawn(async move {
@@ -927,6 +909,61 @@ async fn sandbox_remove(
     let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
     tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// How long reaching a client port's target may take before its connection is refused.
+const CLIENT_PORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `GET /sandboxes/{id}/client-ports/{port}?target=host:port`: the port taken while the answer
+/// is held, each connection a process makes to it carried to `target` on this machine, the
+/// client's, or `127.0.0.1:{port}` without one, and refused where it is not reached. Answered
+/// `200` with a body that carries nothing and ends once the sandbox is deleted; `400` for a
+/// target that is not `host:port`, and `404` for a port the sandbox was not made with. Let go
+/// of, the connections it carries are closed.
+async fn sandbox_client_port(
+    Extension(home): Extension<Arc<Home>>,
+    Segments((id, port)): Segments<(String, u16)>,
+    RawQuery(query): RawQuery,
+) -> Answer {
+    let target = query
+        .as_deref()
+        .and_then(|query| {
+            form_urlencoded::parse(query.as_bytes())
+                .find(|(key, _)| key == "target")
+                .map(|(_, target)| target.into_owned())
+        })
+        .unwrap_or_else(|| format!("127.0.0.1:{port}"));
+    let named = target
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+    if !named {
+        return Err(invalid(format!("target: {target:?} is not host:port")));
+    }
+    let sandbox = home.sandbox(&id)?;
+    let taker = sandbox.take_client_port(port)?;
+    let taking = async move {
+        let mut carried = JoinSet::new();
+        while let Some(connection) = taker.next().await {
+            while carried.try_join_next().is_some() {}
+            let (target, activity) = (target.clone(), sandbox.activity());
+            carried.spawn(async move {
+                let reaching = TcpStream::connect(&target);
+                // Not reached, dropped: refused, as a port nothing listens on is.
+                let Ok(Ok(mut reached)) =
+                    tokio::time::timeout(CLIENT_PORT_CONNECT_TIMEOUT, reaching).await
+                else {
+                    return;
+                };
+                let _activity = activity;
+                if let Ok(mut carried) = connection.accept().await {
+                    let _ = tokio::io::copy_bidirectional(&mut carried, &mut reached).await;
+                }
+            });
+        }
+    };
+    let body = futures_util::stream::once(taking)
+        .filter_map(|()| std::future::ready(None::<Result<Bytes, std::io::Error>>));
+    Ok(Body::from_stream(body).into_response())
 }
 
 async fn sandbox_job_list(

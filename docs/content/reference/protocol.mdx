@@ -24,7 +24,7 @@ A server offers several endpoints, and each speaks its own protocol:
 | [`/sandboxes/`](#sandboxes) | HTTP | Sandbox CRUD |
 | [`/sandboxes/{id}/files/`](#files) | WebDAV | The files in a sandbox, as its processes see them |
 | [`/sandboxes/{id}/ports/{port}`](#ports) | WebSocket | A connection to a sandbox's port |
-| [`/sandboxes/{id}/client-ports/{port}`](#client-ports) | WebSocket | A connection to a client's port, carried from a sandbox |
+| [`/sandboxes/{id}/client-ports/{port}`](#client-ports) | WebSocket, or held on the client's machine | A connection to a client's port, carried from a sandbox |
 | [`/sandboxes/{id}/jobs/`](#sandbox-jobs) | HTTP | Sandbox jobs: read, signal, cancel |
 | [`/sandboxes/{id}/jobs/exec/`](#sandbox-jobs) | HTTP | Starting a process in a sandbox |
 | [`/sandboxes/{id}/jobs/{job}/stdin`](#sandbox-jobs) | HTTP | Writing to a process's stdin |
@@ -366,8 +366,9 @@ They are kept from the sandbox's `POST` until its `DELETE`, and answered by its 
 `0`, a port given twice, a label past 128 characters and a port with any other member are refused with `400`, `invalid`.
 They have nothing to do with `ports`: the same number may be in both.
 
-- A server on the client's machine reaches the port itself, at `127.0.0.1`, for as long as the sandbox lives.
-- A server reachable from other machines reaches it through a client that takes it, as below. A connection to a port no client takes is refused, as one to a port nothing listens on is.
+- A server reachable from other machines reaches it through a client that takes it, over a WebSocket, as below.
+- A server on the client's machine reaches it itself while a client takes it, as [below](#a-client-port-on-the-clients-machine).
+- A connection to a port no client takes is refused, as one to a port nothing listens on is.
 - A connection to `10.0.2.2` at a port the sandbox was not made with is refused. `10.0.2.2` is never reached on the server's network.
 - Client ports are reached with or without `network`.
 
@@ -380,8 +381,14 @@ Any number of WebSockets may take a port at once, of one client or of several, a
 3. The connection's TCP is then carried as a port's is, each direction ending on its own: an empty binary message is its sender's end of what it sends, and its receiver shuts its TCP's writing for it. The WebSocket is closed once both have ended.
 
 A client that keeps a port taken opens another WebSocket as soon as one is sent a connection.
-A connection that comes while no WebSocket is waiting waits for one for a time the server chooses, and is refused after it.
-The server MAY send pings while a WebSocket waits, and closes every one waiting once the sandbox is deleted.
+A connection that comes while no WebSocket is waiting, of a port one has waited on within a time the server chooses, waits for one for that time, and is refused after it.
+The server MAY send pings while a WebSocket waits, and close one that answers none before the next; it refuses a connection whose client answers neither way in a time it chooses, and closes every WebSocket waiting once the sandbox is deleted.
+
+##### A client port on the client's machine
+
+A server on the client's machine, as over stdio, takes `GET /sandboxes/{id}/client-ports/{port}?target=host:port`, with no WebSocket: the port is taken while the answer is held, and the server connects each connection to `target` on the machine itself, `127.0.0.1:{port}` without one.
+It is answered `200` with a body that carries nothing and ends once the sandbox is deleted, or refused `404`, `not_found`, for a port the sandbox was not made with, and `400`, `invalid`, for a `target` that is not `host:port`.
+A connection whose target is not reached is refused; one that is is carried as above, and closed once the request that took it ends.
 
 What a connection is carried to is the client's alone, and the server is not told it.
 A client port gives the sandbox's processes whatever what it reaches gives: a browser's debugging port reaches what the browser does, and `adb`'s server reaches the device.

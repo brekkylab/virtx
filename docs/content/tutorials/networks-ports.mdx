@@ -132,7 +132,7 @@ Ports are opened only when the sandbox is created, and stay open until it is rem
 Closing a forwarder stops forwarding on this machine; the port in the sandbox stays open, and another forwarder can reach it again.
 
 A server on this machine answers each port with a loopback address already, which a TCP client can also reach as it is.
-A server over HTTP answers a URL that only a `PortForwarder` opens, so use one either way.
+A server over HTTP answers none, so use a `PortForwarder` either way.
 
 ## What a port is for
 
@@ -191,7 +191,7 @@ Client ports are ports the other way round: a process in the sandbox reaches a T
 
 How it is carried depends on where the server runs:
 
-- **A server on your machine**, started with `Client.spawn`, connects to `127.0.0.1:<port>` itself, for as long as the sandbox lives. The forwarder only checks that the sandbox was made with the port, and another target is refused.
+- **A server on your machine**, started with `Client.spawn`, connects to the target itself while the forwarder holds a request open to `/sandboxes/{id}/client-ports/{port}`.
 - **A server over HTTP** is reached through a WebSocket, as a port is the other way.
   The forwarder keeps one open to `/sandboxes/{id}/client-ports/{port}`.
   When a process connects, the server tells the forwarder over it, and the forwarder connects to the target on your machine and carries the bytes; it opens another WebSocket at once for the next connection.
@@ -199,7 +199,7 @@ How it is carried depends on where the server runs:
 <img src={clientPortForwarding.src} width={clientPortForwarding.width} height={clientPortForwarding.height} alt="A process in the sandbox connects to 10.0.2.2:9222. The virtx server carries the connection in a WebSocket to ws://…/sandboxes/<id>/client-ports/9222, which the ClientPortForwarder on your machine holds open, and the forwarder connects it to 127.0.0.1:9222." />
 
 The process's `connect` waits until the target is reached, and succeeds then.
-Over HTTP it is refused, as one to a port nothing listens on is, when no forwarder is open, when the target is not reached, or when no forwarder takes it within a few seconds.
+It is refused, as one to a port nothing listens on is, when no forwarder is open, when the target is not reached, or when no forwarder takes it within a few seconds.
 `10.0.2.2` at a port the sandbox was not made with is refused too: it never reaches the server's own network.
 Client ports, like ports, do not need `network`.
 
@@ -284,4 +284,5 @@ What fails on the way, such as a target not reached, is logged as a warning, as 
 
 A client port gives the sandbox's processes whatever the program behind it gives: a browser's debugging port reaches everything that browser is signed in to, and `adb`'s server reaches the device.
 Hand it only a port you would let that code use.
+Anyone who can reach the sandbox, any member of its project, can open a forwarder for its port too, and the connections are shared out among every forwarder open: one on their machine would get some of them.
 For uses of each, see [Driving your browser from a sandbox](/docs/guides/your-browser/) and [Driving an Android device from a sandbox](/docs/guides/android/).

@@ -1,6 +1,6 @@
 //! A sandbox's client ports: a process in it reaching a listener of this machine's at
-//! `10.0.2.2` -- through `virtx-stdio`, on this machine, which reaches it itself, and over HTTP
-//! from `virtx-server-tcp` while this client takes the port.
+//! `10.0.2.2` while this client takes the port -- through `virtx-stdio`, on this machine, which
+//! reaches it itself, and over HTTP from `virtx-server-tcp`.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -50,9 +50,11 @@ fn listening() -> (u16, thread::JoinHandle<()>) {
     (port, answering)
 }
 
-/// Over stdio the server is on this machine, and reaches the port itself, with no network.
+/// Over stdio the server is on this machine, and reaches the port's target itself, with no
+/// network, while this client takes it, and not before or after; it ends once the sandbox is
+/// removed.
 #[test]
-fn a_client_port_over_stdio_is_reached_by_the_server_itself() {
+fn a_client_port_over_stdio_is_reached_while_it_is_taken() {
     let client = common::client();
     common::alpine(&client);
     let (port, _answering) = listening();
@@ -64,18 +66,37 @@ fn a_client_port_over_stdio_is_reached_by_the_server_itself() {
         .map(|p| p.port)
         .collect();
     assert_eq!(ports, [port]);
-    assert_eq!(ask(&sandbox, port), (vec!["back hi".to_owned()], 0));
+    let (lines, code) = ask(&sandbox, port);
+    assert_ne!(code, 0, "reached a port no one takes: {lines:?}");
 
-    // Taken, nothing changes; a port it was not made with, or another target, is refused.
-    let _taken = ClientPortForwarder::open(&sandbox, port, None)
+    let taken = ClientPortForwarder::open(&sandbox, port, None)
         .wait()
         .unwrap();
     assert_eq!(ask(&sandbox, port), (vec!["back hi".to_owned()], 0));
     let undeclared = ClientPortForwarder::open(&sandbox, port + 1, None).wait();
-    assert!(undeclared.is_err());
-    let elsewhere = ClientPortForwarder::open(&sandbox, port, Some("127.0.0.1:1")).wait();
-    assert!(elsewhere.is_err());
+    assert_eq!(undeclared.err().unwrap().status(), Some(404));
+    drop(taken);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while ask(&sandbox, port).1 == 0 {
+        assert!(Instant::now() < deadline, "still taken once let go of");
+    }
+
+    // A target given in place of the port's own is reached, `::1` among them.
+    let listener = TcpListener::bind("[::1]:0").unwrap();
+    let elsewhere = listener.local_addr().unwrap().port();
+    let _answering = thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let _ = write!(stream, "from ::1");
+        }
+    });
+    let target = format!("[::1]:{elsewhere}");
+    let taken = ClientPortForwarder::open(&sandbox, port, Some(&target))
+        .wait()
+        .unwrap();
+    assert_eq!(answered(&sandbox, port), ["from ::1"]);
     sandbox.remove().wait().unwrap();
+    assert_eq!(taken.wait_closed().status(), Some(404));
 }
 
 /// Over HTTP a client port is reached, with no network, while this client takes it, and not
@@ -118,6 +139,13 @@ fn a_client_port_over_http_is_reached_while_it_is_taken() {
         .wait()
         .unwrap();
     assert_eq!(answered(&sandbox, port), ["back hi"]);
+    // Connections made at once, each on a WebSocket of its own, wait for the next.
+    let at_once = format!(
+        "for i in 1 2 3 4 5 6 7 8; do (echo $i | nc -w 5 10.0.2.2 {port} > /tmp/$i) & done; wait; \
+         cat /tmp/1 /tmp/2 /tmp/3 /tmp/4 /tmp/5 /tmp/6 /tmp/7 /tmp/8"
+    );
+    let (lines, code) = common::run(&sandbox, &["sh", "-c", &at_once]);
+    assert_eq!((lines.len(), code), (8, 0), "{lines:?}");
     sandbox.remove().wait().unwrap();
     assert_eq!(taken.wait_closed().status(), Some(404));
 }

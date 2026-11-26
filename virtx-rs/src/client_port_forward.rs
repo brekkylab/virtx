@@ -17,9 +17,8 @@ pub struct ClientPortForwarder {
 impl ClientPortForwarder {
     /// Take the client port `port` of `sandbox`, one it was made with, its connections carried
     /// to `target`, `host:port`, or `127.0.0.1:{port}` without one, over its client's session:
-    /// answered once it is taken. Over HTTP it is reached while this is held, beside any other
-    /// client's; a server on this machine reaches `127.0.0.1:{port}` itself, and refuses another
-    /// `target`. Refused `404` for a port the sandbox was not made with.
+    /// answered once it is taken. It is reached while this is held, beside any other's that
+    /// takes it. Refused `404` for a port the sandbox was not made with.
     pub fn open(
         sandbox: &Sandbox,
         port: u16,

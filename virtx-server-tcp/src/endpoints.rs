@@ -1496,6 +1496,10 @@ async fn sandbox_remove(
 /// between it and its client does not take it for idle.
 const CLIENT_PORT_KEEPALIVE: Duration = Duration::from_secs(15);
 
+/// How long a client port's WebSocket has to answer the connection said on it, longer than a
+/// client takes to reach its target, before the connection is refused.
+const CLIENT_PORT_ANSWER: Duration = Duration::from_secs(20);
+
 /// The WebSocket subprotocol a port's TCP, and a client port's, is carried in.
 const TCP_SUBPROTOCOL: &str = "virtx.tcp";
 
@@ -1609,25 +1613,28 @@ fn close_reason(said: &str) -> String {
 /// The connection is said with an empty binary message; the client answers it with another once
 /// it has reached what the port is, and the process's `connect` succeeds then, or closes the
 /// WebSocket, which refuses it. Refused as [`tcp_websocket`] says, and `404` for a port the
-/// sandbox was not made with.
+/// sandbox was not made with: before the port is taken, so a request refused takes no
+/// connection.
 async fn sandbox_client_port(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, port)): Segments<(String, u16)>,
     headers: HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Answer {
-    let sandbox = home.sandbox(&id)?;
-    let taker = sandbox.take_client_port(port)?;
     let upgrade = match tcp_websocket(upgrade, &headers) {
         Ok(upgrade) => upgrade,
         Err(refused) => return Ok(*refused),
     };
+    let sandbox = home.sandbox(&id)?;
+    let taker = sandbox.take_client_port(port)?;
     Ok(upgrade.on_upgrade(move |socket| take_client_port(socket, sandbox, taker)))
 }
 
 /// Wait on `socket` for the next connection `taker` has, and carry it if the client reaches its
-/// target. A client that closes `socket` meanwhile takes none.
+/// target in [`CLIENT_PORT_ANSWER`]. A client that closes `socket` meanwhile, or answers no ping
+/// before the next, takes none.
 async fn take_client_port(mut socket: WebSocket, sandbox: Arc<Sandbox>, taker: ClientPortTaker) {
+    let mut pinged = false;
     let connection = loop {
         tokio::select! {
             connection = taker.next() => match connection {
@@ -1638,13 +1645,14 @@ async fn take_client_port(mut socket: WebSocket, sandbox: Arc<Sandbox>, taker: C
                 }
             },
             received = socket.recv() => match received {
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => pinged = false,
                 _ => return,
             },
             () = tokio::time::sleep(CLIENT_PORT_KEEPALIVE) => {
-                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                if pinged || socket.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }
+                pinged = true;
             }
         }
     };
@@ -1653,15 +1661,20 @@ async fn take_client_port(mut socket: WebSocket, sandbox: Arc<Sandbox>, taker: C
         return;
     }
     // Dropped unanswered, the connection is refused.
-    let reached = loop {
-        match socket.recv().await {
-            Some(Ok(Message::Binary(said))) if said.is_empty() => break connection,
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            _ => return,
+    let answered = tokio::time::timeout(CLIENT_PORT_ANSWER, async {
+        loop {
+            match socket.recv().await {
+                Some(Ok(Message::Binary(said))) if said.is_empty() => return true,
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                _ => return false,
+            }
         }
-    };
+    });
+    if answered.await != Ok(true) {
+        return;
+    }
     let _activity = sandbox.activity();
-    let Ok(reached) = reached.accept().await else {
+    let Ok(reached) = connection.accept().await else {
         return;
     };
     carry_halves(socket, reached).await;

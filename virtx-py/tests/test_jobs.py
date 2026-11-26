@@ -214,16 +214,20 @@ async def test_a_client_port_is_reached_and_taken(client: Client) -> None:
     )
     assert sandbox.client_ports == [SandboxClientPort(port, "answers back")]
     assert (await client.get_sandbox(sandbox.id)).client_ports == sandbox.client_ports
-    # Over stdio the server, on this machine, reaches the port itself.
-    asked = await sandbox.exec(ask)
-    said = [entry.entry async for entry in asked.log()]
-    assert said == [Stdout("back hi"), SandboxJobEnd(0)]
+    assert await sandbox.exec(ask).complete() != 0
 
     async with await ClientPortForwarder.open(sandbox, port) as taken:
         assert taken.port == port
-        assert await sandbox.exec(ask).complete() == 0
-    with pytest.raises(VirtxError):
+        asked = await sandbox.exec(ask)
+        said = [entry.entry async for entry in asked.log()]
+        assert said == [Stdout("back hi"), SandboxJobEnd(0)]
+        waiting = asyncio.create_task(taken.wait_closed())
+        await asyncio.sleep(0)
+    # Closed while it is waited on, it is answered so.
+    assert isinstance(await asyncio.wait_for(waiting, 10), VirtxError)
+    with pytest.raises(VirtxError) as refused:
         await ClientPortForwarder.open(sandbox, port + 1)
+    assert refused.value.status == 404
     await sandbox.remove()
     server.close()
 

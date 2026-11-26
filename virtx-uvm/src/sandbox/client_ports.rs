@@ -10,16 +10,18 @@
 //! machines, so each is told one address. A connection opens with the relay's greeting -- its
 //! key, which only the sandbox's machines are handed, and the port -- and waits for a taker of
 //! its port. It is answered once a taker has reached what the port is on its client's machine
-//! and [accepts](ClientConnection::accept) it, and the process's SYN in the guest with it. A
-//! connection to a port no one takes is refused at once, and one no taker accepts within
-//! [`HOLD`] is refused then: dropped, which the machine reads as a refusal.
+//! and [accepts](ClientConnection::accept) it, and the process's SYN in the guest with it. One
+//! no taker accepts within [`HOLD`] is refused then: dropped, which the machine reads as a
+//! refusal. A port has no taker between one a client lets go of and the next it takes, so a
+//! connection waits as well while the port has had one within [`HOLD`]; to a port no one has
+//! taken for that long, it is refused at once.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -55,6 +57,8 @@ struct Shared {
 struct Port {
     /// How many takers it has now.
     takers: AtomicUsize,
+    /// When a taker of it last let it go.
+    let_go: Mutex<Option<Instant>>,
     /// Its connections not yet taken, oldest first, each by its number.
     waiting: Mutex<VecDeque<(u64, TcpStream)>>,
     /// Told of each connection that comes to wait, and of the sandbox's closing.
@@ -145,8 +149,8 @@ impl Drop for ClientPorts {
 }
 
 /// Read `connection`'s greeting, and have it wait for a taker of the port it names: dropped,
-/// and so refused, for a greeting without `key`, a port no one takes, or one with as many
-/// waiting as it holds; and once it has waited [`HOLD`] untaken.
+/// and so refused, for a greeting without `key`, a port no one has taken within [`HOLD`], or
+/// one with as many waiting as it holds; and once it has waited [`HOLD`] untaken.
 async fn wait(mut connection: TcpStream, key: String, shared: Arc<Shared>) {
     let mut greeting = [0u8; CLIENT_GREETING];
     let said = connection.read_exact(&mut greeting);
@@ -167,7 +171,13 @@ async fn wait(mut connection: TcpStream, key: String, shared: Arc<Shared>) {
     let number = shared.next.fetch_add(1, Ordering::Relaxed);
     {
         let mut waiting = taken.waiting.lock().unwrap();
-        if taken.takers.load(Ordering::Relaxed) == 0 || waiting.len() >= WAITING {
+        let untaken = taken.takers.load(Ordering::Relaxed) == 0
+            && taken
+                .let_go
+                .lock()
+                .unwrap()
+                .is_none_or(|let_go| let_go.elapsed() >= HOLD);
+        if untaken || waiting.len() >= WAITING {
             return;
         }
         waiting.push_back((number, connection));
@@ -178,8 +188,9 @@ async fn wait(mut connection: TcpStream, key: String, shared: Arc<Shared>) {
     waiting.retain(|(waited, _)| *waited != number);
 }
 
-/// A taker of a client port: the connections made to it, one by one. Dropped, it takes no more,
-/// and once a port has none, a connection to it is refused at once.
+/// A taker of a client port: the connections made to it, one by one. Dropped, it takes no more;
+/// a connection that comes while the port has no taker waits for the next as one waiting does,
+/// and once the port has had none for [`HOLD`], one is refused at once.
 pub struct ClientPortTaker {
     port: u16,
     shared: Arc<Shared>,
@@ -211,6 +222,7 @@ impl ClientPortTaker {
 impl Drop for ClientPortTaker {
     fn drop(&mut self) {
         let port = &self.shared.ports[&self.port];
+        *port.let_go.lock().unwrap() = Some(Instant::now());
         port.takers.fetch_sub(1, Ordering::Relaxed);
         // One it was told of and did not take is another's.
         port.arrived.notify_one();
@@ -280,11 +292,29 @@ mod tests {
         let mut machine = connect(ports.relay(), 9222).await;
         drop(taker.next().await.unwrap());
         assert_eq!(verdict(&mut machine).await, None);
+    }
 
-        // Let go of, it is no one's again.
-        drop(taker);
-        let mut machine = connect(ports.relay(), 9222).await;
-        assert_eq!(verdict(&mut machine).await, None);
+    /// As a client over HTTP takes a port: one taker for each connection, let go of as the
+    /// connection is said, and another taken after.
+    #[tokio::test]
+    async fn connections_made_at_once_wait_for_the_next_taker() {
+        let ports = ClientPorts::open(&[9222]).unwrap();
+        // Between one taker and the next.
+        drop(ports.take(9222).unwrap());
+        let mut machines = Vec::new();
+        for _ in 0..5 {
+            machines.push(connect(ports.relay(), 9222).await);
+        }
+        for _ in 0..5 {
+            let taker = ports.take(9222).unwrap();
+            let connection = taker.next().await.unwrap();
+            drop(taker);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            connection.accept().await.unwrap();
+        }
+        for mut machine in machines {
+            assert_eq!(verdict(&mut machine).await, Some(CLIENT_ACCEPTED));
+        }
     }
 
     #[tokio::test]

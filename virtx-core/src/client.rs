@@ -562,8 +562,7 @@ impl Client {
     /// the stream is held, and refused when `target` is not reached. The stream's first item
     /// says the port is taken, and it has no other: it ends with the error that ends it -- `404`
     /// for a port the sandbox was not made with, or once it is gone -- or when it is dropped,
-    /// which lets the port go and closes the connections it carries. A server on this machine
-    /// reaches `127.0.0.1:{port}` itself, and another `target` is refused.
+    /// which lets the port go and closes the connections it carries.
     pub fn open_client_port(
         &self,
         id: &str,
@@ -1800,7 +1799,8 @@ pub(crate) mod ffi {
 
     /// Answers with the sandboxes, as
     /// `[{"id": "...", "image": "algorithm:hex", "running": bool,
-    /// "ports"?: [{"port": n, "url"?: "...", "label"?}], "client_ports"?: [n]}, ...]`, a port's
+    /// "ports"?: [{"port": n, "url"?: "...", "label"?}], "client_ports"?: [{"port": n, "label"?}]},
+    /// ...]`, a port's
     /// `url` the loopback address a server on this machine answers for it.
     ///
     /// # Safety
@@ -1815,7 +1815,8 @@ pub(crate) mod ffi {
 
     /// Makes a sandbox, given
     /// `{"image": {...}, "name": "...", "network": bool,
-    /// "ports": [n | {"port": n, "label": "..."}], "client_ports": [n],
+    /// "ports": [n | {"port": n, "label": "..."}],
+    /// "client_ports": [n | {"port": n, "label": "..."}],
     /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or

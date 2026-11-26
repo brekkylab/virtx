@@ -635,7 +635,8 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
 
 // Answers with the sandboxes, as
 // `[{"id": "...", "image": "algorithm:hex", "running": bool,
-// "ports"?: [{"port": n, "url"?: "...", "label"?}], "client_ports"?: [n]}, ...]`, a port's
+// "ports"?: [{"port": n, "url"?: "...", "label"?}], "client_ports"?: [{"port": n, "label"?}]},
+// ...]`, a port's
 // `url` the loopback address a server on this machine answers for it.
 //
 // # Safety
@@ -645,7 +646,8 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
 // `{"image": {...}, "name": "...", "network": bool,
-// "ports": [n | {"port": n, "label": "..."}], "client_ports": [n],
+// "ports": [n | {"port": n, "label": "..."}],
+// "client_ports": [n | {"port": n, "label": "..."}],
 // "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // the image as `{"type": "tag", "tag": "name:tag"}` or
@@ -860,8 +862,7 @@ void virtx_stream_free(struct VirtxStream *stream);
 // item is `null`, once the port is taken; it ends with the error that ends it, such as `404`
 // for a port the sandbox was not made with or once it is gone. Freeing it lets the port go,
 // and closes the connections it carries. What fails on the way, such as a target not
-// reached, is handed to the function `virtx_set_warn` set. A server over stdio, on this
-// machine, reaches `127.0.0.1:{port}` itself, and refuses another `target`.
+// reached, is handed to the function `virtx_set_warn` set.
 //
 // It runs on `client`'s runtime, so the client's last release stops it.
 //

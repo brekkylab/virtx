@@ -269,13 +269,15 @@ class Library {
   }
 
   // The next item of the stream `handle`, as `{ done: false, value }`, or `{ done: true }` once
-  // it has ended; its error thrown. The stream is left to its holder to free.
-  async nextItem(handle) {
+  // it has ended, or once `freed()` says its holder freed it while this waited, which wakes it;
+  // its error thrown. The stream is left to its holder to free.
+  async nextItem(handle, freed) {
     for (;;) {
       const { status, out, woken } = this.poll(this.virtx_stream_poll_next, handle)
       if (status === END) return { done: true }
       if (status !== PENDING) return { done: false, value: this.take(status, out) }
       await woken
+      if (freed?.()) return { done: true }
     }
   }
 
@@ -892,15 +894,17 @@ class ClientPortForwarder {
   }
 
   // Wait until it is no longer taken, and answer why: `404` once the sandbox is gone, and what
-  // else ended it.
+  // else ended it, such as its closing.
   async waitClosed() {
     if (this._handle === null) throw new VirtxError('the client port is closed')
     try {
-      while (!(await this._lib.nextItem(this._handle)).done) {}
+      const handle = this._handle
+      while (!(await this._lib.nextItem(handle, () => this._handle === null)).done) {}
     } catch (error) {
       if (error instanceof VirtxError) return error
       throw error
     }
+    if (this._handle === null) return new VirtxError(`client port ${this.port} was closed`)
     return new VirtxError(`client port ${this.port} ended`)
   }
 
@@ -908,8 +912,10 @@ class ClientPortForwarder {
   close() {
     if (this._handle === null) return
     clientPorts.unregister(this._token)
-    this._lib.virtx_stream_free(this._handle)
+    const handle = this._handle
+    // Null before the stream is freed, which wakes what waits in `waitClosed` to find it so.
     this._handle = null
+    this._lib.virtx_stream_free(handle)
   }
 }
 

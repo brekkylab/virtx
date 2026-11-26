@@ -1528,6 +1528,55 @@ mod tests {
         );
     }
 
+    /// A client port is taken over a WebSocket of `virtx.tcp`, in a sandbox of the project a
+    /// request names, one it was made with: here one a server before this one kept, its relay
+    /// opened anew. Its WebSocket is closed once the sandbox is deleted.
+    #[tokio::test]
+    async fn a_client_port_is_taken_in_a_sandbox_of_the_project_named() {
+        let served = Served::spawn("client-ports").await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = json!({ "type": "digest", "digest": digest.unwrap().to_string() });
+        let args = json!({ "image": image, "client_ports": [{ "port": 9222, "label": "cdp" }] });
+        std::fs::write(dir.join("kept.ext4"), b"").unwrap();
+        let record = json!({ "args": args, "exited": false, "jobs": [] });
+        std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
+
+        let port = served.port_url("sandboxes/kept/client-ports/9222");
+        let mut taken = Served::open(&port, "demo", Some("virtx.tcp"))
+            .await
+            .unwrap();
+        assert_eq!(Served::open(&port, "demo", None).await.err(), Some(400));
+        let (status, _) = served
+            .send("GET", "sandboxes/kept/client-ports/9222", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+        let undeclared = served.port_url("sandboxes/kept/client-ports/5037");
+        let refused = Served::open(&undeclared, "demo", Some("virtx.tcp")).await;
+        assert_eq!(refused.err(), Some(404));
+        let refused = Served::open(&port, "other", Some("virtx.tcp")).await;
+        assert_eq!(refused.err(), Some(404));
+
+        let (status, _) = served
+            .send("DELETE", "sandboxes/kept", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), taken.next());
+        let closed = closed.await;
+        assert!(
+            matches!(closed, Ok(None | Some(Ok(tungstenite::Message::Close(_))))),
+            "{closed:?}"
+        );
+        assert_eq!(
+            Served::open(&port, "demo", Some("virtx.tcp")).await.err(),
+            Some(404)
+        );
+    }
+
     /// A sandbox a server before this one kept that this one cannot know again -- its record
     /// not read, or its image gone -- is listed, not running, with why in `error`: a record
     /// that does not read is told by the failure's kind, not by its path. Every other request

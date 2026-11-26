@@ -218,5 +218,5 @@ The address is a number, `10.0.2.2`, rather than a name, since Chrome's debuggin
 ## When it is not reached
 
 A connection to `10.0.2.2` at the port is refused, as one to a closed port is, while nothing listens on `127.0.0.1` at it on your machine: allow remote debugging before the agent connects.
-Over HTTP it is refused too while no forwarder is open; a server started with `Client.spawn` reaches the port itself for as long as the sandbox lives, as the [tutorial](/docs/tutorials/networks-ports/#client-ports) says.
+It is refused too while no forwarder is open, as the [tutorial](/docs/tutorials/networks-ports/#client-ports) says.
 What the forwarder could not reach is logged as a warning.

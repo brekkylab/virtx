@@ -182,13 +182,15 @@ describe('against virtx-stdio', () => {
     try {
       assert.deepEqual(sandbox.clientPorts, clientPorts)
       assert.deepEqual((await client.getSandbox(sandbox.id)).clientPorts, clientPorts)
-      // Over stdio the server, on this machine, reaches the port itself.
-      assert.equal(await sandbox.exec(ask).complete(), 0)
+      assert.notEqual(await sandbox.exec(ask).complete(), 0)
       const taken = await ClientPortForwarder.open(sandbox, port)
       assert.equal(taken.port, port)
       assert.equal(await sandbox.exec(ask).complete(), 0)
+      // Closed while it is waited on, it is answered so.
+      const waiting = taken.waitClosed()
       taken.close()
-      await assert.rejects(ClientPortForwarder.open(sandbox, port + 1), VirtxError)
+      assert.ok((await waiting) instanceof VirtxError)
+      await assert.rejects(ClientPortForwarder.open(sandbox, port + 1), { status: 404 })
     } finally {
       await sandbox.remove()
       server.close()

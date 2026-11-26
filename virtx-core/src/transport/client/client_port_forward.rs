@@ -9,14 +9,17 @@
 //! WebSocket closed when it is not, which refuses it. Each WebSocket carries one connection, and
 //! another is opened to wait for the next as soon as one is said.
 //!
-//! A server on this machine connects to the port itself, at `127.0.0.1`, as it answers a port of
-//! the sandbox's at its own loopback address: taking it is only asking that the sandbox has it.
+//! A server on this machine, over stdio, reaches the target itself, as it answers a port of the
+//! sandbox's at its own loopback address: it is held `GET` of the same path, with the target in
+//! `?target=`, while the port is taken, its answer's body ending once the sandbox is deleted.
 
 use std::sync::PoisonError;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures_util::{SinkExt as _, Stream, StreamExt as _};
 use http::StatusCode;
+use http_body_util::BodyExt as _;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpStream,
@@ -27,7 +30,11 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 use super::{
     Connection, ForwardError, TransportClient, port_forward::open as open_websocket, tcp::current,
 };
-use crate::{Error, PROJECT_HEADER, transport::segment, warning};
+use crate::{
+    Error, PROJECT_HEADER,
+    transport::{full, http::refused, segment},
+    warning,
+};
 
 /// How much of a connection's TCP one message carries at most.
 const CHUNK: usize = 64 << 10;
@@ -42,9 +49,6 @@ const MOST_WAIT: Duration = Duration::from_secs(8);
 /// carried to `target`, `host:port`: `()` once it is taken, and nothing more while it is. Ended
 /// with the error that ends it: `404` for a sandbox or a port that is no one's, or once the
 /// sandbox is gone. Dropped, the port is let go of, and the connections it carries closed.
-///
-/// A server on this machine connects to `127.0.0.1:{port}` itself, so a `target` other than that
-/// is refused over stdio.
 pub(crate) fn take<'a>(
     client: &'a TransportClient,
     sandbox: &str,
@@ -55,22 +59,24 @@ pub(crate) fn take<'a>(
     let sandbox = sandbox.to_owned();
     async_stream::try_stream! {
         let Connection::Tcp(tcp) = &client.connection else {
-            if target != format!("127.0.0.1:{port}") {
-                Err(Error::Client(format!(
-                    "client port {port}: a server on this machine reaches 127.0.0.1:{port} \
-                     itself, and no other target"
-                )))?;
-            }
-            let made: crate::Sandbox =
-                crate::transport::http::get(client, &format!("/sandboxes/{}", segment(&sandbox)))
-                    .await?;
-            if !made.client_ports.iter().any(|opened| opened.port == port) {
-                Err(Error::Client(format!(
-                    "sandbox {sandbox} was made with no client port {port}"
-                )))?;
-            }
+            let request = http::Request::get(format!("/{path}?target={}", segment(&target)))
+                .body(full(Bytes::new()))
+                .map_err(|e| Error::Client(format!("not a request: {e}")))?;
+            let response = client.send(request).await?;
+            let mut held = match response.status().is_success() {
+                true => response.into_body(),
+                false => Err(refused(response).await)?,
+            };
             yield ();
-            return futures_util::future::pending().await;
+            while let Some(frame) = held.frame().await {
+                frame.map_err(|e| Error::Transport(format!("client port {port}: {e}")))?;
+            }
+            Err(Error::Status(
+                StatusCode::NOT_FOUND.as_u16(),
+                format!("not_found: sandbox {sandbox} is gone"),
+                Default::default(),
+            ))?;
+            return;
         };
         let url = tcp
             .base
@@ -364,8 +370,7 @@ mod ffi {
     /// item is `null`, once the port is taken; it ends with the error that ends it, such as `404`
     /// for a port the sandbox was not made with or once it is gone. Freeing it lets the port go,
     /// and closes the connections it carries. What fails on the way, such as a target not
-    /// reached, is handed to the function `virtx_set_warn` set. A server over stdio, on this
-    /// machine, reaches `127.0.0.1:{port}` itself, and refuses another `target`.
+    /// reached, is handed to the function `virtx_set_warn` set.
     ///
     /// It runs on `client`'s runtime, so the client's last release stops it.
     ///

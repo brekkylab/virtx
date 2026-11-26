@@ -672,11 +672,11 @@ export class Client {
  */
 export class ClientPortForwarder {
   private constructor()
-  /** Take the client port `port` of `sandbox`, one it was made with, its connections carried to `target`, `host:port`, or `127.0.0.1:{port}` without one, over its client's session: answered once it is taken. Over HTTP it is reached while this is held, beside any other client's; a server on this machine reaches `127.0.0.1:{port}` itself, and refuses another `target`. Refused with a `VirtxError` of status `404` for a port the sandbox was not made with. */
+  /** Take the client port `port` of `sandbox`, one it was made with, its connections carried to `target`, `host:port`, or `127.0.0.1:{port}` without one, over its client's session: answered once it is taken. It is reached while this is held, beside any other's that takes it. Refused with a `VirtxError` of status `404` for a port the sandbox was not made with. */
   static open(sandbox: Sandbox, port: number, target?: string): Promise<ClientPortForwarder>
   /** The port, as a process in the sandbox reaches it at `10.0.2.2`. */
   readonly port: number
-  /** Wait until it is no longer taken, and answer why: `404` once the sandbox is gone, and what else ended it. */
+  /** Wait until it is no longer taken, and answer why: `404` once the sandbox is gone, and what else ended it, such as its closing. */
   waitClosed(): Promise<VirtxError>
   /** Let the port go. Closing twice does nothing. */
   close(): void

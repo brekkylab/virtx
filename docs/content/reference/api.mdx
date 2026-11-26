@@ -207,7 +207,7 @@ See [Networks and ports](/docs/tutorials/networks-ports/#client-ports).
 | --- | --- | --- |
 | `ClientPortForwarder.open(sandbox, port, target)` | `ClientPortForwarder` | Carries each connection a process in the sandbox makes to `10.0.2.2:port`, one of its `client_ports`, to `target` on this machine, `127.0.0.1:port` without one, once the port is taken. Awaited. |
 | `port` | `int` | The port, as the sandbox reaches it. In Rust, `port()`. |
-| `wait_closed()` | `VirtxError` | Waits until it is no longer taken, and answers why: `404` once the sandbox is gone. In Node, `waitClosed()`. |
+| `wait_closed()` | `VirtxError` | Waits until it is no longer taken, and answers why: `404` once the sandbox is gone, or that it was closed. In Node, `waitClosed()`. |
 | `close()` | `None` | Lets the port go. In Rust, dropping it does the same. |
 
 ## Environment variables

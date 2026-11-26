@@ -3284,11 +3284,14 @@ async fn spike_snapshot(home: Home) {
     for entry in std::fs::read_dir(&dir).unwrap() {
         let entry = entry.unwrap();
         let meta = entry.metadata().unwrap();
+        #[cfg(unix)]
+        let allocated = std::os::unix::fs::MetadataExt::blocks(&meta) * 512;
+        #[cfg(not(unix))]
+        let allocated = meta.len();
         eprintln!(
-            "spike file {:?} {} bytes, {} allocated",
+            "spike file {:?} {} bytes, {allocated} allocated",
             entry.file_name(),
             meta.len(),
-            std::os::unix::fs::MetadataExt::blocks(&meta) * 512
         );
     }
     tokio::time::sleep(Duration::from_secs(var("SPIKE_AGE", 0).into())).await;

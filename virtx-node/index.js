@@ -98,6 +98,7 @@ const SIGNATURES = {
   ],
   virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
   virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
+  virtx_client_set_connections: ['int', ['uintptr_t', 'size_t', Out]],
   virtx_client_set_project: ['int', ['uintptr_t', 'const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['uintptr_t', ['uintptr_t']],
@@ -567,6 +568,19 @@ class Client {
       strings.length / 2,
       error,
     )
+    if (status !== OK) this._lib.take(status, error)
+  }
+
+  // Send the requests from now on through `connections` HTTP clients in turn, one until this
+  // says otherwise: over HTTPS, each one HTTP/2 connection where the server speaks it, so that a
+  // burst of requests is that many TLS handshakes, its streams spread over them. Over stdio, one
+  // connection already, nothing changes. None throws.
+  setConnections(connections) {
+    if (!Number.isSafeInteger(connections) || connections < 0) {
+      throw new VirtxError(`connections: ${connections} is not a count`)
+    }
+    const error = {}
+    const status = this._lib.virtx_client_set_connections(this._held(), connections, error)
     if (status !== OK) this._lib.take(status, error)
   }
 

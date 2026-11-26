@@ -16,11 +16,8 @@ from virtx import (
     ImageJobEnd,
     ImageJobKind,
     ImageUploadOutput,
-    InboundError,
-    InboundRule,
     Output,
     PortForwarder,
-    PortProtocol,
     PortSpec,
     Recipe,
     SandboxJob,
@@ -57,15 +54,12 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
         ALPINE,
         disk_gib=4,
         volumes=[SandboxVolume(volume, "/data", readonly=True)],
-        ports=[8000, PortSpec(5173, label="dev server", protocol="http")],
+        ports=[8000, PortSpec(5173, label="dev server")],
         abins=["index"],
     )
     assert sandbox.running
     assert sandbox.abins == ["index"]
-    assert [(p.port, p.label, p.protocol) for p in sandbox.ports] == [
-        (8000, None, PortProtocol.TCP),
-        (5173, "dev server", PortProtocol.HTTP),
-    ]
+    assert [(p.port, p.label) for p in sandbox.ports] == [(8000, None), (5173, "dev server")]
     assert SandboxVolume(volume, "/data").to_dict() == {
         "volume": volume.name,
         "path": "/data",
@@ -215,12 +209,6 @@ def test_a_log_entry_of_a_kind_this_version_does_not_know_is_passed_over() -> No
     assert image_job_entry({"id": 4, "layer": None}) is None
 
 
-def test_a_port_protocol_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:
-    port = SandboxPort.from_dict({"port": 53, "protocol": "udp"})
-    assert port.protocol == "udp"
-    assert SandboxPort.from_dict({"port": 80, "protocol": "http"}).protocol == PortProtocol.HTTP
-
-
 async def test_an_image_build_is_a_job_whose_log_ends_with_its_digest(client: Client) -> None:
     await alpine(client)
     reference = f"{unique('built')}:latest"
@@ -341,33 +329,11 @@ async def test_a_push_that_fails_raises_its_error_from_its_log_and_its_complete(
     await client.remove_image(reference)
 
 
-async def test_a_port_says_what_it_is_for_and_whom_it_lets_in(client: Client) -> None:
+def test_a_port_says_what_it_is_for() -> None:
     assert PortSpec(22).to_dict() == 22
-    ssh = PortSpec(22, label="ssh", inbound=[InboundRule("203.0.113.7", "office")])
-    assert ssh.to_dict() == {
-        "port": 22,
-        "label": "ssh",
-        "inbound": [{"source": "203.0.113.7", "description": "office"}],
-    }
-    assert PortSpec(22, inbound=[]).to_dict() == {"port": 22, "inbound": []}
-    assert PortSpec(80, protocol=PortProtocol.HTTP).to_dict() == {"port": 80, "protocol": "http"}
-
-    answered = SandboxPort.from_dict(
-        {
-            "port": 22,
-            "url": "ports/x",
-            "address": "tcp.example:20001",
-            "inbound_error": {"code": "quota", "message": "past", "reason": "public_ports"},
-        }
-    )
-    assert answered.address == "tcp.example:20001"
-    assert answered.inbound_error == InboundError("quota", "past", "public_ports")
-
-    # The fixture's server keeps no inbound rules, and refuses them before anything boots.
-    await alpine(client)
-    with pytest.raises(VirtxError) as refused:
-        await client.create_sandbox(ALPINE, ports=[ssh])
-    assert refused.value.status == 400
+    assert PortSpec(22, label="ssh").to_dict() == {"port": 22, "label": "ssh"}
+    answered = SandboxPort.from_dict({"port": 22, "url": "ports/x", "label": "ssh"})
+    assert answered == SandboxPort(22, "ports/x", "ssh")
 
 
 async def test_a_sandbox_is_found_by_its_name_which_no_other_has(client: Client) -> None:

@@ -38,7 +38,7 @@ use virtx_uvm::{
     DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
     ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Os, Project, ProjectError,
     Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
-    build_step, park_after, signal_number,
+    based_on, build_step, park_after, signal_number,
 };
 
 use crate::Host;
@@ -556,6 +556,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
 /// pulled into the store now, anonymously, and left untagged: a build tags only what it builds.
+/// Its config names it as what the build is based on ([`based_on`]).
 async fn base(
     images: &ImageStore,
     base: &str,
@@ -577,9 +578,10 @@ async fn base(
         }
     };
     let held = images.hold_image(&image)?;
-    let (config, layers) = images
+    let (mut config, layers) = images
         .get_image(&image)?
-        .ok_or(ImageStoreError::Missing(image))?;
+        .ok_or_else(|| ImageStoreError::Missing(image.clone()))?;
+    based_on(&mut config, base, &image);
     Ok((config, layers, Some(held)))
 }
 
@@ -788,18 +790,10 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-    // No inbound rules are kept here, so a port given some is refused rather than opened to
-    // whoever they were meant to keep out.
-    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
-        return Err(invalid(format!(
-            "ports: {}'s inbound rules are not kept by this server",
-            spec.port
-        )));
-    }
     let _naming = home.naming(args.name.as_deref())?;
 
     // Each port on this host's loopback, which only this machine reaches, taken to the
-    // sandbox's machine while it runs: TCP as it is, so an `http` port is HTTP at its URL too.
+    // sandbox's machine while it runs.
     let mut opened = Vec::new();
     let mut listeners = Vec::new();
     for spec in &args.ports {
@@ -814,9 +808,6 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             port,
             url: Some(format!("http://{at}")),
             label: spec.label.clone(),
-            protocol: spec.protocol.clone(),
-            address: None,
-            inbound_error: None,
         });
         listeners.push((port, listener));
     }

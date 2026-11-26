@@ -42,11 +42,13 @@ const MAX_DISK_GIB: u32 = 1024;
 /// The directory under a server's root its sandboxes keep what they make on the host in.
 const SANDBOX: &str = "sandbox";
 
-/// The directory beside the server's program its own programs for `/abin` are in, and where each
-/// one's `SKILL.md` is in that.
+/// The directory beside the server's program its own programs for `/abin` are in, where each
+/// one's `SKILL.md` is in that, and where what each one installs beside itself is: under
+/// `install/<name>/`, at the paths it has in `/abin`.
 const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
+const INSTALL: &str = "install";
 
 /// The most characters a port's label has.
 const LABEL_MOST: usize = 128;
@@ -547,9 +549,6 @@ impl Sandbox {
                     port: spec.port,
                     url: None,
                     label: spec.label.clone(),
-                    protocol: spec.protocol.clone(),
-                    address: None,
-                    inbound_error: None,
                 })
                 .collect(),
             abins: args.abins.clone(),
@@ -1338,7 +1337,8 @@ impl Drop for Activity {
 }
 
 /// The directory a sandbox made with [`abins`](SandboxCreateArgs::abins) shows at `/abin`: each
-/// program it named, and its `SKILL.md` under `skills/`, linked from the server's own.
+/// program it named, its `SKILL.md` under `skills/`, and what it installs beside itself, linked
+/// from the server's own.
 ///
 /// One is shared, read-only, by every sandbox made with the same programs as they stand: `<key>/`
 /// in `<root>/sandbox/abin/`, keyed by the programs' names, sizes and times, so that only the
@@ -1354,22 +1354,41 @@ impl Abin {
         root.join(SANDBOX).join(ABIN_HOST)
     }
 
-    /// The one in `dir` of `names`, each a program in `programs`, and the `SKILL.md` of each
-    /// that has one: made, when no sandbox has made it yet.
+    /// The one in `dir` of `names`, each a program in `programs`, the `SKILL.md` of each that
+    /// has one, and what each installs: made, when no sandbox has made it yet.
     fn create(dir: &Path, programs: &Path, names: &[String]) -> Result<Abin, Error> {
         let io = |context: String| move |source| Error::Io { context, source };
+        // Each file as `(where it is in programs, where it goes in /abin)`.
         let mut files = Vec::new();
         for program in names {
-            files.push(PathBuf::from(program));
+            files.push((PathBuf::from(program), PathBuf::from(program)));
             let skill = Path::new(SKILLS).join(program).join(SKILL);
             if programs.join(&skill).is_file() {
-                files.push(skill);
+                files.push((skill.clone(), skill));
+            }
+            let installed = Path::new(INSTALL).join(program);
+            let mut found = Vec::new();
+            installs(programs, &installed, &mut found).map_err(io(format!(
+                "reading {}",
+                programs.join(&installed).display()
+            )))?;
+            for file in found {
+                let to = file.strip_prefix(&installed).unwrap_or(&file).to_path_buf();
+                files.push((file, to));
             }
         }
         files.sort();
+        // Two of them at one path in /abin would be one linked over the other.
+        let mut at = HashSet::new();
+        if let Some((_, to)) = files.iter().find(|(_, to)| !at.insert(to)) {
+            return Err(Error::Invalid(format!(
+                "abins: more than one of them has {} in /abin",
+                to.display()
+            )));
+        }
         let mut key = Sha256::new();
         key.update(programs.as_os_str().as_encoded_bytes());
-        for file in &files {
+        for (file, _) in &files {
             let from = programs.join(file);
             let meta = fs::metadata(&from).map_err(io(format!("reading {}", from.display())))?;
             let time = meta.modified().ok();
@@ -1399,7 +1418,7 @@ impl Abin {
             let part = dir.join(format!("{key}.{name}"));
             let filled = files
                 .iter()
-                .try_for_each(|file| link(&programs.join(file), &part.join(file)))
+                .try_for_each(|(from, to)| link(&programs.join(from), &part.join(to)))
                 .and_then(|()| {
                     fs::rename(&part, &made).map_err(|source| Error::Io {
                         context: format!("placing {}", made.display()),
@@ -1450,6 +1469,26 @@ impl Abin {
             // The lock itself stays: one waiting for it holds what it opened, not a new one.
         }
     }
+}
+
+/// Each file under `programs/dir`, as a path relative to `programs`; none when there is no
+/// such directory.
+fn installs(programs: &Path, dir: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let entries = match fs::read_dir(programs.join(dir)) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = dir.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            installs(programs, &path, found)?;
+        } else {
+            found.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// `from` at `to`, making its directory: a hard link, or a copy where `to` cannot be one, such
@@ -1778,6 +1817,9 @@ mod tests {
             fs::write(programs.join(program), program).unwrap();
         }
         fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
+        let installed = programs.join(INSTALL).join("docread").join(".models/tf");
+        fs::create_dir_all(&installed).unwrap();
+        fs::write(installed.join("model.onnx"), "model").unwrap();
 
         let dir = host.path().join("sandbox").join(ABIN_HOST);
         let names = ["index".to_string(), "display".to_string()];
@@ -1785,12 +1827,33 @@ mod tests {
         assert_eq!(fs::read(abin.dir.join("index")).unwrap(), b"index");
         assert_eq!(fs::read(abin.dir.join("display")).unwrap(), b"display");
         assert!(!abin.dir.join("docread").exists());
+        assert!(!abin.dir.join(".models").exists());
+        assert!(!abin.dir.join(INSTALL).exists());
         let skills = abin.dir.join(SKILLS);
         assert_eq!(
             fs::read(skills.join("index").join(SKILL)).unwrap(),
             b"skill"
         );
         assert!(!skills.join("display").exists());
+
+        // What a program installs is beside it, at the path it installed it at.
+        let docread = Abin::create(&dir, &programs, &["docread".to_string()]).unwrap();
+        assert_eq!(
+            fs::read(docread.dir.join(".models/tf/model.onnx")).unwrap(),
+            b"model"
+        );
+        drop(docread);
+
+        // And two programs that install one path are not shown together.
+        let clash = programs.join(INSTALL).join("display").join(".models/tf");
+        fs::create_dir_all(&clash).unwrap();
+        fs::write(clash.join("model.onnx"), "other").unwrap();
+        let both = ["docread".to_string(), "display".to_string()];
+        assert!(matches!(
+            Abin::create(&dir, &programs, &both),
+            Err(Error::Invalid(_))
+        ));
+        fs::remove_dir_all(programs.join(INSTALL).join("display")).unwrap();
 
         let reversed = ["display".to_string(), "index".to_string()];
         let same = Abin::create(&dir, &programs, &reversed).unwrap();

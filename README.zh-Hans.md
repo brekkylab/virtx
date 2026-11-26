@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">供代码和 AI 智能体使用的一次性 Linux 虚拟机</h3>
+<h3 align="center">面向 AI 智能体的 microVM 沙箱</h3>
+
+<p align="center">无需 Docker，也无需配置守护进程。</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,12 +27,9 @@
 
 <br>
 
-有了 virtx，你可以直接在自己的代码里启动一次性的 Linux 虚拟机来运行任务。
+virtx 是面向 AI 智能体的 microVM 沙箱。你可以直接在自己的代码里启动一次性的 Linux 虚拟机来运行任务，虚拟机可以运行在本机、你自己运行的服务器，或 virtx cloud 上。
 
 有些任务需要装一大堆依赖，你不想把它们装在本机上；有些代码你干脆不想在本机跑，比如 AI 智能体自己决定要执行的命令。这些都很适合交给 virtx。虚拟机里装过、改过的东西，在删除虚拟机后都会一并清掉，只有写进你保留下来的卷里的内容才会留下。
-
-> [!TIP]
-> 正在用 virtx 开发 AI 智能体？不妨看看我们的开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy)。它基于 virtx 构建，会给每个智能体分配一个专属沙箱，不用做任何配置，智能体的命令和文件工具就会在虚拟机里运行。
 
 ## 快速上手
 
@@ -147,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 远程
 
-按照[自行运行服务器](https://virtx.sh/docs/guides/self-hosting/)，在你自己的机器上部署 `virtx-server-tcp`。
+按照[自行运行服务器](https://virtx.sh/docs/tutorials/self-hosting/)，在你自己的机器上部署 `virtx-server-tcp`。
 
 用 `virtx` 命令登录一次（可通过 `uvx` 或 `npx` 免安装运行），然后不再调用 `Client.spawn()`，而是带上它打印的令牌去连接。
 其余部分和本地示例完全一样。
@@ -207,16 +206,16 @@ let client = Client::connect(
 ## 功能亮点
 
 - **在隔离环境中运行不可信代码：** 每个沙箱都是拥有独立内核的 microVM，由 Hypervisor 提供隔离，而不只是靠命名空间，需要时还能完全断开网络。
-- **在哪儿开发都能用：** 任何客户端都能对接任何主机上的任何服务器，从本地服务器切到远程服务器或云端，只需改一行代码。
+- **毫秒级启动：** 新建的沙箱 35 毫秒内即可执行命令（M3 Pro Mac，1 个 vCPU，128 MB 内存）。
+- **为构建 AI 智能体而优化：** RAG、浏览器操控、GUI 自动化等 AI 智能体任务，在沙箱里开箱即用。详见 [RAG](https://virtx.sh/docs/guides/implementing-rag/)、[浏览器操控](https://virtx.sh/docs/guides/browser/)和 [GUI 程序](https://virtx.sh/docs/guides/gui-programs/) 指南。
+- **接入外部上下文：** 把 Notion、Google Drive、OneDrive 当作普通文件挂载进沙箱。
+- **使用 GPU：** 在 Linux、macOS、Windows 上对宿主机 GPU 做了半虚拟化，沙箱里就能跑深度学习模型和图形任务。
+- **随处运行：** 任何客户端都能对接任何主机上的任何服务器，从本地服务器切到远程服务器或云端，只需改一行代码。
   - **客户端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **服务器：** 💻 本地 (stdio) · 🖥️ 远程 (tcp) · ☁️ 云端
   - **主机：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **几乎不用配置：** 装好包就能直接跑，不需要 Docker，也不用另外跑守护进程。
-- **现有镜像拿来就用：** 可以从 Docker Hub 或任意 OCI 镜像仓库拉取，也可以用配方或 Dockerfile 构建，之后还能推回仓库或复制到另一台服务器。
-- **不开 shell 也能传文件：** 直接在代码里读写、复制和删除沙箱中的文件。
-- **沙箱里跑的服务都能访问：** 沙箱里的 Web 服务器、SSH、VNC 桌面或数据库，都可以通过本机上的地址直接访问。
-- **从上次中断的地方继续：** 把沙箱写下的内容存进卷留给下一个沙箱，让多个沙箱共享一个卷，还能把 Notion、Google Drive、OneDrive 当作普通文件挂载进来。
-- **同样能用 GPU：** 在沙箱里用宿主机的 GPU 跑深度学习等 Vulkan 任务。
+- **适用于任何智能体框架：** 沙箱和其他工具一样，任何框架或编码智能体都能调用。开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 
 ## 环境要求
 
@@ -244,7 +243,7 @@ let client = Client::connect(
 
 #### GPU（可选）
 
-只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器。客户机这一侧的 Vulkan 随每个沙箱一起提供，镜像里不需要。详见[使用 GPU](https://virtx.sh/docs/guides/using-gpus/)。
+只有用到 GPU 的沙箱才需要。宿主机上要装好 Vulkan 加载器。客户机这一侧的 Vulkan 随每个沙箱一起提供，镜像里不需要。详见[使用 GPU](https://virtx.sh/docs/tutorials/using-gpus/)。
 
 ## 工作原理
 

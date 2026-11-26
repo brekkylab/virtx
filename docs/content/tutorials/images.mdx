@@ -82,12 +82,14 @@ let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
 
 A build stores its image under the supplied tag. `create_sandbox` boots it by that tag, or by its digest to select exactly that build.
 
+The image keeps the steps it was built with in its history, which `docker history` shows once it is pushed, and names its base in the labels `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest`. A `RUN` step's command is kept as it was written, so pass a secret to the commands a sandbox runs rather than writing it into a step.
+
 A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec`.
 
 A build, like a pull or a push, is a job.
 `complete` follows it to its end, printing its log with `print`, and answers the digest of what it made; a build that fails raises a `VirtxError` whose `source` is `job`, so complete it before booting from the tag.
 Iterated instead, it yields its log, and raises the same error in place of its `end` entry.
-Awaiting the started value gives the job, whose log can be read again with `job.log()`, as a command's is; see [Running commands](/docs/guides/running-commands/#follow-a-job).
+Awaiting the started value gives the job, whose log can be read again with `job.log()`, as a command's is; see [Running commands](/docs/tutorials/running-commands/#follow-a-job).
 
 ## Tagging
 
@@ -184,7 +186,7 @@ client.push_image("ghcr.io/me/jq:1", Some(auth)).complete(true).await?;
 
 A server run over TCP (`virtx-server-tcp`) connects only to registries on public addresses, for a pull, a push and a build's base alike. A job that names a registry on the server's own machine or its private network fails with `is not reachable from this server`. To use such a registry, list it in the server's `server.json` as the reference names it, `host` or `host:port`: `"private_registries": ["registry.internal:5000"]`. A listed registry that sends the job on to another host on a private address, for its token or for a layer, needs that host listed as well. These connections do not go through an `HTTPS_PROXY` set in the server's environment, so a server whose only way to the internet is such a proxy reaches no registry. The local server reaches whatever your machine does.
 
-Docker Hub limits how often one address may pull without credentials, which a server pulling for many users reaches quickly. Such a server can be given a mirror of Docker Hub in its `server.json`, `"registry_mirror": "mirror.gcr.io"`: a pull of a Docker Hub image without credentials, a build's base included, tries the mirror first and goes to Docker Hub for what the mirror lacks, and the image is tagged with the name the job asked for either way. A tag on the mirror can lag Docker Hub's for a while; a digest names the same image on both. A pull with credentials goes to Docker Hub. A mirror on a private address is listed in `private_registries` too. A server can also share such pulls between its projects, `"share_public_images": true`; see [Share public images](/docs/guides/self-hosting/#share-public-images) for what that tells one project of another.
+Docker Hub limits how often one address may pull without credentials, which a server pulling for many users reaches quickly. Such a server can be given a mirror of Docker Hub in its `server.json`, `"registry_mirror": "mirror.gcr.io"`: a pull of a Docker Hub image without credentials, a build's base included, tries the mirror first and goes to Docker Hub for what the mirror lacks, and the image is tagged with the name the job asked for either way. A tag on the mirror can lag Docker Hub's for a while; a digest names the same image on both. A pull with credentials goes to Docker Hub. A mirror on a private address is listed in `private_registries` too. A server can also share such pulls between its projects, `"share_public_images": true`; see [Share public images](/docs/tutorials/self-hosting/#share-public-images) for what that tells one project of another.
 
 ## Copy a local image to a remote server
 

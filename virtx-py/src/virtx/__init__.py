@@ -61,9 +61,6 @@ from .job import LogEntry, StartedJob, Truncated
 from .portforward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
-    InboundError,
-    InboundRule,
-    PortProtocol,
     PortSpec,
     Sandbox,
     SandboxJob,
@@ -109,8 +106,6 @@ __all__ = [
     "ImagePruneOutput",
     "ImageTag",
     "ImageUploadOutput",
-    "InboundError",
-    "InboundRule",
     "Log",
     "LogEntry",
     "Metadata",
@@ -120,7 +115,6 @@ __all__ = [
     "OnedriveSource",
     "Output",
     "PortForwarder",
-    "PortProtocol",
     "PortSpec",
     "Progress",
     "Project",

@@ -1238,6 +1238,32 @@ async fn a_machine_s_process_leads_a_process_group_of_its_own(home: Home) {
     close(sandbox).await;
 }
 
+/// A machine's process holds what it was handed and none of its starter's other descriptors:
+/// not one left inheritable, as one another thread is making is for a moment on macOS, which
+/// held there would stay open for as long as the machine runs.
+#[cfg(unix)]
+async fn a_machine_s_process_holds_none_of_its_starter_s_descriptors(home: Home) {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+
+    let (mut reader, writer) = std::io::pipe().unwrap();
+    // SAFETY: a descriptor this test holds open.
+    assert_ne!(
+        unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_SETFD, 0) },
+        -1
+    );
+    let sandbox = home.sandbox(&small(), None).await;
+    drop(writer);
+    // On a thread of its own, which a read held open does not keep this process past its end.
+    let (read, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || read.send(reader.read(&mut [0; 1]).unwrap()));
+    let got = tokio::task::spawn_blocking(move || got.recv_timeout(HANG))
+        .await
+        .unwrap();
+    close(sandbox).await;
+    assert_eq!(got.expect("no machine holds the pipe open"), 0);
+}
+
 async fn an_idle_sandbox_s_machine_stops_and_boots_again_with_what_it_wrote(home: Home) {
     let park = Some(Duration::from_millis(500));
     let sandbox = home.sandbox(&small(), park).await;
@@ -2043,6 +2069,14 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
     let with = home.sandbox(&small(), None).await;
     assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
+    let named = ["nc", "-z", "-w", "5", "dns.google", "443"];
+    let (lines, code) = run(&with, &named, None).await.unwrap();
+    assert_eq!(code, 0, "reached no name: {lines:?}");
+    // The nameserver at its v6 address: the guest's v6 is up, though a host without v6 reaches
+    // nothing on it beyond.
+    let over_v6 = ["nslookup", "dns.google", "fd00::3"];
+    let (lines, code) = run(&with, &over_v6, None).await.unwrap();
+    assert_eq!(code, 0, "resolved nothing over v6: {lines:?}");
     close(with).await;
     // A published port gives the machine its network device, and still no way out.
     for ports in [vec![], vec![8080.into()]] {
@@ -2102,6 +2136,56 @@ async fn the_embedder_decides_and_hears_of_each_flow_to_the_internet(home: Home)
     );
 }
 
+/// Each way through a port, the guest's listener on its loopback alone for the way in.
+async fn a_sandbox_s_published_ports_carry_megabytes_each_way(home: Home) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    const SIZE: usize = 4 << 20;
+    let args = SandboxCreateArgs {
+        network: false,
+        ports: vec![8080.into(), 8081.into()],
+        ..small()
+    };
+    let sandbox = home.sandbox(&args, None).await;
+    let listening = |port: u16| format!("until netstat -ltn | grep -q :{port}; do sleep 0.1; done");
+
+    let counting = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        async move {
+            run(
+                &sandbox,
+                &["sh", "-c", "nc -l -s 127.0.0.1 -p 8080 | wc -c"],
+                None,
+            )
+            .await
+        }
+    });
+    run(&sandbox, &["sh", "-c", &listening(8080)], None)
+        .await
+        .unwrap();
+    let mut stream = sandbox.connect(8080).await.unwrap();
+    stream.write_all(&vec![7; SIZE]).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let (lines, code) = counting.await.unwrap().unwrap();
+    assert_eq!((lines, code), (vec![SIZE.to_string()], 0));
+
+    let serving = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        let serve = format!("head -c {SIZE} /dev/zero | nc -l -p 8081");
+        async move { run(&sandbox, &["sh", "-c", &serve], None).await }
+    });
+    run(&sandbox, &["sh", "-c", &listening(8081)], None)
+        .await
+        .unwrap();
+    let mut stream = sandbox.connect(8081).await.unwrap();
+    let mut got = vec![1; SIZE];
+    stream.read_exact(&mut got).await.unwrap();
+    assert!(got.iter().all(|&b| b == 0));
+    drop(stream);
+    serving.await.unwrap().unwrap();
+    close(sandbox).await;
+}
+
 async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home: Home) {
     let mut args = SandboxCreateArgs::new(DEBIAN);
     args.memory_mib = Some(1024);
@@ -2140,6 +2224,36 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
         );
         close(sandbox).await;
     }
+}
+
+/// What a sandbox syncs to its disk is flushed there: its disk mounted with barriers, though it
+/// is mounted without them first.
+async fn a_sandbox_s_sync_flushes_its_disk(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let flushes = "awk '{print $16}' /sys/block/vdb/stat";
+    let script = format!("{flushes}; echo kept > /root/kept; sync; {flushes}");
+    let (lines, code) = run(&sandbox, &["sh", "-c", &script], None).await.unwrap();
+    assert_eq!((lines.len(), code), (2, 0), "{lines:?}");
+    let (before, after): (u64, u64) = (lines[0].parse().unwrap(), lines[1].parse().unwrap());
+    assert!(after > before, "{lines:?}");
+    close(sandbox).await;
+}
+
+async fn a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer(home: Home) {
+    let sandbox = home.sandbox(&small().memory_mib(4096), None).await;
+    let (lines, code) = run(&sandbox, &["dmesg"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line.contains("Linux version")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("software IO TLB: mapped")),
+        "{lines:?}"
+    );
+    close(sandbox).await;
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -3058,12 +3172,16 @@ fn main() -> ExitCode {
         };
     }
     // Each of these looks at what the whole process holds -- the room its admission gives, the
-    // machines it started -- or at the host's GPU, so it runs with no other test beside it.
+    // machines it started, the descriptors they hold -- or at the host's GPU, so it runs with
+    // no other test beside it.
     let mut alone = Vec::from(tests![
         a_machine_boots_only_with_room_given_back_as_it_goes_down
     ]);
     #[cfg(unix)]
-    alone.extend(tests![a_machine_s_process_leads_a_process_group_of_its_own]);
+    alone.extend(tests![
+        a_machine_s_process_leads_a_process_group_of_its_own,
+        a_machine_s_process_holds_none_of_its_starter_s_descriptors
+    ]);
     if gpu {
         alone.extend(tests![
             a_gpu_sandbox_finds_the_host_s_gpu_through_venus,
@@ -3105,9 +3223,12 @@ fn main() -> ExitCode {
         a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown,
         a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
+        a_sandbox_s_published_ports_carry_megabytes_each_way,
         the_embedder_decides_and_hears_of_each_flow_to_the_internet,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
+        a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,
+        a_sandbox_s_sync_flushes_its_disk,
         a_signal_ends_a_job_with_every_process_it_started,
         a_job_given_no_input_reads_its_end,
         sandboxes_made_at_once_each_run_their_own,

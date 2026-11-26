@@ -43,7 +43,7 @@ use virtx_uvm::{
     HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
     MachineSpec, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
     RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
-    UnknownSandbox, VolumeError, VolumeStore, build_step, park_after, signal_number,
+    UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -240,8 +240,7 @@ impl Home {
     /// here: for a server built on this one that names its sandboxes itself, as one that moves
     /// them between servers does, each keeping the id and port URLs its client holds. Made and
     /// answered as `POST /sandboxes/` makes and answers one, each port's URL `ports/<key>`,
-    /// relative; but a port may be asked for over HTTP and carry inbound rules, which serving
-    /// and keeping are the embedder's. Refused `400` for an id that cannot be one, or keys that
+    /// relative. Refused `400` for an id that cannot be one, or keys that
     /// are not one for each port; `409` `exists` for an id a sandbox here has, has made or keeps
     /// -- one let go of here is [taken in](Home::take_in) instead -- or a key one opens a port
     /// by or is being made with; and as `POST /sandboxes/` is otherwise. See [`Given::keys`]
@@ -404,6 +403,18 @@ impl Home {
         }
         self.closed.store(true, Ordering::SeqCst);
         true
+    }
+
+    /// Close it as [`close`](Home::close) does, whatever lives here, and close every sandbox
+    /// as [`close_all`](Home::close_all) does. Each kept here and not known again is let go
+    /// of, its disk and record left where they are.
+    pub(crate) fn forget(&self) {
+        {
+            let _sandboxes = self.sandboxes.lock().unwrap();
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        self.close_all();
+        self.unknown.lock().unwrap().clear();
     }
 
     /// Cancel every image job here, and close every sandbox, as removing each does, side by
@@ -1237,6 +1248,7 @@ async fn tag(
 /// pulled into the store now, anonymously, through `registries`, from `mirror` first if it is
 /// Docker Hub's and shared through `public`, and left untagged: a build tags only what it
 /// builds.
+/// Its config names it as what the build is based on ([`based_on`]).
 async fn base(
     images: &ImageStore,
     registries: &dyn RegistryProxy,
@@ -1264,9 +1276,10 @@ async fn base(
         }
     };
     let held = images.hold_image(&image)?;
-    let (config, layers) = images
+    let (mut config, layers) = images
         .get_image(&image)?
-        .ok_or(ImageStoreError::Missing(image))?;
+        .ok_or_else(|| ImageStoreError::Missing(image.clone()))?;
+    based_on(&mut config, base, &image);
     Ok((config, layers, Some(held)))
 }
 
@@ -1544,21 +1557,6 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-    // A port's URL here is a tunnel for TCP, which a browser does not open.
-    if let Some(spec) = args.ports.iter().find(|spec| !spec.protocol.is_tcp()) {
-        return Err(invalid(format!(
-            "ports: {} is asked for over HTTP, which this server does not serve a port over",
-            spec.port
-        )));
-    }
-    // No inbound rules are kept here, so a port given some is refused rather than opened to
-    // whoever they were meant to keep out.
-    if let Some(spec) = args.ports.iter().find(|spec| spec.inbound.is_some()) {
-        return Err(invalid(format!(
-            "ports: {}'s inbound rules are not kept by this server",
-            spec.port
-        )));
-    }
 
     // Each port behind a capability of its own, which only this answer carries: who has the
     // URL reaches the port, and nothing else. Relative, to the URL this request came to, since

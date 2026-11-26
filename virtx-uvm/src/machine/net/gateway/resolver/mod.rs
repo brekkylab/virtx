@@ -2,9 +2,8 @@
 //!
 //! # Not a resolver
 //!
-//! Nothing here resolves anything. The guest is told [`NAMESERVER`](super::NAMESERVER) is its
-//! nameserver, and a query to it is sent, unread, to whatever this host asks -- and the answer
-//! comes back the same way. So the guest gets the same names this machine gets, including
+//! A query to the guest's virtual nameserver is sent unread to the host's resolver, and the
+//! answer comes back the same way. So the guest gets the same names this machine gets, including
 //! whatever a VPN or a corporate resolver is serving, without any of it being configured
 //! twice.
 //!

@@ -370,10 +370,7 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::VolumeListOutputItem;
-    use virtx_core::{
-        Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
-        SandboxCreateArgs,
-    };
+    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs, Step};
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
         FsTree, ImageStore, ProjectId, PublicRegistries, Reference, RegistryProxy, StorageBackend,
@@ -918,6 +915,62 @@ mod tests {
         .expect("the job went on")
     }
 
+    /// A build names its base by the OCI's labels, in place of those the base had, and keeps
+    /// the others; built again, it is the same image. Of steps that boot no machine, so the
+    /// build runs here.
+    #[tokio::test]
+    async fn a_build_names_its_base_and_is_the_same_image_built_again() {
+        let served = Served::spawn("build-history").await;
+        let client = served.connect();
+        // A base whose history tells its one layer apart, naming a base of its own.
+        let store = ImageStore::new(served.project("demo").await.join("images")).unwrap();
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {"Labels": {
+                "org.opencontainers.image.base.name": "alpine:3.20",
+                "maintainer": "virtx",
+            }},
+            "rootfs": {"type": "layers", "diff_ids": []},
+            "history": [{"created_by": "ADD rootfs /"}],
+        }))
+        .unwrap();
+        let base = store.insert_image(&config, &[layer]).unwrap();
+        store.insert_tag(&"base:1".parse().unwrap(), &base).unwrap();
+
+        let recipe = Recipe::new("base:1")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let built = async |reference: &str| {
+            let job = client.build_image(recipe.clone(), reference).await.unwrap();
+            // A guard against a hang, not a measure of anything.
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let job = client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the build went on");
+            ended.digest.expect("the build failed")
+        };
+        let image = built("built:1").await;
+        assert_eq!(built("built:2").await, image);
+
+        let (config, _) = store.get_image(&image.parse().unwrap()).unwrap().unwrap();
+        let labels = config.config().clone().unwrap().labels().clone().unwrap();
+        assert_eq!(labels[virtx_uvm::ANNOTATION_BASE_IMAGE_NAME], "base:1");
+        assert_eq!(
+            labels[virtx_uvm::ANNOTATION_BASE_IMAGE_DIGEST],
+            base.to_string()
+        );
+        assert_eq!(labels["maintainer"], "virtx");
+    }
+
     /// A server's image jobs are held to registries on public addresses: a pull, a push and a
     /// build's base that name one on this host's loopback each fail saying so, and it is
     /// connected to not at all.
@@ -1271,7 +1324,7 @@ mod tests {
                 "POST",
                 "sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?}, not "5900""#,
             ),
             (
                 "GET",
@@ -1462,16 +1515,6 @@ mod tests {
         // A port that is none, and a sandbox of an image nobody filed, are refused before it
         // boots.
         let args = SandboxCreateArgs::new("a:b").port(0);
-        assert_eq!(status(client.create_sandbox(&args).await), 400);
-        // So are a port asked for over HTTP, which a port's tunnel here does not serve, and one
-        // with inbound rules, which this server keeps none of.
-        let web = PortSpec::new(5173).protocol(PortProtocol::Http);
-        let args = SandboxCreateArgs::new("a:b").port(web);
-        let refused = client.create_sandbox(&args).await.unwrap_err();
-        assert_eq!(refused.status(), Some(400), "{refused}");
-        assert!(refused.to_string().contains("HTTP"), "{refused}");
-        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
-        let args = SandboxCreateArgs::new("a:b").port(ssh);
         assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);
@@ -2152,9 +2195,8 @@ mod tests {
 
     /// A sandbox made under an id and keys given it is refused, before its machine boots, an id
     /// a sandbox here has or one made meanwhile takes, a key one here opens a port by or one
-    /// being made was given, an id that cannot be one and keys that are not one for each port;
-    /// a port over HTTP and with inbound rules is not refused for it. Nothing of it is made,
-    /// and a key a making that failed was given is given back.
+    /// being made was given, an id that cannot be one and keys that are not one for each port.
+    /// Nothing of it is made, and a key a making that failed was given is given back.
     #[tokio::test]
     async fn a_sandbox_made_under_an_id_and_keys_given_it_is_refused_only_what_it_cannot_be() {
         use crate::endpoints::{Given, Home};
@@ -2181,11 +2223,8 @@ mod tests {
         let home = home.backed_by(Arc::clone(&backend) as Arc<dyn StorageBackend>);
         assert!(home.sandboxes().get("kept").is_some());
 
-        let web = PortSpec::new(8080)
-            .protocol(PortProtocol::Http)
-            .inbound([InboundRule::new("10.0.0.0/8")]);
         let made = async |image: &str, id: &str, keys: &[(&str, u16)]| {
-            let args = SandboxCreateArgs::new(image).port(web.clone());
+            let args = SandboxCreateArgs::new(image).port(8080);
             let keys = keys.iter().map(|(key, port)| (key.to_string(), *port));
             let given = Given {
                 id: id.to_owned(),

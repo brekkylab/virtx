@@ -49,13 +49,13 @@ describe('against virtx-stdio', () => {
     const sandbox = await client.createSandbox(ALPINE, {
       diskGib: 4,
       abins: ['index'],
-      ports: [8000, { port: 5173, label: 'dev server', protocol: 'http' }],
+      ports: [8000, { port: 5173, label: 'dev server' }],
     })
     assert.equal(sandbox.running, true)
     assert.deepEqual(sandbox.abins, ['index'])
     assert.deepEqual(
       sandbox.ports.map(({ url, ...port }) => port),
-      [{ port: 8000 }, { port: 5173, label: 'dev server', protocol: 'http' }],
+      [{ port: 8000 }, { port: 5173, label: 'dev server' }],
     )
     assert.ok(sandbox.ports.every(({ url }) => typeof url === 'string'))
     const again = await client.getSandbox(sandbox.id)
@@ -96,12 +96,6 @@ describe('against virtx-stdio', () => {
     await assert.rejects(got.job(job.id), { status: 404 })
     await sandbox.remove()
     await assert.rejects(client.getSandbox(sandbox.id), { status: 404 })
-  })
-
-  test('a port with inbound rules is refused by a server that keeps none', async () => {
-    await alpine(client)
-    const ssh = { port: 22, inbound: [{ source: '203.0.113.7', description: 'office' }] }
-    await assert.rejects(client.createSandbox(ALPINE, { ports: [ssh] }), { status: 400 })
   })
 
   test('a sandbox is found by its name, which no other has', async () => {

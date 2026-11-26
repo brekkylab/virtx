@@ -464,10 +464,11 @@ fn renew(asked: &wire::MachineInfo) -> io::Result<()> {
     Ok(())
 }
 
-fn root(asked: &wire::MachineInfo) -> io::Result<()> {
+fn root(asked: &wire::MachineInfo, spike: &mut dyn FnMut(&str)) -> io::Result<()> {
     // The boot root is shared by the time this runs, and a mount under a shared one cannot be
     // moved.
     mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
+    spike("private");
     // The two disks at once: each mount waits on its own disk's reads.
     std::thread::scope(|s| {
         let lower = s.spawn(|| {
@@ -494,15 +495,18 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
             .map_err(|_| io::Error::other("mounting the lower disk panicked"))??;
         upper
     })?;
+    spike("disks");
     fs::create_dir_all(UPPER_DIR)?;
     fs::create_dir_all(WORK_DIR)?;
     let layers = format!("lowerdir={LOWER_AT},upperdir={UPPER_DIR},workdir={WORK_DIR}");
     mount(Some("overlay"), NEW_ROOT, Some("overlay"), 0, Some(&layers))?;
+    spike("overlay");
 
     std::env::set_current_dir(NEW_ROOT)?;
     mount(Some("."), "/", None, libc::MS_MOVE, None)?;
     std::os::unix::fs::chroot(".")?;
     std::env::set_current_dir("/")?;
+    spike("chroot");
 
     let quiet = libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_RELATIME;
     for (source, at, flags) in [
@@ -518,6 +522,7 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
     }
     let _ = std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd");
     mount(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)?;
+    spike("mounts");
 
     // A guest whose network interface cannot be set up, or an image whose `/etc/resolv.conf`
     // cannot be written, reaches nothing or resolves no names, and runs anyway.
@@ -538,6 +543,7 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
         fs::create_dir_all(at)?;
         mount(Some(tag), at, Some("virtiofs"), 0, None)?;
     }
+    spike("shares");
     std::env::set_current_dir(&asked.workdir)
 }
 
@@ -753,10 +759,23 @@ fn serve() -> io::Result<()> {
     send(&out, &CtrlResp::Waiting);
     let asked = wire::recv(&mut input)?
         .ok_or_else(|| io::Error::other("the channel ended before it named a root"))?;
+    // Spike: each step's time, told the host before Ready.
+    let mut spike = Vec::new();
+    let mut spike_at = std::time::Instant::now();
+    let mut spike_step = |name: &str| {
+        let now = std::time::Instant::now();
+        spike.push(format!(
+            "{name}={:.1}",
+            (now - spike_at).as_secs_f64() * 1000.0
+        ));
+        spike_at = now;
+    };
     renew(&asked)?;
-    root(&asked)?;
+    spike_step("renew");
+    root(&asked, &mut spike_step)?;
     // SAFETY: nothing else runs yet; the threads start below.
     unsafe { alib_env() };
+    spike_step("alib");
     let io = File::options()
         .read(true)
         .write(true)
@@ -766,9 +785,20 @@ fn serve() -> io::Result<()> {
             eprintln!("{}: the I/O channel: {e}", env!("CARGO_BIN_NAME"));
         }
     });
+    spike_step("io");
 
     JOBS.get_or_init(jobs_cgroup);
+    spike_step("cgroup");
     thread::spawn(watch_thrashing);
+    spike_step("thrash");
+    send(
+        &out,
+        &CtrlResp::Log {
+            level: "WARN".into(),
+            target: "spike-guest".into(),
+            message: spike.join(" "),
+        },
+    );
     send(&out, &CtrlResp::Ready(Vec::new()));
     let stdins = Stdins::default();
     while let Some(message) = wire::recv(&mut input)? {

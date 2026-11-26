@@ -5,6 +5,8 @@ mod credentials;
 mod portforward;
 mod stdio;
 mod tcp;
+#[cfg(test)]
+mod tls;
 
 use std::io;
 use std::sync::{PoisonError, RwLock};

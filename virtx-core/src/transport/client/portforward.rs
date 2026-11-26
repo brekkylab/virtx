@@ -144,7 +144,7 @@ impl PortForwarder {
             Connection::Stdio(_) => PortForwarder::direct(url),
             Connection::Tcp(tcp) => match tcp.base.join(url) {
                 Ok(url) => PortForwarder::tunnel(
-                    tcp.http.clone(),
+                    tcp.upgrades.clone(),
                     Arc::clone(&tcp.credentials),
                     Arc::clone(&tcp.headers),
                     url,
@@ -473,8 +473,17 @@ mod tests {
     /// first connection at once and echoes every later one, and whose every other port is
     /// refused. Given `token`, it wants it as a bearer token.
     async fn serve(token: Option<&'static str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/virtx/", listener.local_addr().unwrap());
+        let app = ports(token);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        base
+    }
+
+    /// The ports [`serve`] serves, under `/virtx/`.
+    fn ports(token: Option<&'static str>) -> axum::Router {
         let late = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new().route(
+        axum::Router::new().route(
             "/virtx/ports/{capability}",
             axum::routing::get(
                 move |Path(capability): Path<String>,
@@ -532,11 +541,32 @@ mod tests {
                         })
                 },
             ),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}/virtx/", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        base
+        )
+    }
+
+    /// Over HTTPS to a server that offers HTTP/2, a port's WebSocket is still opened: it is
+    /// upgraded from HTTP/1.1. The client trusts the test's own certificate and is otherwise the
+    /// one a port's WebSocket is opened with.
+    #[tokio::test]
+    async fn over_https_a_websocket_is_opened_where_the_server_offers_http2() {
+        let (base, certificate, _) = super::super::tls::serve(ports(None)).await;
+        let url = reqwest::Url::parse(&base)
+            .unwrap()
+            .join("virtx/ports/open")
+            .unwrap();
+        let upgrades = super::super::tcp::upgrades()
+            .tls_certs_only([certificate])
+            .build()
+            .unwrap();
+        let credentials = Arc::new(Credentials::new(Auth::None));
+        let headers = Arc::new(std::sync::RwLock::new(HeaderMap::new()));
+        let forward = PortForwarder::tunnel(upgrades, credentials, headers, url, None).unwrap();
+
+        let mut stream = TcpStream::connect(forward.address()).await.unwrap();
+        stream.write_all(b"one").await.unwrap();
+        let mut echoed = [0u8; 3];
+        stream.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"one");
     }
 
     #[tokio::test]

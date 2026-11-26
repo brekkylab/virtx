@@ -699,14 +699,16 @@ pub(crate) fn spike_mark(what: &str) {
 
 /// 64 bytes of the host's randomness, or none where it has none to read.
 fn host_seed() -> Vec<u8> {
-    use std::io::Read;
-    let mut seed = vec![0; 64];
     #[cfg(unix)]
-    if File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut seed))
-        .is_ok()
     {
-        return seed;
+        use std::io::Read;
+        let mut seed = vec![0; 64];
+        if File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(&mut seed))
+            .is_ok()
+        {
+            return seed;
+        }
     }
     Vec::new()
 }

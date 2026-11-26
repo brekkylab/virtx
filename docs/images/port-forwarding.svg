@@ -27,7 +27,7 @@
 <path d="M1101 305 H1200" stroke-dasharray="8 8"/>
 </g>
 <g fill="none" stroke="#7a71e0" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
-<path d="M664 305 H1096"/><path d="M1080 291 L1096 305 L1080 319"/><path d="M680 291 L664 305 L680 319"/>
+<path d="M664 305 H1096"/><path d="M1080 291 L1096 305 L1080 319"/>
 </g>
 <text x="880" y="281" font-size="32" font-weight="700" fill="#7a71e0" text-anchor="middle">WebSocket</text>
 <g font-size="20" fill="#7d8390" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">

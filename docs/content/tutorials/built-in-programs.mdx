@@ -1,0 +1,75 @@
+---
+title: "Using built-in programs"
+description: "Give a sandbox virtx's built-in programs, its abins, at /abin: they run on any image, each with the SKILL.md an agent reads to use it."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+virtx has built-in programs, called abins, that a sandbox can be given at `/abin`.
+They run on any image, with nothing installed in it for them.
+
+## Give a sandbox its programs
+
+Name them in `abins` when the sandbox is made.
+They are at `/abin`, read-only and first on its `PATH`, so a command calls each by its name.
+A name the server has no program by is refused, and a sandbox made without `abins` has no `/abin`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.create_sandbox("alpine:latest", abins=["index", "docread"])
+print(sandbox.abins)  # ['index', 'docread']
+await sandbox.exec(["index", "--help"]).complete(print=True)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', { abins: ['index', 'docread'] })
+console.log(sandbox.abins) // [ 'index', 'docread' ]
+await sandbox.exec(['index', '--help']).complete({ print: true })
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxCreateArgs::new("alpine:latest").abin("index").abin("docread");
+let sandbox = client.create_sandbox(&args).await?;
+println!("{:?}", sandbox.info().abins); // ["index", "docread"]
+sandbox.exec(&SandboxExecArgs::new(["index", "--help"])).complete(true).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## What an agent reads
+
+Each program has its `SKILL.md` at `/abin/skills/{name}/SKILL.md`: what it does, its commands and options, and how to use them.
+An agent that runs commands in the sandbox reads it there, as it would a skill of its own, and needs no other instructions to use the program.
+
+```bash
+cat /abin/skills/index/SKILL.md
+```
+
+<Aside type="tip">
+An [Ailoy](https://github.com/brekkylab/ailoy) agent given the sandbox does this by itself: it takes the `SKILL.md` of each of the sandbox's programs as a skill of its own, with nothing to set up.
+</Aside>
+
+## The programs
+
+| Name | What it does | Guide |
+| --- | --- | --- |
+| `browser` | Drives a web browser. | [Driving a browser](/docs/guides/browser/) |
+| `display` | Runs GUI programs on a screen you watch over VNC. | [Running GUI programs](/docs/guides/gui-programs/) |
+| `docread` | Parses documents, such as PDF, Word and PowerPoint, precisely. | [Implementing RAG](/docs/guides/implementing-rag/) |
+| `index` | Indexes text files and searches them. | [Implementing RAG](/docs/guides/implementing-rag/) |
+
+Some are open-source tools, built in with what they need:
+
+- `browser` is [agent-browser](https://github.com/vercel-labs/agent-browser), with a Chrome of its own.
+  Its commands are agent-browser's, by the same names, and agent-browser's documentation covers them in full.
+- `docread` is [docling](https://github.com/docling-project/docling), in its Rust port [docling.rs](https://github.com/docling-project/docling.rs).
+  Its options are those of `docling convert`, by the same names, and it writes what docling does: Markdown, docling's JSON, HTML, text and DocLang.

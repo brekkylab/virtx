@@ -5,7 +5,6 @@ description: "Let a sandbox reach out to the network, and reach services running
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 import portForwarding from "../../images/port-forwarding.svg";
-import localPortForwarding from "../../images/local-port-forwarding.svg";
 
 Traffic crosses a sandbox in two directions, set separately:
 
@@ -55,6 +54,8 @@ Each port is on one side: `on="sandbox"`, the default, or `on="local"`.
 A port is its side and its number, so 8080 in the sandbox and 8080 on local are two ports, and a sandbox can have both.
 Either is forwarded by a `PortForwarder`, and its local end, `forwarder.local`, is the address on your machine it connects: where you reach a port in the sandbox, or what the sandbox reaches through a port on local.
 
+<img src={portForwarding.src} width={portForwarding.width} height={portForwarding.height} alt="Your machine and the server machine, a port on each row. A port in the sandbox: a connection to the PortForwarder at 127.0.0.1:54321 is carried in a WebSocket to …/ports/8000, and the virtx server connects it to port 8000 in the sandbox. A port on local: a process in the sandbox connects to 10.0.2.2:9222, the virtx server carries it in a WebSocket to …/client-ports/9222, and the PortForwarder connects it to 127.0.0.1:9222. In both, the PortForwarder opens the WebSocket." />
+
 ### A port in the sandbox
 
 1. Pass `ports` to `create_sandbox` to open those ports in the sandbox.
@@ -69,7 +70,6 @@ How the forwarding works depends on where the server runs:
   The forwarder listens on a local port, and opens a WebSocket to `/sandboxes/{id}/ports/{port}` for each connection made to it, with the client's credentials.
   The server passes the bytes between that WebSocket and the port in the sandbox.
 
-<img src={portForwarding.src} width={portForwarding.width} height={portForwarding.height} alt="The PortForwarder opens a port on your machine's loopback, 127.0.0.1:<port>, and carries each connection to it in a WebSocket to ws://…/sandboxes/<id>/ports/8000 on the virtx server, which connects to port 8000 in the sandbox it runs." />
 
 Because everything goes through the server's own HTTP address, the server's machine needs no other port open.
 A sandbox found again with `get_sandbox`, `list_sandbox` or `find_sandbox`, from this program or another, forwards its ports as the one `create_sandbox` answered does.
@@ -150,7 +150,6 @@ How it is carried depends on where the server runs:
   The forwarder keeps one open to `/sandboxes/{id}/client-ports/{port}`.
   When a process connects, the server tells the forwarder over it, and the forwarder connects to its local end and carries the bytes; it opens another WebSocket at once for the next connection.
 
-<img src={localPortForwarding.src} width={localPortForwarding.width} height={localPortForwarding.height} alt="A process in the sandbox connects to 10.0.2.2:9222. The virtx server carries the connection in a WebSocket to ws://…/sandboxes/<id>/client-ports/9222, which the PortForwarder on your machine holds open, and the forwarder connects it to 127.0.0.1:9222." />
 
 The process's `connect` waits until the local end is reached, and succeeds then.
 It is refused, as one to a port nothing listens on is, when no forwarder is open, when the local end is not reached, or when no forwarder takes it within a few seconds.

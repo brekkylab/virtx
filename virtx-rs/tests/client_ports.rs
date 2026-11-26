@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use virtx::{ClientPortForwarder, SandboxCreateArgs};
+use virtx::{ClientPortForwarder, PortSpec, SandboxClientPort, SandboxCreateArgs};
 
 mod common;
 
@@ -60,7 +60,10 @@ fn a_client_port_over_stdio_is_reached_by_the_server_itself() {
         .network(false)
         .client_port(port);
     let sandbox = client.create_sandbox(&args).wait().unwrap();
-    assert_eq!(sandbox.info().client_ports, [port]);
+    let ports: Vec<_> = (sandbox.info().client_ports.iter())
+        .map(|p| p.port)
+        .collect();
+    assert_eq!(ports, [port]);
     assert_eq!(ask(&sandbox, port), (vec!["back hi".to_owned()], 0));
 
     // Taken, nothing changes; a port it was not made with, or another target, is refused.
@@ -84,11 +87,15 @@ fn a_client_port_over_http_is_reached_while_it_is_taken() {
     let (port, _answering) = listening();
     let args = SandboxCreateArgs::new(ALPINE)
         .network(false)
-        .client_port(port);
+        .client_port(PortSpec::new(port).label("answers back"));
     let sandbox = client.create_sandbox(&args).wait().unwrap();
-    assert_eq!(sandbox.info().client_ports, [port]);
+    let labelled = SandboxClientPort {
+        port,
+        label: Some("answers back".into()),
+    };
+    assert_eq!(sandbox.info().client_ports, std::slice::from_ref(&labelled));
     let got = client.get_sandbox(sandbox.id()).wait().unwrap();
-    assert_eq!(got.info().client_ports, [port]);
+    assert_eq!(got.info().client_ports, [labelled]);
     let (lines, code) = ask(&sandbox, port);
     assert_ne!(code, 0, "reached a port no one takes: {lines:?}");
 

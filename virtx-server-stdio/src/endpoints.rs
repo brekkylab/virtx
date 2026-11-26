@@ -839,7 +839,8 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     let mut listening = JoinSet::new();
     // Each client port reached on this machine, which the client is on, at its loopback: taken
     // by this server for as long as the sandbox is, as its ports are answered at this server's.
-    for &port in &args.client_ports {
+    for spec in &args.client_ports {
+        let port = spec.port;
         let taker = sandbox.take_client_port(port)?;
         let sandbox = Arc::clone(&sandbox);
         listening.spawn(async move {

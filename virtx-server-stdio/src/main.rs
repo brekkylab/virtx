@@ -557,12 +557,16 @@ mod tests {
 
         for ports in [vec![0], vec![8080, 8080]] {
             let mut args = here();
-            args.ports = ports.into_iter().map(PortSpec::new).collect();
+            args.ports = ports.iter().copied().map(PortSpec::new).collect();
+            assert_eq!(refused(args).await, 400);
+            let mut args = here();
+            args.client_ports = ports.into_iter().map(PortSpec::new).collect();
             assert_eq!(refused(args).await, 400);
         }
         // A label is at most 128 characters.
         let long = PortSpec::new(80).label("x".repeat(129));
-        assert_eq!(refused(here().port(long)).await, 400);
+        assert_eq!(refused(here().port(long.clone())).await, 400);
+        assert_eq!(refused(here().client_port(long)).await, 400);
         let long = "x".repeat(129);
         for name in [
             "",

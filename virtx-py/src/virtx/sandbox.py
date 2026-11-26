@@ -42,9 +42,25 @@ class SandboxPort:
 
 
 @dataclass(frozen=True)
+class SandboxClientPort:
+    """A port of a client's machine a sandbox's processes reach at ``10.0.2.2``, which a
+    ``ClientPortForwarder`` takes."""
+
+    port: int
+
+    label: str | None = None
+    """What it is for, as it was asked for with."""
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> SandboxClientPort:
+        return cls(value["port"], value.get("label"))
+
+
+@dataclass(frozen=True)
 class PortSpec:
-    """A port to open in a sandbox as ``create_sandbox`` makes it: its number, and what it is
-    for. ``ports`` takes a plain ``int`` for a port that says nothing more."""
+    """A port to open in a sandbox as ``create_sandbox`` makes it, or of this machine's for it to
+    reach: its number, and what it is for. ``ports`` and ``client_ports`` take a plain ``int`` for
+    a port that says nothing more."""
 
     port: int
 
@@ -108,7 +124,7 @@ class Sandbox(Files):
     ports: list[SandboxPort] = field(default_factory=list)
     """Its opened ports."""
 
-    client_ports: list[int] = field(default_factory=list)
+    client_ports: list[SandboxClientPort] = field(default_factory=list)
     """The ports of its client's its processes reach at ``10.0.2.2``, while a client takes each."""
 
     abins: list[str] = field(default_factory=list)
@@ -127,7 +143,7 @@ class Sandbox(Files):
             value["image"],
             value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
-            list(value.get("client_ports", ())),
+            [SandboxClientPort.from_dict(port) for port in value.get("client_ports", ())],
             list(value.get("abins", ())),
             value.get("error"),
         )

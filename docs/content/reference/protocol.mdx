@@ -359,11 +359,11 @@ The `POST` and every `GET` answer each as `{port, url?, label?}`, in the order g
 
 #### Client ports
 
-`client_ports` in the body are TCP ports of a client's machine the sandbox's processes reach, each a number: `[9222, 5037]`.
+`client_ports` in the body are TCP ports of a client's machine the sandbox's processes reach, each a number, or `{port, label?}` to say what it is for, as a port of `ports` is: `[9222, {"port": 5037, "label": "adb"}]`.
 They are the reverse of `ports`: a process in the sandbox connects to `10.0.2.2` at one of them, and the connection is carried to the client's machine.
 
-They are kept from the sandbox's `POST` until its `DELETE`, and answered by its `POST` and `GET` as they were given.
-`0` and a port given twice are refused with `400`, `invalid`.
+They are kept from the sandbox's `POST` until its `DELETE`, and answered by its `POST` and `GET` as `{port, label?}`, in the order given.
+`0`, a port given twice, a label past 128 characters and a port with any other member are refused with `400`, `invalid`.
 They have nothing to do with `ports`: the same number may be in both.
 
 - A server on the client's machine reaches the port itself, at `127.0.0.1`, for as long as the sandbox lives.

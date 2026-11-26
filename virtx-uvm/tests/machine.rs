@@ -24,8 +24,8 @@ use futures_util::{
 };
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{
-    ImageName, SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry,
-    SandboxResizeArgs, SandboxResources, SandboxVolume,
+    ImageName, PortSpec, SandboxClientPort, SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, SandboxResizeArgs, SandboxResources, SandboxVolume,
 };
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
@@ -2140,11 +2140,18 @@ async fn a_sandbox_s_client_port_is_reached_while_it_is_taken(home: Home) {
 
     let args = SandboxCreateArgs {
         network: false,
-        client_ports: vec![9222],
+        client_ports: vec![PortSpec::new(9222).label("echo")],
         ..small()
     };
     let sandbox = home.sandbox(&args, None).await;
-    assert_eq!(sandbox.answer().client_ports, [9222]);
+    let answered = sandbox.answer().client_ports;
+    assert_eq!(
+        answered,
+        [SandboxClientPort {
+            port: 9222,
+            label: Some("echo".into())
+        }]
+    );
     let ask = ["sh", "-c", "echo hi | nc -w 5 10.0.2.2 9222"];
 
     // No one takes it.

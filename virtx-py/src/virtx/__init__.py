@@ -62,6 +62,7 @@ from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
     PortSpec,
     Sandbox,
+    SandboxClientPort,
     SandboxJob,
     SandboxJobEnd,
     SandboxJobEndReason,
@@ -123,6 +124,7 @@ __all__ = [
     "RegistryAuth",
     "Role",
     "Sandbox",
+    "SandboxClientPort",
     "SandboxJob",
     "SandboxJobEnd",
     "SandboxJobEndReason",

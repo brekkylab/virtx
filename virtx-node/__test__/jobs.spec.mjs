@@ -177,9 +177,11 @@ describe('against virtx-stdio', () => {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address()
     const ask = ['sh', '-c', `echo hi | nc -w 5 10.0.2.2 ${port}`]
-    const sandbox = await client.createSandbox(ALPINE, { network: false, clientPorts: [port] })
+    const clientPorts = [{ port, label: 'answers back' }]
+    const sandbox = await client.createSandbox(ALPINE, { network: false, clientPorts })
     try {
-      assert.deepEqual(sandbox.clientPorts, [port])
+      assert.deepEqual(sandbox.clientPorts, clientPorts)
+      assert.deepEqual((await client.getSandbox(sandbox.id)).clientPorts, clientPorts)
       // Over stdio the server, on this machine, reaches the port itself.
       assert.equal(await sandbox.exec(ask).complete(), 0)
       const taken = await ClientPortForwarder.open(sandbox, port)

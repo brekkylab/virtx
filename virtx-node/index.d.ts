@@ -345,8 +345,8 @@ export interface SandboxInfo {
   running: boolean
   /** Its opened ports, if it was given some, each reached with `PortForwarder.open`. */
   ports?: SandboxPort[]
-  /** The ports of its client's its processes reach at `10.0.2.2`, while a client takes each. */
-  clientPorts?: number[]
+  /** The ports of a client's machine its processes reach at `10.0.2.2`, if it was given some, each taken with `ClientPortForwarder.open`. */
+  clientPorts?: SandboxClientPort[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
   /** Why it takes nothing but `remove`, for one its server could not know again after a restart. */
@@ -365,7 +365,7 @@ export class Sandbox extends Files implements SandboxInfo {
   image: string
   running: boolean
   ports?: SandboxPort[]
-  clientPorts?: number[]
+  clientPorts?: SandboxClientPort[]
   abins?: string[]
   error?: string
   /** Start `cmd` in it: the job, and its output as the job's `log`. */
@@ -410,7 +410,14 @@ export interface SandboxPort {
   label?: string
 }
 
-/** A port to open as a sandbox is made: a number that says nothing more, or one that says what it is for, up to 128 characters. */
+/** A port of a client's machine a sandbox's processes reach at `10.0.2.2`. */
+export interface SandboxClientPort {
+  port: number
+  /** What it is for, as it was asked for with. */
+  label?: string
+}
+
+/** A port to open as a sandbox is made, or of this machine's for it to reach: a number that says nothing more, or one that says what it is for, up to 128 characters. */
 export type PortSpec = number | { port: number; label?: string }
 
 /** Whatever is left out the server picks. */
@@ -420,8 +427,8 @@ export interface SandboxCreateOptions {
   network?: boolean
   /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev' }]`. */
   ports?: PortSpec[]
-  /** TCP ports of a client's machine its processes reach at `10.0.2.2`, with or without a `network`, while a client takes each with `ClientPortForwarder.open`. */
-  clientPorts?: number[]
+  /** TCP ports of a client's machine its processes reach at `10.0.2.2`, with or without a `network`, while a client takes each with `ClientPortForwarder.open`: `[9222, { port: 5037, label: 'adb' }]`. */
+  clientPorts?: PortSpec[]
   vcpus?: number
   memoryMib?: number
   /** How much it may write over its image, in GiB, at most 1024, which goes with it. */

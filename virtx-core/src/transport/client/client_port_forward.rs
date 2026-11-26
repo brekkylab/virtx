@@ -64,7 +64,7 @@ pub(crate) fn take<'a>(
             let made: crate::Sandbox =
                 crate::transport::http::get(client, &format!("/sandboxes/{}", segment(&sandbox)))
                     .await?;
-            if !made.client_ports.contains(&port) {
+            if !made.client_ports.iter().any(|opened| opened.port == port) {
                 Err(Error::Client(format!(
                     "sandbox {sandbox} was made with no client port {port}"
                 )))?;

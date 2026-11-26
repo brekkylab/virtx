@@ -20,6 +20,7 @@ from virtx import (
     PortForwarder,
     PortSpec,
     Recipe,
+    SandboxClientPort,
     SandboxJob,
     SandboxJobEnd,
     SandboxJobEndReason,
@@ -208,8 +209,11 @@ async def test_a_client_port_is_reached_and_taken(client: Client) -> None:
     server = await asyncio.start_server(answer, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     ask = ["sh", "-c", f"echo hi | nc -w 5 10.0.2.2 {port}"]
-    sandbox = await client.create_sandbox(ALPINE, network=False, client_ports=[port])
-    assert sandbox.client_ports == [port]
+    sandbox = await client.create_sandbox(
+        ALPINE, network=False, client_ports=[PortSpec(port, label="answers back")]
+    )
+    assert sandbox.client_ports == [SandboxClientPort(port, "answers back")]
+    assert (await client.get_sandbox(sandbox.id)).client_ports == sandbox.client_ports
     # Over stdio the server, on this machine, reaches the port itself.
     asked = await sandbox.exec(ask)
     said = [entry.entry async for entry in asked.log()]

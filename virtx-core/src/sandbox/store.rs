@@ -34,9 +34,9 @@ pub struct Sandbox {
     pub ports: Vec<SandboxPort>,
 
     /// The ports of a client's machine its processes reach at `10.0.2.2`, as it was made with
-    /// them.
+    /// them, in the order asked for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub client_ports: Vec<u16>,
+    pub client_ports: Vec<SandboxClientPort>,
 
     /// virtx's own programs it has at `/abin`, as it was made with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -76,10 +76,10 @@ pub struct SandboxCreateArgs {
 
     /// TCP ports of a client's machine its processes reach at `10.0.2.2`, each while a client
     /// takes it ([`Client::open_client_port`](crate::Client::open_client_port)): the way out to
-    /// the client, which does not need `network`. Kept until it is removed; `0` and a port given
-    /// twice are refused.
+    /// the client, which does not need `network`. Each a number, or one with what it is for
+    /// ([`PortSpec`]). Kept until it is removed; `0` and a port given twice are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub client_ports: Vec<u16>,
+    pub client_ports: Vec<PortSpec>,
 
     /// How many vCPUs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,9 +168,9 @@ impl SandboxCreateArgs {
     }
 
     /// Let its processes reach the client's TCP port `port` at `10.0.2.2`, beside those given
-    /// before.
-    pub fn client_port(mut self, port: u16) -> Self {
-        self.client_ports.push(port);
+    /// before: a number, or a [`PortSpec`] to say what it is for.
+    pub fn client_port(mut self, port: impl Into<PortSpec>) -> Self {
+        self.client_ports.push(port.into());
         self
     }
 
@@ -308,8 +308,20 @@ pub struct SandboxPort {
     pub label: Option<String>,
 }
 
-/// A port to open in a sandbox: its number, and what it is for. Written as the number alone
-/// when it says nothing more, `{port, label?}` otherwise; read as either.
+/// A port of a client's machine a sandbox's processes reach at `10.0.2.2`, and what it is for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxClientPort {
+    /// The port on the client's machine, and at `10.0.2.2` in the sandbox.
+    pub port: u16,
+
+    /// What it is for, as it was asked for with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// A port to open in a sandbox, or of a client's machine for it to reach: its number, and what
+/// it is for. Written as the number alone when it says nothing more, `{port, label?}`
+/// otherwise; read as either.
 ///
 /// ```
 /// # use virtx_core::{PortSpec, SandboxCreateArgs};
@@ -319,7 +331,7 @@ pub struct SandboxPort {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortSpec {
-    /// The port in the sandbox.
+    /// The port: in the sandbox, or on the client's machine.
     pub port: u16,
 
     /// What it is for, free text of up to 128 characters, answered with it.

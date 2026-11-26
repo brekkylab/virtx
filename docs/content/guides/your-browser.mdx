@@ -35,7 +35,7 @@ Hand the agent a profile made for it.
 ## Reach it from a sandbox
 
 The sandbox is made with the client port `9222`, and the forwarder carries its connections to `127.0.0.1:9222` on your machine.
-Here the sandbox has a network to install Playwright's library; it downloads no browser, since it drives yours.
+Here the sandbox has a network to install Playwright's library, and `libatomic1`, which the slim image lacks and Playwright's driver needs; it downloads no browser, since it drives yours.
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -55,7 +55,7 @@ with sync_playwright() as p:
 
 await client.pull_image("python:3.12-slim").complete()
 sandbox = await client.create_sandbox("python:3.12-slim", client_ports=[9222])
-await sandbox.exec(["pip", "install", "-q", "playwright"]).complete(print=True)
+await sandbox.exec(["sh", "-c", "apt-get update -qq && apt-get install -y -qq libatomic1 && pip install -q playwright"]).complete(print=True)
 await sandbox.write_file("agent.py", AGENT)
 
 async with await ClientPortForwarder.open(sandbox, 9222):
@@ -80,7 +80,7 @@ with sync_playwright() as p:
 
 await client.pullImage('python:3.12-slim').complete()
 const sandbox = await client.createSandbox('python:3.12-slim', { clientPorts: [9222] })
-await sandbox.exec(['pip', 'install', '-q', 'playwright']).complete({ print: true })
+await sandbox.exec(['sh', '-c', 'apt-get update -qq && apt-get install -y -qq libatomic1 && pip install -q playwright']).complete({ print: true })
 await sandbox.writeFile('agent.py', AGENT)
 
 const forwarder = await ClientPortForwarder.open(sandbox, 9222)
@@ -105,7 +105,7 @@ with sync_playwright() as p:
 client.pull_image("python:3.12-slim", None).complete(false).await?;
 let args = SandboxCreateArgs::new("python:3.12-slim").client_port(9222);
 let sandbox = client.create_sandbox(&args).await?;
-let install = SandboxExecArgs::new(["pip", "install", "-q", "playwright"]);
+let install = SandboxExecArgs::new(["sh", "-c", "apt-get update -qq && apt-get install -y -qq libatomic1 && pip install -q playwright"]);
 sandbox.exec(&install).complete(true).await?;
 sandbox.write_file("agent.py", AGENT, None).await?;
 

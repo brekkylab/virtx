@@ -13,8 +13,8 @@ use sha2::{Digest as _, Sha256};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{
-    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
-    SandboxPort, SandboxResizeArgs, SandboxResources,
+    ImageName, SandboxClientPort, SandboxCreateArgs, SandboxJob, SandboxJobEndReason,
+    SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxResizeArgs, SandboxResources,
 };
 
 use super::client_ports::{ClientPortTaker, ClientPorts};
@@ -282,34 +282,27 @@ impl Sandbox {
                 return Err(exists(id));
             }
         }
-        let mut given = HashSet::new();
-        if let Some(spec) = args
-            .ports
-            .iter()
-            .find(|spec| spec.port == 0 || !given.insert(spec.port))
-        {
-            return Err(Error::Invalid(format!(
-                "ports: {} is not a port, or is given twice",
-                spec.port
-            )));
-        }
-        if let Some(spec) = args.ports.iter().find(|spec| {
-            spec.label
-                .as_ref()
-                .is_some_and(|label| label.chars().count() > LABEL_MOST)
-        }) {
-            return Err(Error::Invalid(format!(
-                "ports: {}'s label is past {LABEL_MOST} characters",
-                spec.port
-            )));
-        }
-        let mut given = HashSet::new();
-        if let Some(port) =
-            (args.client_ports.iter()).find(|&&port| port == 0 || !given.insert(port))
-        {
-            return Err(Error::Invalid(format!(
-                "client_ports: {port} is not a port, or is given twice"
-            )));
+        for (member, specs) in [("ports", &args.ports), ("client_ports", &args.client_ports)] {
+            let mut given = HashSet::new();
+            if let Some(spec) = specs
+                .iter()
+                .find(|spec| spec.port == 0 || !given.insert(spec.port))
+            {
+                return Err(Error::Invalid(format!(
+                    "{member}: {} is not a port, or is given twice",
+                    spec.port
+                )));
+            }
+            if let Some(spec) = specs.iter().find(|spec| {
+                spec.label
+                    .as_ref()
+                    .is_some_and(|label| label.chars().count() > LABEL_MOST)
+            }) {
+                return Err(Error::Invalid(format!(
+                    "{member}: {}'s label is past {LABEL_MOST} characters",
+                    spec.port
+                )));
+            }
         }
         let mut at = HashSet::new();
         for volume in &args.volumes {
@@ -528,7 +521,10 @@ impl Sandbox {
 
         let client_ports = match args.client_ports.is_empty() {
             true => None,
-            false => Some(ClientPorts::open(&args.client_ports)?),
+            false => {
+                let ports: Vec<u16> = args.client_ports.iter().map(|spec| spec.port).collect();
+                Some(ClientPorts::open(&ports)?)
+            }
         };
         let config = MachineConfig {
             rootfs,
@@ -627,8 +623,11 @@ impl Sandbox {
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: self.ports_opened.clone(),
-            client_ports: (self.client_ports.iter())
-                .flat_map(|ports| ports.relay().ports.clone())
+            client_ports: (self.args.lock().unwrap().client_ports.iter())
+                .map(|spec| SandboxClientPort {
+                    port: spec.port,
+                    label: spec.label.clone(),
+                })
                 .collect(),
             abins: self.abins.clone(),
             error: None,

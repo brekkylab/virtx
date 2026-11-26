@@ -138,7 +138,7 @@ A server over HTTP answers a URL that only a `PortForwarder` opens, so use one e
 ## What a port is for
 
 A port in `ports` is a number, or a spec with a `label` of up to 128 characters saying what it is for.
-Each comes back in `sandbox.ports` with its `label` as given.
+The label comes back with the port wherever the sandbox is found again, which answers no `url`, so it is what tells its ports apart there:
 
 <Tabs syncKey="lang">
 <TabItem label="Python">
@@ -150,7 +150,9 @@ sandbox = await client.create_sandbox(
     "node:22",
     ports=[PortSpec(5173, label="dev server")],
 )
-print(sandbox.ports[0].label)
+
+found = await client.get_sandbox(sandbox.id)
+print(found.ports[0].label)  # dev server
 ```
 
 </TabItem>
@@ -160,18 +162,22 @@ print(sandbox.ports[0].label)
 const sandbox = await client.createSandbox('node:22', {
   ports: [{ port: 5173, label: 'dev server' }],
 })
-console.log(sandbox.ports[0].label)
+
+const found = await client.getSandbox(sandbox.id)
+console.log(found.ports[0].label) // dev server
 ```
 
 </TabItem>
 <TabItem label="Rust">
 
 ```rust
-let web = PortSpec::new(5173).label("dev server");
+let dev_server = PortSpec::new(5173).label("dev server");
 let sandbox = client
-    .create_sandbox(&SandboxCreateArgs::new("node:22").port(web))
+    .create_sandbox(&SandboxCreateArgs::new("node:22").port(dev_server))
     .await?;
-println!("{:?}", sandbox.info().ports[0].label);
+
+let found = client.get_sandbox(sandbox.id()).await?;
+println!("{:?}", found.info().ports[0].label); // Some("dev server")
 ```
 
 </TabItem>

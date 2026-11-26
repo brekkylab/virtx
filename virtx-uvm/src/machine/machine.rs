@@ -228,6 +228,9 @@ impl Drop for Machine {
         let process = self.process.get_mut().unwrap();
         let _ = process.kill();
         let _ = process.wait();
+        // Its network's link, left behind by a process that ended before libkrun connected.
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(super::net::link_path(process.id()));
     }
 }
 
@@ -318,6 +321,8 @@ impl Machine {
                     let status = process
                         .wait()
                         .map_err(|e| Error::io("waiting for the machine's process", e))?;
+                    #[cfg(windows)]
+                    let _ = std::fs::remove_file(super::net::link_path(process.id()));
                     return Err(did_not_start(status, tail.make_contiguous(), told));
                 }
             }

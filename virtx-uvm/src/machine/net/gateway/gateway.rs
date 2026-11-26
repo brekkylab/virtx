@@ -319,7 +319,17 @@ mod tests {
     impl Guest {
         /// The link opened as the device's is, and the guest at the device's end of it.
         fn new(egress: Egress, published: Vec<(u16, TcpListener)>) -> Guest {
-            let (end, pending) = link::open().unwrap();
+            #[cfg(unix)]
+            let opened = link::open();
+            #[cfg(windows)]
+            let opened = {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                static NEXT: AtomicU32 = AtomicU32::new(0);
+                let n = NEXT.fetch_add(1, Ordering::Relaxed);
+                let name = format!("virtx-net-test-{}-{n}.sock", std::process::id());
+                link::open(std::env::temp_dir().join(name))
+            };
+            let (end, pending) = opened.unwrap();
             thread::spawn(move || {
                 Gateway::with_egress(pending.connect().unwrap(), egress, published)
                     .unwrap()

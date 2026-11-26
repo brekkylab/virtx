@@ -49,8 +49,15 @@ pub(super) struct Pending {
     path: std::path::PathBuf,
 }
 
-/// The two ends of a new link.
-pub(super) fn open() -> io::Result<(DeviceEnd, Pending)> {
+/// Where the machine's process `pid` listens for its device on Windows: one link a process, at
+/// a path its host finds again to remove once the process has ended.
+#[cfg(windows)]
+pub(crate) fn path(pid: u32) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("virtx-net-{pid}.sock"))
+}
+
+/// The two ends of a new link: on Windows, its device to connect at `path`.
+pub(super) fn open(#[cfg(windows)] path: std::path::PathBuf) -> io::Result<(DeviceEnd, Pending)> {
     #[cfg(unix)]
     {
         let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
@@ -63,13 +70,6 @@ pub(super) fn open() -> io::Result<(DeviceEnd, Pending)> {
     }
     #[cfg(windows)]
     {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "virtx-net-{}-{}.sock",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
         let named = path
             .to_str()
             .ok_or(io::ErrorKind::InvalidFilename)?

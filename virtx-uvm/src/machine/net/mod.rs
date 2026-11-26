@@ -40,6 +40,8 @@ use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
 use krun::{NetDevice, NetFlags};
 
 pub(crate) use gateway::routed;
+#[cfg(windows)]
+pub(crate) use link::path as link_path;
 
 use super::wire::GuestNetwork;
 use super::{Error, Result};
@@ -109,7 +111,11 @@ pub(crate) fn device(egress: bool, published: Vec<(u16, TcpListener)>) -> Result
     // module doc.
     const FEATURES: u32 = (1 << 0) | (1 << 1) | (1 << 7);
 
-    let (end, pending) = link::open().map_err(|e| Error::io("opening the guest's link", e))?;
+    #[cfg(unix)]
+    let opened = link::open();
+    #[cfg(windows)]
+    let opened = link::open(link::path(std::process::id()));
+    let (end, pending) = opened.map_err(|e| Error::io("opening the guest's link", e))?;
     let device = match end {
         #[cfg(unix)]
         DeviceEnd::Fd(fd) => {

@@ -301,7 +301,7 @@ mod tests {
     use std::time::Instant as Clock;
 
     use smoltcp::iface::SocketHandle;
-    use smoltcp::socket::{tcp, udp};
+    use smoltcp::socket::{Socket, tcp, udp};
     use smoltcp::wire::IpAddress;
 
     use super::super::link::{self, DeviceEnd};
@@ -316,25 +316,35 @@ mod tests {
         started: Clock,
     }
 
+    /// The link opened as the device's is: the device's end, and the gateway's to connect.
+    fn opened() -> (DeviceEnd, link::Pending) {
+        #[cfg(unix)]
+        let opened = link::open();
+        #[cfg(windows)]
+        let opened = {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let name = format!("virtx-net-test-{}-{n}.sock", std::process::id());
+            link::open(std::env::temp_dir().join(name))
+        };
+        opened.unwrap()
+    }
+
     impl Guest {
-        /// The link opened as the device's is, and the guest at the device's end of it.
+        /// The guest at the device's end of a link, its gateway run on a thread of its own.
         fn new(egress: Egress, published: Vec<(u16, TcpListener)>) -> Guest {
-            #[cfg(unix)]
-            let opened = link::open();
-            #[cfg(windows)]
-            let opened = {
-                use std::sync::atomic::{AtomicU32, Ordering};
-                static NEXT: AtomicU32 = AtomicU32::new(0);
-                let n = NEXT.fetch_add(1, Ordering::Relaxed);
-                let name = format!("virtx-net-test-{}-{n}.sock", std::process::id());
-                link::open(std::env::temp_dir().join(name))
-            };
-            let (end, pending) = opened.unwrap();
+            let (end, pending) = opened();
             thread::spawn(move || {
                 Gateway::with_egress(pending.connect().unwrap(), egress, published)
                     .unwrap()
                     .run()
             });
+            Guest::at(end)
+        }
+
+        /// The guest at the device's end of a link, `end`.
+        fn at(end: DeviceEnd) -> Guest {
             let theirs = match end {
                 #[cfg(unix)]
                 DeviceEnd::Fd(fd) => fd.into(),
@@ -379,12 +389,17 @@ mod tests {
             let deadline = Clock::now() + Duration::from_secs(10);
             while !done(&mut self.sockets) {
                 assert!(Clock::now() < deadline, "timed out waiting until {what}");
-                let now = Instant::from_micros(self.started.elapsed().as_micros() as i64);
-                self.link.fill().unwrap();
-                self.iface.poll(now, &mut self.link, &mut self.sockets);
-                self.link.flush().unwrap();
+                self.turn();
                 thread::sleep(Duration::from_millis(1));
             }
+        }
+
+        /// Take what the link has, and send what the stack then has to.
+        fn turn(&mut self) {
+            let now = Instant::from_micros(self.started.elapsed().as_micros() as i64);
+            self.link.fill().unwrap();
+            self.iface.poll(now, &mut self.link, &mut self.sockets);
+            self.link.flush().unwrap();
         }
 
         fn connect(&mut self, to: SocketAddr) -> SocketHandle {
@@ -556,6 +571,49 @@ mod tests {
             );
             Clock::now() >= deadline
         });
+    }
+
+    /// While the guest's SYN is held for the host's connect, the gateway sleeps until something
+    /// arrives rather than turning at once.
+    #[test]
+    fn a_held_syn_leaves_the_gateway_idle() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let (end, pending) = opened();
+        let mut guest = Guest::at(end);
+        let egress = resolved_at(listener.local_addr().unwrap());
+        let mut gateway = Gateway::with_egress(pending.connect().unwrap(), egress, vec![]).unwrap();
+        guest.connect(DNS);
+        // Turned by hand, its poller never waited on, the gateway is not told the host's connect
+        // was answered, and holds the guest's SYN.
+        let deadline = Clock::now() + Duration::from_secs(10);
+        let now = loop {
+            assert!(Clock::now() < deadline, "the gateway took no SYN");
+            guest.turn();
+            let now = gateway.now();
+            gateway.link.fill().unwrap();
+            gateway.ingress(now);
+            gateway
+                .flows
+                .pump(&gateway.poller, &mut gateway.sockets, &mut gateway.link);
+            while gateway
+                .iface
+                .poll_egress(now, &mut gateway.link, &mut gateway.sockets)
+                != PollResult::None
+            {}
+            gateway.link.flush().unwrap();
+            let held = gateway.sockets.iter().any(|(_, socket)| {
+                matches!(socket, Socket::Tcp(tcp) if tcp.state() == tcp::State::SynReceived)
+            });
+            if held {
+                break now;
+            }
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert_ne!(
+            gateway.iface.poll_delay(now, &gateway.sockets),
+            Some(smoltcp::time::Duration::ZERO),
+            "the gateway would turn at once"
+        );
     }
 
     /// A query to the nameserver reaches the resolver, and its answer comes back from the

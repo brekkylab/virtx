@@ -25,8 +25,9 @@ usage: cargo xtask init     [--force]
        cargo xtask fixture  -- <command>...
        cargo xtask fixture  --serve
 
-  init      checks out the submodules that are not, applies 3rdparty/_patches to libkrun's
-            and rutabaga_gfx's, and adds the guest's musl target -- ready to build the servers
+  init      checks out the submodules that are not, applies 3rdparty/_patches to libkrun's,
+            rutabaga_gfx's and smoltcp's, and adds the guest's musl target -- ready to build
+            the servers
   build     builds the components from source
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
@@ -432,10 +433,12 @@ fn init(force: bool) -> anyhow::Result<()> {
 
 /// The submodules cargo takes crates from by path, each with its patches: a submodule's tree is
 /// the commit this repository pins with each patch applied to it in order. libkrun is
-/// `virtx-uvm`'s dependency, and rutabaga_gfx is patched in for libkrun's.
+/// `virtx-uvm`'s dependency, rutabaga_gfx is patched in for libkrun's, and smoltcp for
+/// `virtx-uvm`'s.
 const PATCHED: &[(&str, &str)] = &[
     ("3rdparty/libkrun", "3rdparty/_patches/libkrun"),
     ("3rdparty/rutabaga_gfx", "3rdparty/_patches/rutabaga_gfx"),
+    ("3rdparty/smoltcp", "3rdparty/_patches/smoltcp"),
 ];
 
 /// What `git` in `dir` prints for `args`.

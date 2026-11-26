@@ -65,7 +65,7 @@ async def test_a_port_forwarder_listens_on_the_loopback_until_closed(tcp_client:
     await alpine(tcp_client)
     sandbox = await tcp_client.create_sandbox(ALPINE, ports=[8000])
     try:
-        forwarder = PortForwarder.open(tcp_client, sandbox.ports[0].url)
+        forwarder = PortForwarder.open(sandbox, 8000)
         assert isinstance(forwarder.port, int)
         assert forwarder.address == f"{forwarder.host}:{forwarder.port}"
         assert forwarder.host == "127.0.0.1"

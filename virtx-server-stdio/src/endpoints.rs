@@ -22,7 +22,7 @@ use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{AbortHandle, JoinSet};
 
 use virtx_core::{
@@ -179,10 +179,23 @@ impl Drop for Naming<'_> {
     }
 }
 
-/// A sandbox, and what takes each of its ports' connections, until the sandbox goes.
+/// A sandbox, its ports with the loopback address each is reached at, and what takes each of
+/// their connections and its client ports', until the sandbox goes.
 struct Held {
     sandbox: Arc<Sandbox>,
+    ports: Vec<SandboxPort>,
     _listening: JoinSet<()>,
+}
+
+impl Held {
+    /// The sandbox as it is answered: each port with its `url`, which only this machine
+    /// reaches, so no secret.
+    fn answer(&self) -> virtx_core::Sandbox {
+        virtx_core::Sandbox {
+            ports: self.ports.clone(),
+            ..self.sandbox.answer()
+        }
+    }
 }
 
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
@@ -782,7 +795,7 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
     let listed: Vec<_> = sandboxes
         .values()
         .filter(|held| name.is_none() || held.sandbox.name() == name.as_deref())
-        .map(|held| held.sandbox.answer())
+        .map(Held::answer)
         .collect();
     Ok(json(&listed))
 }
@@ -819,11 +832,33 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         home.vm.clone(),
         park_after(),
         None,
-        None,
+        false,
         &Backing::default(),
     )
     .await?;
     let mut listening = JoinSet::new();
+    // Each client port reached on this machine, which the client is on, at its loopback: taken
+    // by this server for as long as the sandbox is, as its ports are answered at this server's.
+    for &port in &args.client_ports {
+        let taker = sandbox.take_client_port(port)?;
+        let sandbox = Arc::clone(&sandbox);
+        listening.spawn(async move {
+            while let Some(connection) = taker.next().await {
+                let activity = sandbox.activity();
+                tokio::spawn(async move {
+                    // Not reached, dropped: refused, as a port nothing listens on is.
+                    let Ok(mut reached) = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await
+                    else {
+                        return;
+                    };
+                    let _activity = activity;
+                    if let Ok(mut carried) = connection.accept().await {
+                        let _ = tokio::io::copy_bidirectional(&mut carried, &mut reached).await;
+                    }
+                });
+            }
+        });
+    }
     for (port, listener) in listeners {
         let sandbox = Arc::clone(&sandbox);
         listening.spawn(async move {
@@ -841,8 +876,10 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     let id = sandbox.id().to_owned();
     let held = Held {
         sandbox: Arc::clone(&sandbox),
+        ports: opened,
         _listening: listening,
     };
+    let answer = held.answer();
     let closed = {
         let mut sandboxes = home.sandboxes.lock().unwrap();
         let closed = home.closed.load(Ordering::SeqCst);
@@ -855,10 +892,6 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         tokio::task::spawn_blocking(move || sandbox.close()).await?;
         return Err(forbidden("this project is being removed"));
     }
-    let answer = virtx_core::Sandbox {
-        ports: opened,
-        ..sandbox.answer()
-    };
     Ok(created(format!("/sandboxes/{id}"), &answer))
 }
 
@@ -866,7 +899,11 @@ async fn sandbox_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.sandbox(&id)?.answer()))
+    let sandboxes = home.sandboxes.lock().unwrap();
+    let held = sandboxes
+        .get(&id)
+        .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
+    Ok(json(&held.answer()))
 }
 
 /// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now

@@ -23,24 +23,26 @@
 
 mod call;
 mod client;
+mod client_port_forward;
 mod error;
 mod files;
 mod image;
 mod job;
 mod library;
-mod portforward;
+mod port_forward;
 mod project;
 mod sandbox;
 mod volume;
 
-pub use call::{Call, Events};
+pub use call::{Call, Events, Holding};
 pub use client::{Client, Opening, ensure_virtx};
+pub use client_port_forward::ClientPortForwarder;
 pub use error::Error;
 pub use files::Files;
 pub use image::ImageJob;
 pub use job::{JobEnd, JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
-pub use portforward::{ForwardedPort, PortForwarder};
+pub use port_forward::PortForwarder;
 pub use project::Project;
 pub use sandbox::{Sandbox, SandboxJob};
 /// What the server answers about an image job; an [`ImageJob`] carries it with its client.

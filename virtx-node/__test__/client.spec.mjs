@@ -47,7 +47,7 @@ test('a port forwarder listens on the loopback until it is closed', async () => 
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE, { ports: [8000] })
     try {
-      const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
+      const forwarder = PortForwarder.open(sandbox, 8000)
       assert.equal(typeof forwarder.port, 'number')
       assert.equal(forwarder.address, `${forwarder.host}:${forwarder.port}`)
       assert.equal(forwarder.host, '127.0.0.1')

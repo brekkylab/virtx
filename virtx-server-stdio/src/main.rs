@@ -459,6 +459,18 @@ mod tests {
         assert_eq!(labels["maintainer"], "virtx");
     }
 
+    /// A client port of a sandbox that is not here is `404`, and so is refusing a connection of
+    /// one.
+    #[tokio::test]
+    async fn a_client_port_of_no_sandbox_is_not_found() {
+        let server = Server::spawn("client-port").await;
+        let mut taken = server
+            .client
+            .open_client_port("nope", 9222, "127.0.0.1:9222".into());
+        let refused = futures_util::StreamExt::next(&mut taken).await.unwrap();
+        assert_eq!(status(refused), 404);
+    }
+
     #[tokio::test]
     async fn creates_lists_and_removes_a_volume() {
         let server = Server::spawn("volume").await;

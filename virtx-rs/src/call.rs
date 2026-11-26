@@ -252,3 +252,69 @@ unsafe fn take_with<T>(
     unsafe { (api.virtx_bytes_free)(out) };
     read
 }
+
+/// A request answered with its stream's first item, made into a `T` that holds the stream from
+/// then on: what the stream keeps going, such as a sandbox's client ports taken, goes on for as
+/// long as the `T` is held. It runs from when it is made; dropping it before it answers cancels
+/// it.
+#[must_use = "a call dropped is cancelled"]
+pub struct Holding<T> {
+    events: Option<Events<serde_json::Value>>,
+    make: Make<T>,
+}
+
+type Make<T> =
+    Box<dyn Fn(serde_json::Value, Events<serde_json::Value>) -> Result<T, Error> + Send + Sync>;
+
+impl<T> Unpin for Holding<T> {}
+
+impl<T> Holding<T> {
+    pub(crate) fn new(
+        events: Events<serde_json::Value>,
+        make: impl Fn(serde_json::Value, Events<serde_json::Value>) -> Result<T, Error>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Holding<T> {
+        Holding {
+            events: Some(events),
+            make: Box::new(make),
+        }
+    }
+
+    /// Block this thread until the call answers, for a caller without an async runtime.
+    pub fn wait(mut self) -> Result<T, Error> {
+        let mut events = self.events.take().expect("answered once");
+        let first = events.wait_next();
+        self.answer(first, events)
+    }
+
+    fn answer(
+        &self,
+        first: Option<Result<serde_json::Value, Error>>,
+        events: Events<serde_json::Value>,
+    ) -> Result<T, Error> {
+        match first {
+            Some(Ok(first)) => (self.make)(first, events),
+            Some(Err(e)) => Err(e),
+            None => Err(Error::Call(
+                virtx_core::Source::Transport,
+                "the call ended before it answered".into(),
+            )),
+        }
+    }
+}
+
+impl<T> Future for Holding<T> {
+    type Output = Result<T, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let events = self.events.as_mut().expect("polled after it answered");
+        let first = match Pin::new(events).poll_next(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(first) => first,
+        };
+        let events = self.events.take().expect("held until it answers");
+        Poll::Ready(self.answer(first, events))
+    }
+}

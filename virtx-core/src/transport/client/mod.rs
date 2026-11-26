@@ -1,8 +1,9 @@
 //! The client's end: the server's endpoints over either transport, which only opening and
 //! closing tell apart. It knows no endpoint's protocol; each is built on [`TransportClient::send`].
 
+mod client_port_forward;
 mod credentials;
-mod portforward;
+mod port_forward;
 mod stdio;
 mod tcp;
 
@@ -14,7 +15,8 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
-pub use self::portforward::{ForwardError, PortForwarder};
+pub(crate) use self::client_port_forward::take as take_client_port;
+pub use self::port_forward::{ForwardError, PortForwarder};
 use self::{stdio::Stdio, tcp::Tcp};
 use super::http::refused;
 use crate::{Auth, Error, PROJECT_HEADER};

@@ -170,6 +170,7 @@ async fn step_further(
         volumes: Vec::new(),
         abin: None,
         ports: Vec::new(),
+        client_ports: None,
         sandbox_disk: None,
     };
     let vm = vm.to_vec();

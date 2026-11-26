@@ -1,17 +1,16 @@
-//! A sandbox's port, forwarded to this machine's loopback: what making the sandbox answered for
-//! it, as an address any TCP client connects to.
+//! A sandbox's port, forwarded to this machine's loopback, as an address any TCP client connects
+//! to.
 //!
-//! A server on this machine answers a loopback address already, which is reached as it is. A
-//! server over HTTP answers a URL relative to its base, which only a WebSocket of the
-//! subprotocol `virtx.tcp` opens: so each connection to a loopback port of this client's own
-//! is carried in one, its bytes as binary messages, opened by the same HTTP client the requests
-//! go by.
+//! A server on this machine answers each port's loopback address, its `url`, which is reached
+//! as it is. A server over HTTP is asked for `/sandboxes/{id}/ports/{port}` as a WebSocket of
+//! the subprotocol `virtx.tcp`: so each connection to a loopback port of this client's own is
+//! carried in one, its bytes as binary messages, opened by the same HTTP client the requests go
+//! by, with their credentials and project.
 //!
 //! A connection whose WebSocket is refused, or closed before the port sent a byte, is closed as
 //! the server closed it, and what was seen -- the refusal, or the close and the reason the
 //! server gave for it -- is kept as the forwarder's [last error](PortForwarder::last_error)
-//! until a connection reaches the port, and warned of, naming the port and never its URL, which
-//! is secret.
+//! until a connection reaches the port, and warned of, naming the port.
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
@@ -25,9 +24,13 @@ use super::{
     credentials::Credentials,
     tcp::{Shared, authorized, current},
 };
-use crate::{Error, transport::http::refused, warning};
+use crate::{
+    Error, PROJECT_HEADER,
+    transport::{http::refused, segment},
+    warning,
+};
 use futures_util::{SinkExt, StreamExt};
-use http::{HeaderMap, StatusCode, header};
+use http::{HeaderMap, HeaderValue, StatusCode, header};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use tokio::{
@@ -127,34 +130,48 @@ pub struct PortForwarder {
 }
 
 impl PortForwarder {
-    /// The port making a sandbox answered `url` for, at an address on this machine's loopback,
-    /// reached over `client`'s connection. `port`, its number in the sandbox where the caller
-    /// knows it, names it in what a connection that fails says. Called inside a tokio runtime,
-    /// which the port's connections are carried on.
+    /// The port `port` of the sandbox `sandbox`, at an address on this machine's loopback,
+    /// reached over `client`'s connection. Called inside a tokio runtime, which the port's
+    /// connections are carried on.
     ///
-    /// Over stdio the server is on this machine, and its loopback address is the forwarder's.
-    /// Over HTTP `url` is resolved against the server's base, and each connection to a loopback
-    /// port of the forwarder's own is carried to it in a WebSocket of `virtx.tcp`.
+    /// Over stdio the server is on this machine, and the loopback address it answered for the
+    /// port, `url`, is the forwarder's: one without it is refused. Over HTTP each connection to a
+    /// loopback port of the forwarder's own is carried to `/sandboxes/{id}/ports/{port}` in a
+    /// WebSocket of `virtx.tcp`, in the project `client` names as it is opened.
     pub fn open(
         client: &TransportClient,
-        url: &str,
-        port: Option<u16>,
+        sandbox: &str,
+        port: u16,
+        url: Option<&str>,
     ) -> Result<PortForwarder, Error> {
         match &client.connection {
-            Connection::Stdio(_) => PortForwarder::direct(url),
-            Connection::Tcp(tcp) => match tcp.base.join(url) {
-                Ok(url) => PortForwarder::tunnel(
+            Connection::Stdio(_) => match url {
+                Some(url) => PortForwarder::direct(url),
+                None => Err(Error::Client(format!(
+                    "port {port} has no url: a server on this machine answers each port's \
+                     address with its sandbox"
+                ))),
+            },
+            Connection::Tcp(tcp) => {
+                let path = format!("sandboxes/{}/ports/{port}", segment(sandbox));
+                let url = tcp
+                    .base
+                    .join(&path)
+                    .map_err(|e| Error::Client(format!("{path}: {e}")))?;
+                let project = client
+                    .project
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                PortForwarder::tunnel(
                     tcp.http.clone(),
                     Arc::clone(&tcp.credentials),
                     Arc::clone(&tcp.headers),
+                    project,
                     url,
                     port,
-                ),
-                // Its message would quote the URL, which is secret.
-                Err(e) => Err(Error::Client(format!(
-                    "a port's URL that does not read as one: {e}"
-                ))),
-            },
+                )
+            }
         }
     }
 
@@ -202,13 +219,14 @@ impl PortForwarder {
     }
 
     /// A loopback port of this client's own, each connection to it carried to `url` in a
-    /// WebSocket that `http` opens with the token and `headers` current then.
+    /// WebSocket that `http` opens with the token and `headers` current then, and `project`.
     fn tunnel(
         http: reqwest::Client,
         credentials: Arc<Credentials>,
         headers: Shared<HeaderMap>,
+        project: Option<HeaderValue>,
         url: reqwest::Url,
-        port: Option<u16>,
+        port: u16,
     ) -> Result<PortForwarder, Error> {
         let opening = |e: std::io::Error| Error::Client(format!("opening a loopback port: {e}"));
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(opening)?;
@@ -216,10 +234,7 @@ impl PortForwarder {
         let listener = TcpListener::from_std(listener).map_err(opening)?;
         let address = listener.local_addr().map_err(opening)?;
         let failures = Arc::new(Failures {
-            port: match port {
-                Some(port) => format!("port {port}, forwarded at {address}"),
-                None => format!("the port forwarded at {address}"),
-            },
+            port: format!("port {port}, forwarded at {address}"),
             last: Mutex::default(),
         });
         #[cfg(test)]
@@ -250,7 +265,10 @@ impl PortForwarder {
                             }
                         };
                         let (http, url) = (http.clone(), url.clone());
-                        let (credentials, headers) = (Arc::clone(&credentials), current(&headers));
+                        let (credentials, mut headers) = (Arc::clone(&credentials), current(&headers));
+                        if let Some(project) = &project {
+                            headers.insert(PROJECT_HEADER, project.clone());
+                        }
                         let failed = Arc::clone(&failed);
                         connections.spawn(async move {
                             // Failed, the connection closes: as a port nothing listens on does.
@@ -315,7 +333,7 @@ fn chain(error: &dyn std::error::Error) -> String {
 
 /// A WebSocket of `virtx.tcp` to `url`, its handshake an HTTP/1.1 upgrade `http` sends with
 /// `token` and `headers`. Refused, why, with the status the server answered if it answered.
-async fn open(
+pub(super) async fn open(
     http: &reqwest::Client,
     token: Option<&str>,
     headers: HeaderMap,
@@ -475,17 +493,16 @@ mod tests {
     async fn serve(token: Option<&'static str>) -> String {
         let late = Arc::new(AtomicUsize::new(0));
         let app = axum::Router::new().route(
-            "/virtx/ports/{capability}",
+            "/virtx/sandboxes/{sandbox}/ports/{port}",
             axum::routing::get(
-                move |Path(capability): Path<String>,
+                move |Path((sandbox, _port)): Path<(String, u16)>,
                       headers: HeaderMap,
                       upgrade: WebSocketUpgrade| async move {
-                    let first = capability == "late" && late.fetch_add(1, SeqCst) == 0;
+                    let first = sandbox == "late" && late.fetch_add(1, SeqCst) == 0;
                     let offered = headers
                         .get(header::SEC_WEBSOCKET_PROTOCOL)
                         .is_some_and(|value| value == TCP_SUBPROTOCOL);
-                    if !["open", "deaf", "gone", "late"].contains(&capability.as_str()) || !offered
-                    {
+                    if !["open", "deaf", "gone", "late"].contains(&sandbox.as_str()) || !offered {
                         return (
                             StatusCode::NOT_FOUND,
                             axum::Json(serde_json::json!({
@@ -500,7 +517,7 @@ mod tests {
                     {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
-                    if capability == "deaf" || first {
+                    if sandbox == "deaf" || first {
                         // Closed at once, as a port nothing listens on is.
                         return upgrade.protocols([TCP_SUBPROTOCOL]).on_upgrade(
                             |mut socket| async move {
@@ -508,7 +525,7 @@ mod tests {
                             },
                         );
                     }
-                    if capability == "gone" {
+                    if sandbox == "gone" {
                         return upgrade.protocols([TCP_SUBPROTOCOL]).on_upgrade(
                             |mut socket| async move {
                                 let frame = ws::CloseFrame {
@@ -543,7 +560,7 @@ mod tests {
     async fn each_connection_is_carried_in_a_websocket_to_the_url_under_the_base() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/open", None).unwrap();
+        let forward = PortForwarder::open(&client, "open", 7000, None).unwrap();
         assert!(forward.address().ip().is_loopback());
 
         // Two at once, each its own WebSocket.
@@ -584,7 +601,7 @@ mod tests {
     async fn a_connection_the_server_refuses_is_closed_and_says_why() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/shut", Some(7000)).unwrap();
+        let forward = PortForwarder::open(&client, "shut", 7000, None).unwrap();
         assert_eq!(forward.last_error(), None);
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let mut read = Vec::new();
@@ -600,15 +617,13 @@ mod tests {
             "{}",
             failed.message
         );
-        // The URL is as secret as the credentials it carries.
-        assert!(!failed.message.contains("ports/shut"), "{}", failed.message);
     }
 
     #[tokio::test]
     async fn a_websocket_closed_before_the_port_sent_a_byte_says_so() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/deaf", Some(7000)).unwrap();
+        let forward = PortForwarder::open(&client, "deaf", 7000, None).unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         // Sent or not before the server closes it, the line goes nowhere.
         let _ = stream.write_all(b"hello\n").await;
@@ -636,7 +651,7 @@ mod tests {
     async fn a_websocket_closed_with_a_reason_says_the_servers_reason() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/gone", Some(7000)).unwrap();
+        let forward = PortForwarder::open(&client, "gone", 7000, None).unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let _ = stream.read_to_end(&mut Vec::new()).await;
         let failed = failed(&forward).await;
@@ -654,7 +669,7 @@ mod tests {
     async fn a_connection_that_reaches_the_port_clears_the_last_error() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/late", Some(7000)).unwrap();
+        let forward = PortForwarder::open(&client, "late", 7000, None).unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let _ = stream.read_to_end(&mut Vec::new()).await;
         failed(&forward).await;
@@ -685,16 +700,17 @@ mod tests {
         );
     }
 
+    /// Over stdio the server on this machine answers each port's address, and a port without
+    /// it is refused.
     #[tokio::test]
-    async fn a_port_named_by_no_number_is_named_by_where_it_is_forwarded() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/deaf", None).unwrap();
-        let mut stream = TcpStream::connect(forward.address()).await.unwrap();
-        let _ = stream.read_to_end(&mut Vec::new()).await;
-        let named = format!("the port forwarded at {}: ", forward.address());
-        let failed = failed(&forward).await;
-        assert!(failed.message.starts_with(&named), "{}", failed.message);
+    async fn a_port_over_stdio_without_its_address_is_refused() {
+        let (ours, _theirs) = tokio::io::duplex(64);
+        let client = TransportClient::over(ours);
+        let refused = PortForwarder::open(&client, "s", 5173, None).err().unwrap();
+        assert!(
+            refused.to_string().contains("port 5173 has no url"),
+            "{refused}"
+        );
     }
 
     #[tokio::test]
@@ -702,7 +718,7 @@ mod tests {
         let client =
             TransportClient::connect(&serve(Some("later")).await, Auth::None, HeaderMap::new())
                 .unwrap();
-        let forward = PortForwarder::open(&client, "ports/open", None).unwrap();
+        let forward = PortForwarder::open(&client, "open", 7000, None).unwrap();
         let mut stream = TcpStream::connect(forward.address()).await.unwrap();
         let mut read = Vec::new();
         assert_eq!(stream.read_to_end(&mut read).await.unwrap(), 0, "refused");
@@ -731,7 +747,7 @@ mod tests {
     async fn completed_connection_tasks_are_reaped() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/open", None).unwrap();
+        let forward = PortForwarder::open(&client, "open", 7000, None).unwrap();
 
         for i in 0..10 {
             let mut stream = TcpStream::connect(forward.address()).await.unwrap();
@@ -755,7 +771,7 @@ mod tests {
     async fn refused_connection_tasks_are_reaped() {
         let client =
             TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
-        let forward = PortForwarder::open(&client, "ports/shut", None).unwrap();
+        let forward = PortForwarder::open(&client, "shut", 7000, None).unwrap();
 
         for _ in 0..5 {
             let mut stream = TcpStream::connect(forward.address()).await.unwrap();
@@ -786,16 +802,15 @@ mod ffi {
         ffi::{VIRTX_ERROR, VIRTX_OK, VirtxBytes, encode, json, write},
     };
 
-    /// What `virtx_port_forwarder_open` takes: a port's `url`, as the server answered it, and
-    /// its number in the sandbox, which names it in what a connection that fails says. A port
-    /// asked for again has no `url`, and is refused, naming it.
+    /// What `virtx_port_forwarder_open` takes: the sandbox, the port, and the port's `url`
+    /// where the server answered one.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct PortForwarderArgs {
+        sandbox: String,
+        port: u16,
         #[serde(default)]
         url: Option<String>,
-        #[serde(default)]
-        port: Option<u16>,
     }
 
     /// Where a forwarder is reached, as `host:port`.
@@ -807,12 +822,13 @@ mod ffi {
     /// A `PortForwarder`, as C holds it: held for the forwarding it does until it is freed.
     pub struct VirtxPortForwarder(PortForwarder);
 
-    /// Forward the port a sandbox answered `url` for, given `{"url": "...", "port"?: n}` as
-    /// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
-    /// forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
-    /// the error's message. Returns once its local address is open, which takes no request of
-    /// the server. A port without its `url`, as asking for a sandbox again answers one, is
-    /// refused.
+    /// Forward the port `port` of the sandbox `sandbox`, given
+    /// `{"sandbox": "...", "port": n, "url"?: "..."}`, the `url` as a server on this machine
+    /// answers the port, to this machine's loopback: write the forwarder to `forwarder`, and
+    /// where it is to `out`, as `{"address": "127.0.0.1:n"}`, or the error's message. Returns
+    /// once its local address is open, which takes no request of the server. Over stdio a port
+    /// without its `url` is refused; over HTTP its `url`, which a server there answers none of,
+    /// is not read.
     ///
     /// It runs on `client`'s runtime, so the client's last release stops it, and is freed with
     /// `virtx_port_forwarder_free`.
@@ -832,10 +848,7 @@ mod ffi {
         let args = unsafe { json::<PortForwarderArgs>(args, args_len) };
         let opened = unsafe { &(*client).0 }.inside(|client| {
             let args = args?;
-            let Some(url) = args.url else {
-                return Err(unreached(args.port));
-            };
-            PortForwarder::open(&client.inner, &url, args.port)
+            PortForwarder::open(&client.inner, &args.sandbox, args.port, args.url.as_deref())
         });
         let output = opened.map(|opened| {
             let address = opened.address().to_string();
@@ -871,15 +884,6 @@ mod ffi {
         };
         unsafe { write(out, bytes) };
         status
-    }
-
-    /// Why a port without its `url` is not forwarded: only making its sandbox answers one.
-    fn unreached(port: Option<u16>) -> crate::Error {
-        let port = port.map_or_else(|| "a port".to_owned(), |port| format!("port {port}"));
-        crate::Error::Client(format!(
-            "{port} has no url to forward: only the port create_sandbox answered carries one, \
-             not one a sandbox asked for again answers"
-        ))
     }
 
     /// Stop `forwarder` and free it. Null does nothing.
@@ -938,7 +942,7 @@ mod ffi {
             }
             crate::warning::ffi::virtx_set_warn(Some(warned));
 
-            let args = br#"{"url": "ports/abc", "port": 7009}"#;
+            let args = br#"{"sandbox": "abc", "port": 7009}"#;
             let mut forwarder = ptr::null_mut();
             let status = unsafe {
                 virtx_port_forwarder_open(
@@ -985,7 +989,6 @@ mod ffi {
             };
             let message = failed["message"].as_str().unwrap();
             assert!(message.starts_with(&named), "{message}");
-            assert!(!message.contains("ports/abc"), "{message}");
             assert_eq!(failed.get("status"), None);
             let warned = || WARNED.lock().unwrap().iter().any(|m| m == message);
             while !warned() {
@@ -1005,49 +1008,6 @@ mod ffi {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-        }
-
-        #[test]
-        fn a_port_without_its_url_is_refused_naming_it() {
-            let mut client = ptr::null_mut();
-            let mut out = VirtxBytes {
-                data: ptr::null_mut(),
-                len: 0,
-            };
-            let url = c"http://127.0.0.1:9/";
-            let status = unsafe {
-                virtx_client_connect(
-                    url.as_ptr(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    &mut client,
-                    &mut out,
-                )
-            };
-            assert_eq!(status, crate::ffi::VIRTX_OK);
-
-            let args = br#"{"port": 5173}"#;
-            let mut forwarder = ptr::null_mut();
-            let status = unsafe {
-                virtx_port_forwarder_open(
-                    client,
-                    args.as_ptr(),
-                    args.len(),
-                    &mut forwarder,
-                    &mut out,
-                )
-            };
-            assert_eq!(status, VIRTX_ERROR);
-            assert!(forwarder.is_null());
-            let written = unsafe { std::slice::from_raw_parts(out.data, out.len) };
-            let refused: serde_json::Value = serde_json::from_slice(written).unwrap();
-            unsafe { virtx_bytes_free(out) };
-            let message = refused["message"].as_str().unwrap();
-            assert!(message.starts_with("port 5173 has no url"), "{message}");
-            assert_eq!(refused.get("status"), None);
-            unsafe { virtx_client_release(client) };
         }
     }
 }

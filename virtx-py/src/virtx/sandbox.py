@@ -25,14 +25,13 @@ E = TypeVar("E", bound=Enum)
 
 @dataclass(frozen=True)
 class SandboxPort:
-    """A port opened in a sandbox as it was made, and the ``url`` a ``PortForwarder`` reaches it
-    by."""
+    """A port opened in a sandbox as it was made, which a ``PortForwarder`` reaches."""
 
     port: int
 
     url: str | None = None
-    """Answered by ``create_sandbox`` alone, as secret as the credentials it carries: ``None``
-    in a sandbox ``get_sandbox`` or ``list_sandbox`` answers."""
+    """The loopback address a server on this machine has it reached at: ``None`` from a server
+    reachable from other machines."""
 
     label: str | None = None
     """What it is for, as it was opened with."""
@@ -107,7 +106,10 @@ class Sandbox(Files):
     running: bool
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports, each with its ``url`` where ``create_sandbox`` answered it only."""
+    """Its opened ports."""
+
+    client_ports: list[int] = field(default_factory=list)
+    """The ports of its client's its processes reach at ``10.0.2.2``, while a client takes each."""
 
     abins: list[str] = field(default_factory=list)
     """virtx's own programs it has at ``/abin``."""
@@ -125,6 +127,7 @@ class Sandbox(Files):
             value["image"],
             value["running"],
             [SandboxPort.from_dict(port) for port in value.get("ports", ())],
+            list(value.get("client_ports", ())),
             list(value.get("abins", ())),
             value.get("error"),
         )

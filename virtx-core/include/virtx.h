@@ -635,7 +635,8 @@ struct VirtxFuture *virtx_client_copy_file(struct VirtxClient *client,
 
 // Answers with the sandboxes, as
 // `[{"id": "...", "image": "algorithm:hex", "running": bool,
-// "ports"?: [{"port": n, "label"?}]}, ...]`.
+// "ports"?: [{"port": n, "url"?: "...", "label"?}], "client_ports"?: [n]}, ...]`, a port's
+// `url` the loopback address a server on this machine answers for it.
 //
 // # Safety
 //
@@ -644,14 +645,14 @@ struct VirtxFuture *virtx_client_list_sandbox(struct VirtxClient *client);
 
 // Makes a sandbox, given
 // `{"image": {...}, "name": "...", "network": bool,
-// "ports": [n | {"port": n, "label": "..."}],
+// "ports": [n | {"port": n, "label": "..."}], "client_ports": [n],
 // "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
 // "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
 // the image as `{"type": "tag", "tag": "name:tag"}` or
 // `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
-// sandbox as `virtx_client_list_sandbox` answers each, its
-// `"ports": [{"port": n, "url": "...", "label"?}]`
-// with their `url`s here only.
+// sandbox as `virtx_client_list_sandbox` answers each. Its ports are forwarded with
+// `virtx_port_forwarder_open`, and its `client_ports` with
+// `virtx_client_port_forwarder_open`.
 //
 // # Safety
 //
@@ -852,12 +853,32 @@ int virtx_stream_wait_next(struct VirtxStream *stream, struct VirtxBytes *out);
 // `stream` is null, or one a request returned, not yet freed; it is not used again.
 void virtx_stream_free(struct VirtxStream *stream);
 
-// Forward the port a sandbox answered `url` for, given `{"url": "...", "port"?: n}` as
-// `virtx_client_create_sandbox` answered it, to this machine's loopback: write the
-// forwarder to `forwarder`, and where it is to `out`, as `{"address": "127.0.0.1:n"}`, or
-// the error's message. Returns once its local address is open, which takes no request of
-// the server. A port without its `url`, as asking for a sandbox again answers one, is
-// refused.
+// Take the client port `port` of the sandbox `sandbox`, one it was made with in its
+// `client_ports`, given `{"sandbox": "...", "port": n, "target"?: "host:port"}`: each
+// connection a process in it makes to `10.0.2.2:{port}` is carried to `target`,
+// `127.0.0.1:{port}` without one, on this machine, for as long as the stream is held. Its one
+// item is `null`, once the port is taken; it ends with the error that ends it, such as `404`
+// for a port the sandbox was not made with or once it is gone. Freeing it lets the port go,
+// and closes the connections it carries. What fails on the way, such as a target not
+// reached, is handed to the function `virtx_set_warn` set. A server over stdio, on this
+// machine, reaches `127.0.0.1:{port}` itself, and refuses another `target`.
+//
+// It runs on `client`'s runtime, so the client's last release stops it.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxStream *virtx_client_port_forwarder_open(struct VirtxClient *client,
+                                                     const uint8_t *args,
+                                                     size_t args_len);
+
+// Forward the port `port` of the sandbox `sandbox`, given
+// `{"sandbox": "...", "port": n, "url"?: "..."}`, the `url` as a server on this machine
+// answers the port, to this machine's loopback: write the forwarder to `forwarder`, and
+// where it is to `out`, as `{"address": "127.0.0.1:n"}`, or the error's message. Returns
+// once its local address is open, which takes no request of the server. Over stdio a port
+// without its `url` is refused; over HTTP its `url`, which a server there answers none of,
+// is not read.
 //
 // It runs on `client`'s runtime, so the client's last release stops it, and is freed with
 // `virtx_port_forwarder_free`.

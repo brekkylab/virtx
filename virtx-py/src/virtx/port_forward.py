@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import ctypes
 import json
-from typing import TYPE_CHECKING, Self
+from typing import Self
 
 from ._library import Library, VirtxError, _Bytes
-from .sandbox import SandboxPort
-
-if TYPE_CHECKING:
-    from .client import Client
+from .sandbox import Sandbox
 
 
 class PortForwarder:
@@ -30,18 +27,16 @@ class PortForwarder:
         """Where the port is reached, as ``host:port``."""
 
     @classmethod
-    def open(cls, client: Client, port: SandboxPort | str) -> PortForwarder:
-        """Forward ``port``, as ``create_sandbox`` answers one in ``ports``, or the ``url`` it
-        answered for it, over ``client``'s session. Given the port, what a connection that
-        fails says names its number. Returns as soon as its address on this machine's loopback
-        is open, which takes no request of the server: each connection to it is carried as it
-        comes, so it holds up no event loop it is called on. A port without its ``url``, as
-        ``get_sandbox`` answers one, is refused with a ``VirtxError`` naming it."""
+    def open(cls, sandbox: Sandbox, port: int) -> PortForwarder:
+        """Forward the port ``port`` of ``sandbox``, one it was made with, over its client's
+        session. Returns as soon as its address on this machine's loopback is open, which takes
+        no request of the server: each connection to it is carried as it comes, so it holds up no
+        event loop it is called on. Over stdio the server answered the port's loopback address
+        with the sandbox, and it is reached there."""
+        client = sandbox.client
         lib = client._lib
-        if isinstance(port, SandboxPort):
-            args = json.dumps({"url": port.url, "port": port.port}).encode()
-        else:
-            args = json.dumps({"url": port}).encode()
+        url = next((opened.url for opened in sandbox.ports if opened.port == port), None)
+        args = json.dumps({"sandbox": sandbox.id, "port": port, "url": url}).encode()
         raw = ctypes.c_void_p()
         out = _Bytes()
         status = lib.virtx_port_forwarder_open(

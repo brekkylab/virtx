@@ -72,8 +72,8 @@ See [Setting up sandboxes](/docs/tutorials/setting-sandboxes/) for the options `
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `create_sandbox(image, ...)` | `Sandbox` | Makes a sandbox of `image`, with the options given. `image` has to be on the server already, pulled or built: this does not pull it. |
-| `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes, each port without its `url`. |
-| `find_sandbox(name)` | `Sandbox` or none | The sandbox made with `name`, each port without its `url`; none if no sandbox has it. |
+| `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes. |
+| `find_sandbox(name)` | `Sandbox` or none | The sandbox made with `name`; none if no sandbox has it. |
 
 A `Sandbox` carries its client, and acts on itself:
 
@@ -194,10 +194,21 @@ See [Networks and ports](/docs/tutorials/networks-ports/).
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `PortForwarder.open(client, port)` | `PortForwarder` | Forwards a sandbox's port, as `ports` answers it, or the `url` answered for it, to an address on this machine's loopback. Given the port, a failed connection's error names its number. |
+| `PortForwarder.open(sandbox, port)` | `PortForwarder` | Forwards the sandbox's port `port` to an address on this machine's loopback. A failed connection's error names the port. |
 | `last_error` | `VirtxError` or `None` | Why the last connection that failed did -- its WebSocket refused, or closed before the port sent a byte, with the server's reason if it gave one -- naming the port; `None` again once a later connection's port sends a byte. Each failure is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
 | `address`, `host`, `port` | `str`, `str`, `int` | Where it is reached. In Rust, `address()`. |
 | `close()` | `None` | Stops forwarding; the port in the sandbox stays open. In Rust, dropping it does the same. |
+
+## ClientPortForwarder
+
+See [Networks and ports](/docs/tutorials/networks-ports/#client-ports).
+
+| Call | Returns | What it does |
+| --- | --- | --- |
+| `ClientPortForwarder.open(sandbox, port, target)` | `ClientPortForwarder` | Carries each connection a process in the sandbox makes to `10.0.2.2:port`, one of its `client_ports`, to `target` on this machine, `127.0.0.1:port` without one, once the port is taken. Awaited. |
+| `port` | `int` | The port, as the sandbox reaches it. In Rust, `port()`. |
+| `wait_closed()` | `VirtxError` | Waits until it is no longer taken, and answers why: `404` once the sandbox is gone. In Node, `waitClosed()`. |
+| `close()` | `None` | Lets the port go. In Rust, dropping it does the same. |
 
 ## Environment variables
 

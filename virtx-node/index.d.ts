@@ -343,8 +343,10 @@ export interface SandboxInfo {
   image: string
   /** Whether it takes processes: `false` once its VM has exited on its own. */
   running: boolean
-  /** Its opened ports, if it was given some: each with its `url` only as `createSandbox` answers it. */
+  /** Its opened ports, if it was given some, each reached with `PortForwarder.open`. */
   ports?: SandboxPort[]
+  /** The ports of its client's its processes reach at `10.0.2.2`, while a client takes each. */
+  clientPorts?: number[]
   /** virtx's own programs it has at `/abin`, if it was made with some. */
   abins?: string[]
   /** Why it takes nothing but `remove`, for one its server could not know again after a restart. */
@@ -363,6 +365,7 @@ export class Sandbox extends Files implements SandboxInfo {
   image: string
   running: boolean
   ports?: SandboxPort[]
+  clientPorts?: number[]
   abins?: string[]
   error?: string
   /** Start `cmd` in it: the job, and its output as the job's `log`. */
@@ -401,7 +404,7 @@ export interface SandboxResources {
 /** A port opened in a sandbox, and where it is reached from. */
 export interface SandboxPort {
   port: number
-  /** Answered by `createSandbox` alone, as secret as the credentials it carries: absent from a sandbox `getSandbox`, `findSandbox` or `listSandbox` answers, which a `PortForwarder` refuses. */
+  /** The loopback address a server on this machine has it reached at: absent from a server reachable from other machines. */
   url?: string
   /** What it is for, as it was opened with. */
   label?: string
@@ -417,6 +420,8 @@ export interface SandboxCreateOptions {
   network?: boolean
   /** Ports in it to open, reserved as it is made: `[8080, { port: 5173, label: 'dev' }]`. */
   ports?: PortSpec[]
+  /** TCP ports of a client's machine its processes reach at `10.0.2.2`, with or without a `network`, while a client takes each with `ClientPortForwarder.open`. */
+  clientPorts?: number[]
   vcpus?: number
   memoryMib?: number
   /** How much it may write over its image, in GiB, at most 1024, which goes with it. */
@@ -635,13 +640,13 @@ export class Client {
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>
   getVolume(name: string): Promise<Volume>
-  /** Every sandbox the server holds, each port without its `url`. */
+  /** Every sandbox the server holds. */
   listSandbox(): Promise<Sandbox[]>
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */
   createSandbox(image: string | ImageName, options?: SandboxCreateOptions): Promise<Sandbox>
-  /** The sandbox `id`, each port without its `url`. */
+  /** The sandbox `id`. */
   getSandbox(id: string): Promise<Sandbox>
-  /** The sandbox named `name`, each port without its `url`, or `undefined` if none is. */
+  /** The sandbox named `name`, or `undefined` if none is. */
   findSandbox(name: string): Promise<Sandbox | undefined>
 }
 
@@ -651,9 +656,29 @@ export class Client {
  * refused, or closed before the port sent a byte, is closed, and what was seen is `lastError`,
  * and emitted as a process warning of the type `VirtxWarning`.
  */
+/**
+ * A client port of a sandbox's, one it was made with in its `clientPorts`, taken by this client
+ * until it is closed: each connection a process in the sandbox makes to `10.0.2.2:{port}` is
+ * carried to its target on this machine, and refused when the target is not reached. Closed, the
+ * port is let go of, and the connections it carries are closed. What fails on the way is emitted
+ * as a process warning of the type `VirtxWarning`.
+ */
+export class ClientPortForwarder {
+  private constructor()
+  /** Take the client port `port` of `sandbox`, one it was made with, its connections carried to `target`, `host:port`, or `127.0.0.1:{port}` without one, over its client's session: answered once it is taken. Over HTTP it is reached while this is held, beside any other client's; a server on this machine reaches `127.0.0.1:{port}` itself, and refuses another `target`. Refused with a `VirtxError` of status `404` for a port the sandbox was not made with. */
+  static open(sandbox: Sandbox, port: number, target?: string): Promise<ClientPortForwarder>
+  /** The port, as a process in the sandbox reaches it at `10.0.2.2`. */
+  readonly port: number
+  /** Wait until it is no longer taken, and answer why: `404` once the sandbox is gone, and what else ended it. */
+  waitClosed(): Promise<VirtxError>
+  /** Let the port go. Closing twice does nothing. */
+  close(): void
+  [Symbol.dispose](): void
+}
+
 export class PortForwarder {
-  /** Forward `port`, as `createSandbox` answers one in `ports`, or the `url` it answered for it, over `client`'s session. Given the port, what a connection that fails says names its number. Returns once its local address is open, which takes no request of the server. A port without its `url`, as `getSandbox` answers one, is refused with a `VirtxError` naming it. */
-  static open(client: Client, port: SandboxPort | string): PortForwarder
+  /** Forward the port `port` of `sandbox`, one it was made with, over its client's session. Returns once its local address is open, which takes no request of the server. Over stdio the server answered the port's loopback address with the sandbox, and it is reached there. */
+  static open(sandbox: Sandbox, port: number): PortForwarder
   /** Where the port is reached, as `host:port`. */
   readonly address: string
   /** Why the last connection to the forwarder that failed did, its message naming the port, with the server's reason for closing it if it gave one; `null` while none has, and again once a later connection's port sends a byte. It is the last failure, not whether the port is reached now. Its `status` is the server's, where it refused the connection's WebSocket. A server on this machine is reached at its own address, not through the forwarder, so it has none. */

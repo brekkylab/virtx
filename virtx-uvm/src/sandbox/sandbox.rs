@@ -17,6 +17,7 @@ use virtx_core::{
     SandboxPort, SandboxResizeArgs, SandboxResources,
 };
 
+use super::client_ports::{ClientPortTaker, ClientPorts};
 use super::job::Written;
 use super::record::Record;
 use super::upper::Upper;
@@ -155,7 +156,7 @@ enum State {
 /// [parked](Sandbox::idle) for want of use, and the processes run in it.
 ///
 /// What it wrote is kept across its machine's stops, on the upper disk it made for itself, until
-/// it is closed; what ran in it is not. One made with keys is kept past its process too, with a
+/// it is closed; what ran in it is not. One made to be kept is kept past its process too, with a
 /// record beside its disk: [let go](Sandbox::leave) of as its server ends, it is known again,
 /// parked, by the next server over its root ([`Sandbox::kept`]).
 pub struct Sandbox {
@@ -219,6 +220,8 @@ pub struct Sandbox {
     served: Mutex<Option<bool>>,
     /// Where its machine's ports are reached.
     ports: Ports,
+    /// The relay its machines reach its client's ports through, where it was made with any.
+    client_ports: Option<ClientPorts>,
     /// How long it is in use by nothing before its machine is parked, `None` for never, and
     /// whether that is watched for, from its first boot on.
     park_after: Option<Duration>,
@@ -241,9 +244,8 @@ impl Sandbox {
     /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
     /// under `root` has, has made or keeps; under an id it picks otherwise.
     ///
-    /// With `keys`, the port each opens, it is kept past this process: its record is written
-    /// once it has booted, and a making cut short before then leaves nothing. Without, it goes
-    /// with this process.
+    /// `kept`, it is kept past this process: its record is written once it has booted, and a
+    /// making cut short before then leaves nothing. Otherwise it goes with this process.
     ///
     /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
     /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
@@ -258,7 +260,7 @@ impl Sandbox {
         vm: Vec<OsString>,
         park_after: Option<Duration>,
         id: Option<&str>,
-        keys: Option<HashMap<String, u16>>,
+        kept: bool,
         backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
@@ -299,6 +301,14 @@ impl Sandbox {
             return Err(Error::Invalid(format!(
                 "ports: {}'s label is past {LABEL_MOST} characters",
                 spec.port
+            )));
+        }
+        let mut given = HashSet::new();
+        if let Some(port) =
+            (args.client_ports.iter()).find(|&&port| port == 0 || !given.insert(port))
+        {
+            return Err(Error::Invalid(format!(
+                "client_ports: {port} is not a port, or is given twice"
             )));
         }
         let mut at = HashSet::new();
@@ -435,14 +445,13 @@ impl Sandbox {
         }
         let made = async {
             sandbox.wake_in(Some(room)).await?;
-            match keys {
-                Some(keys) => sandbox.keep(Record {
+            match kept {
+                true => sandbox.keep(Record {
                     args,
-                    keys,
                     exited: false,
                     jobs: Vec::new(),
                 }),
-                None => Ok(()),
+                false => Ok(()),
             }
         };
         if let Err(e) = made.await {
@@ -517,6 +526,10 @@ impl Sandbox {
             }
         };
 
+        let client_ports = match args.client_ports.is_empty() {
+            true => None,
+            false => Some(ClientPorts::open(&args.client_ports)?),
+        };
         let config = MachineConfig {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
@@ -525,6 +538,7 @@ impl Sandbox {
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
             ports: args.ports.iter().map(|spec| spec.port).collect(),
+            client_ports: client_ports.as_ref().map(|ports| ports.relay().clone()),
             // Set as each of its machines boots ([`Sandbox::wake`]).
             sandbox_disk: None,
         };
@@ -574,6 +588,7 @@ impl Sandbox {
             synced: Mutex::default(),
             served: Mutex::default(),
             ports: Ports::default(),
+            client_ports,
             park_after,
             watching: AtomicBool::new(false),
             used: Mutex::new(Instant::now()),
@@ -612,19 +627,12 @@ impl Sandbox {
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: self.ports_opened.clone(),
+            client_ports: (self.client_ports.iter())
+                .flat_map(|ports| ports.relay().ports.clone())
+                .collect(),
             abins: self.abins.clone(),
             error: None,
         }
-    }
-
-    /// The port each of its keys opens, as it was made with them: none for one not kept past
-    /// its process.
-    pub fn keys(&self) -> HashMap<String, u16> {
-        let record = self.record.lock().unwrap();
-        record
-            .as_ref()
-            .map(|record| record.keys.clone())
-            .unwrap_or_default()
     }
 
     /// Keep it past this process as `record` says: written beside its upper disk, which is
@@ -769,6 +777,18 @@ impl Sandbox {
     /// listens on is: a parked one is not booted for it, since nothing would listen there.
     pub async fn connect(&self, port: u16) -> io::Result<TcpStream> {
         self.ports.connect(port).await
+    }
+
+    /// A taker of its client port `port`, beside any others, until it drops: each connection a
+    /// process in it makes to the port goes to one of its takers, and one to a port with none is
+    /// refused. Refused [`NotFound`](Error::NotFound) for a port it was not made with.
+    pub fn take_client_port(&self, port: u16) -> Result<ClientPortTaker, Error> {
+        match &self.client_ports {
+            Some(ports) => ports.take(port),
+            None => Err(Error::NotFound(format!(
+                "this sandbox was made with no client port {port}"
+            ))),
+        }
     }
 
     /// Something done with it from outside, such as a connection through a port or a request
@@ -983,6 +1003,9 @@ impl Sandbox {
             upper.kept = leaving && record.is_some();
         }
         drop(self.abin.lock().unwrap().take());
+        if let Some(ports) = &self.client_ports {
+            ports.close();
+        }
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.cut(reason.clone());
             job.remove();
@@ -1676,6 +1699,7 @@ impl Unknown {
             image: self.image.clone().unwrap_or_default(),
             running: false,
             ports: Vec::new(),
+            client_ports: Vec::new(),
             abins: Vec::new(),
             error: Some(format!(
                 "not known again since its server restarted: {}",

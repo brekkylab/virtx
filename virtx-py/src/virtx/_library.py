@@ -237,6 +237,7 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_write_sandbox_job_stdin": _WITH_ARGS,
     "virtx_client_sandbox_job_log": _WITH_ARGS,
     "virtx_client_exec_sandbox_log": _WITH_ARGS,
+    "virtx_client_port_forwarder_open": _WITH_ARGS,
     "virtx_port_forwarder_open": (
         [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_HANDLE), _OUT],
         ctypes.c_int,
@@ -322,6 +323,17 @@ class Library:
                 await woken
         finally:
             self.virtx_future_free(handle)
+
+    async def next_item(self, handle: int) -> tuple[bool, Any]:
+        """The next item of the stream ``handle``, as ``(True, item)``, or ``(False, None)`` once it
+        has ended; its error raised. The stream is left to its holder to free."""
+        while True:
+            status, out, woken = self._poll(self.virtx_stream_poll_next, handle)
+            if status == END:
+                return False, None
+            if status != PENDING:
+                return True, self.take(status, out)
+            await woken
 
     async def items(self, handle: int) -> AsyncIterator[Any]:
         """Each item of the stream ``handle``, freeing it after, or on closing, which cancels

@@ -12,7 +12,7 @@ import virtx from '../index.js'
 
 import { ALPINE, alpine, fixture, tags, unique } from './fixture.mjs'
 
-const { Client, PortForwarder, VirtxError } = virtx
+const { Client, ClientPortForwarder, PortForwarder, VirtxError } = virtx
 
 // Each test here has a client of a `virtx-stdio` of its own, closed after it.
 describe('against virtx-stdio', () => {
@@ -61,11 +61,10 @@ describe('against virtx-stdio', () => {
     const again = await client.getSandbox(sandbox.id)
     assert.deepEqual(again.abins, ['index'])
     assert.equal(again.id, sandbox.id)
-    // Asked for again, each port without the `url` only its making answers.
-    const asked = sandbox.ports.map(({ url, ...port }) => port)
-    assert.deepEqual(again.ports, asked)
+    // Over stdio each port's loopback address, made or asked for again.
+    assert.deepEqual(again.ports, sandbox.ports)
     const found = (await client.listSandbox()).find(({ id }) => id === sandbox.id)
-    assert.deepEqual(found.ports, asked)
+    assert.deepEqual(found.ports, sandbox.ports)
 
     const job = await sandbox.exec(['echo', 'hi'])
     assert.ok(job instanceof virtx.SandboxJob)
@@ -167,6 +166,30 @@ describe('against virtx-stdio', () => {
       )
     } finally {
       await sandbox.remove()
+    }
+  })
+
+  test('a client port is reached and taken', async () => {
+    await alpine(client)
+    const server = net.createServer((socket) => {
+      socket.once('data', (line) => socket.end(Buffer.concat([Buffer.from('back '), line])))
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address()
+    const ask = ['sh', '-c', `echo hi | nc -w 5 10.0.2.2 ${port}`]
+    const sandbox = await client.createSandbox(ALPINE, { network: false, clientPorts: [port] })
+    try {
+      assert.deepEqual(sandbox.clientPorts, [port])
+      // Over stdio the server, on this machine, reaches the port itself.
+      assert.equal(await sandbox.exec(ask).complete(), 0)
+      const taken = await ClientPortForwarder.open(sandbox, port)
+      assert.equal(taken.port, port)
+      assert.equal(await sandbox.exec(ask).complete(), 0)
+      taken.close()
+      await assert.rejects(ClientPortForwarder.open(sandbox, port + 1), VirtxError)
+    } finally {
+      await sandbox.remove()
+      server.close()
     }
   })
 
@@ -353,14 +376,9 @@ test('a forwarded port nothing listens on says so', async () => {
   try {
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE, { ports: [7000] })
-    // The port asked for again has no `url` to forward: the one its making answered has.
+    // Asked for again, it forwards its port as the one made does.
     const again = await client.getSandbox(sandbox.id)
-    assert.throws(() => PortForwarder.open(client, again.ports[0]), {
-      name: 'VirtxError',
-      source: 'client',
-      message: /^port 7000 has no url/,
-    })
-    const forwarder = PortForwarder.open(client, sandbox.ports[0])
+    const forwarder = PortForwarder.open(again, 7000)
     try {
       assert.equal(forwarder.lastError, null)
       const read = await new Promise((resolve, reject) => {
@@ -384,7 +402,6 @@ test('a forwarded port nothing listens on says so', async () => {
         error.message,
       )
       assert.match(error.message, /before the port sent a byte/)
-      assert.ok(!error.message.includes(sandbox.ports[0].url))
       while (!warned.includes(error.message) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 10))
       }

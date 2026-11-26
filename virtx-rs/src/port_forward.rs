@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Client, Error, SandboxPort,
+    Error, Sandbox,
     call::take,
     library::{Api, Opaque, VirtxBytes},
 };
@@ -27,57 +27,12 @@ pub struct PortForwarder {
 unsafe impl Send for PortForwarder {}
 unsafe impl Sync for PortForwarder {}
 
-/// What a forwarder is opened for: a port as a sandbox answered it, whose number then names it
-/// in what a connection that fails says, or the `url` answered for it alone.
-pub trait ForwardedPort {
-    /// Where the server reaches it, as [`SandboxPort::url`]: `None` for a port asked for again,
-    /// which a forwarder refuses.
-    fn url(&self) -> Option<&str>;
-
-    /// Its number in the sandbox, where it is known.
-    fn port(&self) -> Option<u16> {
-        None
-    }
-}
-
-impl ForwardedPort for str {
-    fn url(&self) -> Option<&str> {
-        Some(self)
-    }
-}
-
-impl ForwardedPort for String {
-    fn url(&self) -> Option<&str> {
-        Some(self)
-    }
-}
-
-impl ForwardedPort for SandboxPort {
-    fn url(&self) -> Option<&str> {
-        self.url.as_deref()
-    }
-
-    fn port(&self) -> Option<u16> {
-        Some(self.port)
-    }
-}
-
-impl<T: ForwardedPort + ?Sized> ForwardedPort for &T {
-    fn url(&self) -> Option<&str> {
-        (**self).url()
-    }
-
-    fn port(&self) -> Option<u16> {
-        (**self).port()
-    }
-}
-
 #[derive(Serialize)]
 struct Args<'a> {
+    sandbox: &'a str,
+    port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -86,15 +41,19 @@ struct Output {
 }
 
 impl PortForwarder {
-    /// Forward `port`, as [`SandboxInfo::ports`](crate::SandboxInfo) answers one, or the
-    /// [`url`](SandboxPort::url) answered for it, over `client`'s session. Blocks until it is
-    /// open, which takes no request of the server. A port without its `url`, as asking for a
-    /// sandbox again answers one, is refused: the port making it answered is the one to forward.
-    pub fn open(client: &Client, port: impl ForwardedPort) -> Result<PortForwarder, Error> {
+    /// Forward the port `port` of `sandbox`, one it was made with, over its client's session.
+    /// Blocks until it is open, which takes no request of the server. Over stdio the server
+    /// answered the port's loopback address with the sandbox, and it is reached there.
+    pub fn open(sandbox: &Sandbox, port: u16) -> Result<PortForwarder, Error> {
+        let client = sandbox.client();
         let api = client.api;
+        let url = (sandbox.info().ports.iter())
+            .find(|opened| opened.port == port)
+            .and_then(|opened| opened.url.as_deref());
         let args = serde_json::to_vec(&Args {
-            url: port.url(),
-            port: port.port(),
+            sandbox: sandbox.id(),
+            port,
+            url,
         })
         .map_err(|e| Error::Json(e.to_string()))?;
         let mut raw = std::ptr::null_mut();

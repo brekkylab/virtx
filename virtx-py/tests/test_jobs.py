@@ -3,7 +3,6 @@ against the fixture's ``virtx-stdio``, and its ``virtx-server-tcp`` where a port
 
 import asyncio
 import logging
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +10,7 @@ from conftest import ALPINE, alpine, tags, unique
 from virtx import (
     BearerAuth,
     Client,
+    ClientPortForwarder,
     ImageDownloadOutput,
     ImageJob,
     ImageJobEnd,
@@ -67,11 +67,11 @@ async def test_a_sandbox_runs_a_command_whose_log_ends_with_its_code(client: Cli
     }
     got = await client.get_sandbox(sandbox.id)
     assert got.id == sandbox.id and got.abins == ["index"]
-    asked = [replace(p, url=None) for p in sandbox.ports]
+    # Over stdio each port's loopback address, made or asked for again.
     assert all(p.url is not None for p in sandbox.ports)
-    assert got.ports == asked
+    assert got.ports == sandbox.ports
     listed = {item.id: item for item in await client.list_sandbox()}
-    assert listed[sandbox.id].ports == asked
+    assert listed[sandbox.id].ports == sandbox.ports
 
     job = await sandbox.exec(["echo", "hi"])
     assert isinstance(job, SandboxJob) and job.sandbox_id == sandbox.id
@@ -195,6 +195,33 @@ async def test_a_process_whose_sandbox_is_removed_ends_with_the_reason(client: C
     await sandbox.remove()
     rest = [entry.entry async for entry in log]
     assert rest[-1] == SandboxJobEnd(137, SandboxJobEndReason.SANDBOX_DELETED)
+
+
+async def test_a_client_port_is_reached_and_taken(client: Client) -> None:
+    await alpine(client)
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(b"back " + await reader.readline())
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(answer, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    ask = ["sh", "-c", f"echo hi | nc -w 5 10.0.2.2 {port}"]
+    sandbox = await client.create_sandbox(ALPINE, network=False, client_ports=[port])
+    assert sandbox.client_ports == [port]
+    # Over stdio the server, on this machine, reaches the port itself.
+    asked = await sandbox.exec(ask)
+    said = [entry.entry async for entry in asked.log()]
+    assert said == [Stdout("back hi"), SandboxJobEnd(0)]
+
+    async with await ClientPortForwarder.open(sandbox, port) as taken:
+        assert taken.port == port
+        assert await sandbox.exec(ask).complete() == 0
+    with pytest.raises(VirtxError):
+        await ClientPortForwarder.open(sandbox, port + 1)
+    await sandbox.remove()
+    server.close()
 
 
 def test_a_reason_this_version_does_not_know_is_kept_as_the_server_said_it() -> None:
@@ -332,8 +359,8 @@ async def test_a_push_that_fails_raises_its_error_from_its_log_and_its_complete(
 def test_a_port_says_what_it_is_for() -> None:
     assert PortSpec(22).to_dict() == 22
     assert PortSpec(22, label="ssh").to_dict() == {"port": 22, "label": "ssh"}
-    answered = SandboxPort.from_dict({"port": 22, "url": "ports/x", "label": "ssh"})
-    assert answered == SandboxPort(22, "ports/x", "ssh")
+    answered = SandboxPort.from_dict({"port": 22, "url": "http://127.0.0.1:1", "label": "ssh"})
+    assert answered == SandboxPort(22, "http://127.0.0.1:1", "ssh")
 
 
 async def test_a_sandbox_is_found_by_its_name_which_no_other_has(client: Client) -> None:
@@ -358,15 +385,9 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
     caplog.set_level(logging.WARNING, logger="virtx")
     await alpine(tcp_client)
     sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
-    # The port asked for again has no ``url`` to forward: the one its making answered has.
+    # Asked for again, it forwards its port as the one made does.
     again = await tcp_client.get_sandbox(sandbox.id)
-    with pytest.raises(VirtxError) as refused:
-        PortForwarder.open(tcp_client, again.ports[0])
-    assert refused.value.source == "client"
-    assert str(refused.value).startswith("port 7000 has no url")
-    url = sandbox.ports[0].url
-    assert url is not None
-    with PortForwarder.open(tcp_client, sandbox.ports[0]) as forwarder:
+    with PortForwarder.open(again, 7000) as forwarder:
         assert forwarder.last_error is None
         reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
         assert await reader.read() == b""
@@ -381,7 +402,6 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
         assert isinstance(error, VirtxError), "no error was kept"
         assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
         assert "before the port sent a byte" in str(error)
-        assert url not in str(error)
 
         for _ in range(6000):
             if any(r.name == "virtx" and r.getMessage() == str(error) for r in caplog.records):

@@ -9,9 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use virtx::{
-    Error, PortForwarder, PortSpec, SandboxCreateArgs, SandboxExecArgs, SandboxPort, Source,
-};
+use virtx::{Error, PortForwarder, PortSpec, SandboxCreateArgs, SandboxExecArgs};
 
 mod common;
 
@@ -83,17 +81,12 @@ fn a_port_reaches_what_listens_on_it_until_the_sandbox_goes() {
     let url = opened.url.as_deref().unwrap();
     let at = url.strip_prefix("http://").unwrap_or(url).to_owned();
     assert!(at.starts_with("127.0.0.1:"), "{at}");
-    // Asked for again, it says what it is for, without the URL: that is as secret as what
-    // reaches it, and answered only on its making.
-    let asked = SandboxPort {
-        url: None,
-        ..opened.clone()
-    };
+    // Asked for again, it says the same: a loopback address only this machine reaches.
     let got = client.get_sandbox(sandbox.id()).wait().unwrap();
-    assert_eq!(got.info().ports, std::slice::from_ref(&asked));
+    assert_eq!(got.info().ports, std::slice::from_ref(opened));
     let listed = client.list_sandbox().wait().unwrap();
     let listed = listed.iter().find(|listed| listed.id() == sandbox.id());
-    assert_eq!(listed.unwrap().info().ports, [asked]);
+    assert_eq!(listed.unwrap().info().ports, std::slice::from_ref(opened));
 
     assert_eq!(answer(at.as_str()), "hello ping\n");
     sandbox.remove().wait().unwrap();
@@ -197,22 +190,12 @@ fn a_port_over_http_is_forwarded_to_what_listens_on_it_until_the_sandbox_goes() 
     let client = common::tcp_client();
     let sandbox = serving(&client, PortSpec::new(8000).label("greeting"));
     assert_eq!(sandbox.info().ports[0].label.as_deref(), Some("greeting"));
-    // Asked for again, without the URL, which carries the capability that reaches it.
+    // A server over HTTP answers no address for it, made or asked for again, and the sandbox
+    // found again forwards it as the one made does.
+    assert_eq!(sandbox.info().ports[0].url, None);
     let got = client.get_sandbox(sandbox.id()).wait().unwrap();
-    assert_eq!(
-        got.info().ports,
-        [SandboxPort {
-            url: None,
-            ..sandbox.info().ports[0].clone()
-        }]
-    );
-    // Forwarded as making it answered it: the port asked for again has no URL to reach.
-    let refused = PortForwarder::open(&client, &got.info().ports[0])
-        .err()
-        .unwrap();
-    assert_eq!(refused.source_kind(), Source::Client, "{refused}");
-    assert!(refused.to_string().contains("port 8000 "), "{refused}");
-    let forwarder = PortForwarder::open(&client, &sandbox.info().ports[0]).unwrap();
+    assert_eq!(got.info().ports, sandbox.info().ports);
+    let forwarder = PortForwarder::open(&got, 8000).unwrap();
     let at = forwarder.address();
     assert!(at.ip().is_loopback());
 
@@ -265,8 +248,7 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
     common::alpine(&client);
     let args = SandboxCreateArgs::new(ALPINE).port(7000);
     let sandbox = client.create_sandbox(&args).wait().unwrap();
-    let port = &sandbox.info().ports[0];
-    let forwarder = PortForwarder::open(&client, port).unwrap();
+    let forwarder = PortForwarder::open(&sandbox, 7000).unwrap();
     assert_eq!(forwarder.last_error(), None);
 
     let mut read = Vec::new();
@@ -285,7 +267,6 @@ fn a_forwarded_port_nothing_listens_on_says_so() {
     let named = format!("port 7000, forwarded at {}: ", forwarder.address());
     assert!(failed.starts_with(&named), "{failed}");
     assert!(failed.contains("before the port sent a byte"), "{failed}");
-    assert!(!failed.contains(port.url.as_deref().unwrap()), "{failed}");
     let warned = until(|| WARNED.lock().unwrap().contains(&failed));
     assert!(warned, "not warned of: {:?}", WARNED.lock().unwrap());
 

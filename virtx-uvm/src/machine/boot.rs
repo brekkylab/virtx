@@ -12,8 +12,8 @@
 //!            virtx-ctrl     the control channel to the agent, passed on to and from the host
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
-//! virtio-net eth0           the guest's network, on a machine with one or with published
-//!                           ports -- see `net`
+//! virtio-net eth0           the guest's network, on a machine with one, with published ports
+//!                           or with its client's -- see `net`
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag once the overlay is
@@ -206,8 +206,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         upper_device: UPPER_DEVICE.to_owned(),
         upper_fstype: UPPER_FSTYPE.to_owned(),
         shares: Vec::new(),
-        network: (machine.spec.network || !machine.ports.is_empty())
-            .then(|| GuestNetwork::new(machine.spec.network)),
+        network: (machine.spec.network
+            || !machine.ports.is_empty()
+            || machine.client_ports.is_some())
+        .then(|| GuestNetwork::new(machine.spec.network)),
         workdir: workdir(&machine.config),
     };
 
@@ -427,8 +429,12 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network || !published.is_empty() {
-        devices.add(net::device(machine.spec.network, published)?);
+    if machine.spec.network || !published.is_empty() || machine.client_ports.is_some() {
+        devices.add(net::device(
+            machine.spec.network,
+            published,
+            machine.client_ports.clone(),
+        )?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module

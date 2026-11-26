@@ -28,10 +28,15 @@ pub struct Sandbox {
     /// is `false` is still held until it is removed.
     pub running: bool,
 
-    /// Each port it opened, in the order asked for: with its `url` in what making it answers
-    /// only, since the URLs carry credentials, and without it in what asking for it answers.
+    /// Each port it opened, in the order asked for, reached with
+    /// [`PortForwarder`](crate::PortForwarder).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,
+
+    /// The ports of a client's machine its processes reach at `10.0.2.2`, as it was made with
+    /// them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_ports: Vec<u16>,
 
     /// virtx's own programs it has at `/abin`, as it was made with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -68,6 +73,13 @@ pub struct SandboxCreateArgs {
     /// made, and kept until it is removed; `0` and a port given twice are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortSpec>,
+
+    /// TCP ports of a client's machine its processes reach at `10.0.2.2`, each while a client
+    /// takes it ([`Client::open_client_port`](crate::Client::open_client_port)): the way out to
+    /// the client, which does not need `network`. Kept until it is removed; `0` and a port given
+    /// twice are refused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_ports: Vec<u16>,
 
     /// How many vCPUs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +136,7 @@ impl SandboxCreateArgs {
             name: None,
             network: true,
             ports: Vec::new(),
+            client_ports: Vec::new(),
             vcpus: None,
             memory_mib: None,
             disk_gib: None,
@@ -151,6 +164,13 @@ impl SandboxCreateArgs {
     /// [`PortSpec`] to say what it is for, whether it is HTTP, and whom it lets in.
     pub fn port(mut self, port: impl Into<PortSpec>) -> Self {
         self.ports.push(port.into());
+        self
+    }
+
+    /// Let its processes reach the client's TCP port `port` at `10.0.2.2`, beside those given
+    /// before.
+    pub fn client_port(mut self, port: u16) -> Self {
+        self.client_ports.push(port);
         self
     }
 
@@ -277,10 +297,9 @@ pub struct SandboxPort {
     /// The port in the sandbox.
     pub port: u16,
 
-    /// Where it is reached from: a loopback address from a server on the client's machine, or
-    /// a URL carrying the credentials it needs from one reachable from other machines. As secret
-    /// as those credentials, and the server's to form: a client does not build one or take it
-    /// apart. Answered by the sandbox's making alone, and `None` in what asking for it answers.
+    /// Where a server on the client's machine has it reached: a loopback address, which only
+    /// that machine reaches. `None` from a server reachable from other machines, whose ports
+    /// are reached at `/sandboxes/{id}/ports/{port}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 

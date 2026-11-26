@@ -34,11 +34,11 @@ use tokio::task::AbortHandle;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
-    ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
-    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
-    accepts_event_stream, described_type, from_body,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortSide, ProjectCreateArgs,
+    ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs,
+    SandboxStdinArgs, Step, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListOutputItem, accepts_event_stream, described_type, from_body,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
@@ -1492,21 +1492,21 @@ async fn sandbox_remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// How often a client port's WebSocket is pinged while no connection comes, so that what stands
+/// How often a port on local's WebSocket is pinged while no connection comes, so that what stands
 /// between it and its client does not take it for idle.
 const CLIENT_PORT_KEEPALIVE: Duration = Duration::from_secs(15);
 
-/// How long a client port's WebSocket has to answer the connection said on it, longer than a
+/// How long a port on local's WebSocket has to answer the connection said on it, longer than a
 /// client takes to reach its target, before the connection is refused.
 const CLIENT_PORT_ANSWER: Duration = Duration::from_secs(20);
 
-/// The WebSocket subprotocol a port's TCP, and a client port's, is carried in.
+/// The WebSocket subprotocol a port's TCP, and a port on local's, is carried in.
 const TCP_SUBPROTOCOL: &str = "virtx.tcp";
 
 /// How much of a port's TCP one message carries at most.
 const CHUNK: usize = 64 << 10;
 
-/// The WebSocket of `virtx.tcp` a request to a port, or a client port, opens; or what it is
+/// The WebSocket of `virtx.tcp` a request to a port, in the sandbox or on local, opens; or what it is
 /// answered otherwise: `426` unless it opens a WebSocket, `400` unless of the subprotocol.
 fn tcp_websocket(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -1543,7 +1543,9 @@ async fn sandbox_port(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Answer {
     let sandbox = home.sandbox(&id)?;
-    if !sandbox.args().ports.iter().any(|spec| spec.port == port) {
+    let opened =
+        (sandbox.args().ports.iter()).any(|spec| spec.on == PortSide::Sandbox && spec.port == port);
+    if !opened {
         return Err(not_found(format!(
             "sandbox {id} was made with no port {port}"
         )));

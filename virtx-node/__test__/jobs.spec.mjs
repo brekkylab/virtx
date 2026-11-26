@@ -12,7 +12,7 @@ import virtx from '../index.js'
 
 import { ALPINE, alpine, fixture, tags, unique } from './fixture.mjs'
 
-const { Client, ClientPortForwarder, PortForwarder, VirtxError } = virtx
+const { Client, PortForwarder, VirtxError } = virtx
 
 // Each test here has a client of a `virtx-stdio` of its own, closed after it.
 describe('against virtx-stdio', () => {
@@ -55,7 +55,10 @@ describe('against virtx-stdio', () => {
     assert.deepEqual(sandbox.abins, ['index'])
     assert.deepEqual(
       sandbox.ports.map(({ url, ...port }) => port),
-      [{ port: 8000 }, { port: 5173, label: 'dev server' }],
+      [
+        { port: 8000, on: 'sandbox' },
+        { port: 5173, on: 'sandbox', label: 'dev server' },
+      ],
     )
     assert.ok(sandbox.ports.every(({ url }) => typeof url === 'string'))
     const again = await client.getSandbox(sandbox.id)
@@ -169,7 +172,7 @@ describe('against virtx-stdio', () => {
     }
   })
 
-  test('a client port is reached and taken', async () => {
+  test('a port on local is reached while it is forwarded', async () => {
     await alpine(client)
     const server = net.createServer((socket) => {
       socket.once('data', (line) => socket.end(Buffer.concat([Buffer.from('back '), line])))
@@ -177,20 +180,22 @@ describe('against virtx-stdio', () => {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     const { port } = server.address()
     const ask = ['sh', '-c', `echo hi | nc -w 5 10.0.2.2 ${port}`]
-    const clientPorts = [{ port, label: 'answers back' }]
-    const sandbox = await client.createSandbox(ALPINE, { network: false, clientPorts })
+    const ports = [{ port, on: 'local', label: 'answers back' }]
+    const sandbox = await client.createSandbox(ALPINE, { network: false, ports })
     try {
-      assert.deepEqual(sandbox.clientPorts, clientPorts)
-      assert.deepEqual((await client.getSandbox(sandbox.id)).clientPorts, clientPorts)
+      assert.deepEqual(sandbox.ports, ports)
+      assert.deepEqual((await client.getSandbox(sandbox.id)).ports, ports)
       assert.notEqual(await sandbox.exec(ask).complete(), 0)
-      const taken = await ClientPortForwarder.open(sandbox, port)
-      assert.equal(taken.port, port)
+      const taken = await PortForwarder.open(sandbox, port, { on: 'local' })
+      assert.deepEqual([taken.port, taken.on, taken.local], [port, 'local', `127.0.0.1:${port}`])
       assert.equal(await sandbox.exec(ask).complete(), 0)
       // Closed while it is waited on, it is answered so.
       const waiting = taken.waitClosed()
       taken.close()
       assert.ok((await waiting) instanceof VirtxError)
-      await assert.rejects(ClientPortForwarder.open(sandbox, port + 1), { status: 404 })
+      await assert.rejects(PortForwarder.open(sandbox, port + 1, { on: 'local' }), {
+        status: 404,
+      })
     } finally {
       await sandbox.remove()
       server.close()
@@ -382,11 +387,15 @@ test('a forwarded port nothing listens on says so', async () => {
     const sandbox = await client.createSandbox(ALPINE, { ports: [7000] })
     // Asked for again, it forwards its port as the one made does.
     const again = await client.getSandbox(sandbox.id)
-    const forwarder = PortForwarder.open(again, 7000)
+    const forwarder = await PortForwarder.open(again, 7000)
     try {
       assert.equal(forwarder.lastError, null)
       const read = await new Promise((resolve, reject) => {
-        const socket = net.connect(forwarder.port, forwarder.host)
+        const at = forwarder.local.lastIndexOf(':')
+        const socket = net.connect(
+          Number(forwarder.local.slice(at + 1)),
+          forwarder.local.slice(0, at),
+        )
         const chunks = []
         socket.on('data', (chunk) => chunks.push(chunk))
         socket.on('end', () => resolve(Buffer.concat(chunks)))
@@ -402,7 +411,7 @@ test('a forwarded port nothing listens on says so', async () => {
       const error = forwarder.lastError
       assert.ok(error instanceof VirtxError, 'no error was kept')
       assert.ok(
-        error.message.startsWith(`port 7000, forwarded at ${forwarder.address}: `),
+        error.message.startsWith(`port 7000, forwarded at ${forwarder.local}: `),
         error.message,
       )
       assert.match(error.message, /before the port sent a byte/)

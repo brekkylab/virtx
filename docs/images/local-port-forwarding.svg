@@ -15,8 +15,7 @@
 <rect x="1140" y="284" width="180" height="42" rx="8"/>
 </g>
 <g font-size="34" font-weight="700" fill="#ffffff">
-<text x="495" y="295" text-anchor="middle" font-size="28">ClientPort</text>
-<text x="495" y="331" text-anchor="middle" font-size="28">Forwarder</text>
+<text x="495" y="317" text-anchor="middle" font-size="28">PortForwarder</text>
 <text x="1132" y="202">virtx server</text>
 <text x="1440" y="317" text-anchor="middle">Sandbox</text>
 </g>

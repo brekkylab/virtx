@@ -156,11 +156,11 @@ const SIGNATURES = {
   virtx_client_write_sandbox_job_stdin: WITH_ARGS,
   virtx_client_sandbox_job_log: WITH_ARGS,
   virtx_client_exec_sandbox_log: WITH_ARGS,
-  virtx_client_port_forwarder_open: WITH_ARGS,
   virtx_port_forwarder_open: [
-    'int',
-    ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
+    'uintptr_t',
+    ['uintptr_t', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t'))],
   ],
+  virtx_port_forwarder_closed: ['uintptr_t', ['uintptr_t']],
   virtx_port_forwarder_last_error: ['int', ['uintptr_t', Out]],
   virtx_port_forwarder_free: ['void', ['uintptr_t']],
   virtx_set_warn: ['void', [koffi.pointer(Warn)]],
@@ -784,40 +784,55 @@ const forwarders = new FinalizationRegistry(({ lib, raw }) => {
   lib.virtx_port_forwarder_free(raw)
 })
 
-// A sandbox's port at an address on this machine's loopback, until it is closed.
+// A sandbox's port, on either side of it, forwarded until it is closed.
 //
-// It runs on its client's session, so the client's last close stops it. Over stdio the server is
-// on this machine and its own address is the forwarder's; over HTTP each connection to the
-// forwarder is carried to the port in a WebSocket. A connection whose WebSocket is refused, or
-// closed before the port sent a byte, is closed, and what was seen is `lastError`, and emitted as
-// a `VirtxWarning`.
+// A port in the sandbox is reached at the forwarder's `local` end, an address on this machine. A
+// port on local, one the sandbox was made with `on: 'local'`, is reached by the sandbox's
+// processes at `10.0.2.2:{port}`, each of their connections carried to `local`, its target on
+// this machine, and refused when that is not reached.
+//
+// It runs on its client's session, so the client's last close stops it. A connection that fails
+// on the way is closed, and what was seen is `lastError`, and emitted as a `VirtxWarning`.
 class PortForwarder {
-  constructor(raw, lib, address) {
-    this._raw = raw
+  constructor(lib, raw, port, on) {
     this._lib = lib
-    // Where the port is reached, as `host:port`.
-    this.address = address
+    this._raw = raw || null
+    // The port, on its side.
+    this.port = port
+    // Which side the port is on: `'sandbox'` or `'local'`.
+    this.on = on
+    // Its local end, as `host:port`: for a port in the sandbox the address it is reached at, for
+    // a port on local the target its connections are carried to.
+    this.local = ''
     this._token = {}
-    forwarders.register(this, { lib, raw }, this._token)
+    if (this._raw !== null) forwarders.register(this, { lib, raw }, this._token)
   }
 
-  // Forward the port `port` of `sandbox`, one it was made with, over its client's session.
-  // Returns once its local address is open, which takes no request of the server. Over stdio the
-  // server answered the port's loopback address with the sandbox, and it is reached there.
-  static open(sandbox, port) {
+  // Forward the port `port` of `sandbox`, one it was made with on the side `on`, over its
+  // client's session: answered once it is open. `local`, `host:port`, is its local end: for a
+  // port in the sandbox the address it is reached at, a free port on `127.0.0.1` without one, or
+  // over stdio the address the server answered for the port; for a port on local the target its
+  // connections are carried to, `127.0.0.1:{port}` without one. A port on local the sandbox was
+  // not made with is refused `404`.
+  static async open(sandbox, port, { on = 'sandbox', local } = {}) {
     const { client } = sandbox
     const lib = client._lib
-    const url = sandbox.ports?.find((opened) => opened.port === port)?.url
-    const bytes = encode({ sandbox: sandbox.id, port, url })
+    const url = sandbox.ports?.find((p) => p.on === on && p.port === port)?.url
+    const bytes = encode({ sandbox: sandbox.id, port, on, url, local })
     const raw = [0]
-    const out = {}
-    const status = lib.virtx_port_forwarder_open(client._held(), bytes, bytes.length, raw, out)
-    const { address } = lib.take(status, out)
-    return new PortForwarder(raw[0], lib, address)
+    const opening = lib.virtx_port_forwarder_open(client._held(), bytes, bytes.length, raw)
+    const forwarder = new PortForwarder(lib, raw[0], port, on)
+    try {
+      forwarder.local = (await lib.answer(opening)).local
+    } catch (error) {
+      forwarder.close()
+      throw error
+    }
+    return forwarder
   }
 
-  // Why the last connection to the forwarder that failed did, its message naming the port, as a
-  // `VirtxError`; `null` while none has, and again once a later connection's port sends a byte.
+  // Why the last connection through the forwarder that failed did, its message naming the port,
+  // as a `VirtxError`; `null` while none has, and again once a later connection reaches the port.
   // Its `status` is the server's, where it refused the connection's WebSocket.
   get lastError() {
     if (this._raw === null) throw new VirtxError('the forwarder is closed')
@@ -832,14 +847,17 @@ class PortForwarder {
     return null
   }
 
-  // The address's host: a loopback IP.
-  get host() {
-    return this.address.slice(0, this.address.lastIndexOf(':')).replace(/^\[|\]$/g, '')
-  }
-
-  // The address's port.
-  get port() {
-    return Number(this.address.slice(this.address.lastIndexOf(':') + 1))
+  // Wait until it has ended, and answer what ended it: for a port on local, `404` once its
+  // sandbox is gone. A port in the sandbox is forwarded until it is closed.
+  async waitClosed() {
+    if (this._raw === null) throw new VirtxError('the forwarder is closed')
+    try {
+      await this._lib.answer(this._lib.virtx_port_forwarder_closed(this._raw))
+    } catch (error) {
+      if (error instanceof VirtxError) return error
+      throw error
+    }
+    return new VirtxError(`port ${this.port} ended`)
   }
 
   // Stop forwarding. Closing twice does nothing.
@@ -848,74 +866,6 @@ class PortForwarder {
     forwarders.unregister(this._token)
     this._lib.virtx_port_forwarder_free(this._raw)
     this._raw = null
-  }
-}
-
-// Each client port not closed, its stream freed when it is collected.
-const clientPorts = new FinalizationRegistry(({ lib, handle }) => {
-  lib.virtx_stream_free(handle)
-})
-
-// A client port of a sandbox's, one it was made with in its `clientPorts`, taken by this client
-// until it is closed: each connection a process in the sandbox makes to `10.0.2.2:{port}` is
-// carried to its target on this machine, and refused when the target is not reached. Closed, the
-// port is let go of, and the connections it carries are closed. What fails on the way is emitted
-// as a `VirtxWarning`.
-class ClientPortForwarder {
-  constructor(lib, handle, port) {
-    this._lib = lib
-    this._handle = handle
-    // The port, as a process in the sandbox reaches it at `10.0.2.2`.
-    this.port = port
-    this._token = {}
-    clientPorts.register(this, { lib, handle }, this._token)
-  }
-
-  // Take the client port `port` of `sandbox`, one it was made with, its connections carried to
-  // `target`, `host:port`, or `127.0.0.1:{port}` without one, over its client's session: answered
-  // once it is taken.
-  static async open(sandbox, port, target) {
-    const { client } = sandbox
-    const lib = client._lib
-    const bytes = encode({ sandbox: sandbox.id, port, target })
-    const taken = new ClientPortForwarder(
-      lib,
-      lib.virtx_client_port_forwarder_open(client._held(), bytes, bytes.length),
-      port,
-    )
-    try {
-      const { done } = await lib.nextItem(taken._handle)
-      if (done) throw new VirtxError(`client port ${port} ended before it was open`)
-      return taken
-    } catch (error) {
-      taken.close()
-      throw error
-    }
-  }
-
-  // Wait until it is no longer taken, and answer why: `404` once the sandbox is gone, and what
-  // else ended it, such as its closing.
-  async waitClosed() {
-    if (this._handle === null) throw new VirtxError('the client port is closed')
-    try {
-      const handle = this._handle
-      while (!(await this._lib.nextItem(handle, () => this._handle === null)).done) {}
-    } catch (error) {
-      if (error instanceof VirtxError) return error
-      throw error
-    }
-    if (this._handle === null) return new VirtxError(`client port ${this.port} was closed`)
-    return new VirtxError(`client port ${this.port} ended`)
-  }
-
-  // Let the port go. Closing twice does nothing.
-  close() {
-    if (this._handle === null) return
-    clientPorts.unregister(this._token)
-    const handle = this._handle
-    // Null before the stream is freed, which wakes what waits in `waitClosed` to find it so.
-    this._handle = null
-    this._lib.virtx_stream_free(handle)
   }
 }
 
@@ -1251,12 +1201,9 @@ class SandboxJob {
 
 // `using`, where the runtime has it.
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
-if (Symbol.dispose)
-  ClientPortForwarder.prototype[Symbol.dispose] = ClientPortForwarder.prototype.close
 
 module.exports = {
   Client,
-  ClientPortForwarder,
   Files,
   ImageJob,
   LIBRARY_ENV,

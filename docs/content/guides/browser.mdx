@@ -109,8 +109,8 @@ for cmd in [
 ]:
     await sandbox.exec(["sh", "-c", cmd]).complete(print=True)
 
-with PortForwarder.open(sandbox, 5900) as forwarder:
-    print(f"vnc://{forwarder.address}")
+with await PortForwarder.open(sandbox, 5900) as forwarder:
+    print(f"vnc://{forwarder.local}")
     input("Press Enter to stop watching")
 ```
 
@@ -141,8 +141,8 @@ for (const cmd of [
   await sandbox.exec(['sh', '-c', cmd]).complete({ print: true })
 }
 
-const forwarder = PortForwarder.open(sandbox, 5900)
-console.log(`vnc://${forwarder.address}`)
+const forwarder = await PortForwarder.open(sandbox, 5900)
+console.log(`vnc://${forwarder.local}`)
 const prompt = readline.createInterface({ input: process.stdin, output: process.stdout })
 await prompt.question('Press Enter to stop watching')
 prompt.close()
@@ -177,8 +177,8 @@ for cmd in [
     sandbox.exec(&SandboxExecArgs::new(["sh", "-c", cmd])).complete(true).await?;
 }
 
-let forwarder = PortForwarder::open(&sandbox, 5900)?;
-println!("vnc://{}", forwarder.address());
+let forwarder = PortForwarder::open(&sandbox, 5900, PortSide::Sandbox, None).await?;
+println!("vnc://{}", forwarder.local());
 println!("Press Enter to stop watching");
 std::io::stdin().read_line(&mut String::new())?;
 ```

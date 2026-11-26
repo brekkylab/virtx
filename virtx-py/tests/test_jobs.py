@@ -10,7 +10,6 @@ from conftest import ALPINE, alpine, tags, unique
 from virtx import (
     BearerAuth,
     Client,
-    ClientPortForwarder,
     ImageDownloadOutput,
     ImageJob,
     ImageJobEnd,
@@ -20,7 +19,6 @@ from virtx import (
     PortForwarder,
     PortSpec,
     Recipe,
-    SandboxClientPort,
     SandboxJob,
     SandboxJobEnd,
     SandboxJobEndReason,
@@ -198,7 +196,7 @@ async def test_a_process_whose_sandbox_is_removed_ends_with_the_reason(client: C
     assert rest[-1] == SandboxJobEnd(137, SandboxJobEndReason.SANDBOX_DELETED)
 
 
-async def test_a_client_port_is_reached_and_taken(client: Client) -> None:
+async def test_a_port_on_local_is_reached_while_it_is_forwarded(client: Client) -> None:
     await alpine(client)
 
     async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -210,14 +208,14 @@ async def test_a_client_port_is_reached_and_taken(client: Client) -> None:
     port = server.sockets[0].getsockname()[1]
     ask = ["sh", "-c", f"echo hi | nc -w 5 10.0.2.2 {port}"]
     sandbox = await client.create_sandbox(
-        ALPINE, network=False, client_ports=[PortSpec(port, label="answers back")]
+        ALPINE, network=False, ports=[PortSpec(port, label="answers back", on="local")]
     )
-    assert sandbox.client_ports == [SandboxClientPort(port, "answers back")]
-    assert (await client.get_sandbox(sandbox.id)).client_ports == sandbox.client_ports
+    assert sandbox.ports == [SandboxPort(port, label="answers back", on="local")]
+    assert (await client.get_sandbox(sandbox.id)).ports == sandbox.ports
     assert await sandbox.exec(ask).complete() != 0
 
-    async with await ClientPortForwarder.open(sandbox, port) as taken:
-        assert taken.port == port
+    async with await PortForwarder.open(sandbox, port, on="local") as taken:
+        assert (taken.port, taken.on, taken.local) == (port, "local", f"127.0.0.1:{port}")
         asked = await sandbox.exec(ask)
         said = [entry.entry async for entry in asked.log()]
         assert said == [Stdout("back hi"), SandboxJobEnd(0)]
@@ -226,7 +224,7 @@ async def test_a_client_port_is_reached_and_taken(client: Client) -> None:
     # Closed while it is waited on, it is answered so.
     assert isinstance(await asyncio.wait_for(waiting, 10), VirtxError)
     with pytest.raises(VirtxError) as refused:
-        await ClientPortForwarder.open(sandbox, port + 1)
+        await PortForwarder.open(sandbox, port + 1, on="local")
     assert refused.value.status == 404
     await sandbox.remove()
     server.close()
@@ -395,9 +393,10 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
     sandbox = await tcp_client.create_sandbox(ALPINE, ports=[7000])
     # Asked for again, it forwards its port as the one made does.
     again = await tcp_client.get_sandbox(sandbox.id)
-    with PortForwarder.open(again, 7000) as forwarder:
+    with await PortForwarder.open(again, 7000) as forwarder:
         assert forwarder.last_error is None
-        reader, writer = await asyncio.open_connection(forwarder.host, forwarder.port)
+        host, port = forwarder.local.rsplit(":", 1)
+        reader, writer = await asyncio.open_connection(host, int(port))
         assert await reader.read() == b""
         writer.close()
 
@@ -408,7 +407,7 @@ async def test_a_forwarded_port_nothing_listens_on_says_so(
             await asyncio.sleep(0.01)
         error = forwarder.last_error
         assert isinstance(error, VirtxError), "no error was kept"
-        assert str(error).startswith(f"port 7000, forwarded at {forwarder.address}: ")
+        assert str(error).startswith(f"port 7000, forwarded at {forwarder.local}: ")
         assert "before the port sent a byte" in str(error)
 
         for _ in range(6000):

@@ -23,7 +23,6 @@
 
 mod call;
 mod client;
-mod client_port_forward;
 mod error;
 mod files;
 mod image;
@@ -34,9 +33,8 @@ mod project;
 mod sandbox;
 mod volume;
 
-pub use call::{Call, Events, Holding};
+pub use call::{Call, Events};
 pub use client::{Client, Opening, ensure_virtx};
-pub use client_port_forward::ClientPortForwarder;
 pub use error::Error;
 pub use files::Files;
 pub use image::ImageJob;
@@ -60,7 +58,7 @@ pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{
     Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, MountType, PortSpec, Progress, Recipe, RegistryAuth, Role, SandboxClientPort,
+    MountSource, MountType, PortSide, PortSpec, Progress, Recipe, RegistryAuth, Role,
     SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEndReason,
     SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxResizeArgs, SandboxResources,
     SandboxVolume, Source, Step, VolumeMountListOutputItem,

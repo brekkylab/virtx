@@ -728,10 +728,8 @@ impl Client {
         })
     }
 
-    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports are forwarded
-    /// with [`PortForwarder::open`](crate::PortForwarder::open), and its
-    /// [`client_ports`](SandboxCreateArgs::client_ports) with
-    /// [`ClientPortForwarder::open`](crate::ClientPortForwarder::open).
+    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports, on either side,
+    /// are forwarded with [`PortForwarder::open`](crate::PortForwarder::open).
     ///
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
     /// tag the server has no image by is refused with `404`.
@@ -902,21 +900,6 @@ impl Client {
         Events::new(
             self.api,
             self.start(self.api.virtx_client_exec_sandbox_log, args),
-        )
-    }
-
-    /// The stream that takes the client port `port` of the sandbox `id`, carried to `target`,
-    /// `127.0.0.1:{port}` without one: `null` once it is taken, and nothing more.
-    pub(crate) fn open_client_port(
-        &self,
-        id: &str,
-        port: u16,
-        target: Option<&str>,
-    ) -> Events<serde_json::Value> {
-        let args = json!({ "sandbox": id, "port": port, "target": target });
-        Events::new(
-            self.api,
-            self.start(self.api.virtx_client_port_forwarder_open, args),
         )
     }
 

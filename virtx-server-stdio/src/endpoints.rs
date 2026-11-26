@@ -28,9 +28,9 @@ use tokio::task::{AbortHandle, JoinSet};
 
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
-    Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort, SandboxResizeArgs,
-    SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortSide, ProjectCreateArgs,
+    ProjectListOutputItem, Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort,
+    SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
     VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
     from_body,
 };
@@ -809,12 +809,21 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     let args: SandboxCreateArgs = body(&request)?;
     let _naming = home.naming(args.name.as_deref())?;
 
-    // Each port on this host's loopback, which only this machine reaches, taken to the
-    // sandbox's machine while it runs.
+    // Each port in the sandbox on this host's loopback, which only this machine reaches, taken
+    // to the sandbox's machine while it runs; each on local as it was asked for.
     let mut opened = Vec::new();
     let mut listeners = Vec::new();
     for spec in &args.ports {
         let port = spec.port;
+        if spec.on == PortSide::Local {
+            opened.push(SandboxPort {
+                port,
+                on: PortSide::Local,
+                url: None,
+                label: spec.label.clone(),
+            });
+            continue;
+        }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
@@ -823,6 +832,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
             .map_err(|e| internal(format!("opening port {port}: {e}")))?;
         opened.push(SandboxPort {
             port,
+            on: PortSide::Sandbox,
             url: Some(format!("http://{at}")),
             label: spec.label.clone(),
         });
@@ -911,7 +921,7 @@ async fn sandbox_remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// How long reaching a client port's target may take before its connection is refused.
+/// How long reaching a port on local's target may take before its connection is refused.
 const CLIENT_PORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `GET /sandboxes/{id}/client-ports/{port}?target=host:port`: the port taken while the answer

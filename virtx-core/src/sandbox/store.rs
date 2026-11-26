@@ -28,15 +28,10 @@ pub struct Sandbox {
     /// is `false` is still held until it is removed.
     pub running: bool,
 
-    /// Each port it opened, in the order asked for, reached with
+    /// Each port it was made with, on either side, in the order asked for, each reached with
     /// [`PortForwarder`](crate::PortForwarder).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,
-
-    /// The ports of a client's machine its processes reach at `10.0.2.2`, as it was made with
-    /// them, in the order asked for.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub client_ports: Vec<SandboxClientPort>,
 
     /// virtx's own programs it has at `/abin`, as it was made with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -68,18 +63,13 @@ pub struct SandboxCreateArgs {
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub network: bool,
 
-    /// Ports in it to open, each answered with where it is reached from: a number, or one with
-    /// what it is for, how it is reached and whom it lets in ([`PortSpec`]). Reserved as it is
-    /// made, and kept until it is removed; `0` and a port given twice are refused.
+    /// Its TCP ports, each on one side ([`PortSide`]): one in the sandbox is opened in it, and one
+    /// on local, the machine a client forwards it from, is reached by its processes at
+    /// `10.0.2.2`, which does not need `network`. Each a number, a port in the sandbox, or one
+    /// with its side and what it is for ([`PortSpec`]). Kept until it is removed; `0`, and a
+    /// port given twice on one side, are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortSpec>,
-
-    /// TCP ports of a client's machine its processes reach at `10.0.2.2`, each while a client
-    /// takes it ([`Client::open_client_port`](crate::Client::open_client_port)): the way out to
-    /// the client, which does not need `network`. Each a number, or one with what it is for
-    /// ([`PortSpec`]). Kept until it is removed; `0` and a port given twice are refused.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub client_ports: Vec<PortSpec>,
 
     /// How many vCPUs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,7 +126,6 @@ impl SandboxCreateArgs {
             name: None,
             network: true,
             ports: Vec::new(),
-            client_ports: Vec::new(),
             vcpus: None,
             memory_mib: None,
             disk_gib: None,
@@ -160,17 +149,10 @@ impl SandboxCreateArgs {
         self
     }
 
-    /// Open the port `port` in it, beside those given before: a number for TCP, or a
-    /// [`PortSpec`] to say what it is for, whether it is HTTP, and whom it lets in.
+    /// Give it the TCP port `port`, beside those given before: a number for one in it, or a
+    /// [`PortSpec`] to say its side and what it is for.
     pub fn port(mut self, port: impl Into<PortSpec>) -> Self {
         self.ports.push(port.into());
-        self
-    }
-
-    /// Let its processes reach the client's TCP port `port` at `10.0.2.2`, beside those given
-    /// before: a number, or a [`PortSpec`] to say what it is for.
-    pub fn client_port(mut self, port: impl Into<PortSpec>) -> Self {
-        self.client_ports.push(port.into());
         self
     }
 
@@ -291,57 +273,77 @@ fn is_on(flag: &bool) -> bool {
     *flag
 }
 
-/// A port opened in a sandbox, and where it is reached from.
+/// A sandbox's port, the side it is on, and where it is reached from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxPort {
-    /// The port in the sandbox.
+    /// The port, on its side.
     pub port: u16,
 
-    /// Where a server on the client's machine has it reached: a loopback address, which only
-    /// that machine reaches. `None` from a server reachable from other machines, whose ports
-    /// are reached at `/sandboxes/{id}/ports/{port}`.
+    /// Which side it is on.
+    #[serde(default)]
+    pub on: PortSide,
+
+    /// For a port in the sandbox, where a server on the client's machine has it reached: a
+    /// loopback address, which only that machine reaches. `None` from a server reachable from
+    /// other machines, whose ports are reached at `/sandboxes/{id}/ports/{port}`, and for a port
+    /// on local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-
-    /// What it is for, as it was opened with.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-/// A port of a client's machine a sandbox's processes reach at `10.0.2.2`, and what it is for.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxClientPort {
-    /// The port on the client's machine, and at `10.0.2.2` in the sandbox.
-    pub port: u16,
 
     /// What it is for, as it was asked for with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
-/// A port to open in a sandbox, or of a client's machine for it to reach: its number, and what
-/// it is for. Written as the number alone when it says nothing more, `{port, label?}`
+/// Which side of a sandbox a port is on: in the sandbox, where connections to it come from
+/// local, or on local, the machine a client forwards it from, where the sandbox's processes
+/// reach it at `10.0.2.2`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortSide {
+    #[default]
+    Sandbox,
+    Local,
+}
+
+/// A sandbox's port to make it with: its number, its side, and what it is for. Written as the
+/// number alone for a port in the sandbox that says nothing more, `{port, on?, label?}`
 /// otherwise; read as either.
 ///
 /// ```
-/// # use virtx_core::{PortSpec, SandboxCreateArgs};
-/// let args = SandboxCreateArgs::new("node:22").port(PortSpec::new(5173).label("dev server"));
+/// # use virtx_core::{PortSide, PortSpec, SandboxCreateArgs};
+/// let args = SandboxCreateArgs::new("node:22")
+///     .port(PortSpec::new(5173).label("dev server"))
+///     .port(PortSpec::new(5037).on(PortSide::Local).label("adb"));
 ///
 /// assert_eq!(args.ports[0].label.as_deref(), Some("dev server"));
+/// assert_eq!(args.ports[1].on, PortSide::Local);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortSpec {
-    /// The port: in the sandbox, or on the client's machine.
+    /// The port, on its side.
     pub port: u16,
+
+    /// Which side it is on: in the sandbox, unless it says otherwise.
+    pub on: PortSide,
 
     /// What it is for, free text of up to 128 characters, answered with it.
     pub label: Option<String>,
 }
 
 impl PortSpec {
-    /// The port `port`, saying nothing more.
+    /// The port `port` in the sandbox, saying nothing more.
     pub fn new(port: u16) -> PortSpec {
-        PortSpec { port, label: None }
+        PortSpec {
+            port,
+            on: PortSide::Sandbox,
+            label: None,
+        }
+    }
+
+    pub fn on(mut self, on: PortSide) -> PortSpec {
+        self.on = on;
+        self
     }
 
     pub fn label(mut self, label: impl Into<String>) -> PortSpec {
@@ -361,17 +363,24 @@ impl From<u16> for PortSpec {
 #[serde(deny_unknown_fields)]
 struct PortSpecObject {
     port: u16,
+    #[serde(default, skip_serializing_if = "is_sandbox")]
+    on: PortSide,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
 }
 
+fn is_sandbox(on: &PortSide) -> bool {
+    *on == PortSide::Sandbox
+}
+
 impl Serialize for PortSpec {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.label.is_none() {
+        if self.label.is_none() && self.on == PortSide::Sandbox {
             return serializer.serialize_u16(self.port);
         }
         PortSpecObject {
             port: self.port,
+            on: self.on,
             label: self.label.clone(),
         }
         .serialize(serializer)
@@ -388,7 +397,7 @@ impl<'de> Deserialize<'de> for PortSpec {
             type Value = PortSpec;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str(r#"a whole number from 0 to 65535, or {"port", "label"?}"#)
+                f.write_str(r#"a whole number from 0 to 65535, or {"port", "on"?, "label"?}"#)
             }
 
             fn visit_u64<E: de::Error>(self, port: u64) -> Result<PortSpec, E> {
@@ -408,6 +417,7 @@ impl<'de> Deserialize<'de> for PortSpec {
                 let spec = PortSpecObject::deserialize(MapAccessDeserializer::new(map))?;
                 Ok(PortSpec {
                     port: spec.port,
+                    on: spec.on,
                     label: spec.label,
                 })
             }
@@ -453,6 +463,7 @@ mod tests {
             sandbox.ports,
             [SandboxPort {
                 port: 80,
+                on: PortSide::Sandbox,
                 url: Some("http://127.0.0.1:1/".into()),
                 label: None,
             }]
@@ -548,11 +559,26 @@ mod tests {
     }
 
     #[test]
+    fn a_port_on_local_says_so_and_one_on_no_side_is_refused() {
+        let local = PortSpec::new(5037).on(PortSide::Local);
+        let written = serde_json::to_value(&local).unwrap();
+        assert_eq!(written, json!({"port": 5037, "on": "local"}));
+        assert_eq!(serde_json::from_value::<PortSpec>(written).unwrap(), local);
+        let sandbox = json!({"port": 5037, "on": "sandbox"});
+        assert_eq!(
+            serde_json::from_value::<PortSpec>(sandbox).unwrap(),
+            PortSpec::new(5037)
+        );
+        let elsewhere = json!({"port": 5037, "on": "host"});
+        assert!(serde_json::from_value::<PortSpec>(elsewhere).is_err());
+    }
+
+    #[test]
     fn a_port_that_is_neither_form_is_refused_saying_what_a_port_is() {
         let refused = serde_json::from_value::<PortSpec>(json!("5900")).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            r#"invalid type: string "5900", expected a whole number from 0 to 65535, or {"port", "label"?}"#
+            r#"invalid type: string "5900", expected a whole number from 0 to 65535, or {"port", "on"?, "label"?}"#
         );
     }
 
@@ -567,12 +593,16 @@ mod tests {
     }
 
     #[test]
-    fn a_port_asked_for_again_is_read_without_its_url() {
+    fn a_port_asked_for_again_is_read_without_its_url_and_answered_with_its_side() {
         let asked = json!({"port": 5173, "label": "dev server"});
-        let port: SandboxPort = serde_json::from_value(asked.clone()).unwrap();
+        let port: SandboxPort = serde_json::from_value(asked).unwrap();
         assert_eq!(port.url, None);
+        assert_eq!(port.on, PortSide::Sandbox);
         assert_eq!(port.label.as_deref(), Some("dev server"));
-        assert_eq!(serde_json::to_value(&port).unwrap(), asked);
+        assert_eq!(
+            serde_json::to_value(&port).unwrap(),
+            json!({"port": 5173, "on": "sandbox", "label": "dev server"})
+        );
     }
 
     #[test]

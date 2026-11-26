@@ -43,8 +43,8 @@ async for entry in sandbox.exec(
     if isinstance(entry.entry, Stdout) and entry.entry.line == "ready":
         break  # the screen keeps running
 
-with PortForwarder.open(sandbox, 5900) as forwarder:
-    print(f"vnc://{forwarder.address}")
+with await PortForwarder.open(sandbox, 5900) as forwarder:
+    print(f"vnc://{forwarder.local}")
     input("Press Enter to stop watching")
 ```
 
@@ -74,8 +74,8 @@ for await (const entry of sandbox.exec(
   if (entry.stdout === 'ready') break // the screen keeps running
 }
 
-const forwarder = PortForwarder.open(sandbox, 5900)
-console.log(`vnc://${forwarder.address}`)
+const forwarder = await PortForwarder.open(sandbox, 5900)
+console.log(`vnc://${forwarder.local}`)
 const prompt = readline.createInterface({ input: process.stdin, output: process.stdout })
 await prompt.question('Press Enter to stop watching')
 prompt.close()
@@ -109,8 +109,8 @@ while let Some(entry) = log.next().await {
     }
 }
 
-let forwarder = PortForwarder::open(&sandbox, 5900)?;
-println!("vnc://{}", forwarder.address());
+let forwarder = PortForwarder::open(&sandbox, 5900, PortSide::Sandbox, None).await?;
+println!("vnc://{}", forwarder.local());
 println!("Press Enter to stop watching");
 std::io::stdin().read_line(&mut String::new())?;
 ```

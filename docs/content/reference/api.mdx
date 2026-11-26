@@ -88,8 +88,8 @@ Its [files](#files) are as its processes see them.
 
 In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image`, `running` and `ports`, and `resize` takes a `SandboxResizeArgs`, chained from `SandboxResizeArgs::default()`.
 
-A port in `create_sandbox`'s `ports` is a number, or a `PortSpec(port, label)`; in Node.js, `{ port, label? }`.
-Each comes back as a `SandboxPort`: its `port`, `url` and `label`.
+A port in `create_sandbox`'s `ports` is a number, a port in the sandbox, or a `PortSpec(port, label, on)`, `on` `"sandbox"` or `"local"`; in Node.js, `{ port, on?, label? }`; in Rust, `PortSpec::new(port).on(PortSide::Local).label(...)`.
+Each comes back as a `SandboxPort`: its `port`, `on`, `url` and `label`.
 `list_sandbox` and `get_sandbox` answer each port with its `port` and `label`, and no `url`: `create_sandbox` alone answers that, since it carries the port's credentials.
 
 A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.
@@ -194,21 +194,11 @@ See [Networks and ports](/docs/tutorials/networks-ports/).
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `PortForwarder.open(sandbox, port)` | `PortForwarder` | Forwards the sandbox's port `port` to an address on this machine's loopback. A failed connection's error names the port. |
-| `last_error` | `VirtxError` or `None` | Why the last connection that failed did -- its WebSocket refused, or closed before the port sent a byte, with the server's reason if it gave one -- naming the port; `None` again once a later connection's port sends a byte. Each failure is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
-| `address`, `host`, `port` | `str`, `str`, `int` | Where it is reached. In Rust, `address()`. |
-| `close()` | `None` | Stops forwarding; the port in the sandbox stays open. In Rust, dropping it does the same. |
-
-## ClientPortForwarder
-
-See [Networks and ports](/docs/tutorials/networks-ports/#client-ports).
-
-| Call | Returns | What it does |
-| --- | --- | --- |
-| `ClientPortForwarder.open(sandbox, port, target)` | `ClientPortForwarder` | Carries each connection a process in the sandbox makes to `10.0.2.2:port`, one of its `client_ports`, to `target` on this machine, `127.0.0.1:port` without one, once the port is taken. Awaited. |
-| `port` | `int` | The port, as the sandbox reaches it. In Rust, `port()`. |
-| `wait_closed()` | `VirtxError` | Waits until it is no longer taken, and answers why: `404` once the sandbox is gone, or that it was closed. In Node, `waitClosed()`. |
-| `close()` | `None` | Lets the port go. In Rust, dropping it does the same. |
+| `PortForwarder.open(sandbox, port, on, local)` | `PortForwarder` | Forwards the sandbox's port `port` on the side `on`, `"sandbox"` without it. A port in the sandbox is reached at `local`, a free port on `127.0.0.1` without it; a port on local is reached by the sandbox's processes at `10.0.2.2:port`, each connection carried to `local`, `127.0.0.1:port` without it. Awaited, once it is open. In Node, `open(sandbox, port, { on, local })`. |
+| `port`, `on`, `local` | `int`, `str`, `str` | The port, its side, and its local end as `host:port`. In Rust, `port()`, `on()` and `local()`. |
+| `last_error` | `VirtxError` or `None` | Why the last connection that failed did -- its WebSocket refused, or closed before the port sent a byte, with the server's reason if it gave one, or its target not reached -- naming the port; `None` again once a later connection reaches the port. Each failure is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
+| `wait_closed()` | `VirtxError` | Waits until it has ended, and answers why: for a port on local, `404` once the sandbox is gone. A port in the sandbox is forwarded until it is closed. In Node, `waitClosed()`; in Rust, `closed()`, answered with the error. |
+| `close()` | `None` | Stops forwarding; the sandbox keeps its port. In Rust, dropping it does the same. |
 
 ## Environment variables
 

@@ -23,7 +23,7 @@ pub enum Source {
 /// Why a call failed. Each variant is one [`Source`]: what made the error says where it
 /// failed by the variant it picks.
 #[cfg(feature = "client")]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Error {
     /// The request did not reach the server, or its response did not come back: the
     /// connection failed or the session ended.

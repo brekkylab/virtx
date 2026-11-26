@@ -27,15 +27,14 @@ known by its id or name is had with ``get_sandbox``, ``find_sandbox``, ``get_vol
 A project is answered as a ``Project``, carrying its client the same way: its members, and its
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
-A sandbox's port, a number or a ``PortSpec``, is reached on this machine's loopback through a
-``PortForwarder``, opened with the sandbox and the port; a port of this machine's its processes
-reach, one of its ``client_ports``, through a ``ClientPortForwarder``. What the library warns of,
-such as a forwarded connection that reached nothing, the ``virtx`` logger logs.
+A sandbox's port, a number or a ``PortSpec``, is on one side of it: in the sandbox, reached on
+this machine, or on local, this machine's, reached by its processes at ``10.0.2.2``. Either is
+forwarded by a ``PortForwarder``, opened with the sandbox and the port. What the library warns
+of, such as a forwarded connection that reached nothing, the ``virtx`` logger logs.
 """
 
 from ._library import LIBRARY_ENV, Source, VirtxError, library_path, load
 from .client import Auth, Client, CommandAuth, Event, Output, Progress, ensure_virtx
-from .client_port_forward import ClientPortForwarder
 from .files import DirEntry, Files, Metadata
 from .image import (
     BasicAuth,
@@ -60,9 +59,9 @@ from .job import LogEntry, StartedJob, Truncated
 from .port_forward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
+    PortSide,
     PortSpec,
     Sandbox,
-    SandboxClientPort,
     SandboxJob,
     SandboxJobEnd,
     SandboxJobEndReason,
@@ -90,7 +89,6 @@ __all__ = [
     "BasicAuth",
     "BearerAuth",
     "Client",
-    "ClientPortForwarder",
     "CommandAuth",
     "DirEntry",
     "Event",
@@ -116,6 +114,7 @@ __all__ = [
     "OnedriveSource",
     "Output",
     "PortForwarder",
+    "PortSide",
     "PortSpec",
     "Progress",
     "Project",
@@ -124,7 +123,6 @@ __all__ = [
     "RegistryAuth",
     "Role",
     "Sandbox",
-    "SandboxClientPort",
     "SandboxJob",
     "SandboxJobEnd",
     "SandboxJobEndReason",

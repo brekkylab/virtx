@@ -1206,7 +1206,7 @@ mod tests {
                 "POST",
                 "sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?}, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "on"?, "label"?}, not "5900""#,
             ),
             (
                 "GET",
@@ -1450,8 +1450,8 @@ mod tests {
         assert_eq!(
             listed,
             [
-                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080 }] }),
-                json!({ "id": "kept", "image": digest, "running": true, "ports": [web] }),
+                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080, "on": "sandbox" }] }),
+                json!({ "id": "kept", "image": digest, "running": true, "ports": [{ "port": 8080, "on": "sandbox", "label": "web" }] }),
             ]
         );
         let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
@@ -1528,12 +1528,12 @@ mod tests {
         );
     }
 
-    /// A client port is taken over a WebSocket of `virtx.tcp`, in a sandbox of the project a
+    /// A port on local is taken over a WebSocket of `virtx.tcp`, in a sandbox of the project a
     /// request names, one it was made with: here one a server before this one kept, its relay
     /// opened anew. Its WebSocket is closed once the sandbox is deleted.
     #[tokio::test]
-    async fn a_client_port_is_taken_in_a_sandbox_of_the_project_named() {
-        let served = Served::spawn("client-ports").await;
+    async fn a_port_on_local_is_taken_in_a_sandbox_of_the_project_named() {
+        let served = Served::spawn("local-ports").await;
         served.file_image("kept:1").await;
         let demo = served.project("demo").await;
         let images = ImageStore::new(demo.join("images")).unwrap();
@@ -1541,7 +1541,8 @@ mod tests {
         let dir = demo.join("sandbox");
         std::fs::create_dir_all(&dir).unwrap();
         let image = json!({ "type": "digest", "digest": digest.unwrap().to_string() });
-        let args = json!({ "image": image, "client_ports": [{ "port": 9222, "label": "cdp" }] });
+        let ports = json!([{ "port": 9222, "on": "local", "label": "cdp" }, 5037]);
+        let args = json!({ "image": image, "ports": ports });
         std::fs::write(dir.join("kept.ext4"), b"").unwrap();
         let record = json!({ "args": args, "exited": false, "jobs": [] });
         std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
@@ -1555,6 +1556,7 @@ mod tests {
             .send("GET", "sandboxes/kept/client-ports/9222", Some("demo"), "")
             .await;
         assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+        // 5037 is a port in the sandbox, not on local.
         let undeclared = served.port_url("sandboxes/kept/client-ports/5037");
         let refused = Served::open(&undeclared, "demo", Some("virtx.tcp")).await;
         assert_eq!(refused.err(), Some(404));

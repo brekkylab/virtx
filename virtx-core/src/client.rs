@@ -556,25 +556,17 @@ impl Client {
         Box::pin(sandbox::client::job_log(&self.inner, id, job, after))
     }
 
-    /// Take the client port `port` of the sandbox `id`, one it was made with in
-    /// [`client_ports`](SandboxCreateArgs::client_ports): each connection a process in it makes
-    /// to `10.0.2.2:{port}` is carried to `target` on this machine, `host:port`, for as long as
-    /// the stream is held, and refused when `target` is not reached. The stream's first item
-    /// says the port is taken, and it has no other: it ends with the error that ends it -- `404`
-    /// for a port the sandbox was not made with, or once it is gone -- or when it is dropped,
-    /// which lets the port go and closes the connections it carries.
-    pub fn open_client_port(
+    /// Forward the port `args` names, on either side of its sandbox: the forwarder, and what
+    /// forwards, a future that runs until the forwarder ends and stops it when dropped. See
+    /// [`PortForwarder::open`](crate::PortForwarder::open).
+    pub fn forward_port(
         &self,
-        id: &str,
-        port: u16,
-        target: String,
-    ) -> impl Stream<Item = Result<(), Error>> + Unpin + Send + use<'_> {
-        Box::pin(crate::transport::take_client_port(
-            &self.inner,
-            id,
-            port,
-            target,
-        ))
+        args: crate::PortForwarderArgs,
+    ) -> (
+        crate::PortForwarder,
+        impl std::future::Future<Output = ()> + Send + use<'_>,
+    ) {
+        crate::PortForwarder::open(&self.inner, args)
     }
 
     /// End the session; see [`TransportClient::close`].
@@ -1799,9 +1791,9 @@ pub(crate) mod ffi {
 
     /// Answers with the sandboxes, as
     /// `[{"id": "...", "image": "algorithm:hex", "running": bool,
-    /// "ports"?: [{"port": n, "url"?: "...", "label"?}], "client_ports"?: [{"port": n, "label"?}]},
-    /// ...]`, a port's
-    /// `url` the loopback address a server on this machine answers for it.
+    /// "ports"?: [{"port": n, "on": "sandbox" | "local", "url"?: "...", "label"?}]}, ...]`, a
+    /// port in the sandbox's `url` the loopback address a server on this machine answers for
+    /// it.
     ///
     /// # Safety
     ///
@@ -1815,15 +1807,13 @@ pub(crate) mod ffi {
 
     /// Makes a sandbox, given
     /// `{"image": {...}, "name": "...", "network": bool,
-    /// "ports": [n | {"port": n, "label": "..."}],
-    /// "client_ports": [n | {"port": n, "label": "..."}],
+    /// "ports": [n | {"port": n, "on": "sandbox" | "local", "label": "..."}],
     /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
-    /// sandbox as `virtx_client_list_sandbox` answers each. Its ports are forwarded with
-    /// `virtx_port_forwarder_open`, and its `client_ports` with
-    /// `virtx_client_port_forwarder_open`.
+    /// sandbox as `virtx_client_list_sandbox` answers each. Its ports, on either side, are
+    /// forwarded with `virtx_port_forwarder_open`.
     ///
     /// # Safety
     ///

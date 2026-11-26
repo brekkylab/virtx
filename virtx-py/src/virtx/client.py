@@ -454,7 +454,6 @@ class Client:
         name: str | None = None,
         network: bool = True,
         ports: Iterable[int | PortSpec] = (),
-        client_ports: Iterable[int | PortSpec] = (),
         vcpus: int | None = None,
         memory_mib: int | None = None,
         disk_gib: int | None = None,
@@ -465,18 +464,15 @@ class Client:
     ) -> Sandbox:
         """Make a sandbox of ``image``, with ``volumes`` mounted into it, each a ``SandboxVolume``,
         and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
-        ``/abin/skills/{name}/``. ``ports`` are ports in it to open, each a number for TCP or a
-        ``PortSpec`` to say what it is for, whether it is HTTP and whom it lets in, reserved as
-        it is made, each answered a ``SandboxPort`` and reached with ``PortForwarder.open``.
-        Whatever is left out the server picks. ``disk_gib`` is how much it may write over its
+        ``/abin/skills/{name}/``. ``ports`` are its TCP ports, each a number for one in it, or a
+        ``PortSpec`` to say its side and what it is for: one in it is opened in it, reserved as it
+        is made, and one ``on="local"`` is reached by its processes at ``10.0.2.2``, with or
+        without a ``network``. Each is answered a ``SandboxPort`` and forwarded with
+        ``PortForwarder.open``. Whatever is left out the server picks. ``disk_gib`` is how much it may write over its
         image, in GiB, at most 1024, which goes with it. ``name`` finds it again with
         ``find_sandbox``, rather than keeping its id: letters, digits, ``.``, ``_`` and ``-``, not
         starting with ``.`` or ``-``, at most 128, or it is refused with ``400``; one another
         sandbox has is refused with ``409``.
-
-        ``client_ports`` are TCP ports of a client's machine its processes reach at
-        ``10.0.2.2``, with or without a ``network``, while a client takes each with
-        ``ClientPortForwarder.open``.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
@@ -485,7 +481,6 @@ class Client:
             name=name,
             network=network,
             ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
-            client_ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in client_ports],
             vcpus=vcpus,
             memory_mib=memory_mib,
             disk_gib=disk_gib,

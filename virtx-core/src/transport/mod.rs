@@ -21,9 +21,9 @@ pub(crate) mod webdav;
 #[cfg(feature = "server")]
 pub use args::{described_type, from_body};
 #[cfg(feature = "client")]
-pub(crate) use client::{Body, full, take_client_port};
+pub(crate) use client::{Body, full};
 #[cfg(feature = "client")]
-pub use client::{ForwardError, PortForwarder, TransportClient};
+pub use client::{ForwardError, PortForwarder, PortForwarderArgs, TransportClient};
 #[cfg(feature = "client")]
 pub(crate) use http::{resolved, segment, segments};
 #[cfg(feature = "server")]

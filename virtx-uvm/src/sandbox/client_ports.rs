@@ -121,7 +121,7 @@ impl ClientPorts {
     pub(crate) fn take(&self, port: u16) -> Result<ClientPortTaker, Error> {
         let Some(taken) = self.shared.ports.get(&port) else {
             return Err(Error::NotFound(format!(
-                "this sandbox was made with no client port {port}"
+                "this sandbox was made with no port {port} on local"
             )));
         };
         taken.takers.fetch_add(1, Ordering::Relaxed);

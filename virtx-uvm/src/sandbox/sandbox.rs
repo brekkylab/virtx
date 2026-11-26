@@ -13,7 +13,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{
-    ImageName, SandboxClientPort, SandboxCreateArgs, SandboxJob, SandboxJobEndReason,
+    ImageName, PortSide, PortSpec, SandboxCreateArgs, SandboxJob, SandboxJobEndReason,
     SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxResizeArgs, SandboxResources,
 };
 
@@ -181,8 +181,8 @@ pub struct Sandbox {
     _held: ImageHold,
     /// The upper disk it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
-    /// The ports it was made with, as asked for again: what each is for and how it is reached,
-    /// with no `url`, which is its server's.
+    /// The ports it was made with, on either side, as asked for again: what each is for, with
+    /// no `url`, which is its server's.
     ports_opened: Vec<SandboxPort>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
@@ -282,27 +282,24 @@ impl Sandbox {
                 return Err(exists(id));
             }
         }
-        for (member, specs) in [("ports", &args.ports), ("client_ports", &args.client_ports)] {
-            let mut given = HashSet::new();
-            if let Some(spec) = specs
-                .iter()
-                .find(|spec| spec.port == 0 || !given.insert(spec.port))
-            {
-                return Err(Error::Invalid(format!(
-                    "{member}: {} is not a port, or is given twice",
-                    spec.port
-                )));
-            }
-            if let Some(spec) = specs.iter().find(|spec| {
-                spec.label
-                    .as_ref()
-                    .is_some_and(|label| label.chars().count() > LABEL_MOST)
-            }) {
-                return Err(Error::Invalid(format!(
-                    "{member}: {}'s label is past {LABEL_MOST} characters",
-                    spec.port
-                )));
-            }
+        let mut given = HashSet::new();
+        if let Some(spec) =
+            (args.ports.iter()).find(|spec| spec.port == 0 || !given.insert((spec.on, spec.port)))
+        {
+            return Err(Error::Invalid(format!(
+                "ports: {} is not a port, or is given twice on one side",
+                spec.port
+            )));
+        }
+        if let Some(spec) = args.ports.iter().find(|spec| {
+            spec.label
+                .as_ref()
+                .is_some_and(|label| label.chars().count() > LABEL_MOST)
+        }) {
+            return Err(Error::Invalid(format!(
+                "ports: {}'s label is past {LABEL_MOST} characters",
+                spec.port
+            )));
         }
         let mut at = HashSet::new();
         for volume in &args.volumes {
@@ -519,12 +516,11 @@ impl Sandbox {
             }
         };
 
-        let client_ports = match args.client_ports.is_empty() {
+        let on = |side| (args.ports.iter()).filter(move |spec: &&PortSpec| spec.on == side);
+        let local: Vec<u16> = on(PortSide::Local).map(|spec| spec.port).collect();
+        let client_ports = match local.is_empty() {
             true => None,
-            false => {
-                let ports: Vec<u16> = args.client_ports.iter().map(|spec| spec.port).collect();
-                Some(ClientPorts::open(&ports)?)
-            }
+            false => Some(ClientPorts::open(&local)?),
         };
         let config = MachineConfig {
             rootfs,
@@ -533,7 +529,7 @@ impl Sandbox {
             spec: machine_spec(args),
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
-            ports: args.ports.iter().map(|spec| spec.port).collect(),
+            ports: on(PortSide::Sandbox).map(|spec| spec.port).collect(),
             client_ports: client_ports.as_ref().map(|ports| ports.relay().clone()),
             // Set as each of its machines boots ([`Sandbox::wake`]).
             sandbox_disk: None,
@@ -557,6 +553,7 @@ impl Sandbox {
                 .iter()
                 .map(|spec| SandboxPort {
                     port: spec.port,
+                    on: spec.on,
                     url: None,
                     label: spec.label.clone(),
                 })
@@ -623,12 +620,6 @@ impl Sandbox {
             image: self.image.to_string(),
             running: !matches!(*self.state.lock().unwrap(), State::Exited),
             ports: self.ports_opened.clone(),
-            client_ports: (self.args.lock().unwrap().client_ports.iter())
-                .map(|spec| SandboxClientPort {
-                    port: spec.port,
-                    label: spec.label.clone(),
-                })
-                .collect(),
             abins: self.abins.clone(),
             error: None,
         }
@@ -778,14 +769,14 @@ impl Sandbox {
         self.ports.connect(port).await
     }
 
-    /// A taker of its client port `port`, beside any others, until it drops: each connection a
+    /// A taker of its port `port` on local, beside any others, until it drops: each connection a
     /// process in it makes to the port goes to one of its takers, and one to a port with none is
     /// refused. Refused [`NotFound`](Error::NotFound) for a port it was not made with.
     pub fn take_client_port(&self, port: u16) -> Result<ClientPortTaker, Error> {
         match &self.client_ports {
             Some(ports) => ports.take(port),
             None => Err(Error::NotFound(format!(
-                "this sandbox was made with no client port {port}"
+                "this sandbox was made with no port {port} on local"
             ))),
         }
     }
@@ -1698,7 +1689,6 @@ impl Unknown {
             image: self.image.clone().unwrap_or_default(),
             running: false,
             ports: Vec::new(),
-            client_ports: Vec::new(),
             abins: Vec::new(),
             error: Some(format!(
                 "not known again since its server restarted: {}",

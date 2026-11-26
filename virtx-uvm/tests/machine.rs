@@ -24,8 +24,8 @@ use futures_util::{
 };
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{
-    ImageName, PortSpec, SandboxClientPort, SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason,
-    SandboxJobEntry, SandboxResizeArgs, SandboxResources, SandboxVolume,
+    ImageName, PortSide, PortSpec, SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, SandboxPort, SandboxResizeArgs, SandboxResources, SandboxVolume,
 };
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
@@ -2132,25 +2132,39 @@ async fn a_sandbox_s_published_ports_carry_megabytes_each_way(home: Home) {
     close(sandbox).await;
 }
 
-/// A process reaches its client's port at the gateway while the port is taken, without a
+/// A process reaches a port on local at the gateway while the port is taken, without a
 /// network: carried both ways once a taker accepts it, refused when it does not or no one takes
-/// the port, and refused for a port the sandbox was not made with.
-async fn a_sandbox_s_client_port_is_reached_while_it_is_taken(home: Home) {
+/// the port, and refused for a port the sandbox was not made with. The same number in the
+/// sandbox is another port.
+async fn a_sandbox_s_port_on_local_is_reached_while_it_is_taken(home: Home) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let args = SandboxCreateArgs {
         network: false,
-        client_ports: vec![PortSpec::new(9222).label("echo")],
+        ports: vec![
+            PortSpec::new(9222).on(PortSide::Local).label("echo"),
+            PortSpec::new(9222),
+        ],
         ..small()
     };
     let sandbox = home.sandbox(&args, None).await;
-    let answered = sandbox.answer().client_ports;
+    let answered = sandbox.answer().ports;
     assert_eq!(
         answered,
-        [SandboxClientPort {
-            port: 9222,
-            label: Some("echo".into())
-        }]
+        [
+            SandboxPort {
+                port: 9222,
+                on: PortSide::Local,
+                url: None,
+                label: Some("echo".into())
+            },
+            SandboxPort {
+                port: 9222,
+                on: PortSide::Sandbox,
+                url: None,
+                label: None
+            }
+        ]
     );
     let ask = ["sh", "-c", "echo hi | nc -w 5 10.0.2.2 9222"];
 
@@ -3209,7 +3223,7 @@ fn main() -> ExitCode {
         a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_s_published_ports_carry_megabytes_each_way,
-        a_sandbox_s_client_port_is_reached_while_it_is_taken,
+        a_sandbox_s_port_on_local_is_reached_while_it_is_taken,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,

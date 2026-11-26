@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">코드와 AI 에이전트를 위한 일회용 Linux VM</h3>
+<h3 align="center">AI 에이전트를 위한 microVM 샌드박스</h3>
+
+<p align="center">Docker도, 따로 띄울 데몬도 필요 없습니다.</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,14 +27,10 @@
 
 <br>
 
-virtx를 쓰면 내 코드에서 일회용 Linux VM을 띄워 작업을 실행할 수 있습니다.
+virtx는 AI 에이전트를 위한 microVM 샌드박스입니다. 내 코드에서 일회용 Linux VM을 띄워 작업을 실행할 수 있고, VM은 내 컴퓨터, 직접 운영하는 서버, 또는 virtx cloud에서 돌릴 수 있습니다.
 
 내 컴퓨터에 굳이 설치하고 싶지 않은 무거운 의존성이 필요한 작업이나, AI 에이전트가 스스로 판단해 실행하는 명령처럼 아예 내 컴퓨터에서 돌리고 싶지 않은 코드에 특히 유용합니다.
 VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 남겨 둔 볼륨에 기록한 것만 그대로 남습니다.
-
-> [!TIP]
-> virtx로 AI 에이전트를 만들고 있다면 저희가 만든 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 살펴보세요.
-> virtx 위에서 만들어져 에이전트마다 전용 샌드박스를 붙여 주기 때문에, 따로 설정하지 않아도 에이전트의 명령과 파일 도구가 VM 안에서 실행됩니다.
 
 ## 빠르게 시작하기
 
@@ -218,6 +216,7 @@ let client = Client::connect(
   - **서버:** 💻 로컬 (stdio) · 🖥️ 원격 (tcp) · ☁️ 클라우드
   - **호스트:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **설정은 최소한으로:** 패키지만 설치하면 바로 실행할 수 있고, Docker도 따로 띄워 둘 데몬도 필요 없습니다.
+- **어떤 에이전트 프레임워크와도:** 샌드박스는 여느 도구와 같아서 어떤 프레임워크나 코딩 에이전트에서든 쓸 수 있습니다. 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 그중 하나입니다.
 
 ## 요구 사항
 

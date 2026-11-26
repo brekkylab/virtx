@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">供代码和 AI 智能体使用的一次性 Linux 虚拟机</h3>
+<h3 align="center">面向 AI 智能体的 microVM 沙箱</h3>
+
+<p align="center">无需 Docker，也无需配置守护进程。</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,12 +27,9 @@
 
 <br>
 
-有了 virtx，你可以直接在自己的代码里启动一次性的 Linux 虚拟机来运行任务。
+virtx 是面向 AI 智能体的 microVM 沙箱。你可以直接在自己的代码里启动一次性的 Linux 虚拟机来运行任务，虚拟机可以运行在本机、你自己运行的服务器，或 virtx cloud 上。
 
 有些任务需要装一大堆依赖，你不想把它们装在本机上；有些代码你干脆不想在本机跑，比如 AI 智能体自己决定要执行的命令。这些都很适合交给 virtx。虚拟机里装过、改过的东西，在删除虚拟机后都会一并清掉，只有写进你保留下来的卷里的内容才会留下。
-
-> [!TIP]
-> 正在用 virtx 开发 AI 智能体？不妨看看我们的开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy)。它基于 virtx 构建，会给每个智能体分配一个专属沙箱，不用做任何配置，智能体的命令和文件工具就会在虚拟机里运行。
 
 ## 快速上手
 
@@ -216,6 +215,7 @@ let client = Client::connect(
   - **服务器：** 💻 本地 (stdio) · 🖥️ 远程 (tcp) · ☁️ 云端
   - **主机：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **几乎不用配置：** 装好包就能直接跑，不需要 Docker，也不用另外跑守护进程。
+- **适用于任何智能体框架：** 沙箱和其他工具一样，任何框架或编码智能体都能调用。开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 
 ## 环境要求
 

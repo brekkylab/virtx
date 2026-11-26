@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">為你的程式碼與 AI 代理準備的拋棄式 Linux 虛擬機器</h3>
+<h3 align="center">為 AI 代理打造的 microVM 沙箱</h3>
+
+<p align="center">不需要 Docker，也不用設定常駐程式。</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,14 +27,11 @@
 
 <br>
 
-virtx 讓你直接在自己的程式碼裡，用拋棄式的 Linux 虛擬機器執行任務。
+virtx 是為 AI 代理打造的 microVM 沙箱。你可以直接在自己的程式碼裡，用拋棄式的 Linux 虛擬機器執行任務，虛擬機器可以跑在本機、你自己執行的伺服器，或 virtx cloud 上。
 
 有些工作需要一大堆相依套件，你不想裝在自己的電腦上；有些程式碼你根本不想在自己的電腦上執行，例如 AI 代理自行決定要跑的指令。
 這些都很適合交給 virtx。
 虛擬機器裡安裝或修改過的東西，在移除它之後都會消失，只有寫進你保留下來的磁碟區的內容才會留下。
-
-> [!TIP]
-> 正在用 virtx 打造 AI 代理嗎？我們的開源代理 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是以 virtx 為基礎，會替每個代理配一個專屬沙箱，不需任何設定，代理的指令和檔案工具就會在虛擬機器裡執行。
 
 ## 快速入門
 
@@ -218,6 +217,7 @@ let client = Client::connect(
   - **伺服器：** 💻 本機 (stdio) · 🖥️ 遠端 (tcp) · ☁️ 雲端
   - **主機：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **幾乎不用設定：** 裝好套件就能直接執行，不需要 Docker，也不用另外架設常駐程式。
+- **適用於任何代理框架：** 沙箱跟其他工具一樣，任何框架或程式碼代理都能呼叫。開源代理 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 
 ## 系統需求
 

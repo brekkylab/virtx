@@ -35,10 +35,10 @@ use virtx_core::{
 };
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
-    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, ImageConfiguration, ImageHold, ImageStore,
-    ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Network, Os, Project, ProjectError,
+    DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Files, HostPaths, ImageConfiguration, ImageHold,
+    ImageStore, ImageStoreError, LOG_LIMIT, MachineError, MachineSpec, Os, Project, ProjectError,
     Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
-    build_step, park_after, signal_number,
+    based_on, build_step, park_after, signal_number,
 };
 
 use crate::Host;
@@ -85,7 +85,7 @@ impl Home {
         Ok(Home {
             images,
             registry,
-            files: Files::new(volumes.clone()),
+            files: Files::new(volumes.clone()).with_host_paths(HostPaths::Named),
             root: root.to_owned(),
             volumes,
             vm: vec![
@@ -539,7 +539,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
                         ram_mib: DEFAULT_MEMORY_MIB,
                         gpu: false,
                         gpu_memory_mib: None,
-                        network: Network::Public,
+                        network: true,
                     },
                     &mut report,
                 )
@@ -555,6 +555,7 @@ async fn image_build(Extension(home): Extension<Arc<Home>>, Whole(request): Whol
 /// A build's base: its config and layers, and its image held for as long as the build runs.
 /// Nothing for `scratch`, as in a Dockerfile; else the image tagged `base` here, or the one
 /// pulled into the store now, anonymously, and left untagged: a build tags only what it builds.
+/// Its config names it as what the build is based on ([`based_on`]).
 async fn base(
     images: &ImageStore,
     base: &str,
@@ -576,9 +577,10 @@ async fn base(
         }
     };
     let held = images.hold_image(&image)?;
-    let (config, layers) = images
+    let (mut config, layers) = images
         .get_image(&image)?
-        .ok_or(ImageStoreError::Missing(image))?;
+        .ok_or_else(|| ImageStoreError::Missing(image.clone()))?;
+    based_on(&mut config, base, &image);
     Ok((config, layers, Some(held)))
 }
 
@@ -827,6 +829,7 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
         &args,
         home.vm.clone(),
         park_after(),
+        None,
         None,
         &Backing::default(),
     )
@@ -1260,7 +1263,7 @@ impl From<MachineError> for Refused {
     fn from(e: MachineError) -> Refused {
         match &e {
             MachineError::NoCommand => invalid(e),
-            MachineError::DidNotStart(_) => {
+            MachineError::DidNotStart { .. } => {
                 refused(StatusCode::INTERNAL_SERVER_ERROR, "boot_failed", e)
             }
             _ => internal(e),
@@ -1273,6 +1276,7 @@ impl From<SandboxError> for Refused {
         match e {
             SandboxError::Invalid(_) => invalid(e),
             SandboxError::NotFound(_) => not_found(e),
+            SandboxError::Exists(_) => refused(StatusCode::CONFLICT, "exists", e),
             SandboxError::Unsupported(_) => {
                 refused(StatusCode::UNPROCESSABLE_ENTITY, "unsupported", e)
             }

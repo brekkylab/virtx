@@ -1,33 +1,31 @@
-# The GPU libraries the servers' `gpu` feature links, as xtask/scripts/build-deps.* installs them
-# under build/ -- virglrenderer, and on Windows libepoxy and an import library for Vulkan's
-# loader -- kept by runs-on/cache by this platform's script and the submodules it builds, so a
-# change to another platform's script costs this one nothing. The scripts build them again only
-# when their stamp says they were built from something else, so a cache of another tree's or
-# another runner's only costs its download. Building them took a minute of each Windows job
-# that does, and 11 to 14 seconds on Linux. MoltenVK, macOS's, keeps its own cache in the job.
+# virglrenderer as 3rdparty/_scripts/build-virglrenderer.* installs it under build/ for the servers'
+# `gpu` feature -- on Windows with an import library for Vulkan's loader -- kept by runs-on/cache
+# by what it is built from: its script, its submodule and its patches, and on macOS the same of
+# the MoltenVK it links. The script builds it again only when its stamp says it was built from
+# something else, so a cache of another tree's or another runner's only costs its download.
+# Building it took a minute of each Windows job that does, and 11 to 14 seconds on Linux.
+# MoltenVK itself, macOS's, keeps its own cache in the job.
 name: gpu-deps
-description: The GPU libraries build-deps installs under build/, restored and saved by what they are built from
+description: virglrenderer as its build script installs it under build/, restored and saved by what it is built from
 
 runs:
   using: composite
   steps:
     - id: key
       shell: bash
-      # Only what this platform's build reads: its script, and the submodules it builds.
       run: |
         case "$RUNNER_OS" in
-          Windows) script=xtask/scripts/build-deps.ps1; submodules="virglrenderer libepoxy" ;;
-          macOS) script=xtask/scripts/build-deps.sh; submodules="virglrenderer MoltenVK SPIRV-Cross" ;;
-          *) script=xtask/scripts/build-deps.sh; submodules=virglrenderer ;;
+          Windows) scripts=3rdparty/_scripts/build-virglrenderer.ps1; submodules=virglrenderer ;;
+          macOS) scripts="3rdparty/_scripts/build-virglrenderer.sh 3rdparty/_scripts/build-moltenvk.sh"; submodules="virglrenderer MoltenVK SPIRV-Cross" ;;
+          *) scripts=3rdparty/_scripts/build-virglrenderer.sh; submodules=virglrenderer ;;
         esac
-        from=$({ git hash-object "$script"; for s in $submodules; do git rev-parse "HEAD:3rdparty/$s"; done; } | git hash-object --stdin)
+        from=$({ git hash-object $scripts; for s in $submodules; do git rev-parse "HEAD:3rdparty/$s" "HEAD:3rdparty/_patches/$s"; done; } | git hash-object --stdin)
         echo "key=gpu-deps-$RUNNER_OS-$RUNNER_ARCH-$from" >> "$GITHUB_OUTPUT"
 
     - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
       with:
         path: |
           build/virglrenderer
-          build/epoxy
           build/vulkan
           build/pkgconfig
         key: ${{ steps.key.outputs.key }}

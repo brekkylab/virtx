@@ -21,7 +21,7 @@ The image has to be on the server already, pulled or built as [Images](/docs/tut
 | `ports` | none | Ports in it to reach from outside, even with `network` off: numbers for TCP, or specs with a `label`, an `http` `protocol` and `inbound` rules; see [Networks and ports](/docs/tutorials/networks-ports/). |
 | `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/tutorials/mounting-volumes/). |
 | `gpu`, `gpu_memory_mib` | none | A GPU and the memory it may hold; see [Using GPUs](/docs/tutorials/using-gpus/). |
-| `abins` | none | virtx's own programs, by name, such as `index`, `docread` and `display`, at `/abin` and first on its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. The sandbox answers them as `abins`; see [Using built-in programs](/docs/tutorials/built-in-programs/). |
+| `abins` | none | virtx's own programs, by name, such as `index`, `docread`, `display` and `browser`, at `/abin` and first on its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. The sandbox answers them as `abins`; see [Using built-in programs](/docs/tutorials/built-in-programs/). |
 
 This makes a sandbox with 2 vCPUs, 2 GiB of memory, and no way out:
 

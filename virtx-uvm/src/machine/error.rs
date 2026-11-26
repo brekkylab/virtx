@@ -50,9 +50,11 @@ pub enum Error {
     NoCommand,
 
     /// The machine's process could not build the machine, or it broke: why, with the end of
-    /// what the guest's console and libkrun said.
-    #[error("{0}")]
-    DidNotStart(String),
+    /// what the guest's console and libkrun said. `told` is why without what can name this
+    /// host's paths, for a caller elsewhere: the console's lines among those, and why as the
+    /// process told it without a path, in place of libkrun's records and this crate's.
+    #[error("{account}")]
+    DidNotStart { account: String, told: String },
 
     /// A command the guest could not start, and why.
     #[error("{0}")]
@@ -87,6 +89,105 @@ impl Error {
             source,
         }
     }
+
+    /// What `self` says without this host's paths, for a caller elsewhere: a failure on this
+    /// host's files by its kind, a libkrun error by its kind where libkrun's text for it is its
+    /// own, and the rest as it says itself. Asked of what [`enter`](super::enter) fails with,
+    /// whose contexts name no path.
+    pub(super) fn told(&self) -> String {
+        match self {
+            Error::Io { context, source } => format!("{context}: {}", source.kind()),
+            Error::Fstree(fstree::Error::Io { source, .. })
+            | Error::Volume(volume::Error::Io { source, .. }) => {
+                format!("the server's files: {}", source.kind())
+            }
+            Error::Vmm { context, source } => format!("{context}: {}", vmm_told(source)),
+            Error::Init(krun_init::ApplyError::SymbolNotFound(_)) => self.to_string(),
+            Error::Init(krun_init::ApplyError::OverlayError(source)) => {
+                format!(
+                    "preparing the guest init: overlay error: {}",
+                    vmm_told(source)
+                )
+            }
+            Error::Init(_) => "preparing the guest init: a failure in libkrun".into(),
+            _ => self.to_string(),
+        }
+    }
+}
+
+/// `e` by its kind: as it says itself where libkrun's text for it is fixed, and its kind
+/// alone where the text is libkrun's own, which can name this host's paths.
+fn vmm_told(e: &krun::VmmError) -> String {
+    use krun::VmmError;
+    match e {
+        VmmError::InvalidParam()
+        | VmmError::OutOfRange()
+        | VmmError::FileNotFound()
+        | VmmError::ResourceAlloc()
+        | VmmError::BadFd()
+        | VmmError::FeatureDisabled() => e.to_string(),
+        VmmError::MissingConfig(_) => "missing required configuration".into(),
+        VmmError::BootError(_) => "boot error".into(),
+        VmmError::Internal(_) => "internal error".into(),
+        _ => "a failure in libkrun".into(),
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn what_a_machine_s_process_tells_names_none_of_this_host_s_paths() {
+        const PATH: &str = "/home/virtx/project/a/volume/v";
+        let named = [
+            (
+                Error::vmm(
+                    "attaching the root's image",
+                    krun::VmmError::BootError(format!("opening {PATH}/a.vmdk")),
+                ),
+                "attaching the root's image: boot error",
+            ),
+            (
+                Error::io(
+                    "reading the machine to be",
+                    io::Error::other(format!("{{\"rootfs\": \"{PATH}\"}}")),
+                ),
+                "reading the machine to be: other error",
+            ),
+            (
+                Error::Volume(volume::Error::Io {
+                    context: format!("reading {PATH}/mounts.json"),
+                    source: io::ErrorKind::InvalidData.into(),
+                }),
+                "the server's files: invalid data",
+            ),
+            (
+                Error::Init(krun_init::ApplyError::OverlayError(
+                    krun::VmmError::Internal(PATH.into()),
+                )),
+                "preparing the guest init: overlay error: internal error",
+            ),
+        ];
+        for (e, told) in named {
+            assert!(e.to_string().contains(PATH), "{e}");
+            assert_eq!(e.told(), told);
+        }
+
+        let fixed = [
+            Error::vmm("sharing /abin", krun::VmmError::FileNotFound()),
+            Error::MountPoint {
+                volume: "v".into(),
+                at: "/".into(),
+                why: "/ is the guest's root",
+            },
+        ];
+        for e in fixed {
+            assert_eq!(e.told(), e.to_string());
+        }
+    }
+}

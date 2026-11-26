@@ -372,7 +372,7 @@ mod tests {
     use virtx_core::VolumeListOutputItem;
     use virtx_core::{
         Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
-        SandboxCreateArgs,
+        SandboxCreateArgs, Step,
     };
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
@@ -916,6 +916,62 @@ mod tests {
         })
         .await
         .expect("the job went on")
+    }
+
+    /// A build names its base by the OCI's labels, in place of those the base had, and keeps
+    /// the others; built again, it is the same image. Of steps that boot no machine, so the
+    /// build runs here.
+    #[tokio::test]
+    async fn a_build_names_its_base_and_is_the_same_image_built_again() {
+        let served = Served::spawn("build-history").await;
+        let client = served.connect();
+        // A base whose history tells its one layer apart, naming a base of its own.
+        let store = ImageStore::new(served.project("demo").await.join("images")).unwrap();
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {"Labels": {
+                "org.opencontainers.image.base.name": "alpine:3.20",
+                "maintainer": "virtx",
+            }},
+            "rootfs": {"type": "layers", "diff_ids": []},
+            "history": [{"created_by": "ADD rootfs /"}],
+        }))
+        .unwrap();
+        let base = store.insert_image(&config, &[layer]).unwrap();
+        store.insert_tag(&"base:1".parse().unwrap(), &base).unwrap();
+
+        let recipe = Recipe::new("base:1")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let built = async |reference: &str| {
+            let job = client.build_image(recipe.clone(), reference).await.unwrap();
+            // A guard against a hang, not a measure of anything.
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let job = client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the build went on");
+            ended.digest.expect("the build failed")
+        };
+        let image = built("built:1").await;
+        assert_eq!(built("built:2").await, image);
+
+        let (config, _) = store.get_image(&image.parse().unwrap()).unwrap().unwrap();
+        let labels = config.config().clone().unwrap().labels().clone().unwrap();
+        assert_eq!(labels[virtx_uvm::ANNOTATION_BASE_IMAGE_NAME], "base:1");
+        assert_eq!(
+            labels[virtx_uvm::ANNOTATION_BASE_IMAGE_DIGEST],
+            base.to_string()
+        );
+        assert_eq!(labels["maintainer"], "virtx");
     }
 
     /// A server's image jobs are held to registries on public addresses: a pull, a push and a
@@ -1593,9 +1649,10 @@ mod tests {
     }
 
     /// A sandbox a server before this one kept that this one cannot know again -- its record
-    /// not read, or its image gone -- is listed, not running, with why in `error`. Every other
-    /// request about it is refused `409` `ended`, and it keeps its project from being removed
-    /// until its `DELETE` removes it, its disk and record with it.
+    /// not read, or its image gone -- is listed, not running, with why in `error`: a record
+    /// that does not read is told by the failure's kind, not by its path. Every other request
+    /// about it is refused `409` `ended`, saying why the same way, and it keeps its project from
+    /// being removed until its `DELETE` removes it, its disk and record with it.
     #[tokio::test]
     async fn a_sandbox_not_known_again_is_listed_with_why_until_its_delete() {
         let served = Served::spawn("unknown").await;
@@ -1625,13 +1682,16 @@ mod tests {
                 json!({ "id": "unread", "image": "", "running": false }),
             ]
         );
-        for error in errors {
-            let error = error.expect("an error says why");
-            assert!(
-                error.as_str().unwrap().starts_with("not known again"),
-                "{error}"
-            );
-        }
+        let said = |why: &str| {
+            Some(json!(format!(
+                "not known again since its server restarted: {why}"
+            )))
+        };
+        let unread = "the server's files: invalid data";
+        assert_eq!(
+            errors,
+            [said(&format!("no image here is {gone}")), said(unread)]
+        );
         let (status, got) = served
             .send("GET", "sandboxes/unread", Some("demo"), "")
             .await;
@@ -1653,6 +1713,8 @@ mod tests {
             assert_eq!(status, StatusCode::CONFLICT, "{method} {path}");
             let refused: Value = serde_json::from_str(&refused).unwrap();
             assert_eq!(refused["error"]["code"], "ended", "{method} {path}");
+            let message = refused["error"]["message"].as_str().unwrap();
+            assert!(message.ends_with(&format!(": {unread}")), "{message}");
         }
         let (status, _) = served.send("DELETE", "projects/demo", None, "").await;
         assert_eq!(status, StatusCode::CONFLICT, "its sandboxes keep it");
@@ -2108,6 +2170,147 @@ mod tests {
         assert_eq!(tagged.map(|image| image.to_string()), Some(digest));
     }
 
+    /// A backend that keeps nothing, whose `want` -- the first wait of a sandbox's making --
+    /// says it was reached in `wanting` and, while `holding`, waits for `go`; and writes the
+    /// record `writes` names, where it names one, as another making under its id would.
+    struct Holding {
+        holding: std::sync::atomic::AtomicBool,
+        wanting: tokio::sync::Semaphore,
+        go: tokio::sync::Semaphore,
+        writes: Mutex<Option<PathBuf>>,
+    }
+
+    impl Default for Holding {
+        fn default() -> Holding {
+            Holding {
+                holding: Default::default(),
+                wanting: tokio::sync::Semaphore::new(0),
+                go: tokio::sync::Semaphore::new(0),
+                writes: Mutex::default(),
+            }
+        }
+    }
+
+    impl StorageBackend for Holding {
+        fn want<'a>(&'a self, _: Wanted<'a>) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                self.wanting.add_permits(1);
+                if self.holding.load(std::sync::atomic::Ordering::SeqCst) {
+                    self.go.acquire().await.unwrap().forget();
+                }
+                if let Some(record) = self.writes.lock().unwrap().take() {
+                    std::fs::write(record, b"{}").unwrap();
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// A sandbox made under an id and keys given it is refused, before its machine boots, an id
+    /// a sandbox here has or one made meanwhile takes, a key one here opens a port by or one
+    /// being made was given, an id that cannot be one and keys that are not one for each port;
+    /// a port over HTTP and with inbound rules is not refused for it. Nothing of it is made,
+    /// and a key a making that failed was given is given back.
+    #[tokio::test]
+    async fn a_sandbox_made_under_an_id_and_keys_given_it_is_refused_only_what_it_cannot_be() {
+        use crate::endpoints::{Given, Home};
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let images = ImageStore::new(root.join("images")).unwrap();
+        let digest = empty_image(&images);
+        images
+            .insert_tag(&"kept:1".parse().unwrap(), &digest)
+            .unwrap();
+        let dir = root.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capability = "c".repeat(64);
+        let image = json!({ "type": "digest", "digest": digest.to_string() });
+        let args = json!({ "image": image, "ports": [8080] });
+        let record = json!({ "args": args, "keys": { capability.clone(): 8080 } });
+        std::fs::write(dir.join("kept.ext4"), b"").unwrap();
+        std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
+        let registry =
+            virtx_uvm::RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH).unwrap();
+        let backend = Arc::new(Holding::default());
+        let home = Home::new(images, Arc::new(registry), root).unwrap();
+        let home = home.backed_by(Arc::clone(&backend) as Arc<dyn StorageBackend>);
+        assert!(home.sandboxes().get("kept").is_some());
+
+        let web = PortSpec::new(8080)
+            .protocol(PortProtocol::Http)
+            .inbound([InboundRule::new("10.0.0.0/8")]);
+        let made = async |image: &str, id: &str, keys: &[(&str, u16)]| {
+            let args = SandboxCreateArgs::new(image).port(web.clone());
+            let keys = keys.iter().map(|(key, port)| (key.to_string(), *port));
+            let given = Given {
+                id: id.to_owned(),
+                keys: keys.collect(),
+            };
+            refused_with(home.make(args, given).await.err().unwrap()).await
+        };
+        let exists = (StatusCode::CONFLICT, "exists".to_owned());
+        assert_eq!(made("kept:1", "kept", &[("k", 8080)]).await, exists);
+        // Taken before its image is looked for.
+        assert_eq!(made("none:1", "kept", &[("k", 8080)]).await, exists);
+        assert_eq!(made("kept:1", "new", &[(&capability, 8080)]).await, exists);
+        let invalid = (StatusCode::BAD_REQUEST, "invalid".to_owned());
+        for id in ["", "../x", "a.b", &"a".repeat(65)] {
+            assert_eq!(made("kept:1", id, &[("k", 8080)]).await, invalid, "{id:?}");
+        }
+        let unkeyed: [&[(&str, u16)]; 7] = [
+            &[],
+            &[("k", 9090)],
+            &[("k", 8080), ("j", 8080)],
+            &[("k", 8080), ("j", 9090)],
+            &[("", 8080)],
+            &[("k-1", 8080)],
+            &[(&"k".repeat(129), 8080)],
+        ];
+        for keys in unkeyed {
+            assert_eq!(made("kept:1", "new", keys).await, invalid, "{keys:?}");
+        }
+        // Past each check of its own, refused for what is not here alone.
+        let missing = (StatusCode::NOT_FOUND, "not_found".to_owned());
+        assert_eq!(made("none:1", "new", &[("k", 8080)]).await, missing);
+
+        // A key one being made was given is taken until its making ends, and then given back.
+        backend
+            .holding
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let first = made("none:1", "first", &[("k", 8080)]);
+        let second = async {
+            backend.wanting.acquire().await.unwrap().forget();
+            // The first held; this one, past `keying`, would not be.
+            backend
+                .holding
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            let second = made("none:1", "second", &[("k", 8080)]).await;
+            backend.go.add_permits(1);
+            second
+        };
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!((first, second), (missing.clone(), exists.clone()));
+        assert_eq!(made("none:1", "second", &[("k", 8080)]).await, missing);
+
+        // An id another making takes after it was looked at is refused as its disk is made.
+        *backend.writes.lock().unwrap() = Some(dir.join("raced.json"));
+        assert_eq!(made("kept:1", "raced", &[("k", 8080)]).await, exists);
+        // What the other making holds, as it would.
+        for left in ["raced.json", "raced.ext4.lock"] {
+            std::fs::remove_file(dir.join(left)).unwrap();
+        }
+
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with("kept."))
+            .collect();
+        left.sort();
+        assert_eq!(left, Vec::<String>::new());
+        assert_eq!(home.sandboxes().list().len(), 1);
+    }
+
     /// A sandbox whose record and disk are put in a home is taken in, its image wanted from the
     /// home's backend: parked, behind its port URLs, and taken in once. Let go of, no request
     /// reaches it, and its record and disk stay for it to be taken in again; in use, it is not
@@ -2182,6 +2385,18 @@ mod tests {
         );
         let none = home.take_in("none").await.err().unwrap();
         assert_eq!(refused_with(none).await.0, StatusCode::NOT_FOUND);
+        // One whose record does not read is refused as making it is, by the failure's kind.
+        let (disk, unread) = (dir.join("unread.ext4"), dir.join("unread.json"));
+        std::fs::write(&disk, b"").unwrap();
+        std::fs::write(&unread, b"not a record").unwrap();
+        let refused = home.take_in("unread").await.err().unwrap();
+        let refused = axum::response::IntoResponse::into_response(refused);
+        assert_eq!(refused.status().as_u16(), 500);
+        let body = axum::body::to_bytes(refused.into_body(), usize::MAX).await;
+        let body: Value = serde_json::from_slice(&body.unwrap()).unwrap();
+        assert_eq!(body["error"]["message"], "the server's files: invalid data");
+        std::fs::remove_file(disk).unwrap();
+        std::fs::remove_file(unread).unwrap();
 
         // In use, it stays; let go of, it is reached no more, and its record and disk stay.
         let tunnel = home.tunnel(&capability).unwrap();

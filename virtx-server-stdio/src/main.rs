@@ -26,7 +26,7 @@ use http::HeaderMap;
 use tower::ServiceExt as _;
 use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
 use virtx_uvm::{
-    ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
+    HostPaths, ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
     RegistryServer, Sandbox,
 };
 
@@ -204,7 +204,8 @@ impl Host {
         }
         let dir = self.store.path(id);
         let images = ImageStore::new(dir.join("images"))?;
-        let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
+        let registry = RegistryServer::new(images.clone(), REGISTRY_PATH)?;
+        let registry = Arc::new(registry.with_host_paths(HostPaths::Named));
         let home = Arc::new(Home::new(images, registry, &dir)?);
         homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))
@@ -291,6 +292,7 @@ mod tests {
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
         PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume,
+        Step,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -397,6 +399,65 @@ mod tests {
             .await;
         assert_eq!(status(built), 400);
         assert_eq!(server.client.list_image_job().await.unwrap(), []);
+    }
+
+    /// A build names its base by the OCI's labels, in place of those the base had, and keeps
+    /// the others; built again, it is the same image. Of steps that boot no machine, so the
+    /// build runs here.
+    #[tokio::test]
+    async fn a_build_names_its_base_and_is_the_same_image_built_again() {
+        let server = Server::spawn("build-history").await;
+        // A base whose history tells its one layer apart, naming a base of its own.
+        let store = ImageStore::new(server.home.join("images")).unwrap();
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {"Labels": {
+                "org.opencontainers.image.base.name": "alpine:3.20",
+                "maintainer": "virtx",
+            }},
+            "rootfs": {"type": "layers", "diff_ids": []},
+            "history": [{"created_by": "ADD rootfs /"}],
+        }))
+        .unwrap();
+        let base = store.insert_image(&config, &[layer]).unwrap();
+        store.insert_tag(&"base:1".parse().unwrap(), &base).unwrap();
+
+        let recipe = Recipe::new("base:1")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let built = async |reference: &str| {
+            let job = server
+                .client
+                .build_image(recipe.clone(), reference)
+                .await
+                .unwrap();
+            // A guard against a hang, not a measure of anything.
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let job = server.client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the build went on");
+            ended.digest.expect("the build failed")
+        };
+        let image = built("built:1").await;
+        assert_eq!(built("built:2").await, image);
+
+        let (config, _) = store.get_image(&image.parse().unwrap()).unwrap().unwrap();
+        let labels = config.config().clone().unwrap().labels().clone().unwrap();
+        assert_eq!(labels[virtx_uvm::ANNOTATION_BASE_IMAGE_NAME], "base:1");
+        assert_eq!(
+            labels[virtx_uvm::ANNOTATION_BASE_IMAGE_DIGEST],
+            base.to_string()
+        );
+        assert_eq!(labels["maintainer"], "virtx");
     }
 
     #[tokio::test]
@@ -1168,6 +1229,40 @@ mod tests {
             .unwrap();
         let xml = String::from_utf8(body.to_vec()).unwrap();
         assert!(xml.contains("displayname"), "{xml}");
+    }
+
+    /// A failure on this host's files is answered as its account says it, naming their paths,
+    /// to a caller on this host: a volume whose mount table does not read, and the registry's
+    /// tags over a tag directory that is a file.
+    #[tokio::test]
+    async fn a_failure_on_this_host_s_files_is_answered_with_their_paths() {
+        use axum::body::Body;
+
+        let server = Server::spawn("host-paths").await;
+        server.client.create_volume(Some("v")).await.unwrap();
+        let table = server.home.join("volume").join("v").join("mounts.json");
+        std::fs::write(&table, "not a table").unwrap();
+        let tags = server.home.join("images").join("tag");
+        std::fs::remove_dir_all(&tags).unwrap();
+        std::fs::write(&tags, "not a directory").unwrap();
+
+        let answered = async |path: &str| {
+            let request = http::Request::get(path).body(Body::empty()).unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            assert_eq!(response.status(), 500, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        };
+        let files = answered("/volumes/v/files/").await;
+        let named = format!("reading {}", table.display());
+        assert!(files.starts_with(&named), "{files}");
+        let registry = answered("/images/oci/v2/app/tags/list").await;
+        let registry: serde_json::Value = serde_json::from_str(&registry).unwrap();
+        let message = registry["errors"][0]["message"].as_str().unwrap();
+        let named = format!("reading {}", tags.display());
+        assert!(message.starts_with(&named), "{message}");
     }
 
     /// Two conditional writes to one file at once, from two apps over one home as two server

@@ -82,6 +82,8 @@ let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
 
 A build stores its image under the supplied tag. `create_sandbox` boots it by that tag, or by its digest to select exactly that build.
 
+The image keeps the steps it was built with in its history, which `docker history` shows once it is pushed, and names its base in the labels `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest`. A `RUN` step's command is kept as it was written, so pass a secret to the commands a sandbox runs rather than writing it into a step.
+
 A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec`.
 
 A build, like a pull or a push, is a job.

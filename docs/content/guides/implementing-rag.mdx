@@ -1,0 +1,234 @@
+---
+title: "Implementing RAG"
+description: "Turn PDFs, Word files and slides into Markdown with docread, index them with index, and answer questions from them with an Ailoy agent that searches them itself."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+Retrieval-augmented generation (RAG) answers a question from documents: it finds the passages that bear on the question, and a model answers from them.
+Here a sandbox does the finding and an agent the answering:
+
+- [`docread`](/docs/tutorials/built-in-programs/) parses documents precisely, into text that keeps their structure.
+- [`index`](/docs/tutorials/built-in-programs/) keeps that text searchable, and finds the passages that bear on a question.
+- An [Ailoy](https://github.com/brekkylab/ailoy) agent, given the sandbox, searches with `index` and answers from what it finds.
+
+`docread` and `index` run on any image, without the network.
+
+## Put the documents in
+
+Keep the documents and the store in a [volume](/docs/tutorials/mounting-volumes/), so the store outlives the sandbox that builds it and the next one searches it without building it again.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from pathlib import Path
+from virtx import SandboxVolume
+
+volume = await client.create_volume("manuals")
+await volume.create_dir_all("raw")
+for path in Path("manuals").glob("*.pdf"):
+    await volume.write_file(f"raw/{path.name}", path.read_bytes())
+
+sandbox = await client.create_sandbox(
+    "alpine:latest",
+    abins=["docread", "index"],
+    volumes=[SandboxVolume(volume, "/data")],
+    network=False,
+)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const fs = require('node:fs')
+
+const volume = await client.createVolume('manuals')
+await volume.createDirAll('raw')
+for (const name of fs.readdirSync('manuals').filter((name) => name.endsWith('.pdf'))) {
+  await volume.writeFile(`raw/${name}`, fs.readFileSync(`manuals/${name}`))
+}
+
+const sandbox = await client.createSandbox('alpine:latest', {
+  abins: ['docread', 'index'],
+  volumes: [{ volume, path: '/data' }],
+  network: false,
+})
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use virtx::Files;
+
+let volume = client.create_volume(Some("manuals")).await?;
+volume.create_dir_all("raw").await?;
+for entry in std::fs::read_dir("manuals")? {
+    let path = entry?.path();
+    if path.extension().is_some_and(|ext| ext == "pdf") {
+        let name = path.file_name().unwrap().to_string_lossy();
+        volume.write_file(format!("raw/{name}"), std::fs::read(&path)?, None).await?;
+    }
+}
+
+let args = SandboxCreateArgs::new("alpine:latest")
+    .abin("docread")
+    .abin("index")
+    .volume(volume.name(), "/data")
+    .network(false);
+let sandbox = client.create_sandbox(&args).await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Parse and index them
+
+`docread` turns each document into Markdown, and `index` builds a searchable store from it.
+
+```bash
+cd /data
+docread raw --to md --output md
+index init manuals.db
+index ingest manuals.db md
+```
+
+`docread` reads PDF, Word, PowerPoint, Excel, HTML, EPUB, HWP and more.
+A scanned document, an image of text, is not read.
+
+## Search them
+
+`index search` answers the passages that best match a query, best first.
+
+```bash
+cd /data
+index search manuals.db -n 5 --text warranty coverage
+```
+
+Each names the document and the lines it comes from, with the passage under it:
+
+```text frame="terminal" title="Output"
+12.4	md/warranty.md:41-58	Limited warranty
+	## What is covered
+	The product is covered against defects in materials and workmanship ...
+```
+
+It matches words, not meanings: a passage that says the same in other words is not found.
+
+## Answer from them
+
+An Ailoy agent given the sandbox learns `index` and `docread` from it by itself.
+It searches the store, tries other words when it finds too little, and answers from the passages.
+Tell it where the store is, and to cite the passages its answer comes from.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from ailoy import AgentBuilder
+
+agent = await (
+    AgentBuilder("anthropic/claude-sonnet-5-5")
+    .instruction(
+        "The user's documents are indexed in /data/manuals.db; run `index` from /data. "
+        "Answer from what they say, and cite each passage by the path and lines a search answers."
+    )
+    .sandbox(sandbox)
+    .build()
+)
+
+async for output in agent.run("What does the warranty cover?"):
+    message = output["message"]
+    if message["role"] == "assistant":
+        for part in message["contents"]:
+            if part["type"] == "text":
+                print(part["text"])
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const { AgentBuilder } = require('@brekkylab/ailoy')
+
+const agent = await new AgentBuilder('anthropic/claude-sonnet-5-5')
+  .instruction(
+    "The user's documents are indexed in /data/manuals.db; run `index` from /data. " +
+      'Answer from what they say, and cite each passage by the path and lines a search answers.',
+  )
+  .sandbox(sandbox)
+  .build()
+
+try {
+  for await (const { message } of agent.run('What does the warranty cover?')) {
+    if (message.role !== 'assistant') continue
+    for (const part of message.contents) {
+      if (part.type === 'text') console.log(part.text)
+    }
+  }
+} finally {
+  await agent.close()
+}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use ailoy::{
+    agent::AgentBuilder,
+    message::{Message, Part, Role},
+};
+use futures::StreamExt as _;
+
+let mut agent = AgentBuilder::new("anthropic/claude-sonnet-5-5")
+    .instruction(concat!(
+        "The user's documents are indexed in /data/manuals.db; run `index` from /data. ",
+        "Answer from what they say, and cite each passage by the path and lines a search answers.",
+    ))
+    .sandbox(sandbox)
+    .build()
+    .await?;
+
+let mut stream = agent.run(
+    Message::new(Role::User).with_contents([Part::text("What does the warranty cover?")]),
+);
+while let Some(output) = stream.next().await {
+    let message = output?.message;
+    if message.role == Role::Assistant {
+        for text in message.contents.iter().filter_map(Part::as_text) {
+            println!("{text}");
+        }
+    }
+}
+```
+
+</TabItem>
+</Tabs>
+
+It prints the agent's answer, with the passages it comes from:
+
+```text frame="terminal" title="Output"
+The warranty covers defects in materials and workmanship for two years from the date of
+purchase (md/warranty.md:41-58). It does not cover damage from accidents, misuse or
+unauthorised repairs, nor normal wear of the battery (md/warranty.md:59-74).
+
+To make a claim, contact support with the serial number and proof of purchase; a covered
+product is repaired or replaced at no charge (md/support.md:12-25).
+```
+
+The model runs outside the sandbox, so the sandbox needs no network for it.
+Ailoy's [README](https://github.com/brekkylab/ailoy) says which models and backends it runs, and how to install it for each language.
+
+## Keep it up to date
+
+`index sync` brings the store up to date with what was added, changed or removed.
+A document taken out of `raw` needs its `.md` taken out too.
+
+```bash
+cd /data
+docread raw --to md --output md
+index sync manuals.db md
+```

@@ -396,7 +396,7 @@ jobs:
       - run: cargo xtask clippy --gpu
 
   # macOS and Windows: `virtx-stdio` and `virtx-server-tcp`, each archived with the kernel, abin
-  # and alib; `libvirtx_core`; and the platform's packages.
+  # and alib, and the platform's packages.
   build-native:
     name: build (${{ matrix.release }})
     needs: [version, guest]
@@ -410,13 +410,11 @@ jobs:
             hosted: macos-15
             arch: aarch64
             target: aarch64-apple-darwin
-            file: libvirtx_core.dylib
           - release: windows-x86_64
             platform: win32-x64-msvc
             hosted: windows-2025
             arch: x86_64
             target: x86_64-pc-windows-msvc
-            file: virtx_core.dll
     runs-on: ${{ matrix.hosted }}
     timeout-minutes: 120
     defaults:
@@ -542,28 +540,6 @@ jobs:
           cp -v "$CARGO_TARGET_DIR/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz" \
             "$CARGO_TARGET_DIR/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz" dist/release/
 
-      - name: libvirtx_core
-        env:
-          # The oldest macOS the wheel's tag says it runs on.
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: |
-          cargo xtask build client --locked --target ${{ matrix.target }}
-          mkdir -p dist/lib/${{ matrix.platform }}
-          cp "$CARGO_TARGET_DIR/${{ matrix.target }}/release/${{ matrix.file }}" dist/lib/${{ matrix.platform }}/
-          ls -la dist/lib/${{ matrix.platform }}
-
-      # No DLL Windows does not ship: the C runtime is linked in (`.cargo/config.toml`).
-      - name: Library's DLL imports (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          f=dist/lib/${{ matrix.platform }}/${{ matrix.file }}
-          "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
-            | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
-            | sort -u | tee "$RUNNER_TEMP/imports.txt"
-          if grep -iE "load: (vcruntime|msvcp)" "$RUNNER_TEMP/imports.txt"; then
-            echo "::error::$f needs the DLLs above to load"; exit 1
-          fi
-
       - uses: ./.github/actions/pack
         env:
           # The oldest macOS the wheel's tag says it runs on.
@@ -572,6 +548,36 @@ jobs:
           platform: ${{ matrix.platform }}
           target: ${{ matrix.target }}
           out: dist/release
+
+      # The library each package carries loads where its tag says: on macOS 11 with the system's
+      # libraries alone, and on Windows with no C runtime DLL (it is linked in, `.cargo/config.toml`).
+      - name: The packages' libraries
+        run: |
+          lib="$RUNNER_TEMP/libs"
+          python -m zipfile -e dist/release/virtx-*.whl "$lib/wheel"
+          python -m tarfile --filter data -e dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz "$lib/npm"
+          for f in "$lib"/wheel/virtx/_virtx_core.* "$lib"/npm/package/*.node; do
+            echo "$f:"
+            if [ "$RUNNER_OS" = Windows ]; then
+              "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
+                | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
+                | sort -u | tee "$RUNNER_TEMP/imports.txt"
+              ! grep -iE "load: (vcruntime|msvcp)" "$RUNNER_TEMP/imports.txt" \
+                || { echo "::error::$f needs the DLLs above to load"; fail=1; }
+            else
+              minos=$(otool -l "$f" | awk '/LC_BUILD_VERSION/{b=1} b && /minos/{print $2; exit}')
+              links=$(otool -l "$f" | awk '/cmd LC_LOAD(_WEAK)?_DYLIB/{l=1} l && / name /{print $2; l=0}' | tr '\n' ' ')
+              echo "  macOS $minos; links $links"
+              [ "$minos" = 11.0 ] || { echo "::error::$f needs macOS $minos"; fail=1; }
+              for l in $links; do
+                case "$l" in
+                  /usr/lib/* | /System/Library/*) ;;
+                  *) echo "::error::$f links $l, which macOS does not ship"; fail=1 ;;
+                esac
+              done
+            fi
+          done
+          exit ${fail:-0}
 
       - uses: actions/upload-artifact@v7.0.2
         with:

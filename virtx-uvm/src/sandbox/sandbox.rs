@@ -151,13 +151,6 @@ enum State {
     Exited,
 }
 
-/// A backend's keeping of a new sandbox's disk ([`Sandbox::create`]): answered already, or
-/// going on on a task of its own.
-enum Keeping {
-    Answered(Result<(), crate::backend::Refusal>),
-    Going(tokio::task::JoinHandle<Result<(), crate::backend::Refusal>>),
-}
-
 /// A sandbox: a machine booted as it was made, again whenever it is needed after it was
 /// [parked](Sandbox::idle) for want of use, and the processes run in it.
 ///
@@ -443,29 +436,17 @@ impl Sandbox {
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
         spike_step("build");
-        // Its disk kept by the backend while its machine boots, the one not waiting on the other:
-        // answered once its machine is up, the backend's answer taken then if it has come, and
-        // otherwise after -- a refusal then closes the sandbox. The backend is asked before the
-        // machine boots, up to its first wait, so that it holds the disk as its own by the time
-        // the boot takes it ([`StorageBackend::made`]); the rest goes on on a task of its own.
-        let size = u64::from(args.disk_gib.unwrap_or(DEFAULT_DISK_GIB)) << 30;
-        let mut kept = match backend {
-            Some(backend) => {
-                let (backend, id) = (Arc::clone(backend), sandbox.id.clone());
-                let mut keeping: futures_util::future::BoxFuture<'static, _> =
-                    Box::pin(async move { backend.made(Stored::Disk(&id), size).await });
-                let first =
-                    std::future::poll_fn(|cx| std::task::Poll::Ready(keeping.as_mut().poll(cx)))
-                        .await;
-                Some(match first {
-                    std::task::Poll::Ready(answered) => Keeping::Answered(answered),
-                    std::task::Poll::Pending => Keeping::Going(tokio::spawn(keeping)),
-                })
+        // The backend holds its disk as its own, `made`, before the machine boots and takes it.
+        if let Some(backend) = backend {
+            let size = u64::from(args.disk_gib.unwrap_or(DEFAULT_DISK_GIB)) << 30;
+            if let Err(e) = backend.made(Stored::Disk(&sandbox.id), size).await {
+                let closed = Arc::clone(&sandbox);
+                tokio::task::spawn_blocking(move || closed.close()).await?;
+                return Err(e.into());
             }
-            None => None,
-        };
+        }
         spike_step("made");
-        let booted = async {
+        let made = async {
             sandbox.wake_in(Some(room)).await?;
             match keys {
                 Some(keys) => sandbox.keep(Record {
@@ -477,48 +458,15 @@ impl Sandbox {
                 None => Ok(()),
             }
         };
-        let booted = booted.await;
+        let booted = made.await;
         spike_step("boot");
-        // The backend's answer now, if it has come or the machine did not boot.
-        let kept_now = match kept.take() {
-            Some(Keeping::Answered(answered)) => Some(answered),
-            Some(Keeping::Going(keeping)) if keeping.is_finished() || booted.is_err() => {
-                Some(keeping.await?)
-            }
-            keeping => {
-                kept = keeping;
-                None
-            }
-        };
-        if matches!(kept_now, Some(Err(_))) || booted.is_err() {
+        if let Err(e) = booted {
             let closed = Arc::clone(&sandbox);
             tokio::task::spawn_blocking(move || closed.close()).await?;
-            // Refused by the backend, its disk is not kept there -- the refusal said, and a boot
-            // that failed beside it logged; kept, it is removed again.
-            if let Some(Err(refused)) = kept_now {
-                if let Err(e) = &booted {
-                    log::warn!("sandbox {}'s machine did not boot either: {e}", sandbox.id);
-                }
-                return Err(refused.into());
-            }
             if let Some(backend) = backend {
                 let _ = backend.remove(Stored::Disk(&sandbox.id)).await;
             }
-            booted?;
-        }
-        // Up, its backend still keeping its disk: refused after, it is closed, and nothing of
-        // it is kept.
-        if let Some(Keeping::Going(keeping)) = kept {
-            let refused = Arc::downgrade(&sandbox);
-            tokio::spawn(async move {
-                let Ok(Err(e)) = keeping.await else {
-                    return;
-                };
-                log::warn!("a sandbox's disk was refused after it was made, and it is closed: {e}");
-                if let Some(sandbox) = refused.upgrade() {
-                    let _ = tokio::task::spawn_blocking(move || sandbox.close()).await;
-                }
-            });
+            return Err(e);
         }
         spike_step("after");
         eprintln!(

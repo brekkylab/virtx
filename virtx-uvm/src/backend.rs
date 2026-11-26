@@ -81,16 +81,12 @@ pub trait StorageBackend: Send + Sync {
     /// written to it. Refused [`Exists`](Refusal::Exists) where one of its name is kept already;
     /// what was made here is then removed.
     ///
-    /// Asked once for a disk, as it is made, before its machine first boots -- polled up to its
-    /// first wait first, which is where the backend takes the disk as its own -- and answered
-    /// while the machine boots: the disk is [taken](Self::take) before this has answered, and
-    /// that take brings nothing up. The sandbox is answered once its machine is up, this
-    /// answered or not. Refused before, the machine is stopped and the sandbox is not made;
-    /// refused after, the sandbox is closed. Either way the [`Held`] its machine's take gave
-    /// drops after the refusal, and that drop is not a keep: nothing of a disk refused is kept.
-    /// One [resized](crate::Sandbox::resize) larger is grown past `size` as its machine boots,
-    /// while it is [taken](Self::take), and is kept larger once the machine is down, with no
-    /// call to the backend to say so. The
+    /// Asked once for a disk, as it is made, and while its machine first boots: the disk is
+    /// [taken](Self::take) before this has answered, and the backend takes it as its own then,
+    /// with nothing to bring up. Refused, the machine is stopped and the sandbox is not made.
+    /// One [resized](crate::Sandbox::resize) larger is
+    /// grown past `size` as its machine boots, while it is [taken](Self::take), and is kept
+    /// larger once the machine is down, with no call to the backend to say so. The
     /// [`Disks`](crate::disks::Disks) an embedder [sets](crate::disks::set_disks) are asked
     /// around the grow: before it, for the disk all in its file
     /// ([`whole`](crate::disks::Disks::whole)), and to forget what they keep beside the disk

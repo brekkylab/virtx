@@ -140,9 +140,11 @@ impl PixelFormat {
     }
 
     /// Where ZRLE's three-byte pixel sits in a 32-bit one, if it has one: every colour bit
-    /// in the low three bytes (`Some(false)`) or in the high three (`Some(true)`).
+    /// in the low three bytes (`Some(false)`) or in the high three (`Some(true)`). Judged by
+    /// where the colours are and not by `depth`, as viewers read it: Apple's asks for depth 32
+    /// with 8-bit colours and reads three bytes.
     fn cpixel_high(&self) -> Option<bool> {
-        if self.bits_per_pixel != 32 || self.depth > 24 || !self.true_colour {
+        if self.bits_per_pixel != 32 || !self.true_colour {
             return None;
         }
         let used = (0..3).fold(0u32, |m, i| {
@@ -611,6 +613,17 @@ mod tests {
     #[test]
     fn a_three_byte_cpixel_is_the_low_bytes_of_the_default_format() {
         let format = PixelFormat::default();
+        let mut out = Vec::new();
+        format.write_cpixel(format.pixel(0x112233), &mut out);
+        assert_eq!(out, [0x33, 0x22, 0x11]);
+    }
+
+    #[test]
+    fn a_cpixel_is_three_bytes_for_8_bit_colours_whatever_the_depth_says() {
+        let format = PixelFormat {
+            depth: 32,
+            ..PixelFormat::default()
+        };
         let mut out = Vec::new();
         format.write_cpixel(format.pixel(0x112233), &mut out);
         assert_eq!(out, [0x33, 0x22, 0x11]);

@@ -5,6 +5,8 @@ mod credentials;
 mod portforward;
 mod stdio;
 mod tcp;
+#[cfg(test)]
+mod tls;
 
 use std::io;
 use std::sync::{PoisonError, RwLock};
@@ -158,20 +160,6 @@ impl TransportClient {
     pub fn set_headers(&self, headers: HeaderMap) {
         if let Connection::Tcp(tcp) = &self.connection {
             tcp.set_headers(headers);
-        }
-    }
-
-    /// Send the requests from now on through `connections` HTTP clients in turn, one until this
-    /// says otherwise: over HTTPS, each one HTTP/2 connection where the server speaks it, so that
-    /// a burst of requests is that many TLS handshakes, its streams spread over them. Over stdio,
-    /// one connection already, nothing changes. Refused for none.
-    pub fn set_connections(&self, connections: usize) -> Result<(), Error> {
-        match &self.connection {
-            Connection::Tcp(tcp) => tcp.set_connections(connections),
-            Connection::Stdio(_) if connections == 0 => {
-                Err(Error::Client("connections: 0 sends nothing".into()))
-            }
-            Connection::Stdio(_) => Ok(()),
         }
     }
 

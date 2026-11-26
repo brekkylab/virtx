@@ -19,6 +19,7 @@ const ABINS: &[(&str, &str)] = &[
     ("virtx-exec-index", "index"),
     ("virtx-exec-docread", "docread"),
     ("virtx-exec-display", "display"),
+    ("virtx-exec-browser", "browser"),
 ];
 
 /// Build the `/abin` programs for the guest, in the debug or release profile, and place them,

@@ -179,7 +179,6 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
         [_HANDLE, ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t, _OUT],
         ctypes.c_int,
     ),
-    "virtx_client_set_connections": ([_HANDLE, ctypes.c_size_t, _OUT], ctypes.c_int),
     "virtx_client_set_project": ([_HANDLE, ctypes.c_char_p, _OUT], ctypes.c_int),
     "virtx_client_retain": ([_HANDLE], None),
     "virtx_client_release": ([_HANDLE], _HANDLE),

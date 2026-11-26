@@ -1,6 +1,10 @@
 //! A TCP connection between the guest and this host: a smoltcp socket on the guest's side, a
 //! host socket on the other, and the bytes moved between their buffers where they lie.
 //!
+//! The guest's SYN is answered only once the host socket's connect is: its SYN-ACK is held
+//! until then, and a connect that fails resets it, so the guest's `connect` ends as one from
+//! this host would.
+//!
 //! The guest's half-close is passed on as a shutdown of the host socket's writing, and the
 //! host's as a FIN to the guest, so each direction ends when its own sender says so. A failure
 //! on the host's side resets the guest's.
@@ -55,6 +59,7 @@ impl TcpFlow {
                 port: to.port(),
             })
             .map_err(io::Error::other)?;
+        socket.pause_synack(true);
         Ok(TcpFlow {
             handle: sockets.add(socket),
             host,
@@ -110,7 +115,10 @@ impl TcpFlow {
                 };
             }
             match self.host.take_error() {
-                Ok(None) => self.connecting = false,
+                Ok(None) => {
+                    self.connecting = false;
+                    socket.pause_synack(false);
+                }
                 Ok(Some(_)) | Err(_) => return self.fail(socket),
             }
         }

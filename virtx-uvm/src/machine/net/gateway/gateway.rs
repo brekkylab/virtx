@@ -526,6 +526,44 @@ mod tests {
         });
     }
 
+    /// A connection the host refuses is reset without being answered first, so the guest's
+    /// `connect` fails as one from this host does.
+    #[test]
+    fn a_connection_the_host_refuses_is_reset_without_being_answered() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let refused = listener.local_addr().unwrap();
+        drop(listener);
+        let mut guest = Guest::new(resolved_at(refused), vec![]);
+        let handle = guest.connect(DNS);
+        guest.until("the connection is reset", |sockets| {
+            let state = sockets.get::<tcp::Socket>(handle).state();
+            assert_ne!(
+                state,
+                tcp::State::Established,
+                "the guest's SYN was answered"
+            );
+            state == tcp::State::Closed
+        });
+    }
+
+    /// The guest's SYN is not answered while the host's connect is not.
+    #[test]
+    fn a_connection_is_not_answered_before_the_hosts_connect_is() {
+        // TEST-NET-1, which nothing answers: the host's connect waits, or fails at once.
+        let mut guest = Guest::new(resolved_at("192.0.2.1:9".parse().unwrap()), vec![]);
+        let handle = guest.connect(DNS);
+        let deadline = Clock::now() + Duration::from_millis(500);
+        guest.until("half a second has passed", |sockets| {
+            let state = sockets.get::<tcp::Socket>(handle).state();
+            assert_ne!(
+                state,
+                tcp::State::Established,
+                "the guest's SYN was answered"
+            );
+            Clock::now() >= deadline
+        });
+    }
+
     /// A datagram reaches where the policy says, and the reply comes back from where the guest
     /// sent it.
     #[test]

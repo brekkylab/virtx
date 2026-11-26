@@ -70,7 +70,7 @@ krun = { path = "../3rdparty/libkrun/src/libkrun", package = "libkrun", features
 # The guest's network: the TCP/IP stack its virtio-net device's frames reach, one thread's
 # poller over the frames and every host socket the guest's connections are carried on, the
 # host sockets connected without blocking, and the connections by slot.
-smoltcp = { version = "0.14", default-features = false, features = ["std", "log", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "log", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-pause-synack"] }
 polling = "3"
 socket2 = "0.6"
 slab = "0.4"

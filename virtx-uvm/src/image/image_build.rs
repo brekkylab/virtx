@@ -150,16 +150,12 @@ async fn step_further(
     tokio::task::spawn_blocking(move || machine::create_upper(&made, crate::DEFAULT_DISK_GIB))
         .await??;
 
-    // From the root, as the guest's init would fail to go somewhere not there yet. Synced
-    // before it is done, since the machine is killed after and what the guest had not put on
-    // the upper disk would be lost.
-    let workdir = machine::workdir(&config);
-    config.set_working_dir(None);
+    // Synced before it is done, since the machine is killed after and what the guest had not
+    // put on the upper disk would be lost.
     let cmd = [
         "/bin/sh",
         "-c",
-        r#"mkdir -p "$0" && cd "$0" && /bin/sh -c "$1"; code=$?; sync; exit $code"#,
-        workdir.as_str(),
+        r#"/bin/sh -c "$0"; code=$?; sync; exit $code"#,
         command,
     ];
     let config = MachineConfig {

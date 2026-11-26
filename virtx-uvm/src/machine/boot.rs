@@ -196,7 +196,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
-        executable(dir);
+        executable(dir, true);
     }
     let alib = beside(ALIB_HOST);
     let env = env(&machine.config, abin.is_some());
@@ -654,14 +654,14 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     #[cfg(windows)]
-    executable(&dir);
+    executable(&dir, false);
     Some(dir)
 }
 
-/// Mark each file directly in `dir` executable for the guest: the programs `/abin` runs by path.
-/// What is in their directories is read, not run -- a library is mapped by the guest's loader
-/// whatever its mode -- so it is left as it is, and a boot writes a stream for a handful of
-/// files rather than for every one.
+/// Mark each file in `dir` executable for the guest, and with `deep` each file under it: `/abin`'s
+/// programs, and what they install beside themselves, which they run by path too, such as
+/// `browser`'s Chromium. `alib/`'s directories hold libraries, which the guest's loader maps
+/// whatever their mode, and many of them, so only its top level is marked.
 ///
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
 /// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no
@@ -669,7 +669,7 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
 /// marked again. A file it fails on is said and skipped, as a host with no `alib/` is a machine
 /// without it.
 #[cfg(windows)]
-fn executable(dir: &Path) {
+fn executable(dir: &Path, deep: bool) {
     const OVERRIDE_STAT: &str = ":user.containers.override_stat";
     const ROOT_EXECUTABLE: &str = "0:0:0100755";
 
@@ -677,6 +677,9 @@ fn executable(dir: &Path) {
         return;
     };
     for path in entries.flatten().map(|entry| entry.path()) {
+        if deep && path.is_dir() {
+            executable(&path, true);
+        }
         if !path.is_file() {
             continue;
         }

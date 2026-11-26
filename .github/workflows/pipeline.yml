@@ -191,7 +191,7 @@ jobs:
         run: cargo xtask init
 
       # The bindings' lint: ruff through uv, biome and tsc through npm.
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - uses: actions/setup-node@v7.1.0
         with:
@@ -260,10 +260,20 @@ jobs:
           path: target/release/abin
           key: abin-${{ matrix.arch }}-${{ hashFiles('virtx-abins/**', 'rust-toolchain.toml', 'xtask/scripts/musl-*.sh', 'xtask/scripts/fetch-musl-sysroot.sh', 'xtask/src/abin.rs') }}
 
+      # What abin's build scripts fetch, each under its sha256: keyed by the scripts that pin them,
+      # so a change to a program's code fetches nothing again.
+      - uses: runs-on/cache@3c223729b4fda74ee12f4976048dd69b420fdd26 # v5
+        if: steps.abin.outputs.cache-hit != 'true'
+        with:
+          path: abin-downloads
+          key: abin-downloads-${{ matrix.arch }}-${{ hashFiles('virtx-abins/*/build.rs') }}
+
       # Its tests too, here where it changed: they are built for the guest's musl target, which
       # this Linux host runs.
       - name: abin
         if: steps.abin.outputs.cache-hit != 'true'
+        env:
+          VIRTX_ABIN_DOWNLOADS: ${{ github.workspace }}/abin-downloads
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm cmake ninja-build
@@ -790,7 +800,7 @@ jobs:
           ls -la /dev/kvm
 
       # Before the compile step, which installs the bindings' packages with them.
-      - uses: astral-sh/setup-uv@v10.3.3
+      - uses: astral-sh/setup-uv@v10.4.0
 
       - uses: actions/setup-node@v7.1.0
         with:

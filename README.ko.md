@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 원격
 
-[직접 서버 운영하기](https://virtx.sh/docs/guides/self-hosting/)를 따라, 직접 관리하는 머신에 `virtx-server-tcp`를 설치하고 설정합니다.
+[직접 서버 운영하기](https://virtx.sh/docs/tutorials/self-hosting/)를 따라, 직접 관리하는 머신에 `virtx-server-tcp`를 설치하고 설정합니다.
 
 `uvx`나 `npx`로 설치 없이 실행되는 `virtx` 명령으로 한 번 로그인한 뒤, `Client.spawn()` 대신 그것이 출력하는 토큰으로 접속합니다.
 나머지는 로컬 예제와 같습니다.
@@ -209,16 +209,15 @@ let client = Client::connect(
 ## 주요 기능
 
 - **신뢰할 수 없는 코드는 내 컴퓨터 밖에서:** 샌드박스는 모두 자체 커널을 가진 microVM이라 네임스페이스 수준이 아니라 하이퍼바이저 수준에서 격리되고, 네트워크도 완전히 끊을 수 있습니다.
-- **어디서 작업하든 그대로:** 어떤 클라이언트든 어느 호스트의 어떤 서버와도 함께 쓸 수 있고, 로컬 서버에서 원격 서버나 클라우드로 옮길 때도 코드 한 줄만 바꾸면 됩니다.
+- **밀리초 단위 부팅:** 새 샌드박스가 35ms 만에 명령을 실행할 준비를 마칩니다(M3 Pro Mac, vCPU 1개, 메모리 128MB 기준).
+- **AI 에이전트 개발에 최적화된 샌드박스:** RAG, 브라우저 사용, GUI 자동화 같은 AI 에이전트 작업을 샌드박스에서 바로 할 수 있습니다. 자세한 내용은 [RAG](https://virtx.sh/docs/guides/implementing-rag/), [브라우저 사용](https://virtx.sh/docs/guides/browser/), [GUI 프로그램](https://virtx.sh/docs/guides/gui-programs/) 가이드를 참고하세요.
+- **외부 컨텍스트 가져오기:** Notion, Google Drive, OneDrive를 샌드박스에 평범한 파일처럼 마운트할 수 있습니다.
+- **GPU 사용:** Linux, macOS, Windows에서 호스트의 GPU를 반가상화해, 샌드박스 안에서 딥러닝 모델을 돌리거나 그래픽 작업을 할 수 있습니다.
+- **어디서든 실행:** 어떤 클라이언트든 어느 호스트의 어떤 서버와도 함께 쓸 수 있고, 로컬 서버에서 원격 서버나 클라우드로 옮길 때도 코드 한 줄만 바꾸면 됩니다.
   - **클라이언트:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **서버:** 💻 로컬 (stdio) · 🖥️ 원격 (tcp) · ☁️ 클라우드
   - **호스트:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **설정은 최소한으로:** 패키지만 설치하면 바로 실행할 수 있고, Docker도 따로 띄워 둘 데몬도 필요 없습니다.
-- **쓰던 이미지를 그대로:** Docker Hub나 어떤 OCI 레지스트리에서든 이미지를 받아 오거나 레시피 또는 Dockerfile로 빌드할 수 있고, 다시 푸시하거나 다른 서버로 복사할 수도 있습니다.
-- **셸 없이 파일 주고받기:** 샌드박스 안의 파일을 코드에서 바로 읽고, 쓰고, 복사하고, 지울 수 있습니다.
-- **안에서 돌아가는 서비스에 바로 접속:** 샌드박스 안의 웹 서버, SSH, VNC 데스크톱, 데이터베이스에 내 컴퓨터의 주소로 접속할 수 있습니다.
-- **하던 작업 이어 가기:** 샌드박스가 쓴 내용을 볼륨에 남겨 다음 샌드박스로 넘기고, 볼륨 하나를 여러 샌드박스가 함께 쓰고, Notion, Google Drive, OneDrive를 평범한 파일처럼 마운트할 수 있습니다.
-- **GPU도 함께:** 샌드박스 안에서 호스트의 GPU로 딥러닝을 비롯한 Vulkan 작업을 돌릴 수 있습니다.
 
 ## 요구 사항
 
@@ -254,7 +253,7 @@ virtx 서버를 실행하는 머신에 필요한 조건입니다.
 GPU를 쓰는 샌드박스에만 필요합니다.
 호스트에 Vulkan 로더가 있어야 합니다.
 게스트 쪽 Vulkan은 모든 샌드박스에 함께 들어 있어서 이미지에는 필요 없습니다.
-자세한 내용은 [GPU 사용하기](https://virtx.sh/docs/guides/using-gpus/)를 참고하세요.
+자세한 내용은 [GPU 사용하기](https://virtx.sh/docs/tutorials/using-gpus/)를 참고하세요.
 
 ## 동작 방식
 

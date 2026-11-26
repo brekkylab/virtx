@@ -117,23 +117,6 @@ test('a project is made, its members set and taken away, and it is removed', asy
   }
 })
 
-test('setConnections sends through as many and refuses none', async () => {
-  const { url, token, project } = fixture()
-  const client = Client.connect(url, { type: 'bearer', token }, project)
-  try {
-    client.setConnections(4)
-    const names = Array.from({ length: 8 }, () => unique('over-four'))
-    const made = await Promise.all(names.map((name) => client.createVolume(name)))
-    assert.deepEqual(made.map((v) => v.name).sort(), [...names].sort())
-    assert.throws(() => client.setConnections(0), { name: 'VirtxError', source: 'client' })
-    assert.throws(() => client.setConnections(-1), { name: 'VirtxError' })
-    const listed = new Set((await client.listVolume()).map((v) => v.name))
-    assert.ok(names.every((name) => listed.has(name)))
-  } finally {
-    await client.close()
-  }
-})
-
 test('setProject changes the project a request reaches', async () => {
   const { url, users } = fixture()
   const name = unique('set')

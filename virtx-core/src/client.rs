@@ -83,14 +83,6 @@ impl Client {
         self.inner.set_headers(headers);
     }
 
-    /// Send the requests from now on through `connections` HTTP clients in turn, one until this
-    /// says otherwise: over HTTPS, each one HTTP/2 connection where the server speaks it, so that
-    /// a burst of requests is that many TLS handshakes, its streams spread over them. Over stdio,
-    /// one connection already, nothing changes. Refused for none.
-    pub fn set_connections(&self, connections: usize) -> Result<(), Error> {
-        self.inner.set_connections(connections)
-    }
-
     /// Name `project` in every request from now on, over either transport -- a project of the
     /// user's by name, or any by its id -- in place of a `virtx-project` among the headers given.
     /// With `None`, that header names it where there is one, and otherwise none is named, for
@@ -879,30 +871,6 @@ pub(crate) mod ffi {
                 unsafe { &(*client).0 }.value().set_headers(map);
                 VIRTX_OK
             }
-            Err(failed) => {
-                let (status, message) = failure(failed);
-                unsafe { write(error, message) };
-                status
-            }
-        }
-    }
-
-    /// Send the requests from now on through `connections` HTTP clients in turn, as
-    /// [`Client::set_connections`] says. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is
-    /// refused written to `error`, the clients unchanged.
-    ///
-    /// # Safety
-    ///
-    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. `error`
-    /// is null or writable.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_set_connections(
-        client: *mut VirtxClient,
-        connections: usize,
-        error: *mut VirtxBytes,
-    ) -> c_int {
-        match unsafe { &(*client).0 }.value().set_connections(connections) {
-            Ok(()) => VIRTX_OK,
             Err(failed) => {
                 let (status, message) = failure(failed);
                 unsafe { write(error, message) };
@@ -2198,35 +2166,6 @@ pub(crate) mod ffi {
             let message = unsafe { std::slice::from_raw_parts(error.data, error.len) };
             assert!(String::from_utf8_lossy(message).contains("not a name"));
             unsafe { virtx_bytes_free(error) };
-            unsafe { virtx_client_release(client) };
-        }
-
-        #[test]
-        fn no_connections_are_refused_and_the_clients_left_as_they_were() {
-            let mut client = ptr::null_mut();
-            let status = unsafe {
-                virtx_client_connect(
-                    c"http://127.0.0.1:9/".as_ptr(),
-                    ptr::null(),
-                    0,
-                    ptr::null(),
-                    0,
-                    &mut client,
-                    ptr::null_mut(),
-                )
-            };
-            assert_eq!(status, VIRTX_OK);
-            let mut error = VirtxBytes {
-                data: ptr::null_mut(),
-                len: 0,
-            };
-            let status = unsafe { virtx_client_set_connections(client, 0, &mut error) };
-            assert_eq!(status, crate::ffi::VIRTX_ERROR);
-            let message = unsafe { std::slice::from_raw_parts(error.data, error.len) };
-            assert!(String::from_utf8_lossy(message).contains("connections"));
-            unsafe { virtx_bytes_free(error) };
-            let status = unsafe { virtx_client_set_connections(client, 4, ptr::null_mut()) };
-            assert_eq!(status, VIRTX_OK);
             unsafe { virtx_client_release(client) };
         }
 

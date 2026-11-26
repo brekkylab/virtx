@@ -161,20 +161,6 @@ impl TransportClient {
         }
     }
 
-    /// Send the requests from now on through `connections` HTTP clients in turn, one until this
-    /// says otherwise: over HTTPS, each one HTTP/2 connection where the server speaks it, so that
-    /// a burst of requests is that many TLS handshakes, its streams spread over them. Over stdio,
-    /// one connection already, nothing changes. Refused for none.
-    pub fn set_connections(&self, connections: usize) -> Result<(), Error> {
-        match &self.connection {
-            Connection::Tcp(tcp) => tcp.set_connections(connections),
-            Connection::Stdio(_) if connections == 0 => {
-                Err(Error::Client("connections: 0 sends nothing".into()))
-            }
-            Connection::Stdio(_) => Ok(()),
-        }
-    }
-
     /// Name `project` in every request from now on, in place of a `virtx-project` among the
     /// headers given. With `None`, that header names it where there is one, and otherwise none
     /// is named, for the user's own project. Refused for a name no header carries, the project

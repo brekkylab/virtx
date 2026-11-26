@@ -155,11 +155,6 @@ api! {
         headers_len: usize,
         error: *mut VirtxBytes,
     ) -> c_int,
-    virtx_client_set_connections: fn(
-        client: *mut Opaque,
-        connections: usize,
-        error: *mut VirtxBytes,
-    ) -> c_int,
     virtx_client_set_project: fn(
         client: *mut Opaque,
         project: *const c_char,

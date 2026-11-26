@@ -218,20 +218,6 @@ impl Client {
         unsafe { take(self.api, status, error) }
     }
 
-    /// Send the requests from now on through `connections` HTTP clients in turn, one until this
-    /// says otherwise: over HTTPS, each one HTTP/2 connection where the server speaks it, so that
-    /// a burst of requests is that many TLS handshakes, its streams spread over them. Over stdio,
-    /// one connection already, nothing changes. Refused for none.
-    pub fn set_connections(&self, connections: usize) -> Result<(), Error> {
-        let mut error = VirtxBytes::empty();
-        let status =
-            unsafe { (self.api.virtx_client_set_connections)(self.raw, connections, &mut error) };
-        if status == VIRTX_OK {
-            return Ok(());
-        }
-        unsafe { take(self.api, status, error) }
-    }
-
     /// Name `project` in every request from now on, over either transport, or with `None`
     /// none, for the user's own project. It is sent in place of a `virtx-project` among the
     /// headers given. Refused for a name no header carries, the project unchanged.

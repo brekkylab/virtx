@@ -197,7 +197,7 @@ See [Networks and ports](/docs/tutorials/networks-ports/).
 | `PortForwarder.open(sandbox, port, on, local)` | `PortForwarder` | Forwards the sandbox's port `port` on the side `on`, `"sandbox"` without it. A port in the sandbox is reached at `local`, a free port on `127.0.0.1` without it; a port on local is reached by the sandbox's processes at `10.0.2.2:port`, each connection carried to `local`, `127.0.0.1:port` without it. Awaited, once it is open. In Node, `open(sandbox, port, { on, local })`. |
 | `port`, `on`, `local` | `int`, `str`, `str` | The port, its side, and its local end as `host:port`. In Rust, `port()`, `on()` and `local()`. |
 | `last_error` | `VirtxError` or `None` | Why the last connection that failed did -- its WebSocket refused, or closed before the port sent a byte, with the server's reason if it gave one, or its target not reached -- naming the port; `None` again once a later connection reaches the port. Each failure is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
-| `wait_closed()` | `VirtxError` | Waits until it has ended, and answers why: for a port on local, `404` once the sandbox is gone. A port in the sandbox is forwarded until it is closed. In Node, `waitClosed()`; in Rust, `closed()`, answered with the error. |
+| `wait_closed()` | `VirtxError` | Waits until it has ended, and answers why: for a port on local, `404` once the sandbox is gone. A port in the sandbox is forwarded until it is closed. In Node, `waitClosed()`. |
 | `close()` | `None` | Stops forwarding; the sandbox keeps its port. In Rust, dropping it does the same. |
 
 ## Environment variables

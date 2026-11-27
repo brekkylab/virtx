@@ -96,7 +96,7 @@ fn a_port_on_local_over_stdio_is_reached_while_it_is_forwarded() {
     assert_eq!(taken.local(), target);
     assert_eq!(answered(&sandbox, port), ["from ::1"]);
     sandbox.remove().wait().unwrap();
-    assert_eq!(taken.closed().wait().unwrap_err().status(), Some(404));
+    assert_eq!(taken.wait_closed().wait().status(), Some(404));
 }
 
 /// Over HTTP a port on local is reached, with no network, while this client forwards it, and
@@ -161,7 +161,7 @@ fn a_port_on_local_over_http_is_reached_while_it_is_forwarded() {
     let (lines, code) = common::run(&sandbox, &["sh", "-c", &at_once]);
     assert_eq!((lines.len(), code), (8, 0), "{lines:?}");
     sandbox.remove().wait().unwrap();
-    assert_eq!(taken.closed().wait().unwrap_err().status(), Some(404));
+    assert_eq!(taken.wait_closed().wait().status(), Some(404));
 }
 
 /// A connection whose target on this machine is not reached is refused, as one to a port

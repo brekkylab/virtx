@@ -1,10 +1,15 @@
 //! A sandbox's port forwarded by this client, on either side of the sandbox: a
 //! `VirtxPortForwarder` held.
 
-use std::sync::Mutex;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Mutex,
+    task::{Context, Poll},
+};
 
 use serde::{Deserialize, Serialize};
-use virtx_core::PortSide;
+use virtx_core::{PortSide, Source};
 
 use crate::{
     Call, Error, Sandbox,
@@ -133,10 +138,40 @@ impl PortForwarder {
         unsafe { take::<serde_json::Value>(api, status, out) }.err()
     }
 
-    /// Answers once it has ended, with what ended it as the error: for a port on local, `404`
-    /// once its sandbox is gone. A port in the sandbox is forwarded until this drops.
-    pub fn closed(&self) -> Call<()> {
+    /// Waits until it has ended, and answers why: for a port on local, `404` once its sandbox
+    /// is gone. A port in the sandbox is forwarded until this drops.
+    pub fn wait_closed(&self) -> Closed {
         let Raw { api, raw } = self.raw;
-        Call::new(api, unsafe { (api.virtx_port_forwarder_closed)(raw) })
+        Closed(Call::new(api, unsafe {
+            (api.virtx_port_forwarder_closed)(raw)
+        }))
     }
+}
+
+/// A [`PortForwarder`] being waited for by [`wait_closed`](PortForwarder::wait_closed):
+/// awaited, or waited for without a runtime with [`wait`](Closed::wait), it answers what ended
+/// it. Dropping it stops waiting, not the forwarder.
+#[must_use = "a wait dropped is stopped"]
+pub struct Closed(Call<()>);
+
+impl Closed {
+    /// Block this thread until the forwarder has ended, for a caller without an async runtime.
+    pub fn wait(self) -> Error {
+        ended(self.0.wait())
+    }
+}
+
+impl Future for Closed {
+    type Output = Error;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Error> {
+        Pin::new(&mut self.0).poll(cx).map(ended)
+    }
+}
+
+/// What ended a forwarder, which the library answers as its error.
+fn ended(answered: Result<(), Error>) -> Error {
+    answered
+        .err()
+        .unwrap_or_else(|| Error::Call(Source::Transport, "it ended".into()))
 }

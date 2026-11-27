@@ -239,7 +239,7 @@ let forwarder =
 
 The forwarder works for any sandbox with the port, made by this program or found again with `get_sandbox`, `find_sandbox` or `list_sandbox`, and several forwarders, of one program or of several, may take a port at once: each connection goes to one of them.
 Closing the forwarder, or dropping it in Rust, lets the port go, and closes the connections it carries.
-It also ends once the sandbox is removed: `wait_closed()` waits for that and answers why, a `404` once the sandbox is gone (`waitClosed()` in Node.js, `closed()` in Rust).
+It also ends once the sandbox is removed: `wait_closed()` waits for that and answers why, a `404` once the sandbox is gone (`waitClosed()` in Node.js).
 What fails on the way, such as a local end not reached, is its last error and logged as a warning, as a port in the sandbox's failures are.
 
 A port on local gives the sandbox's processes whatever the program behind it gives: a browser's debugging port reaches everything that browser is signed in to, and `adb`'s server reaches the device.

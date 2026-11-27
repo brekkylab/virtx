@@ -2321,6 +2321,123 @@ async fn a_shape_whose_restores_do_not_come_up_boots_without_its_snapshot(home: 
     }
 }
 
+/// An image of the same layers as another but an environment of its own comes up with its own,
+/// though the other's machine took the snapshot of their shape first.
+async fn an_image_s_environment_is_its_own_though_another_has_its_layers(home: Home) {
+    let alpine = home
+        .images
+        .get_tag(&ALPINE.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    let (mut config, layers) = home.images.get_image(&alpine).unwrap().unwrap();
+    let mut inner = config.config().clone().unwrap_or_default();
+    let mut env = inner.env().clone().unwrap_or_default();
+    env.push("VIRTX_TEST_ENV=own".to_owned());
+    inner.set_env(Some(env));
+    config.set_config(Some(inner));
+    let image = home.images.insert_image(&config, &layers).unwrap();
+    let reference = "localhost/virtx-test/environment:1";
+    home.images
+        .insert_tag(&reference.parse().unwrap(), &image)
+        .unwrap();
+    let echo = ["sh", "-c", "echo \"[$VIRTX_TEST_ENV]\""];
+
+    let plain = home.sandbox(&small(), None).await;
+    let (a, code) = run(&plain, &echo, None).await.unwrap();
+    assert_eq!(code, 0, "{a:?}");
+    let mut args = SandboxCreateArgs::new(reference);
+    args.memory_mib = small().memory_mib;
+    let own = home.sandbox(&args, None).await;
+    let (b, code) = run(&own, &echo, None).await.unwrap();
+    assert_eq!(code, 0, "{b:?}");
+    assert_eq!((a, b), (vec!["[]".to_owned()], vec!["[own]".to_owned()]));
+    close(plain).await;
+    close(own).await;
+}
+
+/// A machine has the host's clock, the first of its shape -- which takes the snapshot as its
+/// agent waits -- among them.
+async fn a_machine_has_the_host_s_clock(home: Home) {
+    let mut args = SandboxCreateArgs::new(DEBIAN);
+    args.memory_mib = Some(1024);
+    let sandbox = home.sandbox(&args, None).await;
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let (lines, code) = run(&sandbox, &["date", "+%s.%N"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    let guest: f64 = lines[0].parse().unwrap();
+    assert!(
+        guest >= before - 0.25,
+        "the guest's clock {guest:.3} is {:.3} s behind the host's",
+        before - guest
+    );
+    close(sandbox).await;
+}
+
+/// A restore that fails to build once leaves its shape's snapshot to the next machine of it.
+async fn a_restore_that_fails_once_leaves_the_snapshot_to_the_next(home: Home) {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return;
+    }
+    let first = home.sandbox(&small(), None).await;
+    let taken = only_entry(&only_entry(&home.root.join("snapshots")));
+    let state = std::fs::read(taken.join("state")).unwrap();
+    std::fs::write(taken.join("state"), b"no state").unwrap();
+    assert!(home.making(&small(), None, None).await.is_err());
+    std::fs::write(taken.join("state"), &state).unwrap();
+
+    let second = home.sandbox(&small(), None).await;
+    let (lines, code) = run(&second, &["true"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(!taken.join("broken").exists());
+    assert!(taken.join("memory").exists());
+    close(first).await;
+    close(second).await;
+}
+
+/// A restore under way in a process this one may not signal -- another user's -- is not lost.
+async fn a_restore_in_another_user_s_process_is_not_lost(home: Home) {
+    // Root may signal any process.
+    #[cfg(unix)]
+    // SAFETY: only reads the process's user.
+    let root = unsafe { libc::geteuid() } == 0;
+    #[cfg(not(unix))]
+    let root = false;
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) || root {
+        return;
+    }
+    let first = home.sandbox(&small(), None).await;
+    let taken = only_entry(&only_entry(&home.root.join("snapshots")));
+    // Root's processes, which run on.
+    let roots: Vec<String> = std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
+            status
+                .lines()
+                .any(|line| line.starts_with("Uid:\t0\t"))
+                .then(|| pid.to_string())
+        })
+        .take(3)
+        .collect();
+    assert_eq!(roots.len(), 3, "{roots:?}");
+    for pid in &roots {
+        std::fs::File::create(taken.join(format!("restoring-{pid}"))).unwrap();
+    }
+
+    let second = home.sandbox(&small(), None).await;
+    let (lines, code) = run(&second, &["true"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(!taken.join("broken").exists());
+    assert!(taken.join("state").exists());
+    close(first).await;
+    close(second).await;
+}
+
 /// Every file under `dir`, at any depth.
 fn walkdir(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -3289,6 +3406,10 @@ fn main() -> ExitCode {
     let mut beside = Vec::from(tests![
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_shape_whose_restores_do_not_come_up_boots_without_its_snapshot,
+        an_image_s_environment_is_its_own_though_another_has_its_layers,
+        a_machine_has_the_host_s_clock,
+        a_restore_that_fails_once_leaves_the_snapshot_to_the_next,
+        a_restore_in_another_user_s_process_is_not_lost,
         a_snapshot_taken_removes_those_no_machine_here_can_restore,
         a_machine_is_restored_from_the_snapshot_its_shape_s_first_took,
         a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed,

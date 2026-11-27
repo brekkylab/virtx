@@ -561,6 +561,7 @@ jobs:
 
       # The library each package carries loads where its tag says: on macOS 11 with the system's
       # libraries alone, and on Windows with no C runtime DLL (it is linked in, `.cargo/config.toml`).
+      # Nor does it name where it was built.
       - name: The packages' libraries
         run: |
           lib="$RUNNER_TEMP/libs"
@@ -568,6 +569,10 @@ jobs:
           python -m tarfile --filter data -e dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz "$lib/npm"
           for f in "$lib"/wheel/virtx/_virtx_core.* "$lib"/npm/package/*virtx_core.*; do
             echo "$f:"
+            for p in "$HOME" "$GITHUB_WORKSPACE"; do
+              if [ "$RUNNER_OS" = Windows ]; then p=$(cygpath -w "$p"); fi
+              if grep -qaF "$p" "$f"; then echo "::error::$f names $p, where it was built"; fail=1; fi
+            done
             if [ "$RUNNER_OS" = Windows ]; then
               "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
                 | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
@@ -682,7 +687,8 @@ jobs:
           out: dist/release
 
       # The servers and the library each package carries. `__isoc23_*` is glibc 2.38's and comes
-      # in unversioned, so the version alone would not show it.
+      # in unversioned, so the version alone would not show it. A package's library names nowhere
+      # it was built either.
       - name: The glibc floor
         run: |
           lib="$RUNNER_TEMP/libs"
@@ -699,6 +705,9 @@ jobs:
             if printf '%s' "$libs" | grep -qE 'libssl|libcrypto'; then echo "::error::$f links OpenSSL"; fail=1; fi
             # A package's library, as auditwheel's manylinux policy holds it: glibc's libraries alone.
             case "$f" in "$lib"/*)
+              for p in "$HOME" "$GITHUB_WORKSPACE"; do
+                if grep -qaF "$p" "$f"; then echo "::error::$f names $p, where it was built"; fail=1; fi
+              done
               for n in $libs; do
                 case "$n" in
                   libc.so.6|libm.so.6|libdl.so.2|libpthread.so.0|librt.so.1|libgcc_s.so.1|ld-linux-*) ;;

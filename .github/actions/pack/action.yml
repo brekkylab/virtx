@@ -28,6 +28,24 @@ runs:
       with:
         python-version: "3.12"
 
+    # The paths a library's panics name, by where they are under cargo's and rustup's homes, the
+    # clone and its target directory, not where this runner keeps those (the last that matches
+    # wins). For the target alone, so the config's own flags still apply, and for both packages'
+    # builds, which share one.
+    - name: Source paths
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        flags=
+        for pair in "${CARGO_HOME:-$HOME/.cargo}=cargo" "${RUSTUP_HOME:-$HOME/.rustup}=rustup" \
+          "$PWD=virtx" "${CARGO_TARGET_DIR:-$PWD/target}=target"; do
+          from=${pair%=*}
+          if [ "$RUNNER_OS" = Windows ]; then from=$(cygpath -w "$from"); fi
+          flags="$flags --remap-path-prefix=$from=${pair##*=}"
+        done
+        echo "CARGO_TARGET_$(tr a-z- A-Z_ <<<"$TARGET")_RUSTFLAGS=${flags# }" >> "$GITHUB_ENV"
+
     - name: Wheel
       shell: bash
       env:

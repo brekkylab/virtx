@@ -49,6 +49,10 @@ for (const name of NAMES) fs.rmSync(path.join(dir, name), { force: true })
 fs.copyFileSync(built, path.join(dir, file))
 
 if (platform) {
+  // Named by itself, not by the path cargo built it at.
+  if (process.platform === 'darwin') {
+    execFileSync('install_name_tool', ['-id', `@rpath/${file}`, path.join(dir, file)])
+  }
   const root = require('./package.json')
   const name = `${root.name}-${platform}`
   const [os, cpu, abi] = platform.split('-')

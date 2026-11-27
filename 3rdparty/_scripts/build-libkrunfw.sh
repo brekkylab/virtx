@@ -46,11 +46,24 @@ set -eu
 
 # Pinned for the same reason the submodules are: the kernel config and the ABI version
 # have to match what libkrun expects (KRUNFW_NAME, ABI 6).
-LIBKRUNFW_TAG="${LIBKRUNFW_TAG:-v6.0.0}"
+PINNED_TAG=v6.0.0
 # The kernel the tag builds, pinned too: libkrunfw downloads it from a branch of
 # libkrun/linux, whose head moves on after a release. This is that head when v6.0.0 was
-# tagged, Linux 7.3.6; a `LIBKRUNFW_TAG` of another release needs that release's kernel here.
-LIBKRUNFW_KERNEL="${LIBKRUNFW_KERNEL:-68236f25ff94d308744506a41071f9e5bea49e88}"
+# tagged, Linux 7.3.6.
+PINNED_KERNEL=68236f25ff94d308744506a41071f9e5bea49e88
+# Another release is built only with its own kernel: this one under another tag's Makefile
+# and config is a library of neither.
+if [ -n "${LIBKRUNFW_TAG:-}" ] && [ "$LIBKRUNFW_TAG" != "$PINNED_TAG" ] && [ -z "${LIBKRUNFW_KERNEL:-}" ]; then
+    echo "LIBKRUNFW_TAG=$LIBKRUNFW_TAG needs LIBKRUNFW_KERNEL, the libkrun/linux commit it builds" >&2
+    exit 1
+fi
+LIBKRUNFW_TAG="${LIBKRUNFW_TAG:-$PINNED_TAG}"
+LIBKRUNFW_KERNEL="${LIBKRUNFW_KERNEL:-$PINNED_KERNEL}"
+# The whole commit: GitHub names the archive's directory by it, whatever the URL abbreviates.
+if [ "${#LIBKRUNFW_KERNEL}" -ne 40 ] || [ -n "$(printf '%s' "$LIBKRUNFW_KERNEL" | tr -d 0-9a-f)" ]; then
+    echo "LIBKRUNFW_KERNEL is a whole commit, 40 lower-case hex digits: $LIBKRUNFW_KERNEL" >&2
+    exit 1
+fi
 KERNEL_ARGS="KERNEL_REMOTE=https://github.com/libkrun/linux/archive/$LIBKRUNFW_KERNEL.tar.gz"
 KERNEL_ARGS="$KERNEL_ARGS KERNEL_TARBALL=tarballs/linux-$LIBKRUNFW_KERNEL.tar.gz"
 KERNEL_ARGS="$KERNEL_ARGS KERNEL_SOURCES=linux-$LIBKRUNFW_KERNEL"
@@ -98,21 +111,30 @@ case "$TARGET" in
     *) echo "unsupported LIBKRUNFW_TARGET: $TARGET (linux, macos or windows)" >&2 && exit 1 ;;
 esac
 
-# What each target's build was made from: the tag and the kernel. One made from others is
+# What each target's build was made from: the tag and the kernel. A library made from others,
+# or newer than the stamp -- written by another checkout's script, which keeps none -- is
 # built again, and taken out first: its ABI may not be the one libkrun opens, and xtask takes
 # whichever libkrunfw it finds.
 STAMP="$PREFIX/.virtx-stamp-$TARGET"
 WANT="$LIBKRUNFW_TAG $LIBKRUNFW_KERNEL"
-# shellcheck disable=SC2086
-if [ -z "${LIBKRUNFW_REBUILD:-}" ] && [ -n "$(find "$PREFIX" -maxdepth 1 -name "$PATTERN" 2>/dev/null)" ] &&
-    [ "$(cat "$STAMP" 2>/dev/null)" = "$WANT" ]; then
+MADE=no
+if [ -n "$(find "$PREFIX" -maxdepth 1 -name "$PATTERN" 2>/dev/null)" ] &&
+    [ "$(cat "$STAMP" 2>/dev/null)" = "$WANT" ] &&
+    [ -z "$(find "$PREFIX" -maxdepth 1 -name "$PATTERN" -newer "$STAMP" 2>/dev/null)" ]; then
+    MADE=yes
+fi
+if [ -z "${LIBKRUNFW_REBUILD:-}" ] && [ "$MADE" = yes ]; then
     echo "libkrunfw already built in $PREFIX (LIBKRUNFW_REBUILD=1 to build it again)"
     exit 0
 fi
 
 mkdir -p "$BUILD" "$PREFIX"
-find "$PREFIX" -maxdepth 1 -name "$PATTERN" -exec rm -f {} +
-rm -f "$STAMP"
+# A library this build makes again stays, with its stamp, until the new one replaces it: a
+# rebuild that cannot run leaves one that works.
+if [ "$MADE" = no ]; then
+    find "$PREFIX" -maxdepth 1 -name "$PATTERN" -exec rm -f {} +
+    rm -f "$STAMP"
+fi
 
 # A tree from another tag is cloned again rather than moved: the Makefile unpacks the
 # kernel and copies the config in once, so an old tree would keep the old kernel.

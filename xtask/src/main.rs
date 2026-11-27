@@ -933,7 +933,9 @@ fn ready(exe: &Path) -> anyhow::Result<()> {
         .parent()
         .context("the server binary is in a directory")?;
     let beside = dir.join(kernel.file_name().expect("the kernel is a file"));
-    if !beside.is_file() {
+    // Replaced whenever it is not the one built, not only when it is missing: Windows names
+    // every ABI's kernel `libkrunfw.dll`, and a kernel built again keeps its name.
+    if !same_contents(&kernel, &beside)? {
         place(&kernel, &beside)?;
     }
     let alib = alib_dir();
@@ -1320,6 +1322,15 @@ fn stage_bin(built: &Path, bin: &Path, files: &[String], abin: bool) -> anyhow::
         place_dir(&alib, &bin.join("alib"))?;
     }
     Ok(())
+}
+
+/// Whether `copy` exists and holds what `file` does.
+fn same_contents(file: &Path, copy: &Path) -> anyhow::Result<bool> {
+    let Ok(copied) = fs::metadata(copy) else {
+        return Ok(false);
+    };
+    let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
+    Ok(copied.len() == fs::metadata(file)?.len() && read(file)? == read(copy)?)
 }
 
 fn place(from: &Path, to: &Path) -> anyhow::Result<()> {

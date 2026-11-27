@@ -2287,6 +2287,31 @@ async fn a_guest_s_kernel_boots_seeded(home: Home) {
     close(sandbox).await;
 }
 
+/// An i386 ELF that is `exit(42)` through `int 0x80` and nothing else: a 32-bit program that
+/// needs no libc of an image's.
+#[cfg(target_arch = "x86_64")]
+const EXIT_42_I386: [u8; 96] = [
+    0x7f, 0x45, 0x4c, 0x46, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x54, 0x80, 0x04, 0x08, 0x34, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x34, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x04, 0x08,
+    0x00, 0x80, 0x04, 0x08, 0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+    0x00, 0x10, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xbb, 0x2a, 0x00, 0x00, 0x00, 0xcd, 0x80,
+];
+
+/// A 32-bit program runs in an x86_64 guest, as the 32-bit half of Steam and of Wine does: the
+/// guest kernel takes i386 ELF.
+#[cfg(target_arch = "x86_64")]
+async fn a_32_bit_program_runs_in_an_x86_64_guest(home: Home) {
+    let sandbox = home.sandbox(&small(), None).await;
+    let octal: String = EXIT_42_I386.iter().map(|b| format!("\\{b:03o}")).collect();
+    let script =
+        format!("printf '{octal}' > /root/exit42 && chmod +x /root/exit42 && exec /root/exit42");
+    let (lines, code) = run(&sandbox, &["sh", "-c", &script], None).await.unwrap();
+    assert_eq!(code, 42, "{lines:?}");
+    close(sandbox).await;
+}
+
 async fn a_signal_ends_a_job_with_every_process_it_started(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     // The signal reaches the child it left in the background too, which would run on otherwise.
@@ -3244,6 +3269,8 @@ fn main() -> ExitCode {
     // The x86_64 kernels are seeded by their CPU.
     #[cfg(target_arch = "aarch64")]
     beside.extend(tests![a_guest_s_kernel_boots_seeded]);
+    #[cfg(target_arch = "x86_64")]
+    beside.extend(tests![a_32_bit_program_runs_in_an_x86_64_guest]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {

@@ -23,8 +23,7 @@
 //! Without it libkrun advertises the virgl/virgl2 capsets, which the build has no vrend
 //! behind (`-Dvrend=false`), and rutabaga leaves 2D resources and global fences to a
 //! virglrenderer that does nothing with them; with it rutabaga handles both itself. venus
-//! needs none of the GL side. libkrun does not expose the bit in its own flag set, hence
-//! `from_bits_retain`.
+//! needs none of the GL side.
 //!
 //! # `RENDER_SERVER`, everywhere but Windows
 //!
@@ -64,9 +63,6 @@ use krun::{DisplayBackend, DisplayInfoBuilder, GpuDevice, VirglRendererFlags};
 
 use super::Result;
 
-/// `VIRGL_RENDERER_NO_VIRGL` -- see the module doc.
-const NO_VIRGL: VirglRendererFlags = VirglRendererFlags::from_bits_retain(1 << 7);
-
 /// The scanout that is declared and never drawn to. The numbers are arbitrary and the
 /// device only wants there to be one.
 const SCANOUT: (u32, u32) = (1280, 800);
@@ -90,7 +86,7 @@ pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
     let flags = VirglRendererFlags::VENUS
         | VirglRendererFlags::THREAD_SYNC
         | VirglRendererFlags::USE_ASYNC_FENCE_CB
-        | NO_VIRGL;
+        | VirglRendererFlags::NO_VIRGL;
     // See the module doc.
     #[cfg(not(windows))]
     let flags = flags | VirglRendererFlags::RENDER_SERVER;

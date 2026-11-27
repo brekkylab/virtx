@@ -19,6 +19,9 @@ One patch for both hosts, because they share the files. The macOS half:
   reasoning as [libkrun#740](https://github.com/libkrun/libkrun/pull/740),
   rewritten against the current rutabaga API — that PR predates the migration to
   the upstream crate and no longer applies.
+- `add_mapping` unmaps whatever was at the offset before it maps a blob there,
+  and the first blob at an offset finds nothing: that unmap failing is the
+  normal case, so it is logged at debug rather than as an error.
 
 The Windows half is mostly the same code, reached: upstream gates the whole
 blob-mapping path on `target_os = "macos"` — `map_sender`, the `WorkerMessage`

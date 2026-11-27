@@ -297,9 +297,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .collect::<io::Result<_>>()
         .map_err(|e| Error::io("reading where the published ports are", e))?;
 
-    // The guest kernel, which libkrun `dlopen`s rather than links.
-    let mut payload =
-        Payload::load_krunfw().map_err(|e| Error::vmm("loading the guest kernel", e))?;
+    // The guest kernel, which libkrun `dlopen`s rather than links. A caller elsewhere is told
+    // its failure only as a boot error, so the context names the kernel looked for.
+    let mut payload = Payload::load_krunfw()
+        .map_err(|e| Error::vmm("loading the guest kernel, libkrunfw ABI 6", e))?;
     // No bounce buffer. A guest whose RAM reaches past 4 GiB -- the default 4 GiB does, over
     // the MMIO hole -- sets aside 64 MiB for swiotlb and zeroes it while it boots, and no
     // device here bounces through it: none offers `VIRTIO_F_ACCESS_PLATFORM`, so virtio
@@ -307,6 +308,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // touches is a fault its hypervisor resolves: 13 ms of a boot under nested KVM, and under
     // WHP, nested, 2.1s of 6.4.
     payload.append_cmdline("swiotlb=noforce");
+    // The kernel's crypto algorithms are not tested as each registers: on one vCPU those tests
+    // are a third of a boot, run against the init for it. libkrunfw v6.0.0's kernel is built
+    // without them (CRYPTO_SELFTESTS), so this keeps them off in one that turns them back on.
+    #[cfg(target_arch = "aarch64")]
+    payload.append_cmdline("cryptomgr.notests");
 
     let mut overlay = FsOverlay::new();
     for dir in ROOT_DIRS {

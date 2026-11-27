@@ -935,7 +935,19 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("state"), "").unwrap();
             let at = std::time::SystemTime::now() - std::time::Duration::from_secs(idle);
-            std::fs::File::open(dir).unwrap().set_modified(at).unwrap();
+            // Windows opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and sets its
+            // time only where it was opened to write.
+            #[cfg(windows)]
+            let opened = {
+                use std::os::windows::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(0x0200_0000)
+                    .open(dir)
+            };
+            #[cfg(not(windows))]
+            let opened = std::fs::File::open(dir);
+            opened.unwrap().set_modified(at).unwrap();
         }
 
         server.client.prune_image().await.unwrap();

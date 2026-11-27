@@ -719,8 +719,9 @@ const MOST_WAIT: Duration = Duration::from_secs(8);
 /// Take the port `port` on local of the sandbox `sandbox` over `client`, each connection to it
 /// carried to `target`, `host:port`, and each failure on the way said to `failures`: said
 /// [open](Phase::Open) to `said` once it is taken, and ended with the error that ends it, `404`
-/// for a sandbox or a port that is no one's, or once the sandbox is gone. Dropped, the port is
-/// let go of, and the connections it carries closed.
+/// for a sandbox or a port that is no one's, or once the sandbox is gone. Once taken, a refusal
+/// that can pass, `401`, `429`, a `5xx` or no answer, is taken again after a wait; any other, such
+/// as `403`, ends it. Dropped, the port is let go of, and the connections it carries closed.
 async fn take_local(
     client: &TransportClient,
     sandbox: &str,
@@ -773,7 +774,13 @@ async fn take_local(
                 if refused.status == Some(StatusCode::UNAUTHORIZED.as_u16()) {
                     tcp.credentials.refused();
                 }
-                if !opened || refused.status == Some(StatusCode::NOT_FOUND.as_u16()) {
+                // Taken again only past what can pass: a token renewed, a server that is
+                // busy or down.
+                let passing = match refused.status {
+                    None => true,
+                    Some(status) => status == 401 || status == 429 || status >= 500,
+                };
+                if !opened || !passing {
                     let message = format!("port {port} on local: {}", refused.message);
                     return Err(match refused.status {
                         Some(status) => Error::Status(status, message, Default::default()),
@@ -1405,6 +1412,44 @@ mod tests {
             forwarding.await;
             assert_eq!(forward.opened().await.unwrap_err().status(), Some(404));
             assert_eq!(forward.closed().await.status(), Some(404));
+        }
+
+        /// Refused once it was taken, with what will not pass, such as a member removed, it ends
+        /// with that refusal rather than taking it again.
+        #[tokio::test]
+        async fn a_refusal_after_it_was_taken_ends_it() {
+            let taken = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&taken);
+            let app = Router::new().route(
+                "/sandboxes/{id}/client-ports/{port}",
+                get(move |upgrade: WebSocketUpgrade| {
+                    let taken = Arc::clone(&counted);
+                    async move {
+                        if taken.fetch_add(1, SeqCst) > 0 {
+                            let body =
+                                r#"{"error": {"code": "forbidden", "message": "not a member"}}"#;
+                            return (StatusCode::FORBIDDEN, body).into_response();
+                        }
+                        // Taken, then closed with no connection said.
+                        upgrade
+                            .protocols(["virtx.tcp"])
+                            .on_upgrade(|socket| async move { drop(socket) })
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            let client = TransportClient::connect(&base, Auth::None, HeaderMap::new()).unwrap();
+            let args = PortForwarderArgs::new("s", 9222)
+                .on(PortSide::Local)
+                .local("127.0.0.1:9");
+            let (forward, forwarding) = PortForwarder::open(&client, args);
+            tokio::time::timeout(Duration::from_secs(60), forwarding)
+                .await
+                .expect("taken again");
+            assert_eq!(taken.load(SeqCst), 2, "refused only once it was taken");
+            assert_eq!(forward.closed().await.status(), Some(403));
         }
     }
 }

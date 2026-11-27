@@ -611,8 +611,8 @@ impl Sandbox {
         self.up_since.lock().unwrap().map(|(at, _)| at)
     }
 
-    /// The sandbox as the server answers it, each port with what it is for and how it is
-    /// reached but no `url`: only its making answers those, which its server forms.
+    /// The sandbox for its server to answer, each port with what it is for and how it is reached
+    /// but no `url`, which is the server's to give.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),

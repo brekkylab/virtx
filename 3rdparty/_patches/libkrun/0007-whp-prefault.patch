@@ -1,14 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: khj809 <onsealeatang@gmail.com>
 Date: Thu, 12 Nov 2026 11:01:25 +0900
-Subject: whp-prefault: a VmmBuilder option backs guest RAM with host pages before the guest runs
+Subject: whp-prefault: a VmmBuilder option backs guest memory with host pages before the guest runs
 
 ## Why virtx needs it
 
 Under WHP each page the guest first touches is a fault the hypervisor resolves on its own.
 Nested -- a Windows instance in a cloud, as a spot CI runner is -- one costs about 130us, and a guest kernel touches tens of thousands before it reaches init: its struct pages alone were 2s of a 3.8s boot on an m8i.
 VmmBuilder::prefault_memory(true) has memory_init ask WHvAdviseGpaRange to populate each region it maps, writable, which is 1.2s for 4 GiB.
-Off by default: populated, all of a guest's RAM is resident on the host from the start.
+Off by default: populated, all of a guest's memory, its RAM and any GPU window, is resident on the host from the start.
 virtx-uvm turns it on for VIRTX_PREFAULT_MEMORY=1.
 
 ## What it changes
@@ -37,8 +37,8 @@ The struct pages do not: the guest has to initialise them for its RAM below
 above, which saved 0.15s. So the commit gives the host the other side of it.
 `VmmBuilder::prefault_memory(true)` has `memory_init` ask
 `WHvAdviseGpaRange` to populate each region it maps, writable, which is 1.2s
-for 4 GiB at once. The price is that all of the guest's RAM is resident on the
-host from the start, used or not, so it is off by default; `boot.rs` turns it
+for 4 GiB at once. The price is that all of the guest's memory, its RAM and any
+GPU shared-memory window, is resident on the host from the start, used or not, so it is off by default; `boot.rs` turns it
 on for `VIRTX_PREFAULT_MEMORY=1`, which is for a runner whose Windows is itself
 a virtual machine and nothing else. The machine tests on such a runner take 59s with it and 182s without.
 
@@ -69,11 +69,11 @@ index 09721794..5534d224 100644
          Ok(self)
      }
  
-+    /// Back all of guest RAM with host pages before the guest runs, rather than as it first
-+    /// touches each.
++    /// Back all of guest memory, RAM and any shared-memory region such as a GPU's window,
++    /// with host pages before the guest runs, rather than as it first touches each.
 +    ///
 +    /// Only WHP heeds it, where a first touch is costly: nested -- a Windows instance in a
-+    /// cloud -- it is the better part of a boot. The cost is that all of the guest's RAM is
++    /// cloud -- it is the better part of a boot. The cost is that all of that memory is
 +    /// then resident on the host from the start, used or not, so it is off by default.
 +    /// Elsewhere it does nothing.
 +    pub fn prefault_memory(mut self, enabled: bool) -> Self {
@@ -126,7 +126,7 @@ index 049e67cc..95117a2a 100644
      pub reset_exit_code: Option<u8>,
      /// Whether to expose the host's invariant TSC capability.
      pub invariant_tsc: bool,
-+    /// Whether to back all of guest RAM with host pages before the guest runs (WHP only).
++    /// Whether to back all of guest memory with host pages before the guest runs (WHP only).
 +    pub prefault_memory: bool,
      /// Whether to enable split irqchip
      pub split_irqchip: bool,
@@ -148,7 +148,7 @@ index c1810a25..7f649242 100644
      }
  
 -    pub fn memory_init(&mut self, guest_mem: &GuestMemoryMmap) -> Result<()> {
-+    /// Maps guest RAM into the partition and, with `prefault`, backs it with host pages now
++    /// Maps guest memory into the partition and, with `prefault`, backs it with host pages now
 +    /// (see [`WhpVm::prefault_memory`]).
 +    pub fn memory_init(&mut self, guest_mem: &GuestMemoryMmap, prefault: bool) -> Result<()> {
          for region in guest_mem.iter() {

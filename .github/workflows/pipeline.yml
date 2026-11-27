@@ -866,8 +866,7 @@ jobs:
       # machine, which its SMBIOS says (BIOS characteristics extension byte 2, bit 4) where
       # `HypervisorPresent` cannot: Hyper-V's root on bare metal runs over a hypervisor too.
       # Found here rather than told: a job cannot read its runner's labels, and a runner that
-      # is told can be told wrong. The host's free memory is logged beside it, for the next
-      # machine that fails to get some.
+      # is told can be told wrong.
       - id: runner
         name: This runner
         env:
@@ -896,11 +895,13 @@ jobs:
             for ($j = $i + $t[$i + 1]; $j + 1 -lt $t.Length -and ($t[$j] -ne 0 -or $t[$j + 1] -ne 0); $j++) {}
           }
           $cs = Get-CimInstance Win32_ComputerSystem
-          $os = Get-CimInstance Win32_OperatingSystem
           if ($null -ne $ext -and ($ext -band 0x10)) { 'nested' } else { 'bare' }
           if ($null -eq $ext) { 'no SMBIOS BIOS characteristics extension byte 2' }
           else { 'SMBIOS BIOS characteristics extension byte 2 = 0x{0:x2}' -f $ext }
           '{0} {1}' -f $cs.Manufacturer, $cs.Model
+          PS
+          cat > "$RUNNER_TEMP/memory.ps1" <<'PS'
+          $os = Get-CimInstance Win32_OperatingSystem
           'commit {0:N1} of {1:N1} GiB free, physical {2:N1} of {3:N1} GiB free' -f
             ($os.FreeVirtualMemory / 1MB), ($os.TotalVirtualMemorySize / 1MB),
             ($os.FreePhysicalMemory / 1MB), ($os.TotalVisibleMemorySize / 1MB)
@@ -911,7 +912,6 @@ jobs:
           fi
           echo "sccache: ${SCCACHE_BUCKET:+yes}; GPU: ${gpu:-none}"
           echo "Windows: ${host[0]} (${host[1]}; ${host[2]}), so prefault: $([ "${host[0]}" = nested ] && echo yes || echo no)"
-          echo "memory: ${host[3]}"
 
       - uses: ./.github/actions/cargo-deps
 
@@ -943,7 +943,13 @@ jobs:
           mkdir -p build/krunfw
           cp -v guest/kernel/libkrunfw.dll build/krunfw/
 
-      # It fails if cargo compiles anything: the compile step built it all.
-      - run: cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES -- --include-ignored
+      # It fails if cargo compiles anything: the compile step built it all. The host's free
+      # memory is logged before the tests and again if they fail, for a machine that could not
+      # get some.
+      - name: Test
+        run: |
+          memory() { echo "memory: $(powershell -NoProfile -ExecutionPolicy Bypass -File "$RUNNER_TEMP/memory.ps1" | tr -d '\r')"; }
+          memory
+          cargo xtask test --release -p virtx-uvm -p virtx-server-tcp -p virtx-server-stdio $TEST_FEATURES -- --include-ignored || { status=$?; memory; exit $status; }
         env:
           XTASK_TESTS_COMPILED: "1"

@@ -759,7 +759,7 @@ index 422bd608..c1af50bd 100644
          self.vm.remove_mapping(reply_sender, guest_addr, len);
      }
 diff --git a/src/libkrun/src/vmm/windows/vstate.rs b/src/libkrun/src/vmm/windows/vstate.rs
-index 85829f8b..c1810a25 100644
+index 85829f8b..ccb153f3 100644
 --- a/src/libkrun/src/vmm/windows/vstate.rs
 +++ b/src/libkrun/src/vmm/windows/vstate.rs
 @@ -8,12 +8,13 @@
@@ -837,7 +837,7 @@ index 85829f8b..c1810a25 100644
 +    /// Aliases a host pointer into the guest's virtio-gpu shm window.
 +    ///
 +    /// The pointer comes from the venus context's `vkMapMemory`, by way of
-+    /// `virgl_renderer_resource_get_map_ptr()`. WHP takes it: see
++    /// `virgl_renderer_resource_map()`. WHP takes it: see
 +    /// `examples/whp_map_probe.rs`, which checks host-visible system memory and
 +    /// ReBAR alike, with a vCPU reading and writing through the mapping rather
 +    /// than only the call returning S_OK.

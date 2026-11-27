@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: grf53 <grf0503@gmail.com>
 Date: Thu, 5 Nov 2026 14:22:21 +0900
-Subject: virgl-renderer: virgl_renderer on Windows: no render node, export_blob unsupported, map by get_map_ptr
+Subject: virgl-renderer: virgl_renderer on Windows: no render node, export_blob unsupported
 
 ## Why virtx needs it
 
@@ -14,18 +14,18 @@ The patch is Windows-only. `virgl_renderer.rs` opens a DRM render node, folds
 stderr into stdout with `dup2`, and turns exported `int` fds into descriptors —
 none of which exist on Windows. On Windows `export_blob` has to report `Unsupported`, since a
 `RawDescriptor` is a `HANDLE` that does not fit in the `int` virglrenderer
-exports blobs through, and `map()` has to fall back to
-`virgl_renderer_resource_get_map_ptr()`.
+exports blobs through. `map()` needs nothing: virglrenderer maps a blob there
+by lending the venus context's own pointer.
 
 ## When it can go
 
-With virglrenderer's `windows` patch, whose `virgl_renderer_resource_get_map_ptr()` it calls: when upstream virglrenderer serves venus on Windows and upstream rutabaga_gfx builds against it there.
+When upstream virglrenderer serves venus on Windows and upstream rutabaga_gfx builds against it there.
 ---
- src/virgl_renderer.rs | 92 +++++++++++++++++++++++++++++++++----------
- 1 file changed, 72 insertions(+), 20 deletions(-)
+ src/virgl_renderer.rs | 70 ++++++++++++++++++++++++++++++-------------
+ 1 file changed, 50 insertions(+), 20 deletions(-)
 
 diff --git a/src/virgl_renderer.rs b/src/virgl_renderer.rs
-index 1b59275..2336225 100644
+index 1b59275..b0a07c8 100644
 --- a/src/virgl_renderer.rs
 +++ b/src/virgl_renderer.rs
 @@ -18,6 +18,7 @@ use std::mem::ManuallyDrop;
@@ -36,24 +36,7 @@ index 1b59275..2336225 100644
  use std::os::unix::fs::OpenOptionsExt;
  use std::panic::catch_unwind;
  use std::process::abort;
-@@ -45,6 +46,16 @@ use magma_gpu::util::MAGMA_GPU_HANDLE_TYPE_MEM_SHM;
- use magma_gpu::util::MAGMA_GPU_HANDLE_TYPE_SIGNAL_SYNC_FD;
- 
- use crate::generated::virgl_renderer_bindings::*;
-+
-+// Windows' in-process venus context hands out a host pointer instead of a
-+// descriptor: it has no `resource_map` hook, so `virgl_renderer_resource_map`
-+// has no way to produce a mapping, and a descriptor would not fit in the `int`
-+// the blob export API carries anyway. The accessor comes from virglrenderer's `windows` patch,
-+// 3rdparty/_patches/virglrenderer/0004-windows.patch.
-+#[cfg(windows)]
-+unsafe extern "C" {
-+    fn virgl_renderer_resource_get_map_ptr(res_handle: u32, map_ptr: *mut u64) -> c_int;
-+}
- use crate::handle::RutabagaHandle;
- use crate::renderer_utils::ret_to_res;
- use crate::renderer_utils::RutabagaCookie;
-@@ -305,6 +316,14 @@ extern "C" fn get_drm_fd(cookie: *mut c_void) -> c_int {
+@@ -305,6 +306,14 @@ extern "C" fn get_drm_fd(cookie: *mut c_void) -> c_int {
          });
  
          match gpu_path {
@@ -68,7 +51,7 @@ index 1b59275..2336225 100644
              Some(path) => {
                  info!("using provided GPU path {path:?}");
                  OpenOptions::new()
-@@ -432,6 +451,9 @@ impl VirglRenderer {
+@@ -432,6 +441,9 @@ impl VirglRenderer {
          render_server_fd: Option<OwnedDescriptor>,
          rutabaga_paths: Option<RutabagaPaths>,
      ) -> RutabagaResult<Box<dyn RutabagaComponent>> {
@@ -78,7 +61,7 @@ index 1b59275..2336225 100644
          if cfg!(debug_assertions) {
              // TODO(b/315870313): Add safety comment
              #[allow(clippy::undocumented_unsafe_blocks)]
-@@ -527,27 +549,39 @@ impl VirglRenderer {
+@@ -527,27 +539,39 @@ impl VirglRenderer {
              unsafe { virgl_renderer_resource_export_blob(resource_id, &mut fd_type, &mut fd) };
          ret_to_res(ret)?;
  
@@ -96,8 +79,8 @@ index 1b59275..2336225 100644
 -            }
 -        };
 +        // A `RawDescriptor` here is a HANDLE, which does not fit in the `int`
-+        // virglrenderer exports blobs through. The mapping is built from
-+        // `map_ptr` instead (see `map`).
++        // virglrenderer exports blobs through. `map` answers with the venus
++        // context's own pointer instead, which virglrenderer lends.
 +        #[cfg(windows)]
 +        {
 +            let _ = (fd_type, fd);
@@ -138,7 +121,7 @@ index 1b59275..2336225 100644
      }
  }
  
-@@ -685,6 +719,12 @@ impl RutabagaComponent for VirglRenderer {
+@@ -685,6 +709,12 @@ impl RutabagaComponent for VirglRenderer {
                  let ret_fd =
                      unsafe { virgl_renderer_get_fd_for_texture(info_ext.base.tex_id, &mut fd) };
  
@@ -151,22 +134,3 @@ index 1b59275..2336225 100644
                  if ret_fd == 0 && fd >= 0 {
                      // Successfully got DMABUF FD.
                      let fourcc: u32 = info_ext.base.drm_fourcc as u32;
-@@ -947,6 +987,18 @@ impl RutabagaComponent for VirglRenderer {
-         // Safe because virglrenderer wraps and validates use of GL/VK.
-         let ret = unsafe { virgl_renderer_resource_map(resource_id, &mut map, &mut size) };
-         if ret != 0 {
-+            // No `resource_map` hook, and the transient-dmabuf fallback is
-+            // Linux-only; the venus context recorded the host pointer when the
-+            // blob was created.
-+            #[cfg(windows)]
-+            {
-+                let mut map_ptr: u64 = 0;
-+                // SAFETY: virglrenderer is initialized and validates res_handle.
-+                let ret = unsafe { virgl_renderer_resource_get_map_ptr(resource_id, &mut map_ptr) };
-+                if ret == 0 && map_ptr != 0 {
-+                    return Ok(RawMapping { ptr: map_ptr, size });
-+                }
-+            }
-             return Err(RutabagaError::MappingFailed(ret));
-         }
- 

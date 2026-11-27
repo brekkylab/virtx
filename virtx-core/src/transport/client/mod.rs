@@ -2,7 +2,7 @@
 //! closing tell apart. It knows no endpoint's protocol; each is built on [`TransportClient::send`].
 
 mod credentials;
-mod portforward;
+mod port_forward;
 mod stdio;
 mod tcp;
 #[cfg(test)]
@@ -16,7 +16,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 
-pub use self::portforward::{ForwardError, PortForwarder};
+pub use self::port_forward::{ForwardError, PortForwarder, PortForwarderArgs};
 use self::{stdio::Stdio, tcp::Tcp};
 use super::http::refused;
 use crate::{Auth, Error, PROJECT_HEADER};

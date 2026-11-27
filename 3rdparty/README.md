@@ -9,6 +9,7 @@ The guest kernel, libkrunfw, is not among them: [`_scripts/build-libkrunfw.sh`](
 | --- | --- | --- |
 | [libkrun](https://github.com/libkrun/libkrun) | [`_patches/libkrun/`](_patches/libkrun/) | the submodule's own tree, by `cargo xtask init`: cargo takes its crates from there by path |
 | [rutabaga_gfx](https://github.com/magma-gpu/rutabaga_gfx) | [`_patches/rutabaga_gfx/`](_patches/rutabaga_gfx/) | the submodule's own tree, by `cargo xtask init`, likewise |
+| [smoltcp](https://github.com/smoltcp-rs/smoltcp) | [`_patches/smoltcp/`](_patches/smoltcp/) | the submodule's own tree, by `cargo xtask init`, likewise |
 | [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) | [`_patches/virglrenderer/`](_patches/virglrenderer/) | a copy under `build/`, by [`_scripts/build-virglrenderer.sh`](_scripts/build-virglrenderer.sh) and [`.ps1`](_scripts/build-virglrenderer.ps1) |
 | [MoltenVK](https://github.com/KhronosGroup/MoltenVK) | [`_patches/MoltenVK/`](_patches/MoltenVK/) | a copy under `build/`, by [`_scripts/build-moltenvk.sh`](_scripts/build-moltenvk.sh) |
 | [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) | [`_patches/SPIRV-Cross/`](_patches/SPIRV-Cross/) | a copy under `build/`, by [`_scripts/build-moltenvk.sh`](_scripts/build-moltenvk.sh) |

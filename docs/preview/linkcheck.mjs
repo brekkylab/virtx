@@ -7,11 +7,15 @@
 // The preview serves the pages under /docs/, as the site does, so dist/ holds what the site has at
 // /docs/. A link outside /docs/ is to one of the site's own pages, which the preview does not have:
 // those in SITE_PAGES are let through, any other is broken.
+//
+// It also fails when the links under content/index.mdx's `## Tutorials` or `## Guides` are not the
+// pages of the sidebar group of that label, in its order.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const BASE = '/docs/';
 const SITE_PAGES = ['/signin/', '/signup/'];
+const LISTED = ['Tutorials', 'Guides'];
 const dist = process.argv[2] ?? 'dist';
 
 const walk = (dir) =>
@@ -57,6 +61,21 @@ for (const [file, { links }] of pages) {
   }
 }
 
+// the index's Tutorials and Guides, against the sidebar's groups of those labels
+const index = readFileSync(new URL('../content/index.mdx', import.meta.url), 'utf8');
+const sidebar = JSON.parse(readFileSync(new URL('../sidebar.json', import.meta.url), 'utf8'));
+const drift = [];
+for (const label of LISTED) {
+  const section = index.split(/^## /m).find((s) => s.startsWith(`${label}\n`)) ?? '';
+  const listed = [...section.matchAll(/^- \[[^\]]*\]\(([^)]*)\)/gm)].map((m) => m[1]);
+  const group = sidebar.find((g) => g.label === label)?.items ?? [];
+  const slugs = group.map((i) => `${BASE}${i.slug}/`);
+  if (listed.join() !== slugs.join()) drift.push([label, listed, slugs]);
+}
+
 console.log(`linkcheck: ${pages.size} pages, ${total} internal refs, ${broken.length} broken`);
 for (const [file, link, why] of broken) console.log(`${relative(dist, file)}\t${link}\t${why}`);
-process.exit(broken.length ? 1 : 0);
+for (const [label, listed, slugs] of drift) {
+  console.log(`content/index.mdx: ## ${label} lists\n  ${listed.join('\n  ')}\nbut the sidebar has\n  ${slugs.join('\n  ')}`);
+}
+process.exit(broken.length || drift.length ? 1 : 0);

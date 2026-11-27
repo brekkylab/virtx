@@ -8,7 +8,6 @@
 //! keeps its sandboxes' upper disks and its volumes under a home of its own.
 
 use std::{
-    collections::HashMap,
     env,
     ffi::OsString,
     path::{Path, PathBuf},
@@ -25,8 +24,8 @@ use futures_util::{
 };
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use virtx_core::{
-    ImageName, SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry,
-    SandboxResizeArgs, SandboxResources, SandboxVolume,
+    ImageName, PortSide, PortSpec, SandboxCreateArgs, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, SandboxPort, SandboxResizeArgs, SandboxResources, SandboxVolume,
 };
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
@@ -61,7 +60,7 @@ const HANG: Duration = Duration::from_secs(60);
 
 /// A sandbox of [`ALPINE`] with 1 GiB of memory: enough for what these tests run in it, and little
 /// enough that the suite's machines, booting at once, fit a host that commits each one's memory as
-/// it boots (`VIRTX_PREFAULT_MEMORY`, as Windows' CI runs them), where 4 GiB each does not.
+/// it boots, as Windows does, where 4 GiB each does not.
 fn small() -> SandboxCreateArgs {
     let mut args = SandboxCreateArgs::new(ALPINE);
     args.memory_mib = Some(1024);
@@ -93,16 +92,15 @@ impl Home {
         args: &SandboxCreateArgs,
         park_after: Option<Duration>,
     ) -> Arc<Sandbox> {
-        self.making(args, park_after, None).await.unwrap()
+        self.making(args, park_after, false).await.unwrap()
     }
 
-    /// Making a sandbox as `args` asks, kept past this process with `keys` where they are
-    /// given.
+    /// Making a sandbox as `args` asks, kept past this process if `kept`.
     async fn making(
         &self,
         args: &SandboxCreateArgs,
         park_after: Option<Duration>,
-        keys: Option<HashMap<String, u16>>,
+        kept: bool,
     ) -> Result<Arc<Sandbox>, SandboxError> {
         Sandbox::create(
             &self.images,
@@ -112,7 +110,7 @@ impl Home {
             vm(),
             park_after,
             None,
-            keys,
+            kept,
             &Backing::default(),
         )
         .await
@@ -354,8 +352,7 @@ async fn leave(sandbox: Arc<Sandbox>) {
 }
 
 async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote(home: Home) {
-    let keys = HashMap::from([("key".to_owned(), 8080)]);
-    let kept = home.making(&small(), None, Some(keys.clone())).await;
+    let kept = home.making(&small(), None, true).await;
     let kept = kept.unwrap();
     let gone = home.sandbox(&small(), None).await;
     let write = ["sh", "-c", "echo kept > /root/kept"];
@@ -383,11 +380,10 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
     let sandbox_deleted = Some(SandboxJobEndReason::SandboxDeleted);
     assert_eq!(deleted.get().reason, sandbox_deleted);
     let known = home.kept();
-    assert_eq!(known.len(), 1, "the one made without keys goes");
+    assert_eq!(known.len(), 1, "the one not made to be kept goes");
     let again = &known[0];
     assert_eq!(again.id(), id);
     assert!(again.answer().running);
-    assert_eq!(again.keys(), keys);
     // Its jobs are kept, the one that ran then ended by the restart, each log its end alone.
     let ended: Vec<_> = again
         .jobs()
@@ -419,7 +415,7 @@ async fn a_kept_sandbox_is_known_again_past_its_server_parked_with_what_it_wrote
 }
 
 async fn a_kept_sandbox_whose_machine_ends_on_its_own_has_exited_past_its_server(home: Home) {
-    let sandbox = home.making(&small(), None, Some(HashMap::new())).await;
+    let sandbox = home.making(&small(), None, true).await;
     let sandbox = sandbox.unwrap();
     // A reset, which ends a machine on every arch.
     let reset = run(&sandbox, &["sh", "-c", "sync; reboot -f"], None);
@@ -441,7 +437,7 @@ async fn a_kept_sandbox_whose_making_is_cut_short_leaves_nothing(home: Home) {
     // Cut short at each point of its making, from its disk to its boot.
     let args = small();
     for after in [20, 100, 300, 1000] {
-        let making = home.making(&args, None, Some(HashMap::new()));
+        let making = home.making(&args, None, true);
         let made = tokio::time::timeout(Duration::from_millis(after), making).await;
         if let Ok(made) = made {
             close(made.unwrap()).await;
@@ -462,11 +458,10 @@ async fn a_kept_sandbox_whose_making_is_cut_short_leaves_nothing(home: Home) {
     }
 }
 
-/// A sandbox made under an id given it has that id, and is kept and known again by it with its
-/// keys. Another is refused that id while it is here and once it is let go of, its disk and
+/// A sandbox made under an id given it has that id, and is kept and known again by it. Another is refused that id while it is here and once it is let go of, its disk and
 /// record left; an id that is not one is refused, and neither refusal makes anything.
 async fn a_sandbox_is_made_under_an_id_given_it(home: Home) {
-    let making = async |id: &str, keys: Option<HashMap<String, u16>>| {
+    let making = async |id: &str, kept: bool| {
         Sandbox::create(
             &home.images,
             &home.root,
@@ -475,16 +470,14 @@ async fn a_sandbox_is_made_under_an_id_given_it(home: Home) {
             vm(),
             None,
             Some(id),
-            keys,
+            kept,
             &Backing::default(),
         )
         .await
     };
-    let keys = HashMap::from([("key".to_owned(), 8080)]);
-    let made = making("sbx_given-1", Some(keys.clone())).await.unwrap();
+    let made = making("sbx_given-1", true).await.unwrap();
     assert_eq!(made.id(), "sbx_given-1");
     assert_eq!(made.answer().id, "sbx_given-1");
-    assert_eq!(made.keys(), keys);
     let left = home.left();
     assert!(
         left.contains(&"sbx_given-1.ext4".to_owned())
@@ -492,7 +485,7 @@ async fn a_sandbox_is_made_under_an_id_given_it(home: Home) {
         "{left:?}"
     );
 
-    let again = making("sbx_given-1", Some(HashMap::new())).await.err();
+    let again = making("sbx_given-1", true).await.err();
     assert!(matches!(again, Some(SandboxError::Exists(_))), "{again:?}");
     for id in [
         "",
@@ -504,7 +497,7 @@ async fn a_sandbox_is_made_under_an_id_given_it(home: Home) {
         "a b",
         &"a".repeat(65),
     ] {
-        let refused = making(id, None).await.err();
+        let refused = making(id, false).await.err();
         assert!(
             matches!(refused, Some(SandboxError::Invalid(_))),
             "{id:?}: {refused:?}"
@@ -513,12 +506,11 @@ async fn a_sandbox_is_made_under_an_id_given_it(home: Home) {
     assert_eq!(home.left(), left, "nothing made by a refusal");
 
     leave(made).await;
-    let again = making("sbx_given-1", None).await.err();
+    let again = making("sbx_given-1", false).await.err();
     assert!(matches!(again, Some(SandboxError::Exists(_))), "{again:?}");
     let known = home.kept();
     assert_eq!(known.len(), 1);
     assert_eq!(known[0].id(), "sbx_given-1");
-    assert_eq!(known[0].keys(), keys);
     close(Arc::clone(&known[0])).await;
     assert_eq!(home.left(), Vec::<String>::new());
 }
@@ -620,7 +612,6 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
         },
     ];
     let park = Some(Duration::from_millis(500));
-    let keys = Some(HashMap::new());
     let sandbox = Sandbox::create(
         &home.images,
         &home.root,
@@ -629,7 +620,7 @@ async fn a_sandbox_kept_beyond_its_machine_takes_its_disk_and_volumes_while_it_r
         vm(),
         park,
         None,
-        keys,
+        true,
         &backing,
     );
     let sandbox = sandbox.await.unwrap();
@@ -1384,7 +1375,7 @@ async fn a_machine_boots_only_with_room_given_back_as_it_goes_down(home: Home) {
         vm,
         None,
         None,
-        None,
+        false,
         &Backing::default(),
     )
     .await;
@@ -1677,7 +1668,7 @@ async fn a_machine_paused_past_the_silence_bound_runs_on(home: Home) {
         vm,
         None,
         None,
-        None,
+        false,
         &Backing::default(),
     )
     .await
@@ -1733,7 +1724,7 @@ async fn a_guest_that_halts_ends_its_machine_and_its_jobs(home: Home) {
         vm,
         park_after,
         None,
-        None,
+        false,
         &Backing::default(),
     )
     .await
@@ -1797,7 +1788,7 @@ async fn a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so(home: Hom
     let mut args = small();
     args.vcpus = Some(2);
     args.disk_gib = Some(1);
-    let sandbox = home.making(&args, None, Some(HashMap::new())).await;
+    let sandbox = home.making(&args, None, true).await;
     let sandbox = sandbox.unwrap();
     let said = async |sandbox: &Arc<Sandbox>, cmd: &str| -> String {
         let (lines, _) = run(sandbox, &["sh", "-c", cmd], None).await.unwrap();
@@ -1913,7 +1904,7 @@ async fn a_sandbox_s_args_are_what_it_was_made_with_as_last_resized(home: Home) 
         disk_gib: Some(1),
         ..small()
     };
-    let sandbox = home.making(&asked, None, Some(HashMap::new())).await;
+    let sandbox = home.making(&asked, None, true).await;
     let sandbox = sandbox.unwrap();
     let mut made = asked.clone();
     made.image = ImageName::Digest {
@@ -2068,6 +2059,14 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     let out = ["nc", "-z", "-w", "5", "8.8.8.8", "443"];
     let with = home.sandbox(&small(), None).await;
     assert_eq!(run(&with, &out, None).await.unwrap().1, 0);
+    let named = ["nc", "-z", "-w", "5", "dns.google", "443"];
+    let (lines, code) = run(&with, &named, None).await.unwrap();
+    assert_eq!(code, 0, "reached no name: {lines:?}");
+    // The nameserver at its v6 address: the guest's v6 is up, though a host without v6 reaches
+    // nothing on it beyond.
+    let over_v6 = ["nslookup", "dns.google", "fd00::3"];
+    let (lines, code) = run(&with, &over_v6, None).await.unwrap();
+    assert_eq!(code, 0, "resolved nothing over v6: {lines:?}");
     close(with).await;
     // A published port gives the machine its network device, and still no way out.
     for ports in [vec![], vec![8080.into()]] {
@@ -2081,6 +2080,126 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
         assert_ne!(code, 0, "reached out with ports {ports:?}: {lines:?}");
         close(without).await;
     }
+}
+
+/// Each way through a port, the guest's listener on its loopback alone for the way in.
+async fn a_sandbox_s_published_ports_carry_megabytes_each_way(home: Home) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    const SIZE: usize = 4 << 20;
+    let args = SandboxCreateArgs {
+        network: false,
+        ports: vec![8080.into(), 8081.into()],
+        ..small()
+    };
+    let sandbox = home.sandbox(&args, None).await;
+    let listening = |port: u16| format!("until netstat -ltn | grep -q :{port}; do sleep 0.1; done");
+
+    let counting = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        async move {
+            run(
+                &sandbox,
+                &["sh", "-c", "nc -l -s 127.0.0.1 -p 8080 | wc -c"],
+                None,
+            )
+            .await
+        }
+    });
+    run(&sandbox, &["sh", "-c", &listening(8080)], None)
+        .await
+        .unwrap();
+    let mut stream = sandbox.connect(8080).await.unwrap();
+    stream.write_all(&vec![7; SIZE]).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let (lines, code) = counting.await.unwrap().unwrap();
+    assert_eq!((lines, code), (vec![SIZE.to_string()], 0));
+
+    let serving = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        let serve = format!("head -c {SIZE} /dev/zero | nc -l -p 8081");
+        async move { run(&sandbox, &["sh", "-c", &serve], None).await }
+    });
+    run(&sandbox, &["sh", "-c", &listening(8081)], None)
+        .await
+        .unwrap();
+    let mut stream = sandbox.connect(8081).await.unwrap();
+    let mut got = vec![1; SIZE];
+    stream.read_exact(&mut got).await.unwrap();
+    assert!(got.iter().all(|&b| b == 0));
+    drop(stream);
+    serving.await.unwrap().unwrap();
+    close(sandbox).await;
+}
+
+/// A process reaches a port on local at the gateway while the port is taken, without a
+/// network: carried both ways once a taker accepts it, refused when it does not or no one takes
+/// the port, and refused for a port the sandbox was not made with. The same number in the
+/// sandbox is another port.
+async fn a_sandbox_s_port_on_local_is_reached_while_it_is_taken(home: Home) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let args = SandboxCreateArgs {
+        network: false,
+        ports: vec![
+            PortSpec::new(9222).on(PortSide::Local).label("echo"),
+            PortSpec::new(9222),
+        ],
+        ..small()
+    };
+    let sandbox = home.sandbox(&args, None).await;
+    let answered = sandbox.answer().ports;
+    assert_eq!(
+        answered,
+        [
+            SandboxPort {
+                port: 9222,
+                on: PortSide::Local,
+                url: None,
+                label: Some("echo".into())
+            },
+            SandboxPort {
+                port: 9222,
+                on: PortSide::Sandbox,
+                url: None,
+                label: None
+            }
+        ]
+    );
+    let ask = ["sh", "-c", "echo hi | nc -w 5 10.0.2.2 9222"];
+
+    // No one takes it.
+    let (lines, code) = run(&sandbox, &ask, None).await.unwrap();
+    assert_ne!(code, 0, "reached a port no one takes: {lines:?}");
+
+    let taker = sandbox.take_client_port(9222).unwrap();
+    let asking = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        async move { run(&sandbox, &ask, None).await }
+    });
+    let mut carried = taker.next().await.unwrap().accept().await.unwrap();
+    let mut said = [0u8; 3];
+    carried.read_exact(&mut said).await.unwrap();
+    assert_eq!(&said, b"hi\n");
+    carried.write_all(b"back\n").await.unwrap();
+    drop(carried);
+    let (lines, code) = asking.await.unwrap().unwrap();
+    assert_eq!((lines, code), (vec!["back".to_owned()], 0));
+
+    // Not accepted.
+    let asking = tokio::spawn({
+        let sandbox = Arc::clone(&sandbox);
+        async move { run(&sandbox, &ask, None).await }
+    });
+    drop(taker.next().await.unwrap());
+    let (lines, code) = asking.await.unwrap().unwrap();
+    assert_ne!(code, 0, "reached a connection not accepted: {lines:?}");
+
+    // Not one it was made with.
+    let other = ["nc", "-z", "-w", "5", "10.0.2.2", "5037"];
+    assert_ne!(run(&sandbox, &other, None).await.unwrap().1, 0);
+    drop(taker);
+    close(sandbox).await;
 }
 
 async fn a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config(home: Home) {
@@ -2270,6 +2389,7 @@ async fn a_machine_that_did_not_start_tells_why_without_this_host_s_paths(home: 
         }],
         abin: None,
         ports: Vec::new(),
+        client_ports: None,
         sandbox_disk: None,
     };
     let started = tokio::task::spawn_blocking(move || Machine::start(config, &vm()))
@@ -2408,13 +2528,14 @@ async fn vulkan_devices(sandbox: &Arc<Sandbox>) -> Vec<String> {
     devices
 }
 
-/// A sandbox with a GPU of `memory_mib` (libkrun's 8 GiB for `None`) and the guest half
-/// installed.
+/// A sandbox with 1 GiB of RAM, as [`small`]'s, a GPU of `memory_mib` (1 GiB for `None`), and
+/// the guest half installed. Windows backs the GPU's window with committed memory, as it does
+/// RAM, so libkrun's 8 GiB window and 4 GiB of RAM each would not fit a host the suite shares.
 async fn gpu_sandbox(home: &Home, memory_mib: Option<u32>, park: Option<Duration>) -> Arc<Sandbox> {
-    let mut args = SandboxCreateArgs::new(GPU_IMAGE).gpu(true);
-    if let Some(mib) = memory_mib {
-        args = args.gpu_memory_mib(mib);
-    }
+    let mut args = SandboxCreateArgs::new(GPU_IMAGE)
+        .gpu(true)
+        .gpu_memory_mib(memory_mib.unwrap_or(1024));
+    args.memory_mib = Some(1024);
     let sandbox = home.sandbox(&args, park).await;
     apk_add(&sandbox, &GPU_GUEST).await;
     sandbox
@@ -2463,7 +2584,9 @@ async fn a_gpu_sandbox_finds_the_host_s_gpu_through_venus(home: Home) {
 /// A sandbox that does not ask for one gets no GPU, in a build that has them and on a host
 /// that has one: the same guest, the same driver, and nothing for it to find.
 async fn a_sandbox_that_asks_for_no_gpu_finds_none(home: Home) {
-    let sandbox = home.sandbox(&SandboxCreateArgs::new(GPU_IMAGE), None).await;
+    let mut args = SandboxCreateArgs::new(GPU_IMAGE);
+    args.memory_mib = Some(1024);
+    let sandbox = home.sandbox(&args, None).await;
     apk_add(&sandbox, &GPU_GUEST).await;
     let devices = vulkan_devices(&sandbox).await;
     assert!(
@@ -2564,8 +2687,7 @@ async fn a_parked_gpu_sandbox_boots_again_with_its_gpu(home: Home) {
     close(sandbox).await;
 }
 
-/// Sandboxes with GPUs at once each have their own, and each gets its own work back. Each
-/// asks for 1 GiB, so two fit beside each other's RAM on any host these run on.
+/// Sandboxes with GPUs at once each have their own, and each gets its own work back.
 async fn gpu_sandboxes_made_at_once_each_compute_their_own(home: Home) {
     let made = join_all((0..2).map(|_| gpu_sandbox(&home, Some(1024), None))).await;
     join_all(made.iter().map(build_gpu_tool)).await;
@@ -3102,6 +3224,8 @@ fn main() -> ExitCode {
         a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown,
         a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
+        a_sandbox_s_published_ports_carry_megabytes_each_way,
+        a_sandbox_s_port_on_local_is_reached_while_it_is_taken,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,

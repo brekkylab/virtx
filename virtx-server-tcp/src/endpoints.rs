@@ -19,31 +19,35 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, ProjectCreateArgs, ProjectListOutputItem,
-    ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
-    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
-    accepts_event_stream, described_type, from_body,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortSide, ProjectCreateArgs,
+    ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs,
+    SandboxStdinArgs, Step, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
+    VolumeMountListOutputItem, accepts_event_stream, described_type, from_body,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
-    Activity, BuildError, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files,
-    HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
-    MachineSpec, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
-    RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
-    UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after, signal_number,
+    BuildError, ClientPortTaker, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError,
+    Files, HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT,
+    MachineError, MachineSpec, NoRoom, Os, PublicImages, PublicRegistries, Reference,
+    RegistryClient, RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError,
+    StorageBackend, UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after,
+    signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -81,12 +85,9 @@ pub struct Home {
     /// This binary, as each machine is spawned.
     vm: Vec<OsString>,
     /// The sandboxes, by id, until each is removed.
-    sandboxes: Mutex<HashMap<String, Held>>,
+    sandboxes: Mutex<HashMap<String, Arc<Sandbox>>>,
     /// The names sandboxes being made have taken, each until it is made or is not.
     naming: Mutex<HashSet<String>>,
-    /// The port keys sandboxes being made by [`Home::make`] have taken, each until it is made
-    /// or is not.
-    keying: Mutex<HashSet<String>>,
     /// Each sandbox kept here that could not be known again, by id, until it is removed: listed
     /// with why, and refused all but its `DELETE`.
     unknown: Mutex<HashMap<String, UnknownSandbox>>,
@@ -129,17 +130,7 @@ impl Home {
         let sandboxes = kept
             .known
             .into_iter()
-            .map(|sandbox| {
-                let capabilities = sandbox.keys();
-                let id = sandbox.id().to_owned();
-                (
-                    id,
-                    Held {
-                        sandbox,
-                        capabilities,
-                    },
-                )
-            })
+            .map(|sandbox| (sandbox.id().to_owned(), sandbox))
             .collect();
         Ok(Home {
             images,
@@ -154,7 +145,6 @@ impl Home {
             sandboxes: Mutex::new(sandboxes),
             unknown: Mutex::new(unknown),
             naming: Mutex::default(),
-            keying: Mutex::default(),
             image_jobs: Mutex::default(),
             closed: AtomicBool::default(),
             backing,
@@ -217,15 +207,11 @@ impl Home {
             id,
         )
         .await?;
-        let held = Held {
-            capabilities: sandbox.keys(),
-            sandbox: Arc::clone(&sandbox),
-        };
         let closed = {
             let mut sandboxes = self.sandboxes.lock().unwrap();
             let closed = self.closed.load(Ordering::SeqCst);
             if !closed {
-                sandboxes.insert(id.to_owned(), held);
+                sandboxes.insert(id.to_owned(), Arc::clone(&sandbox));
             }
             closed
         };
@@ -236,42 +222,25 @@ impl Home {
         Ok(sandbox.answer())
     }
 
-    /// A sandbox made of `args` under the id and port keys `given` it, rather than ones picked
-    /// here: for a server built on this one that names its sandboxes itself, as one that moves
-    /// them between servers does, each keeping the id and port URLs its client holds. Made and
-    /// answered as `POST /sandboxes/` makes and answers one, each port's URL `ports/<key>`,
-    /// relative. Refused `400` for an id that cannot be one, or keys that
-    /// are not one for each port; `409` `exists` for an id a sandbox here has, has made or keeps
-    /// -- one let go of here is [taken in](Home::take_in) instead -- or a key one opens a port
-    /// by or is being made with; and as `POST /sandboxes/` is otherwise. See [`Given::keys`]
-    /// for what keeps a key one port's across the server's homes, which this does not check.
+    /// A sandbox made of `args` under the id `given` it, rather than one picked here: for a
+    /// server built on this one that names its sandboxes itself, as one that moves them between
+    /// servers does, each keeping the id its client holds. Made and answered as
+    /// `POST /sandboxes/` makes and answers one. Refused `400` for an id that cannot be one;
+    /// `409` `exists` for an id a sandbox here has, has made or keeps -- one let go of here is
+    /// [taken in](Home::take_in) instead; and as `POST /sandboxes/` is otherwise.
     pub async fn make(
         &self,
         args: SandboxCreateArgs,
         given: Given,
     ) -> Result<virtx_core::Sandbox, Refused> {
-        let Given { id, keys } = given;
-        if let Some(key) = keys.keys().find(|key| !is_key(key)) {
-            return Err(invalid(format!(
-                "keys: {key:?} is not a key: letters and digits, 128 at most"
-            )));
-        }
-        let ports: HashSet<u16> = args.ports.iter().map(|spec| spec.port).collect();
-        let opened: HashSet<u16> = keys.values().copied().collect();
-        if opened != ports || keys.len() != ports.len() {
-            return Err(invalid("keys: not one for each of its ports"));
-        }
-        let _keying = self.keying(&keys)?;
-        self.create(args, Some(&id), keys).await
+        self.create(args, Some(&given.id)).await
     }
 
-    /// A sandbox made of `args`, under `id` where it is given, each port behind its key in
-    /// `keys`, and answered with each port's URL `ports/<key>`.
+    /// A sandbox made of `args`, under `id` where it is given, and kept past this process.
     async fn create(
         &self,
         args: SandboxCreateArgs,
         id: Option<&str>,
-        keys: HashMap<String, u16>,
     ) -> Result<virtx_core::Sandbox, Refused> {
         let _naming = self.naming(args.name.as_deref())?;
         let sandbox = Sandbox::create(
@@ -282,26 +251,18 @@ impl Home {
             self.vm.clone(),
             park_after(),
             id,
-            Some(keys.clone()),
+            true,
             &self.backing,
         )
         .await?;
 
         let id = sandbox.id().to_owned();
-        let mut answer = sandbox.answer();
-        for port in &mut answer.ports {
-            let key = keys.iter().find(|(_, opens)| **opens == port.port);
-            port.url = key.map(|(key, _)| format!("ports/{key}"));
-        }
-        let held = Held {
-            sandbox: Arc::clone(&sandbox),
-            capabilities: keys,
-        };
+        let answer = sandbox.answer();
         let closed = {
             let mut sandboxes = self.sandboxes.lock().unwrap();
             let closed = self.closed.load(Ordering::SeqCst);
             if !closed {
-                sandboxes.insert(id.clone(), held);
+                sandboxes.insert(id.clone(), Arc::clone(&sandbox));
             }
             closed
         };
@@ -333,14 +294,14 @@ impl Home {
             let held = sandboxes
                 .get(id)
                 .ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
-            if held.sandbox.idle().is_none() {
+            if held.idle().is_none() {
                 return Err(refused(
                     StatusCode::CONFLICT,
                     "in_use",
                     format!("sandbox {id} is in use: a job runs in it, or it is reached"),
                 ));
             }
-            sandboxes.remove(id).map(|held| held.sandbox)
+            sandboxes.remove(id)
         };
         if let Some(sandbox) = left {
             tokio::task::spawn_blocking(move || sandbox.leave()).await?;
@@ -379,19 +340,6 @@ impl Home {
         &self.registry
     }
 
-    /// A tunnel to the port `capability` opens, in whichever of this home's sandboxes it is
-    /// one of.
-    pub fn tunnel(&self, capability: &str) -> Option<Tunnel> {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        sandboxes.values().find_map(|held| {
-            let port = *held.capabilities.get(capability)?;
-            Some(Tunnel {
-                activity: held.sandbox.activity(),
-                port,
-            })
-        })
-    }
-
     /// Close it to every sandbox and image job from now on, for its project to be removed:
     /// `false`, and left open, while a sandbox of this process or another lives here. Decided
     /// under the sandboxes' lock, which a sandbox is added under once it holds its upper disk:
@@ -428,7 +376,7 @@ impl Home {
             .lock()
             .unwrap()
             .drain()
-            .map(|(_, held)| held.sandbox)
+            .map(|(_, held)| held)
             .collect();
         std::thread::scope(|scope| {
             for sandbox in &closed {
@@ -445,9 +393,7 @@ impl Home {
         };
         let sandboxes = self.sandboxes.lock().unwrap();
         let mut naming = self.naming.lock().unwrap();
-        let held = sandboxes
-            .values()
-            .any(|held| held.sandbox.name() == Some(name))
+        let held = sandboxes.values().any(|held| held.name() == Some(name))
             || (self.unknown.lock().unwrap().values()).any(|kept| kept.name() == Some(name));
         if held || !naming.insert(name.to_owned()) {
             return Err(refused(
@@ -457,28 +403,6 @@ impl Home {
             ));
         }
         Ok(Naming(self, Some(name.to_owned())))
-    }
-
-    /// `keys` taken for a sandbox being made, until what this answers drops: refused `409`
-    /// `exists` where a sandbox here, or one being made, opens a port by one of them.
-    fn keying(&self, keys: &HashMap<String, u16>) -> Result<Keying<'_>, Refused> {
-        let sandboxes = self.sandboxes.lock().unwrap();
-        let mut keying = self.keying.lock().unwrap();
-        let taken = |key: &String| {
-            keying.contains(key)
-                || sandboxes
-                    .values()
-                    .any(|held| held.capabilities.contains_key(key))
-        };
-        if keys.keys().any(taken) {
-            return Err(refused(
-                StatusCode::CONFLICT,
-                "exists",
-                "keys: a sandbox here opens a port by one of them",
-            ));
-        }
-        keying.extend(keys.keys().cloned());
-        Ok(Keying(self, keys.keys().cloned().collect()))
     }
 
     /// Its sandboxes, whether each one's machine is up or not: for a server's own routes
@@ -529,7 +453,7 @@ impl Home {
             .lock()
             .unwrap()
             .drain()
-            .map(|(_, held)| held.sandbox)
+            .map(|(_, held)| held)
             .collect();
         std::thread::scope(|scope| {
             for sandbox in &left {
@@ -543,7 +467,7 @@ impl Home {
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         let sandboxes = self.sandboxes.lock().unwrap();
         if let Some(held) = sandboxes.get(id) {
-            return Ok(Arc::clone(&held.sandbox));
+            return Ok(Arc::clone(held));
         }
         if let Some(unknown) = self.unknown.lock().unwrap().get(id) {
             return Err(refused(
@@ -581,16 +505,13 @@ impl Sandboxes<'_> {
     /// Each of them, in no set order.
     pub fn list(&self) -> Vec<Arc<Sandbox>> {
         let sandboxes = self.0.sandboxes.lock().unwrap();
-        sandboxes
-            .values()
-            .map(|held| Arc::clone(&held.sandbox))
-            .collect()
+        sandboxes.values().map(Arc::clone).collect()
     }
 
     /// The sandbox `id`, if it is one of them.
     pub fn get(&self, id: &str) -> Option<Arc<Sandbox>> {
         let sandboxes = self.0.sandboxes.lock().unwrap();
-        sandboxes.get(id).map(|held| Arc::clone(&held.sandbox))
+        sandboxes.get(id).map(Arc::clone)
     }
 
     /// How many there are, how many of those have their machine up now, and how many more the
@@ -598,7 +519,7 @@ impl Sandboxes<'_> {
     pub fn counts(&self) -> Counts {
         let (known, up) = {
             let sandboxes = self.0.sandboxes.lock().unwrap();
-            let up = sandboxes.values().filter(|held| held.sandbox.is_up());
+            let up = sandboxes.values().filter(|held| held.is_up());
             (sandboxes.len(), up.count())
         };
         let unknown = self.0.unknown.lock().unwrap().len();
@@ -610,20 +531,6 @@ impl Sandboxes<'_> {
     /// the answer as soon as it is given.
     pub fn running_on(&self, id: &str) -> Option<Arc<Sandbox>> {
         self.get(id).filter(|sandbox| sandbox.is_up())
-    }
-}
-
-/// A connection through one of a sandbox's ports, counted until it drops: a sandbox with one
-/// is in use, whatever its jobs do.
-pub struct Tunnel {
-    activity: Activity,
-    port: u16,
-}
-
-impl Tunnel {
-    /// The port, in the sandbox's machine while it runs.
-    pub async fn connect(&self) -> io::Result<TcpStream> {
-        self.activity.sandbox().connect(self.port).await
     }
 }
 
@@ -639,42 +546,11 @@ impl Drop for Naming<'_> {
     }
 }
 
-/// Port keys a sandbox being made has taken, given back as this drops: once the sandbox is
-/// among [`Home`]'s, which holds them from there, or once its making failed.
-struct Keying<'a>(&'a Home, Vec<String>);
-
-impl Drop for Keying<'_> {
-    fn drop(&mut self) {
-        let mut keying = self.0.keying.lock().unwrap();
-        for key in &self.1 {
-            keying.remove(key);
-        }
-    }
-}
-
-/// The id a sandbox is made under and the port each of its keys opens, by key, chosen by a
-/// server built on this one rather than picked here ([`Home::make`]).
+/// The id a sandbox is made under, chosen by a server built on this one rather than picked
+/// here ([`Home::make`]).
 pub struct Given {
     /// Letters, digits, `_` and `-`, the first a letter or digit, 64 at most.
     pub id: String,
-    /// One for each port it is made with, each letters and digits, 128 at most: its URL is
-    /// `ports/<key>`, which asks for no token, so whoever has the URL reaches the port. Each key
-    /// is to be as hard to guess as one `POST /sandboxes/` picks (64 hex digits), and to open
-    /// one port across every home of the server: [`Home::make`] refuses a key only where a
-    /// sandbox of its own home has it or is being made with it, and `ports/<key>` reaches the
-    /// first sandbox of any home that has it.
-    pub keys: HashMap<String, u16>,
-}
-
-/// Whether `key` can be a port's key given it: a URL's segment, letters and digits, 128 at most.
-fn is_key(key: &str) -> bool {
-    !key.is_empty() && key.len() <= 128 && key.bytes().all(|b| b.is_ascii_alphanumeric())
-}
-
-/// A sandbox, and the port each capability its making answered opens.
-struct Held {
-    sandbox: Arc<Sandbox>,
-    capabilities: HashMap<String, u16>,
 }
 
 /// A job, as it is answered, and its log, kept to [`LOG_LIMIT`] entries before its end.
@@ -761,6 +637,11 @@ pub fn router() -> Router {
             get(sandbox_get)
                 .patch(sandbox_resize)
                 .delete(sandbox_remove),
+        )
+        .route("/sandboxes/{id}/ports/{port}", get(sandbox_port))
+        .route(
+            "/sandboxes/{id}/client-ports/{port}",
+            get(sandbox_client_port),
         )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
@@ -1541,8 +1422,8 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
     let sandboxes = home.sandboxes.lock().unwrap();
     let mut listed: Vec<_> = sandboxes
         .values()
-        .filter(|held| name.is_none() || held.sandbox.name() == name.as_deref())
-        .map(|held| held.sandbox.answer())
+        .filter(|held| name.is_none() || held.name() == name.as_deref())
+        .map(|held| held.answer())
         .collect();
     let unknown = home.unknown.lock().unwrap();
     listed.extend(
@@ -1557,21 +1438,7 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
 
-    // Each port behind a capability of its own, which only this answer carries: who has the
-    // URL reaches the port, and nothing else. Relative, to the URL this request came to, since
-    // what reaches this server from outside is not this server's to know. Kept with the
-    // sandbox, so that its URLs reach it across this server's restart.
-    let capabilities = (args.ports.iter())
-        .map(|spec| {
-            let capability = format!(
-                "{}{}",
-                uuid::Uuid::new_v4().simple(),
-                uuid::Uuid::new_v4().simple()
-            );
-            (capability, spec.port)
-        })
-        .collect();
-    let answer = home.create(args, None, capabilities).await?;
+    let answer = home.create(args, None).await?;
     Ok(created(format!("/sandboxes/{}", answer.id), &answer))
 }
 
@@ -1621,8 +1488,238 @@ async fn sandbox_remove(
     }
     let removed = home.sandboxes.lock().unwrap().remove(&id);
     let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
-    tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
+    tokio::task::spawn_blocking(move || removed.close()).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// How often a port on local's WebSocket is pinged while no connection comes, so that what stands
+/// between it and its client does not take it for idle.
+const CLIENT_PORT_KEEPALIVE: Duration = Duration::from_secs(15);
+
+/// How long a port on local's WebSocket has to answer the connection said on it, longer than a
+/// client takes to reach its target, before the connection is refused.
+const CLIENT_PORT_ANSWER: Duration = Duration::from_secs(20);
+
+/// The WebSocket subprotocol a port's TCP, and a port on local's, is carried in.
+const TCP_SUBPROTOCOL: &str = "virtx.tcp";
+
+/// How much of a port's TCP one message carries at most.
+const CHUNK: usize = 64 << 10;
+
+/// The WebSocket of `virtx.tcp` a request to a port, in the sandbox or on local, opens; or what it is
+/// answered otherwise: `426` unless it opens a WebSocket, `400` unless of the subprotocol.
+fn tcp_websocket(
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    headers: &HeaderMap,
+) -> Result<WebSocketUpgrade, Box<Response>> {
+    let Ok(upgrade) = upgrade else {
+        return Err(Box::new(StatusCode::UPGRADE_REQUIRED.into_response()));
+    };
+    let offered = headers
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|offered| offered.trim() == TCP_SUBPROTOCOL)
+        });
+    if !offered {
+        let refusal = invalid(format!(
+            "a port is reached over the WebSocket subprotocol {TCP_SUBPROTOCOL}"
+        ));
+        return Err(Box::new(refusal.into_response()));
+    }
+    Ok(upgrade.protocols([TCP_SUBPROTOCOL]))
+}
+
+/// `GET /sandboxes/{id}/ports/{port}`, a WebSocket of `virtx.tcp` carrying a TCP connection to
+/// the port in the sandbox: closed at once, saying why, when the port is not reached, such as
+/// while no machine runs. Refused as [`tcp_websocket`] says, and `404` for a port the sandbox
+/// was not made with.
+async fn sandbox_port(
+    Extension(home): Extension<Arc<Home>>,
+    Segments((id, port)): Segments<(String, u16)>,
+    headers: HeaderMap,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Answer {
+    let sandbox = home.sandbox(&id)?;
+    let opened =
+        (sandbox.args().ports.iter()).any(|spec| spec.on == PortSide::Sandbox && spec.port == port);
+    if !opened {
+        return Err(not_found(format!(
+            "sandbox {id} was made with no port {port}"
+        )));
+    }
+    let upgrade = match tcp_websocket(upgrade, &headers) {
+        Ok(upgrade) => upgrade,
+        Err(refused) => return Ok(*refused),
+    };
+    let activity = sandbox.activity();
+    Ok(upgrade.on_upgrade(move |mut socket| async move {
+        match activity.sandbox().connect(port).await {
+            Ok(reached) => carry(socket, reached).await,
+            Err(e) => {
+                let frame = CloseFrame {
+                    code: close_code::ERROR,
+                    reason: close_reason(&e.to_string()).into(),
+                };
+                let _ = socket.send(Message::Close(Some(frame))).await;
+            }
+        }
+    }))
+}
+
+/// Carry bytes between `socket` and `reached` until either ends: what is read from `reached` as
+/// binary messages, and the binary messages to it.
+async fn carry(mut socket: WebSocket, mut reached: TcpStream) {
+    let (mut from, mut to) = reached.split();
+    let mut buffer = vec![0u8; CHUNK];
+    loop {
+        tokio::select! {
+            read = from.read(&mut buffer) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let message = Message::Binary(buffer[..n].to_vec().into());
+                    if socket.send(message).await.is_err() {
+                        break;
+                    }
+                }
+            },
+            received = socket.recv() => match received {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if to.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                // Answered by the socket itself.
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                // Text is no TCP's, and anything else is the end.
+                Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
+            },
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
+}
+
+/// `said` as a close's reason, which a WebSocket holds 123 bytes of: cut at a character's end.
+fn close_reason(said: &str) -> String {
+    let mut end = said.len().min(123);
+    while !said.is_char_boundary(end) {
+        end -= 1;
+    }
+    said[..end].to_owned()
+}
+
+/// `GET /sandboxes/{id}/client-ports/{port}`, a WebSocket of `virtx.tcp`: the port taken by
+/// this client while it is open, and the next connection a process makes to it carried in it.
+/// The connection is said with an empty binary message; the client answers it with another once
+/// it has reached what the port is, and the process's `connect` succeeds then, or closes the
+/// WebSocket, which refuses it. Refused as [`tcp_websocket`] says, and `404` for a port the
+/// sandbox was not made with: before the port is taken, so a request refused takes no
+/// connection.
+async fn sandbox_client_port(
+    Extension(home): Extension<Arc<Home>>,
+    Segments((id, port)): Segments<(String, u16)>,
+    headers: HeaderMap,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Answer {
+    let upgrade = match tcp_websocket(upgrade, &headers) {
+        Ok(upgrade) => upgrade,
+        Err(refused) => return Ok(*refused),
+    };
+    let sandbox = home.sandbox(&id)?;
+    let taker = sandbox.take_client_port(port)?;
+    Ok(upgrade.on_upgrade(move |socket| take_client_port(socket, sandbox, taker)))
+}
+
+/// Wait on `socket` for the next connection `taker` has, and carry it if the client reaches its
+/// target in [`CLIENT_PORT_ANSWER`]. A client that closes `socket` meanwhile, or answers no ping
+/// before the next, takes none.
+async fn take_client_port(mut socket: WebSocket, sandbox: Arc<Sandbox>, taker: ClientPortTaker) {
+    let mut pinged = false;
+    let connection = loop {
+        tokio::select! {
+            connection = taker.next() => match connection {
+                Some(connection) => break connection,
+                None => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+            },
+            received = socket.recv() => match received {
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => pinged = false,
+                _ => return,
+            },
+            () = tokio::time::sleep(CLIENT_PORT_KEEPALIVE) => {
+                if pinged || socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                    return;
+                }
+                pinged = true;
+            }
+        }
+    };
+    drop(taker);
+    if socket.send(Message::Binary(Bytes::new())).await.is_err() {
+        return;
+    }
+    // Dropped unanswered, the connection is refused.
+    let answered = tokio::time::timeout(CLIENT_PORT_ANSWER, async {
+        loop {
+            match socket.recv().await {
+                Some(Ok(Message::Binary(said))) if said.is_empty() => return true,
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                _ => return false,
+            }
+        }
+    });
+    if answered.await != Ok(true) {
+        return;
+    }
+    let _activity = sandbox.activity();
+    let Ok(reached) = connection.accept().await else {
+        return;
+    };
+    carry_halves(socket, reached).await;
+}
+
+/// Carry bytes between `socket` and `reached` until both directions have ended: what is read
+/// from `reached` as binary messages, and its end as an empty one; the binary messages to it, and
+/// an empty one as the client's end, `reached`'s writing shut. Ended at once by a failure, or a
+/// close.
+async fn carry_halves(mut socket: WebSocket, mut reached: TcpStream) {
+    let (mut from, mut to) = reached.split();
+    let mut buffer = vec![0u8; CHUNK];
+    let (mut read_all, mut written_all) = (false, false);
+    while !(read_all && written_all) {
+        tokio::select! {
+            read = from.read(&mut buffer), if !read_all => match read {
+                Ok(n) => {
+                    read_all = n == 0;
+                    let message = Message::Binary(buffer[..n].to_vec().into());
+                    if socket.send(message).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            },
+            received = socket.recv() => match received {
+                Some(Ok(Message::Binary(bytes))) if bytes.is_empty() => {
+                    written_all = true;
+                    let _ = to.shutdown().await;
+                }
+                Some(Ok(Message::Binary(bytes))) => {
+                    if to.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                // Answered by the socket itself.
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                // Text is no TCP's, and anything else is the end.
+                _ => break,
+            },
+        }
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 async fn sandbox_job_list(

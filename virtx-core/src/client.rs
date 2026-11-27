@@ -430,13 +430,12 @@ impl Client {
         webdav::client::copy(&self.inner, root, from, to, overwrite).await
     }
 
-    /// Every sandbox the server holds, each port without its `url`.
+    /// Every sandbox the server holds.
     pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
         sandbox::client::list(&self.inner).await
     }
 
-    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports' `url`s are
-    /// answered here only.
+    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`].
     ///
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
     /// tag the server has no image by is refused with `404`.
@@ -444,12 +443,12 @@ impl Client {
         sandbox::client::create(&self.inner, args).await
     }
 
-    /// The sandbox `id`, each port without its `url`.
+    /// The sandbox `id`.
     pub async fn get_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
         sandbox::client::get(&self.inner, id.as_ref()).await
     }
 
-    /// The sandbox named `name`, each port without its `url`, if one is.
+    /// The sandbox named `name`, if one is.
     pub async fn find_sandbox(&self, name: impl AsRef<str>) -> Result<Option<Sandbox>, Error> {
         sandbox::client::find(&self.inner, name.as_ref()).await
     }
@@ -555,6 +554,19 @@ impl Client {
         after: Option<u64>,
     ) -> impl Stream<Item = Result<LogEntry<SandboxJobEntry>, Error>> + Unpin + Send + use<'_> {
         Box::pin(sandbox::client::job_log(&self.inner, id, job, after))
+    }
+
+    /// Forward the port `args` names, on either side of its sandbox: the forwarder, and what
+    /// forwards, a future that runs until the forwarder ends and stops it when dropped. See
+    /// [`PortForwarder::open`](crate::PortForwarder::open).
+    pub fn forward_port(
+        &self,
+        args: crate::PortForwarderArgs,
+    ) -> (
+        crate::PortForwarder,
+        impl std::future::Future<Output = ()> + Send + use<'_>,
+    ) {
+        crate::PortForwarder::open(&self.inner, args)
     }
 
     /// End the session; see [`TransportClient::close`].
@@ -1779,7 +1791,9 @@ pub(crate) mod ffi {
 
     /// Answers with the sandboxes, as
     /// `[{"id": "...", "image": "algorithm:hex", "running": bool,
-    /// "ports"?: [{"port": n, "label"?}]}, ...]`.
+    /// "ports"?: [{"port": n, "on": "sandbox" | "local", "url"?: "...", "label"?}]}, ...]`, a
+    /// port in the sandbox's `url` the loopback address a server on this machine answers for
+    /// it.
     ///
     /// # Safety
     ///
@@ -1793,14 +1807,13 @@ pub(crate) mod ffi {
 
     /// Makes a sandbox, given
     /// `{"image": {...}, "name": "...", "network": bool,
-    /// "ports": [n | {"port": n, "label": "..."}],
+    /// "ports": [n | {"port": n, "on": "sandbox" | "local", "label": "..."}],
     /// "vcpus": n, "memory_mib": n, "disk_gib": n, "gpu": bool, "gpu_memory_mib": n,
     /// "volumes": [{"volume": "...", "path": "/...", "readonly": bool}], "abins": ["..."]}`,
     /// the image as `{"type": "tag", "tag": "name:tag"}` or
     /// `{"type": "digest", "digest": "algorithm:hex"}` and all but it optional. Answers with the
-    /// sandbox as `virtx_client_list_sandbox` answers each, its
-    /// `"ports": [{"port": n, "url": "...", "label"?}]`
-    /// with their `url`s here only.
+    /// sandbox as `virtx_client_list_sandbox` answers each. Its ports, on either side, are
+    /// forwarded with `virtx_port_forwarder_open`.
     ///
     /// # Safety
     ///

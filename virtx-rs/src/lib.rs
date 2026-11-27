@@ -28,7 +28,7 @@ mod files;
 mod image;
 mod job;
 mod library;
-mod portforward;
+mod port_forward;
 mod project;
 mod sandbox;
 mod volume;
@@ -40,7 +40,7 @@ pub use files::Files;
 pub use image::ImageJob;
 pub use job::{JobEnd, JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
-pub use portforward::{ForwardedPort, PortForwarder};
+pub use port_forward::{Closed, PortForwarder};
 pub use project::Project;
 pub use sandbox::{Sandbox, SandboxJob};
 /// What the server answers about an image job; an [`ImageJob`] carries it with its client.
@@ -58,9 +58,9 @@ pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{
     Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, MountType, PortSpec, Progress, Recipe, RegistryAuth, Role, SandboxCreateArgs,
-    SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry,
-    SandboxJobKind, SandboxPort, SandboxResizeArgs, SandboxResources, SandboxVolume, Source, Step,
-    VolumeMountListOutputItem,
+    MountSource, MountType, PortSide, PortSpec, Progress, Recipe, RegistryAuth, Role,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJobEnd, SandboxJobEndReason,
+    SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxResizeArgs, SandboxResources,
+    SandboxVolume, Source, Step, VolumeMountListOutputItem,
 };
 pub use volume::Volume;

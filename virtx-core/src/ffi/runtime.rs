@@ -13,7 +13,7 @@ use std::{
 
 use futures_util::Stream;
 use serde::Serialize;
-use tokio::task::JoinSet;
+use tokio::task::{self, JoinSet};
 
 use super::{
     VIRTX_OK,
@@ -61,13 +61,6 @@ impl<T: Send + Sync + 'static> Runtime<T> {
         &self.value
     }
 
-    /// What `f` makes of the value, inside the runtime: for what needs one without waiting on
-    /// it, such as a listener whose connections it will carry.
-    pub(crate) fn inside<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        let _entered = self.runtime.enter();
-        f(&self.value)
-    }
-
     /// Start what `make` makes of the value, and hand C the future, answered with its output
     /// as JSON.
     pub(crate) fn future<R: Serialize, F>(&self, make: impl FnOnce(Arc<T>) -> F) -> *mut VirtxFuture
@@ -92,6 +85,25 @@ impl<T: Send + Sync + 'static> Runtime<T> {
                 Err(error) => failure(error),
             }
         })
+    }
+
+    /// Run what `make` makes of the value, tracked as its requests are, so ending the value
+    /// stops it first: for what runs beside a request, such as a forwarder. Stopped with the
+    /// handle answered.
+    pub(crate) fn spawn<F>(&self, make: impl FnOnce(Arc<T>) -> F) -> task::AbortHandle
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let future = make(Arc::clone(&self.value));
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        // Finished tasks stay in the set until reaped.
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn_on(future, self.runtime.handle())
+    }
+
+    /// The runtime, for what starts requests of its own on it.
+    pub(crate) fn handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
     }
 
     /// Start what `make` makes of the value, and hand C the stream.

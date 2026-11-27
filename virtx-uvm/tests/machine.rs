@@ -2185,8 +2185,17 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
 /// as its agent waited, beside the sandboxes' disks, on x86_64 Linux; and comes up its own: its
 /// randomness not the first's, and its clock the host's rather than the snapshot's.
 async fn a_machine_is_restored_from_the_snapshot_its_shape_s_first_took(home: Home) {
+    // Snapshots on until this test ends, a panic included: the tests after it boot without.
+    struct SnapshotsOn;
+    impl Drop for SnapshotsOn {
+        fn drop(&mut self) {
+            // SAFETY: as below.
+            unsafe { env::remove_var("VIRTX_SNAPSHOTS") };
+        }
+    }
     // SAFETY: this test runs alone; the machines it starts inherit it.
     unsafe { env::set_var("VIRTX_SNAPSHOTS", "1") };
+    let snapshots_on = SnapshotsOn;
     let script = [
         "sh",
         "-c",
@@ -2198,7 +2207,7 @@ async fn a_machine_is_restored_from_the_snapshot_its_shape_s_first_took(home: Ho
     let second = home.sandbox(&small(), None).await;
     let (b, code) = run(&second, &script, None).await.unwrap();
     assert_eq!(code, 0, "{b:?}");
-    unsafe { env::remove_var("VIRTX_SNAPSHOTS") };
+    drop(snapshots_on);
 
     assert_ne!(a[0], b[0], "each machine's randomness its own");
     let now = std::time::SystemTime::now()

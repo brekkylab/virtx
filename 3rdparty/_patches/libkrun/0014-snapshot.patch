@@ -11,6 +11,7 @@ KVM on x86_64 alone. A snapshot is a host's own: its vCPU state names the host's
 
 It can go once libkrun saves and restores a machine itself, with the devices virtx attaches.
 ---
+ src/arch/src/x86_64/linux/msr.rs              |   5 +
  src/devices/src/virtio/console/device.rs      |  72 ++--
  src/devices/src/virtio/console/port.rs        |   5 +
  src/devices/src/virtio/device.rs              |  92 +++++
@@ -23,14 +24,30 @@ It can go once libkrun saves and restores a machine itself, with the devices vir
  src/libkrun/src/api/vmm_builder.rs            |  33 ++
  src/libkrun/src/vmm/builder.rs                | 111 +++++-
  .../src/vmm/device_manager/kvm/mmio.rs        |   8 +-
- src/libkrun/src/vmm/linux/vstate.rs           |  91 ++++-
+ src/libkrun/src/vmm/linux/vstate.rs           | 116 +++++-
  src/libkrun/src/vmm/mod.rs                    |  49 ++-
  src/libkrun/src/vmm/resources.rs              |   5 +
  src/libkrun/src/vmm/snapshot.rs               | 373 ++++++++++++++++++
- 16 files changed, 925 insertions(+), 67 deletions(-)
+ 17 files changed, 943 insertions(+), 79 deletions(-)
  create mode 100644 src/devices/src/virtio/snapshot.rs
  create mode 100644 src/libkrun/src/vmm/snapshot.rs
 
+diff --git a/src/arch/src/x86_64/linux/msr.rs b/src/arch/src/x86_64/linux/msr.rs
+index 8207e6b7..49b635d6 100644
+--- a/src/arch/src/x86_64/linux/msr.rs
++++ b/src/arch/src/x86_64/linux/msr.rs
+@@ -156,6 +156,11 @@ static WHITELISTED_MSR_RANGES: &[MsrRange] = &[
+     SINGLE_MSR!(MSR_GS_BASE),
+     SINGLE_MSR!(MSR_KERNEL_GS_BASE),
+     SINGLE_MSR!(MSR_TSC_AUX),
++    // The supervisor states a guest's XSAVES writes: without them a restored guest's XRSTORS
++    // faults on the state it saved.
++    SINGLE_MSR!(MSR_IA32_XSS),
++    // CET: U_CET, S_CET, PL0_SSP to PL3_SSP and INT_SSP_TAB, those KVM lists.
++    MSR_RANGE!(0x6a0, 9),
+ ];
+ 
+ /// Specifies whether a particular MSR should be included in vcpu serialization.
 diff --git a/src/devices/src/virtio/console/device.rs b/src/devices/src/virtio/console/device.rs
 index 10ab92a5..976baeb2 100644
 --- a/src/devices/src/virtio/console/device.rs
@@ -835,7 +852,7 @@ index 732ad768..4ad3d014 100644
          let ret = (self.mmio_base, irq);
          self.id_to_dev_info.insert(
 diff --git a/src/libkrun/src/vmm/linux/vstate.rs b/src/libkrun/src/vmm/linux/vstate.rs
-index c0064595..c19b46c4 100644
+index c0064595..c7a82ea6 100644
 --- a/src/libkrun/src/vmm/linux/vstate.rs
 +++ b/src/libkrun/src/vmm/linux/vstate.rs
 @@ -858,7 +858,6 @@ impl Vm {
@@ -904,19 +921,51 @@ index c0064595..c19b46c4 100644
      #[cfg(target_arch = "x86_64")]
      fn save_state(&self) -> Result<VcpuState> {
          /*
-@@ -1410,7 +1429,10 @@ impl Vcpu {
+@@ -1391,17 +1410,6 @@ impl Vcpu {
+          * meaningful. For SET_MSRS it will then contain good data.
+          */
+ 
+-        // Build the list of MSRs we want to save.
+-        let num_msrs = self.msr_list.as_fam_struct_ref().nmsrs as usize;
+-        let mut msrs = Msrs::new(num_msrs).unwrap();
+-        {
+-            let indices = self.msr_list.as_slice();
+-            let msr_entries = msrs.as_mut_slice();
+-            assert_eq!(indices.len(), msr_entries.len());
+-            for (pos, index) in indices.iter().enumerate() {
+-                msr_entries[pos].index = *index;
+-            }
+-        }
+         let mp_state = self.fd.get_mp_state().map_err(Error::VcpuGetMpState)?;
+         let regs = self.fd.get_regs().map_err(Error::VcpuGetRegs)?;
+         let sregs = self.fd.get_sregs().map_err(Error::VcpuGetSregs)?;
+@@ -1409,8 +1417,23 @@ impl Vcpu {
+         let xcrs = self.fd.get_xcrs().map_err(Error::VcpuGetXcrs)?;
          let debug_regs = self.fd.get_debug_regs().map_err(Error::VcpuGetDebugRegs)?;
          let lapic = self.fd.get_lapic().map_err(Error::VcpuGetLapic)?;
-         let nmsrs = self.fd.get_msrs(&mut msrs).map_err(Error::VcpuGetMsrs)?;
+-        let nmsrs = self.fd.get_msrs(&mut msrs).map_err(Error::VcpuGetMsrs)?;
 -        assert_eq!(nmsrs, num_msrs);
-+        if nmsrs != num_msrs {
-+            // KVM stops at the first MSR it cannot read: keep those it read.
-+            msrs = Msrs::from_entries(&msrs.as_slice()[..nmsrs]).unwrap();
++        // KVM stops at the first MSR it cannot read: that one is left out and the rest read on.
++        let mut read = Vec::new();
++        let mut rest = self.msr_list.as_slice();
++        while !rest.is_empty() {
++            let entries: Vec<kvm_bindings::kvm_msr_entry> = rest
++                .iter()
++                .map(|&index| kvm_bindings::kvm_msr_entry {
++                    index,
++                    ..Default::default()
++                })
++                .collect();
++            let mut msrs = Msrs::from_entries(&entries).unwrap();
++            let n = self.fd.get_msrs(&mut msrs).map_err(Error::VcpuGetMsrs)?;
++            read.extend_from_slice(&msrs.as_slice()[..n]);
++            rest = &rest[(n + 1).min(rest.len())..];
 +        }
++        let msrs = Msrs::from_entries(&read).unwrap();
          let vcpu_events = self
              .fd
              .get_vcpu_events()
-@@ -1429,9 +1451,8 @@ impl Vcpu {
+@@ -1429,9 +1452,8 @@ impl Vcpu {
          })
      }
  
@@ -927,7 +976,7 @@ index c0064595..c19b46c4 100644
          /*
           * Ordering requirements:
           *
-@@ -1675,6 +1696,14 @@ impl Vcpu {
+@@ -1675,6 +1697,14 @@ impl Vcpu {
                      )));
                      continue;
                  }
@@ -942,7 +991,7 @@ index c0064595..c19b46c4 100644
                  Err(TryRecvError::Disconnected) => {
                      return self.exit(VcpuResponse::Exited(FC_EXIT_CODE_GENERIC_ERROR));
                  }
-@@ -1738,6 +1767,14 @@ impl Vcpu {
+@@ -1738,6 +1768,14 @@ impl Vcpu {
                  let _ = reply.send(());
                  StateMachine::next(Self::running)
              }
@@ -957,7 +1006,7 @@ index c0064595..c19b46c4 100644
              #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
              Ok(VcpuEvent::RestoreCounter { counter, reply }) => {
                  let result = write_counter(&self.fd, counter).map_err(|e| {
-@@ -1820,6 +1857,41 @@ pub struct VcpuState {
+@@ -1820,6 +1858,41 @@ pub struct VcpuState {
      xsave: kvm_xsave,
  }
  
@@ -999,7 +1048,7 @@ index c0064595..c19b46c4 100644
  #[derive(Debug)]
  /// List of events that the Vcpu can receive.
  pub enum VcpuEvent {
-@@ -1827,6 +1899,9 @@ pub enum VcpuEvent {
+@@ -1827,6 +1900,9 @@ pub enum VcpuEvent {
      Pause(Sender<result::Result<Option<u64>, String>>),
      /// Event that should resume the Vcpu.
      Resume(Sender<()>),

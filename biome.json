@@ -6,6 +6,7 @@
       "virtx-node/*.js",
       "virtx-node/*.d.ts",
       "virtx-node/__test__/*.mjs",
+      "virtx-node/__test__/*.ts",
       "scripts/packages/**/*.mjs"
     ]
   },

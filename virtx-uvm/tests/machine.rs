@@ -2273,16 +2273,10 @@ async fn a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer(hom
 }
 
 #[cfg(target_arch = "aarch64")]
-async fn a_guest_s_kernel_boots_seeded_and_tests_none_of_its_crypto(home: Home) {
+async fn a_guest_s_kernel_boots_seeded(home: Home) {
     let sandbox = home.sandbox(&small(), None).await;
     let (lines, code) = run(&sandbox, &["dmesg"], None).await.unwrap();
     assert_eq!(code, 0, "{lines:?}");
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("self-tests disabled")),
-        "{lines:?}"
-    );
     // Seeded by the device tree, before the kernel's clock starts.
     assert!(
         lines
@@ -3247,11 +3241,9 @@ fn main() -> ExitCode {
         of_two_conditional_writes_to_one_file_in_a_sandbox_one_lands,
         of_two_conditional_writes_to_a_mounted_volume_s_file_one_lands,
     ]);
-    // The x86_64 kernels are built without those tests, and seeded by their CPU.
+    // The x86_64 kernels are seeded by their CPU.
     #[cfg(target_arch = "aarch64")]
-    beside.extend(tests![
-        a_guest_s_kernel_boots_seeded_and_tests_none_of_its_crypto
-    ]);
+    beside.extend(tests![a_guest_s_kernel_boots_seeded]);
     // The Windows guest kernel has no ACPI, so its guest halts rather than powers off, and is
     // ended only once it has been silent, as one that halts.
     if cfg!(not(windows)) {

@@ -4088,7 +4088,6 @@ dependencies = [
  "http-body",
  "http-body-util",
  "imago",
- "krun-display",
  "krun-init-blob",
  "libc",
  "libkrun",

@@ -15,7 +15,7 @@ When upstream copies the kernel, or maps it populated.
  1 file changed, 44 insertions(+), 4 deletions(-)
 
 diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
-index fc44c129..d13be75e 100644
+index 4862a96b..8af054f4 100644
 --- a/src/libkrun/src/vmm/builder.rs
 +++ b/src/libkrun/src/vmm/builder.rs
 @@ -596,11 +596,21 @@ pub enum Payload {

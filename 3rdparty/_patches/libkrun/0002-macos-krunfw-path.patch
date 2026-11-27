@@ -7,7 +7,7 @@ Subject: macos-krunfw-path: open libkrunfw beside the executable on macOS, as on
 
 The guest kernel sits beside the binary that opens it, on every host.
 dyld looks for a dlopen name with no slash only in DYLD_LIBRARY_PATH and the fallback path, never near the caller, so on macOS whoever ran the server had to set an environment variable.
-KRUNFW_NAME is @loader_path/libkrunfw.5.dylib there, which dyld resolves against the directory of what did the dlopen.
+KRUNFW_NAME is @loader_path/libkrunfw.6.dylib there, which dyld resolves against the directory of what did the dlopen.
 
 ## What it changes
 
@@ -25,7 +25,7 @@ dyld does neither. A `dlopen` argument with no slash in it is looked for in
 (`$HOME/lib:/usr/local/lib:/usr/lib`), and nowhere near the caller. `@rpath` and
 `@loader_path` do not help: they are prefixes dyld expands inside a *path*, so a name
 that is not one is never resolved against them, whatever `LC_RPATH` the binary carries.
-So `KRUNFW_NAME` is `@loader_path/libkrunfw.5.dylib` there — a path, which dyld then
+So `KRUNFW_NAME` is `@loader_path/libkrunfw.6.dylib` there — a path, which dyld then
 resolves against the directory of whatever did the `dlopen`.
 
 What this replaces is an environment variable that whoever runs the binary had to set,
@@ -40,13 +40,13 @@ When upstream opens libkrunfw by a path relative to its loader on macOS, or take
  1 file changed, 11 insertions(+), 1 deletion(-)
 
 diff --git a/src/libkrun/src/api/payload.rs b/src/libkrun/src/api/payload.rs
-index 00c61c9e..b106abdc 100644
+index c9045f31..598f8c2d 100644
 --- a/src/libkrun/src/api/payload.rs
 +++ b/src/libkrun/src/api/payload.rs
-@@ -273,8 +273,18 @@ const KRUNFW_NAME: &str = "libkrunfw.so.5";
- const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
+@@ -281,8 +281,18 @@ const KRUNFW_NAME: &str = "libkrunfw.so.6";
+ const KRUNFW_NAME: &str = "libkrunfw-sev.so.6";
  #[cfg(all(target_os = "linux", feature = "tdx"))]
- const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
+ const KRUNFW_NAME: &str = "libkrunfw-tdx.so.6";
 +// `@loader_path/` and not a leaf name, which is what every other target here uses. The
 +// kernel is shipped beside the binary that opens it -- see `virtx-uvm/build.rs` --
 +// and on the other two platforms a leaf name finds it there: Windows searches the
@@ -58,8 +58,8 @@ index 00c61c9e..b106abdc 100644
 +// puts macOS under the same rule as the others rather than under an environment variable
 +// that has to be set by whoever runs the binary.
  #[cfg(target_os = "macos")]
--const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
-+const KRUNFW_NAME: &str = "@loader_path/libkrunfw.5.dylib";
+-const KRUNFW_NAME: &str = "libkrunfw.6.dylib";
++const KRUNFW_NAME: &str = "@loader_path/libkrunfw.6.dylib";
  #[cfg(target_os = "windows")]
  const KRUNFW_NAME: &str = "libkrunfw.dll";
  

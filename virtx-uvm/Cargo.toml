@@ -8,7 +8,7 @@ rust-version.workspace = true
 [features]
 # Built-in virtio-gpu with venus (Vulkan). Requires virglrenderer with venus support --
 # `cargo xtask build server-stdio` or `server-tcp` builds it first.
-gpu = ["krun/gpu", "dep:krun_display"]
+gpu = ["krun/gpu"]
 
 [dependencies]
 oci-spec = { version = "0.10", default-features = false, features = ["image", "distribution"] }
@@ -75,8 +75,6 @@ polling = "3"
 socket2 = "0.6"
 slab = "0.4"
 krun_init = { path = "../3rdparty/libkrun/init/init-blob", package = "krun-init-blob", features = ["krun"] }
-# A display backend, which libkrun's virtio-gpu device has to be handed.
-krun_display = { path = "../3rdparty/libkrun/src/display", package = "krun-display", optional = true }
 
 # The registry side of the OCI distribution spec: token auth, manifest negotiation and blob
 # downloads. Its TLS is the OS's own where there is one, and rustls on Linux, where a dynamic

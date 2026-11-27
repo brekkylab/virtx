@@ -307,10 +307,6 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     // touches is a fault its hypervisor resolves: 13 ms of a boot under nested KVM, and under
     // WHP, nested, 2.1s of 6.4.
     payload.append_cmdline("swiotlb=noforce");
-    // The kernel's crypto algorithms are not tested as each registers: on one vCPU those tests
-    // are a third of a boot, run against the init for it.
-    #[cfg(target_arch = "aarch64")]
-    payload.append_cmdline("cryptomgr.notests");
 
     let mut overlay = FsOverlay::new();
     for dir in ROOT_DIRS {
@@ -377,10 +373,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .add_default_console(None, None, None)
         .map_err(|e| Error::vmm("making the guest console", e))?;
     console
-        .add_inout_port(PORT_NAME, Some(to_guest), Some(of_guest))
+        .add_inout_port(PORT_NAME, Some(to_guest), Some(of_guest), None)
         .map_err(|e| Error::vmm("wiring the agent's port", e))?;
     console
-        .add_inout_port(IO_PORT_NAME, Some(ioin), Some(ioout))
+        .add_inout_port(IO_PORT_NAME, Some(ioin), Some(ioout), None)
         .map_err(|e| Error::vmm("wiring the agent's I/O port", e))?;
 
     // Read-only at the device and not merely in the guest's mount flags: what is behind

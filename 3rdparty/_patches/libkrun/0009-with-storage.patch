@@ -136,10 +136,10 @@ index d65e4e51..b298df14 100644
  pub use self::device::*;
  #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
-index fc035c28..d00abfce 100644
+index b09963d5..5cf73047 100644
 --- a/src/libkrun/src/api/device_builders.rs
 +++ b/src/libkrun/src/api/device_builders.rs
-@@ -1618,6 +1618,7 @@ pub struct BlockDevice {
+@@ -1652,6 +1652,7 @@ pub struct BlockDevice {
      sync_mode: SyncMode,
      parallel_reads: bool,
      read_pool_size: Option<NonZeroUsize>,
@@ -147,7 +147,7 @@ index fc035c28..d00abfce 100644
  }
  
  #[cfg_attr(feature = "ffi", ffier::export(send, cfg = "feature = \"blk\""))]
-@@ -1637,9 +1638,24 @@ impl BlockDevice {
+@@ -1671,9 +1672,24 @@ impl BlockDevice {
              sync_mode: SyncMode::default(),
              parallel_reads: false,
              read_pool_size: None,
@@ -172,7 +172,7 @@ index fc035c28..d00abfce 100644
      /// Set whether the block device is read-only.
      pub fn set_read_only(&mut self, read_only: bool) {
          self.is_read_only = read_only;
-@@ -1694,6 +1710,7 @@ impl<'a> AttachDevice<'a> for BlockDevice {
+@@ -1728,6 +1744,7 @@ impl<'a> AttachDevice<'a> for BlockDevice {
              self.sync_mode,
              self.parallel_reads,
              self.read_pool_size,
@@ -181,10 +181,10 @@ index fc035c28..d00abfce 100644
          .map_err(|e| VmmError::Internal(format!("block: {e}")))?;
  
 diff --git a/src/libkrun/src/api/mod.rs b/src/libkrun/src/api/mod.rs
-index 6bb5111c..38f563ba 100644
+index c4a0d6e5..9da51724 100644
 --- a/src/libkrun/src/api/mod.rs
 +++ b/src/libkrun/src/api/mod.rs
-@@ -62,7 +62,7 @@ pub use devices::virtio::TsiPolicy;
+@@ -61,7 +61,7 @@ pub use device_builders::{GpuDevice, VirglRendererFlags};
  #[cfg(not(feature = "tee"))]
  pub use devices::virtio::balloon::FreePageReportingMode;
  #[cfg(feature = "blk")]

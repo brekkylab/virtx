@@ -13,10 +13,10 @@
 //! # The display nobody looks at
 //!
 //! virtio-gpu will not come up without a display backend and a scanout declared on it,
-//! and venus carries Vulkan traffic and never scans anything out. So the backend here
-//! reports every framebuffer call as unsupported and allocates no frames, and the scanout
-//! exists to be counted rather than drawn to. A session is a command on a console, not a
-//! window.
+//! and venus carries Vulkan traffic and never scans anything out. So the backend is
+//! libkrun's noop one, which refuses every framebuffer call and allocates no frames, and the
+//! scanout exists to be counted rather than drawn to. A session is a command on a console,
+//! not a window.
 //!
 //! # `NO_VIRGL`
 //!
@@ -60,13 +60,9 @@
 //! Windows vm-memory commits the whole window with the rest of guest memory, so it is charged
 //! against the commit limit from boot whether or not the guest ever maps anything.
 
-use krun::{DisplayInfoBuilder, GpuDevice, VirglRendererFlags};
-use krun_display::{
-    DisplayBackendBasicFramebuffer, DisplayBackendError, DisplayBackendNew, IntoDisplayBackend,
-    Rect, ResourceFormat,
-};
+use krun::{DisplayBackend, DisplayInfoBuilder, GpuDevice, VirglRendererFlags};
 
-use super::{Error, Result};
+use super::Result;
 
 /// `VIRGL_RENDERER_NO_VIRGL` -- see the module doc.
 const NO_VIRGL: VirglRendererFlags = VirglRendererFlags::from_bits_retain(1 << 7);
@@ -88,19 +84,7 @@ pub(crate) fn device(memory_mib: Option<u32>) -> Result<GpuDevice> {
     #[cfg(windows)]
     crt_setenv("VKR_HEAP_SIZE_MAX", &window.to_string());
 
-    let vtable = <Headless as IntoDisplayBackend<()>>::into_display_backend(None);
-
-    // SAFETY: `vtable` is a fully populated krun_display_backend produced by krun_display
-    // itself, and libkrun copies it out of the pointer rather than borrowing it -- so it
-    // may be a local, and is.
-    let mut backend = unsafe {
-        krun::DisplayBackend::new(
-            &raw const vtable as *const std::ffi::c_void,
-            std::mem::size_of_val(&vtable),
-        )
-    }
-    .map_err(|e| Error::vmm("making the guest's display backend", e))?;
-
+    let mut backend = DisplayBackend::new_noop();
     backend.add_display(DisplayInfoBuilder::new(SCANOUT.0, SCANOUT.1));
 
     let flags = VirglRendererFlags::VENUS
@@ -138,52 +122,5 @@ fn crt_setenv(name: &str, value: &str) {
     let failed = unsafe { _putenv_s(name.as_ptr(), value.as_ptr()) };
     if failed != 0 {
         log::warn!("the C runtime refused {name:?}: errno {failed}");
-    }
-}
-
-/// A display backend that exists so the device can come up, and does nothing else. See
-/// the module doc.
-struct Headless;
-
-impl DisplayBackendNew<()> for Headless {
-    fn new(_userdata: Option<&()>) -> Headless {
-        Headless
-    }
-}
-
-impl DisplayBackendBasicFramebuffer for Headless {
-    fn configure_scanout(
-        &mut self,
-        _scanout_id: u32,
-        _display_width: u32,
-        _display_height: u32,
-        _width: u32,
-        _height: u32,
-        _format: ResourceFormat,
-    ) -> std::result::Result<(), DisplayBackendError> {
-        Err(DisplayBackendError::MethodNotSupported)
-    }
-
-    fn disable_scanout(
-        &mut self,
-        _scanout_id: u32,
-    ) -> std::result::Result<(), DisplayBackendError> {
-        Ok(())
-    }
-
-    fn alloc_frame(
-        &mut self,
-        _scanout_id: u32,
-    ) -> std::result::Result<(u32, &mut [u8]), DisplayBackendError> {
-        Err(DisplayBackendError::OutOfBuffers)
-    }
-
-    fn present_frame(
-        &mut self,
-        _scanout_id: u32,
-        _frame_id: u32,
-        _rect: Option<&Rect>,
-    ) -> std::result::Result<(), DisplayBackendError> {
-        Err(DisplayBackendError::MethodNotSupported)
     }
 }

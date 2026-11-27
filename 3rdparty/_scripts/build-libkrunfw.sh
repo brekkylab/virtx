@@ -45,8 +45,15 @@
 set -eu
 
 # Pinned for the same reason the submodules are: the kernel config and the ABI version
-# have to match what libkrun expects (KRUNFW_NAME, ABI 5).
-LIBKRUNFW_TAG="${LIBKRUNFW_TAG:-v5.6.2}"
+# have to match what libkrun expects (KRUNFW_NAME, ABI 6).
+LIBKRUNFW_TAG="${LIBKRUNFW_TAG:-v6.0.0}"
+# The kernel the tag builds, pinned too: libkrunfw downloads it from a branch of
+# libkrun/linux, whose head moves on after a release. This is that head when v6.0.0 was
+# tagged, Linux 7.3.6; a `LIBKRUNFW_TAG` of another release needs that release's kernel here.
+LIBKRUNFW_KERNEL="${LIBKRUNFW_KERNEL:-68236f25ff94d308744506a41071f9e5bea49e88}"
+KERNEL_ARGS="KERNEL_REMOTE=https://github.com/libkrun/linux/archive/$LIBKRUNFW_KERNEL.tar.gz"
+KERNEL_ARGS="$KERNEL_ARGS KERNEL_TARBALL=tarballs/linux-$LIBKRUNFW_KERNEL.tar.gz"
+KERNEL_ARGS="$KERNEL_ARGS KERNEL_SOURCES=linux-$LIBKRUNFW_KERNEL"
 IMAGE="${LIBKRUNFW_IMAGE:-ubuntu:24.04}"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -82,7 +89,7 @@ case "$TARGET" in
 esac
 
 # What the library is called, which is also how this tells a build it already has from
-# one it does not. The Linux name carries the ABI version (`libkrunfw.so.5`, renamed so
+# one it does not. The Linux name carries the ABI version (`libkrunfw.so.6`, renamed so
 # below), so it is matched rather than named.
 case "$TARGET" in
     linux) PATTERN="libkrunfw.so.*" ;;
@@ -91,20 +98,28 @@ case "$TARGET" in
     *) echo "unsupported LIBKRUNFW_TARGET: $TARGET (linux, macos or windows)" >&2 && exit 1 ;;
 esac
 
+# What each target's build was made from: the tag and the kernel. One made from others is
+# built again, and taken out first: its ABI may not be the one libkrun opens, and xtask takes
+# whichever libkrunfw it finds.
+STAMP="$PREFIX/.virtx-stamp-$TARGET"
+WANT="$LIBKRUNFW_TAG $LIBKRUNFW_KERNEL"
 # shellcheck disable=SC2086
-if [ -z "${LIBKRUNFW_REBUILD:-}" ] && [ -n "$(find "$PREFIX" -maxdepth 1 -name "$PATTERN" 2>/dev/null)" ]; then
+if [ -z "${LIBKRUNFW_REBUILD:-}" ] && [ -n "$(find "$PREFIX" -maxdepth 1 -name "$PATTERN" 2>/dev/null)" ] &&
+    [ "$(cat "$STAMP" 2>/dev/null)" = "$WANT" ]; then
     echo "libkrunfw already built in $PREFIX (LIBKRUNFW_REBUILD=1 to build it again)"
     exit 0
 fi
 
 mkdir -p "$BUILD" "$PREFIX"
+find "$PREFIX" -maxdepth 1 -name "$PATTERN" -exec rm -f {} +
+rm -f "$STAMP"
 
 # A tree from another tag is cloned again rather than moved: the Makefile unpacks the
 # kernel and copies the config in once, so an old tree would keep the old kernel.
 if [ "$(git -C "$BUILD/libkrunfw" describe --tags 2>/dev/null)" != "$LIBKRUNFW_TAG" ]; then
     rm -rf "$BUILD/libkrunfw"
     git clone --depth 1 --branch "$LIBKRUNFW_TAG" \
-        https://github.com/containers/libkrunfw.git "$BUILD/libkrunfw"
+        https://github.com/libkrun/libkrunfw.git "$BUILD/libkrunfw"
 fi
 
 build_in_container() {
@@ -139,7 +154,7 @@ fi
 
 cd "$SRC"
 # bin2cbundle.py needs pyelftools; the kernel build needs the rest.
-make ${MAKE_ARGS:-} -j"$(nproc)"
+make $KERNEL_ARGS ${MAKE_ARGS:-} -j"$(nproc)"
 cp -v libkrunfw* /out/ 2>/dev/null || true
 if [ -n "${COPY_BACK:-}" ]; then
     cp -v $COPY_BACK /build/libkrunfw/
@@ -150,6 +165,7 @@ EOF
     # is what stops it turning the container-side ones into Windows paths.
     MSYS_NO_PATHCONV=1 docker run --rm \
         -e EXTRA_PACKAGES="${EXTRA_PACKAGES:-}" \
+        -e KERNEL_ARGS="$KERNEL_ARGS" \
         -e MAKE_ARGS="${MAKE_ARGS:-}" \
         -e COPY_BACK="${COPY_BACK:-}" \
         -e LIBKRUNFW_TAG="$LIBKRUNFW_TAG" \
@@ -166,9 +182,9 @@ case "$TARGET" in
     linux)
         build_in_container
         # Kept under its soname, not the name make gives it. libkrun opens
-        # `libkrunfw.so.5` by that name -- found beside the binary through its
+        # `libkrunfw.so.6` by that name -- found beside the binary through its
         # `$ORIGIN` runpath -- and no `make install` runs here to add the link from
-        # it to `libkrunfw.so.5.6.2`. Renamed rather than linked, so that
+        # it to `libkrunfw.so.6.0.0`. Renamed rather than linked, so that
         # everything downstream copies one file under the one name that works.
         for lib in "$PREFIX"/libkrunfw.so.*.*.*; do
             [ -e "$lib" ] || continue
@@ -190,4 +206,5 @@ case "$TARGET" in
         ;;
 esac
 
+printf '%s\n' "$WANT" > "$STAMP"
 echo "built libkrunfw ($LIBKRUNFW_TAG) into $PREFIX"

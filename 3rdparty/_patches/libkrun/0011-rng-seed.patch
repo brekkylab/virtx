@@ -16,10 +16,10 @@ When upstream's device tree carries an rng-seed.
  1 file changed, 8 insertions(+)
 
 diff --git a/src/devices/src/fdt/aarch64.rs b/src/devices/src/fdt/aarch64.rs
-index da96e895..c4a83751 100644
+index e0020e06..3407cd50 100644
 --- a/src/devices/src/fdt/aarch64.rs
 +++ b/src/devices/src/fdt/aarch64.rs
-@@ -14,6 +14,7 @@ use crate::legacy::IrqChip;
+@@ -13,6 +13,7 @@ use crate::legacy::IrqChip;
  use crate::legacy::gic::GICDevice;
  use arch::aarch64::layout::{GTIMER_HYP, GTIMER_PHYS, GTIMER_SEC, GTIMER_VIRT};
  use arch::{ArchMemoryInfo, InitrdConfig};
@@ -27,7 +27,7 @@ index da96e895..c4a83751 100644
  use vm_fdt::{Error as FdtError, FdtWriter};
  use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
  
-@@ -197,6 +198,13 @@ fn create_chosen_node<T: DeviceInfoForFDT + Clone + Debug>(
+@@ -196,6 +197,13 @@ fn create_chosen_node<T: DeviceInfoForFDT + Clone + Debug>(
      let chosen_node = fdt.begin_node("chosen")?;
      fdt.property_string("bootargs", cmdline)?;
  

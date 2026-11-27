@@ -41,7 +41,7 @@ Nothing upstream does, so this stays until it is taken there.
  create mode 100644 src/devices/src/virtio/fs/external.rs
 
 diff --git a/src/devices/src/virtio/fs/device.rs b/src/devices/src/virtio/fs/device.rs
-index c1dc693e..c7a2bcc1 100644
+index 2275c058..24cbf044 100644
 --- a/src/devices/src/virtio/fs/device.rs
 +++ b/src/devices/src/virtio/fs/device.rs
 @@ -19,6 +19,7 @@ use super::super::{
@@ -423,7 +423,7 @@ index 00000000..45780dae
 +
 +const _: () = assert!(fuse::ROOT_ID == 1);
 diff --git a/src/devices/src/virtio/fs/mod.rs b/src/devices/src/virtio/fs/mod.rs
-index d4a74379..a28f3a01 100644
+index d935e9bf..c1da00ec 100644
 --- a/src/devices/src/virtio/fs/mod.rs
 +++ b/src/devices/src/virtio/fs/mod.rs
 @@ -1,5 +1,6 @@
@@ -514,7 +514,7 @@ index efdb4648..ba15fcaa 100644
                  &inode_alloc,
                  virtual_entries,
 diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
-index ad7926b9..fc035c28 100644
+index 27d61a10..b09963d5 100644
 --- a/src/libkrun/src/api/device_builders.rs
 +++ b/src/libkrun/src/api/device_builders.rs
 @@ -35,6 +35,8 @@ use devices::virtio::balloon::FreePageReportingMode;
@@ -526,7 +526,7 @@ index ad7926b9..fc035c28 100644
  use devices::virtio::fs::virtual_entry::{VirtualDirEntry, VirtualEntry, VirtualEntryContent};
  #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
  pub use devices::virtio::fs::{CachePolicy, PermissionSemantics};
-@@ -771,6 +773,13 @@ impl<'a> FsDevice<'a> {
+@@ -765,6 +767,13 @@ impl<'a> FsDevice<'a> {
  
  #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
  impl<'a> FsDevice<'a> {
@@ -541,10 +541,10 @@ index ad7926b9..fc035c28 100644
          let exit_code = Arc::new(AtomicI32::new(i32::MAX));
          let fs = devices::virtio::Fs::new(
 diff --git a/src/libkrun/src/api/mod.rs b/src/libkrun/src/api/mod.rs
-index ef7ee4fd..6bb5111c 100644
+index 203a553b..c4a0d6e5 100644
 --- a/src/libkrun/src/api/mod.rs
 +++ b/src/libkrun/src/api/mod.rs
-@@ -63,6 +63,8 @@ pub use devices::virtio::TsiPolicy;
+@@ -62,6 +62,8 @@ pub use device_builders::{GpuDevice, VirglRendererFlags};
  pub use devices::virtio::balloon::FreePageReportingMode;
  #[cfg(feature = "blk")]
  pub use devices::virtio::block::{DiskFormat, SyncMode};

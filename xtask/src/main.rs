@@ -1096,7 +1096,7 @@ fn alib_dir() -> PathBuf {
 /// Where the guest kernel is built to, and what it is called there.
 ///
 /// One directory under `build/`, like everything else this repository compiles, and the
-/// name is the platform's: `libkrunfw.dll`, `libkrunfw.5.dylib`, `libkrunfw.so.5` -- the
+/// name is the platform's: `libkrunfw.dll`, `libkrunfw.6.dylib`, `libkrunfw.so.6` -- the
 /// soname libkrun opens, which `build-libkrunfw.sh` renames the built file to. The Linux
 /// name carries the ABI version, so this answers with whatever is there rather than with
 /// a name it worked out.

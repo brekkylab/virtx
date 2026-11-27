@@ -345,7 +345,7 @@ mod tests {
             tar.append_data(&mut header, name, data).unwrap();
         };
         file(&server, b"#!/bin/sh\necho server\n");
-        file("libkrunfw.5.dylib", b"kernel");
+        file("libkrunfw.6.dylib", b"kernel");
         file("abin/index", b"index");
         let archive = tar.into_inner().unwrap().finish().unwrap();
         let asset = format!(
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(placed, root.join("bin").join(server_file()));
         assert_eq!(fs::read(&placed).unwrap(), b"#!/bin/sh\necho server\n");
         assert_eq!(
-            fs::read(root.join("bin/libkrunfw.5.dylib")).unwrap(),
+            fs::read(root.join("bin/libkrunfw.6.dylib")).unwrap(),
             b"kernel"
         );
         assert_eq!(fs::read(root.join("bin/abin/index")).unwrap(), b"index");

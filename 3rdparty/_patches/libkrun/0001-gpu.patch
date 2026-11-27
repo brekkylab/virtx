@@ -6,7 +6,7 @@ Subject: gpu: map blobs without a dmabuf gate on macOS, and build the GPU device
 ## Why virtx needs it
 
 A sandbox's GPU is venus over virtio-gpu, and a guest maps the host's memory as blobs.
-On macOS resource_map_blob required a dmabuf export that no macOS blob has, and Hypervisor.framework maps in 16 KiB host pages while a blob is sized in 4 KiB guest pages, so mapping lengths are rounded up.
+On macOS resource_map_blob required a dmabuf export that no macOS blob has.
 On Windows the whole blob-mapping path was gated to macOS though none of it is about macOS: it is widened, with WhpVm::unmap_memory and Vm::add_mapping/remove_mapping on WHP written for it.
 
 ## What it changes
@@ -19,11 +19,6 @@ One patch for both hosts, because they share the files. The macOS half:
   reasoning as [libkrun#740](https://github.com/libkrun/libkrun/pull/740),
   rewritten against the current rutabaga API — that PR predates the migration to
   the upstream crate and no longer applies.
-- Hypervisor.framework maps in host pages, 16 KiB on Apple Silicon, while blob
-  resources are sized in 4 KiB guest pages. A 132 KiB blob was rejected outright.
-  Lengths are now rounded up, symmetrically in `add_mapping` and
-  `remove_mapping`. Upstream offers `VIRTIO_GPU_F_BLOB_ALIGNMENT` (`51367cf`)
-  instead, but a guest only honours it from Linux 7.2, and libkrunfw is 6.12.
 
 The Windows half is mostly the same code, reached: upstream gates the whole
 blob-mapping path on `target_os = "macos"` — `map_sender`, the `WorkerMessage`
@@ -36,11 +31,9 @@ had to be written rather than widened:
 - **`WhpVm::unmap_memory`**, wrapping `WHvUnmapGpaRange`. The `whp` crate had
   only `map_memory`, so there was no way to replace a blob mapping.
 - **`Vm::add_mapping`/`remove_mapping` on WHP**, the counterparts of the macOS
-  ones. No rounding: WHP asks for 4 KiB, which is what a blob is already sized
-  in, so the host-page arithmetic Apple Silicon needs has no equivalent here.
-  For the same reason the `VIRTIO_GPU_F_BLOB_ALIGNMENT` upstream offers
-  (`51367cf`) is 4096 there: upstream reads it from `sysconf`, which Windows
-  does not have.
+  ones. WHP asks for 4 KiB, which is what a blob is already sized in, and the
+  `VIRTIO_GPU_F_BLOB_ALIGNMENT` upstream offers (`51367cf`) is 4096 there:
+  upstream reads it from `sysconf`, which Windows does not have.
 - **`Vmm::vm` on Windows.** Upstream has no use for the field there and drops
   it (`5be8aa18`), but the `Vmm::add_mapping` wrappers reach the WHP partition
   through it.
@@ -63,7 +56,7 @@ had to be written rather than widened:
 
 ## When it can go
 
-The macOS half when upstream maps a blob by its pointer without asking for a dmabuf, and the guest kernel honours VIRTIO_GPU_F_BLOB_ALIGNMENT (Linux 7.2; libkrunfw is 6.12), which replaces the rounding.
+The macOS half when upstream maps a blob by its pointer without asking for a dmabuf.
 The Windows half when upstream builds blob mapping on WHP.
 ---
  src/devices/src/virtio/gpu/device.rs     |  22 ++--
@@ -72,15 +65,15 @@ The Windows half when upstream builds blob mapping on WHP.
  src/libkrun/src/api/device_builders.rs   |  30 +++--
  src/libkrun/src/api/vmm_builder.rs       |   3 +-
  src/libkrun/src/vmm/builder.rs           |   3 +-
- src/libkrun/src/vmm/macos/vstate.rs      |  19 ++-
+ src/libkrun/src/vmm/macos/vstate.rs      |   4 +-
  src/libkrun/src/vmm/mod.rs               |   8 +-
- src/libkrun/src/vmm/windows/vstate.rs    | 130 ++++++++++++++++++-
+ src/libkrun/src/vmm/windows/vstate.rs    | 129 ++++++++++++++++++-
  src/libkrun/src/vmm/worker.rs            |   4 +-
  src/utils/Cargo.toml                     |   4 +-
  src/utils/src/windows/eventfd.rs         |  19 ++-
  src/utils/src/worker_message.rs          |   4 +-
  src/whp/src/lib.rs                       |  21 ++-
- 14 files changed, 356 insertions(+), 103 deletions(-)
+ 14 files changed, 340 insertions(+), 103 deletions(-)
 
 diff --git a/src/devices/src/virtio/gpu/device.rs b/src/devices/src/virtio/gpu/device.rs
 index 24443473..2a278e8a 100644
@@ -172,7 +165,7 @@ index 24443473..2a278e8a 100644
      }
  }
 diff --git a/src/devices/src/virtio/gpu/virtio_gpu.rs b/src/devices/src/virtio/gpu/virtio_gpu.rs
-index 27224fd5..c53dc8b5 100644
+index 56cf4df8..5729e811 100644
 --- a/src/devices/src/virtio/gpu/virtio_gpu.rs
 +++ b/src/devices/src/virtio/gpu/virtio_gpu.rs
 @@ -12,16 +12,13 @@ use super::protocol::{
@@ -205,7 +198,7 @@ index 27224fd5..c53dc8b5 100644
  use utils::worker_message::WorkerMessage;
  use vm_memory::{GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
  
-@@ -189,7 +188,7 @@ pub struct VirtioGpu {
+@@ -190,7 +189,7 @@ pub struct VirtioGpu {
      rutabaga: Rutabaga,
      resources: BTreeMap<u32, VirtioGpuResource>,
      fence_state: Arc<Mutex<FenceState>>,
@@ -214,7 +207,7 @@ index 27224fd5..c53dc8b5 100644
      map_sender: Sender<WorkerMessage>,
      scanouts: [Option<VirtioGpuScanout>; VIRTIO_GPU_MAX_SCANOUTS as usize],
      displays: Box<[DisplayInfo]>,
-@@ -349,7 +348,7 @@ impl VirtioGpu {
+@@ -352,7 +351,7 @@ impl VirtioGpu {
          queue_ctl: Arc<Mutex<VirtQueue>>,
          interrupt: InterruptTransport,
          virgl_flags: u32,
@@ -223,7 +216,7 @@ index 27224fd5..c53dc8b5 100644
          export_table: Option<ExportTable>,
          displays: Box<[DisplayInfo]>,
          display_backend: DisplayBackend,
-@@ -390,7 +389,7 @@ impl VirtioGpu {
+@@ -393,7 +392,7 @@ impl VirtioGpu {
              scanouts: Default::default(),
              displays,
              display_backend,
@@ -232,7 +225,7 @@ index 27224fd5..c53dc8b5 100644
              map_sender,
          }
      }
-@@ -451,7 +450,36 @@ impl VirtioGpu {
+@@ -454,7 +453,36 @@ impl VirtioGpu {
      }
  
      /// Releases guest kernel reference on the resource.
@@ -270,7 +263,7 @@ index 27224fd5..c53dc8b5 100644
          let resource = self
              .resources
              .remove(&resource_id)
-@@ -589,10 +617,14 @@ impl VirtioGpu {
+@@ -592,10 +620,14 @@ impl VirtioGpu {
              }
          }
  
@@ -286,7 +279,7 @@ index 27224fd5..c53dc8b5 100644
              Err(e) => return Err(ErrRutabaga(e)),
          }
  
-@@ -942,7 +974,7 @@ impl VirtioGpu {
+@@ -945,7 +977,7 @@ impl VirtioGpu {
              map_info: map_info & RUTABAGA_MAP_CACHE_MASK,
          })
      }
@@ -295,7 +288,7 @@ index 27224fd5..c53dc8b5 100644
      pub fn resource_map_blob(
          &mut self,
          resource_id: u32,
-@@ -954,45 +986,61 @@ impl VirtioGpu {
+@@ -957,45 +989,61 @@ impl VirtioGpu {
              .get_mut(&resource_id)
              .ok_or(ErrInvalidResourceId)?;
  
@@ -391,7 +384,7 @@ index 27224fd5..c53dc8b5 100644
          // Access flags not a part of the virtio-gpu spec.
          Ok(OkMapInfo {
              map_info: map_info & RUTABAGA_MAP_CACHE_MASK,
-@@ -1038,7 +1086,7 @@ impl VirtioGpu {
+@@ -1041,7 +1089,7 @@ impl VirtioGpu {
  
          Ok(OkNoData)
      }
@@ -400,7 +393,7 @@ index 27224fd5..c53dc8b5 100644
      pub fn resource_unmap_blob(
          &mut self,
          resource_id: u32,
-@@ -1063,17 +1111,26 @@ impl VirtioGpu {
+@@ -1066,17 +1114,26 @@ impl VirtioGpu {
          );
  
          let (reply_sender, reply_receiver) = unbounded();
@@ -528,19 +521,19 @@ index 8ce0c9ce..7fc5eee9 100644
                  info.scanout_id,
                  info.resource_id,
 diff --git a/src/libkrun/src/api/device_builders.rs b/src/libkrun/src/api/device_builders.rs
-index aa26aabe..db9af078 100644
+index 3fcb8152..27d61a10 100644
 --- a/src/libkrun/src/api/device_builders.rs
 +++ b/src/libkrun/src/api/device_builders.rs
-@@ -89,7 +89,7 @@ pub struct AttachContext<'a> {
-         dyn Fn(&mut Vmm, String, IrqChip, Arc<Mutex<dyn VirtioDevice>>) -> Result<(), VmmError>
-             + 'a,
-     >,
+@@ -87,7 +87,7 @@ pub struct AttachContext<'a> {
+     device_index: usize,
+     register_fn:
+         Box<dyn Fn(&mut Vmm, IrqChip, Arc<Mutex<dyn VirtioDevice>>) -> Result<(), VmmError> + 'a>,
 -    #[cfg(target_os = "macos")]
 +    #[cfg(any(target_os = "macos", target_os = "windows"))]
      map_sender: Option<crossbeam_channel::Sender<utils::worker_message::WorkerMessage>>,
  }
  
-@@ -100,7 +100,7 @@ impl<'a> AttachContext<'a> {
+@@ -98,7 +98,7 @@ impl<'a> AttachContext<'a> {
          shm_manager: &'a ShmManager,
          intc: IrqChip,
          device_index: usize,
@@ -549,7 +542,7 @@ index aa26aabe..db9af078 100644
              crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
          >,
      ) -> Self {
-@@ -115,7 +115,7 @@ impl<'a> AttachContext<'a> {
+@@ -113,7 +113,7 @@ impl<'a> AttachContext<'a> {
                      .map_err(|e| VmmError::Internal(format!("{e:?}")))?;
                  Ok(())
              }),
@@ -558,7 +551,7 @@ index aa26aabe..db9af078 100644
              map_sender,
          }
      }
-@@ -142,7 +142,7 @@ impl<'a> AttachContext<'a> {
+@@ -140,7 +140,7 @@ impl<'a> AttachContext<'a> {
                      .map_err(|e| VmmError::Internal(format!("{e:?}")))?;
                  Ok(())
              }),
@@ -567,7 +560,7 @@ index aa26aabe..db9af078 100644
              map_sender: None,
          }
      }
-@@ -245,9 +245,12 @@ impl<'a> AttachContext<'a> {
+@@ -239,9 +239,12 @@ impl<'a> AttachContext<'a> {
          setup_terminal_raw_mode(self.vmm, Some(handle), false, true);
      }
  
@@ -583,7 +576,7 @@ index aa26aabe..db9af078 100644
      pub fn map_sender(
          &self,
      ) -> Option<crossbeam_channel::Sender<utils::worker_message::WorkerMessage>> {
-@@ -340,7 +343,7 @@ mod sealed {
+@@ -334,7 +337,7 @@ mod sealed {
              event_manager: &mut EventManager,
              shm_manager: &ShmManager,
              intc: IrqChip,
@@ -592,7 +585,7 @@ index aa26aabe..db9af078 100644
                  crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
              >,
          ) -> Result<(), VmmError>;
-@@ -421,7 +424,7 @@ impl sealed::Sealed for MmioDeviceManager<'_> {
+@@ -415,7 +418,7 @@ impl sealed::Sealed for MmioDeviceManager<'_> {
          event_manager: &mut EventManager,
          shm_manager: &ShmManager,
          intc: IrqChip,
@@ -601,7 +594,7 @@ index aa26aabe..db9af078 100644
              crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
          >,
      ) -> Result<(), VmmError> {
-@@ -432,7 +435,7 @@ impl sealed::Sealed for MmioDeviceManager<'_> {
+@@ -426,7 +429,7 @@ impl sealed::Sealed for MmioDeviceManager<'_> {
                  shm_manager,
                  intc.clone(),
                  i,
@@ -610,7 +603,7 @@ index aa26aabe..db9af078 100644
                  map_sender.clone(),
              );
              device.attach(&mut ctx)?;
-@@ -514,7 +517,7 @@ impl sealed::Sealed for PciDeviceManager<'_> {
+@@ -508,7 +511,7 @@ impl sealed::Sealed for PciDeviceManager<'_> {
          event_manager: &mut EventManager,
          shm_manager: &ShmManager,
          intc: IrqChip,
@@ -619,7 +612,7 @@ index aa26aabe..db9af078 100644
              crossbeam_channel::Sender<utils::worker_message::WorkerMessage>,
          >,
      ) -> Result<(), VmmError> {
-@@ -2027,8 +2030,9 @@ impl<'a> AttachDevice<'a> for GpuDevice {
+@@ -2151,8 +2154,9 @@ impl<'a> AttachDevice<'a> for GpuDevice {
              self.virgl_flags,
              displays,
              self.backend.inner,
@@ -648,7 +641,7 @@ index 716aa2e4..09721794 100644
              // On macOS, devices change the guest's memory map through the worker.
              #[cfg(not(target_arch = "x86_64"))]
 diff --git a/src/libkrun/src/vmm/builder.rs b/src/libkrun/src/vmm/builder.rs
-index 4281281b..9c7ca4e9 100644
+index b0b9938e..e8c393f5 100644
 --- a/src/libkrun/src/vmm/builder.rs
 +++ b/src/libkrun/src/vmm/builder.rs
 @@ -1431,7 +1431,6 @@ pub fn build_microvm(
@@ -669,15 +662,12 @@ index 4281281b..9c7ca4e9 100644
          )
          .map_err(|e| StartMicrovmError::AttachDevice(format!("{e:?}")))?;
 diff --git a/src/libkrun/src/vmm/macos/vstate.rs b/src/libkrun/src/vmm/macos/vstate.rs
-index d5d9a645..d24ff6d5 100644
+index d5d9a645..e61e4566 100644
 --- a/src/libkrun/src/vmm/macos/vstate.rs
 +++ b/src/libkrun/src/vmm/macos/vstate.rs
-@@ -198,9 +198,13 @@ impl Vm {
-         guest_addr: u64,
+@@ -199,8 +199,10 @@ impl Vm {
          len: u64,
      ) {
-+        let len = round_up_to_host_page(len);
-+
          debug!("add_mapping: host_addr={host_addr:x}, guest_addr={guest_addr:x}, len={len}");
 +        // Nothing is mapped at this offset the first time a blob lands there,
 +        // so a failed unmap is the normal case rather than an error.
@@ -687,33 +677,6 @@ index d5d9a645..d24ff6d5 100644
          }
  
          if let Err(e) = self.hvf_vm.map_memory(host_addr, guest_addr, len) {
-@@ -212,6 +216,10 @@ impl Vm {
-     }
- 
-     pub fn remove_mapping(&self, reply_sender: Sender<bool>, guest_addr: u64, len: u64) {
-+        // Must match the rounding add_mapping used, or the unmap does not line
-+        // up with the mapping it is meant to undo.
-+        let len = round_up_to_host_page(len);
-+
-         debug!("remove_mapping: guest_addr={guest_addr:x}, len={len}");
-         if let Err(e) = self.hvf_vm.unmap_memory(guest_addr, len) {
-             error!("Error removing memory map: {e:?}");
-@@ -277,6 +285,15 @@ impl Vm {
-     }
- }
- 
-+/// Hypervisor.framework works in host pages -- 16 KiB on Apple Silicon --
-+/// while virtio-gpu blob resources are sized in 4 KiB guest pages. Mapping a
-+/// length that is not a whole number of host pages is rejected outright.
-+fn round_up_to_host_page(len: u64) -> u64 {
-+    // SAFETY: sysconf with a valid name has no preconditions.
-+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
-+    len.div_ceil(page_size) * page_size
-+}
-+
- /// Encapsulates configuration parameters for the guest vCPUS.
- #[derive(Debug, Eq, PartialEq)]
- pub struct VcpuConfig {
 diff --git a/src/libkrun/src/vmm/mod.rs b/src/libkrun/src/vmm/mod.rs
 index 422bd608..c1af50bd 100644
 --- a/src/libkrun/src/vmm/mod.rs
@@ -759,7 +722,7 @@ index 422bd608..c1af50bd 100644
          self.vm.remove_mapping(reply_sender, guest_addr, len);
      }
 diff --git a/src/libkrun/src/vmm/windows/vstate.rs b/src/libkrun/src/vmm/windows/vstate.rs
-index 85829f8b..c1810a25 100644
+index 85829f8b..cd321c89 100644
 --- a/src/libkrun/src/vmm/windows/vstate.rs
 +++ b/src/libkrun/src/vmm/windows/vstate.rs
 @@ -8,12 +8,13 @@
@@ -829,7 +792,7 @@ index 85829f8b..c1810a25 100644
      }
  
      pub fn memory_init(&mut self, guest_mem: &GuestMemoryMmap) -> Result<()> {
-@@ -133,6 +170,95 @@ impl Vm {
+@@ -133,6 +170,94 @@ impl Vm {
      pub fn whp_vm(&self) -> &Arc<WhpVm> {
          &self.whp_vm
      }
@@ -842,8 +805,7 @@ index 85829f8b..c1810a25 100644
 +    /// ReBAR alike, with a vCPU reading and writing through the mapping rather
 +    /// than only the call returning S_OK.
 +    ///
-+    /// No rounding here, unlike the macOS path: WHP wants 4 KiB, which is what
-+    /// a blob resource is already sized in.
++    /// WHP wants 4 KiB, which is what a blob resource is already sized in.
 +    pub fn add_mapping(
 +        &self,
 +        reply_sender: Sender<bool>,

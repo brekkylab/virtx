@@ -20,7 +20,7 @@ When upstream builds its `cdylib` only where it is asked for (a feature, or a cr
  2 files changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/init/init-blob/Cargo.toml b/init/init-blob/Cargo.toml
-index 2736e5b..2a5a7dd 100644
+index 2736e5b5..2a5a7dd7 100644
 --- a/init/init-blob/Cargo.toml
 +++ b/init/init-blob/Cargo.toml
 @@ -37,4 +37,4 @@ krun-init-common = { path = "../common", features = ["server"] }
@@ -30,14 +30,12 @@ index 2736e5b..2a5a7dd 100644
 -crate-type = ["lib", "cdylib"]
 +crate-type = ["lib"]
 diff --git a/src/libkrun/Cargo.toml b/src/libkrun/Cargo.toml
-index 14e8bac..5df0a81 100644
+index bdd4cfef..f99728b6 100644
 --- a/src/libkrun/Cargo.toml
 +++ b/src/libkrun/Cargo.toml
-@@ -83,4 +83,4 @@ devices = { package = "krun-devices", version = "=0.1.0-2.0.0-dev", path = "../d
+@@ -84,4 +84,4 @@ devices = { package = "krun-devices", version = "=0.1.0-2.0.0-dev", path = "../d
  
  [lib]
  name = "krun"
 -crate-type = ["cdylib", "lib"]
-\ No newline at end of file
 +crate-type = ["lib"]
-\ No newline at end of file

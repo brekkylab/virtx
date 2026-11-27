@@ -84,8 +84,9 @@ runs:
         node build.js --release --package "$PLATFORM"
         npm pack "./npm/$PLATFORM" --pack-destination "$GITHUB_WORKSPACE/$OUT"
 
-    # npm packs only what is in `virtx-node/`. The platform packages are named here, not in
-    # package.json: its lock could not name a version not yet published. What builds the
+    # npm packs only what is in `virtx-node/`. Every platform's package is named here, as
+    # `index.js`'s `PLATFORM_PACKAGE` names them, not only the one built on this runner; here, not
+    # in package.json, whose lock could not name a version not yet published. What builds the
     # package from a clone is left out.
     - name: "@brekkylab/virtx"
       shell: bash
@@ -94,9 +95,10 @@ runs:
         OUT: ${{ inputs.out }}
       run: |
         cp ../README.md ../LICENSE .
+        name=$(node -p 'require("./package.json").name')
         version=$(node -p 'require("./package.json").version')
-        for dir in npm/*/; do
-          npm pkg set "optionalDependencies.$(node -p "require('./${dir}package.json').name")=$version"
+        for platform in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc; do
+          npm pkg set "optionalDependencies.$name-$platform=$version"
         done
         npm pkg delete scripts devDependencies
         npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/$OUT"

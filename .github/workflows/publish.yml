@@ -107,7 +107,8 @@ jobs:
         run: cd dist && grep -E '\.(tgz|whl)$' SHA256SUMS | sha256sum --check
 
       # Each package is the root's name or one of its platform packages, at the tag's version;
-      # every optional dependency the root names is among them; and each passes npm's dry run.
+      # the root names every platform package among them and nothing else; and each passes npm's
+      # dry run.
       - name: npm packages
         run: |
           version=${TAG#v}
@@ -126,10 +127,18 @@ jobs:
             packed="$packed $pkg"
             npm publish "$tgz" --access public --dry-run
           done
-          for dep in $(tar -xzOf "$root" package/package.json | jq -r '.optionalDependencies | to_entries[] | "\(.key)@\(.value)"'); do
+          deps=" $(tar -xzOf "$root" package/package.json | jq -r '.optionalDependencies // {} | to_entries[] | "\(.key)@\(.value)"' | tr '\n' ' ') "
+          for dep in $deps; do
             case " $packed " in
               *" $dep "*) ;;
               *) echo "::error::$name names $dep, which is not among the release's packages"; exit 1 ;;
+            esac
+          done
+          for pkg in $packed; do
+            [ "$pkg" = "$name@$version" ] && continue
+            case "$deps" in
+              *" $pkg "*) ;;
+              *) echo "::error::$name does not name $pkg, so npm would install it nowhere"; exit 1 ;;
             esac
           done
           echo "npm:$packed"

@@ -45,6 +45,11 @@ runs:
           flags="$flags --remap-path-prefix=$from=${pair##*=}"
         done
         echo "CARGO_TARGET_$(tr a-z- A-Z_ <<<"$TARGET")_RUSTFLAGS=${flags# }" >> "$GITHUB_ENV"
+        # aws-lc's C names its sources in `__FILE__`, which clang maps by aws-lc-sys's own
+        # `-ffile-prefix-map` and MSVC only trims, by this.
+        if [ "$RUNNER_OS" = Windows ]; then
+          echo "CFLAGS_$(tr - _ <<<"$TARGET")=/d1trimfile:$(cygpath -w "${CARGO_HOME:-$HOME/.cargo}")\\" >> "$GITHUB_ENV"
+        fi
 
     - name: Wheel
       shell: bash

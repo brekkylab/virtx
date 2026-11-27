@@ -571,7 +571,10 @@ jobs:
             echo "$f:"
             for p in "$HOME" "$GITHUB_WORKSPACE"; do
               if [ "$RUNNER_OS" = Windows ]; then p=$(cygpath -w "$p"); fi
-              if grep -qaF "$p" "$f"; then echo "::error::$f names $p, where it was built"; fail=1; fi
+              if grep -qaF "$p" "$f"; then
+                echo "::error::$f names $p, where it was built"; fail=1
+                LC_ALL=C grep -aoE '[[:print:]]{4,}' "$f" | grep -F "$p" | head -5
+              fi
             done
             if [ "$RUNNER_OS" = Windows ]; then
               "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
@@ -706,7 +709,10 @@ jobs:
             # A package's library, as auditwheel's manylinux policy holds it: glibc's libraries alone.
             case "$f" in "$lib"/*)
               for p in "$HOME" "$GITHUB_WORKSPACE"; do
-                if grep -qaF "$p" "$f"; then echo "::error::$f names $p, where it was built"; fail=1; fi
+                if grep -qaF "$p" "$f"; then
+                  echo "::error::$f names $p, where it was built"; fail=1
+                  LC_ALL=C grep -aoE '[[:print:]]{4,}' "$f" | grep -F "$p" | head -5
+                fi
               done
               for n in $libs; do
                 case "$n" in

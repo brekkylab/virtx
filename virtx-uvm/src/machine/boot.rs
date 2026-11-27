@@ -457,46 +457,59 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let vmm = vmm
         .acpi(true)
         .map_err(|e| Error::vmm("describing the machine in ACPI", e))?;
-    // A machine snapshotted as its agent waits, or restored from such a snapshot. With
-    // `VIRTX_SNAPSHOTS=1`, which an embedder sets for its machines, one snapshot per shape beside
-    // the sandboxes' disks: the first machine of it takes it and boots on, every later one is
-    // restored from it. `VIRTX_SNAPSHOT_SAVE` and `VIRTX_SNAPSHOT_RESTORE` name one directory to
-    // take or to restore from instead.
-    let shape = snapshot_shape(&machine, &info);
+    // A machine snapshotted as its agent waits, or restored from such a snapshot: one snapshot
+    // per shape beside the sandboxes' disks, which the first machine of it takes as it boots on
+    // and every later one is restored from, but for a shape whose restores do not come up.
+    // `VIRTX_SNAPSHOT_SAVE` and `VIRTX_SNAPSHOT_RESTORE` name one directory to take or to
+    // restore from instead.
     let (mut save, mut restore) = (
         std::env::var_os("VIRTX_SNAPSHOT_SAVE").map(std::path::PathBuf::from),
         std::env::var_os("VIRTX_SNAPSHOT_RESTORE").map(std::path::PathBuf::from),
     );
-    let mut save_and_boot = false;
+    // The shape's own snapshot, where this machine takes it or is restored from it.
+    let mut shared = None;
     if save.is_none()
         && restore.is_none()
-        && std::env::var_os("VIRTX_SNAPSHOTS").is_some_and(|on| on == "1")
-        && let Some(dir) = shape
+        && let Some(dir) = snapshot_shape(&machine, &info)
     {
-        if dir.join("state").exists() {
-            restore = Some(dir);
-        } else {
-            save = Some(dir);
-            save_and_boot = true;
+        (save, restore) = shape_snapshot(&dir);
+        if save.is_some() || restore.is_some() {
+            shared = Some(dir);
         }
     }
+    let save_and_boot = shared.is_some() && save.is_some();
+    let restored = shared.clone().filter(|_| restore.is_some());
     // Read only where a snapshot is taken, on x86_64 Linux.
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     let _ = save_and_boot;
     let vmm = vmm.payload(payload).devices(devices);
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     let vmm = match &restore {
-        Some(dir) => vmm.restore(dir),
+        Some(dir) => {
+            if restored.is_some() {
+                // Restored from now: what `sweep_snapshots` leaves for another `SNAPSHOT_KEPT`.
+                let _ =
+                    File::open(dir).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
+                let _ = File::create(restoring(dir, std::process::id()));
+            }
+            vmm.restore(dir)
+        }
         None => vmm,
     };
     let vmm = vmm
         .prefault_memory(prefault_memory())
         .build()
-        .map_err(|e| Error::vmm("building the machine", e))?;
+        .map_err(|e| {
+            // A shape's snapshot this host cannot restore is not restored again.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            if let Some(dir) = &restored {
+                snapshot_broken(dir);
+            }
+            Error::vmm("building the machine", e)
+        })?;
     let handle = vmm
         .handle()
         .map_err(|e| Error::vmm("a handle on the machine", e))?;
-    let _ = &restore;
 
     // The root for the agent to build, then the host's messages on to it, and the agent's back -- `Ready` with where the ports
     // are published, which only this side knows. A host that has closed `ctrlin`, or written
@@ -531,10 +544,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         let heard = Arc::clone(&heard);
         let for_info = Arc::clone(&for_guest);
         let info_after = info.clone();
+        let rootfs = machine.rootfs.clone();
         move || {
             // Sent only after a snapshot, on x86_64 Linux.
             #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-            let _ = (&for_info, &info_after);
+            let _ = (&for_info, &info_after, &rootfs, &restored);
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
                 if let CtrlResp::Waiting = message {
                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -552,9 +566,15 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                         let aside = dir.with_extension(format!("taking-{}", std::process::id()));
                         match handle.snapshot(&aside) {
                             Ok(()) => {
-                                if std::fs::rename(&aside, dir).is_err() {
+                                use std::os::unix::ffi::OsStrExt;
+                                let named = std::fs::write(
+                                    aside.join("rootfs"),
+                                    rootfs.as_os_str().as_bytes(),
+                                );
+                                if named.is_err() || std::fs::rename(&aside, dir).is_err() {
                                     let _ = std::fs::remove_dir_all(&aside);
                                 }
+                                sweep_snapshots(dir);
                             }
                             Err(e) => {
                                 log::error!("snapshot: {e}");
@@ -572,6 +592,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                     CtrlResp::Ready(_) => {
                         if let Some(disk) = &booting {
                             disk.booted();
+                        }
+                        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                        if let Some(dir) = &restored {
+                            restore_ready(dir);
                         }
                         send(&CtrlResp::Ready(addresses.clone()))
                     }
@@ -622,9 +646,11 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     Err(Error::EventLoop)
 }
 
-/// Where a snapshot of a machine of this one's shape is kept -- beside the sandboxes'
-/// disks, named for everything a restored guest has to find as it was: its vCPUs, memory,
-/// devices, root image and upper disk's size. None off Linux x86_64 and for a GPU's machine.
+/// Where a snapshot of a machine of this one's shape is kept -- beside the sandboxes' disks,
+/// `snapshots/<host>/<shape>`. The host is this binary, whose libkrun and agent write it, with the
+/// CPU and kernel whose KVM it names the features of; the shape is everything a restored guest
+/// has to find as it was: its vCPUs, memory, devices, root image and upper disk's size. None off
+/// Linux x86_64 and for a GPU's machine.
 fn snapshot_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) || machine.spec.gpu {
@@ -641,12 +667,169 @@ fn snapshot_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<s
         .ok()?
         .len()
         .hash(&mut hash);
-    // This binary, whose libkrun and agent wrote the snapshot.
+    let shape = hash.finish();
     let exe = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
     (exe.len(), exe.modified().ok()).hash(&mut hash);
-    let dir = home.join("snapshots");
+    std::fs::read("/proc/sys/kernel/osrelease")
+        .ok()?
+        .hash(&mut hash);
+    // The first CPU's, which every other's matches, read alone: the whole file is slow to make
+    // on a host of many.
+    use std::io::BufRead;
+    io::BufReader::new(File::open("/proc/cpuinfo").ok()?)
+        .lines()
+        .map_while(|line| line.ok())
+        .take_while(|line| !line.is_empty())
+        .filter(|line| {
+            [
+                "vendor_id",
+                "cpu family",
+                "model",
+                "stepping",
+                "microcode",
+                "flags",
+            ]
+            .iter()
+            .any(|key| line.split(':').next().is_some_and(|k| k.trim() == *key))
+        })
+        .for_each(|line| line.hash(&mut hash));
+    let dir = home
+        .join("snapshots")
+        .join(format!("{:016x}", hash.finish()));
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join(format!("{:016x}", hash.finish())))
+    Some(dir.join(format!("{shape:016x}")))
+}
+
+/// What a machine does with its shape's snapshot at `dir`, as `(save, restore)`: takes it as it
+/// boots on, is restored from it, or neither once its restores have not come up.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn shape_snapshot(dir: &Path) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    if dir.join(SNAPSHOT_BROKEN).exists() {
+        (None, None)
+    } else if !dir.join("state").exists() {
+        (Some(dir.to_owned()), None)
+    } else if restores_lost(dir) {
+        snapshot_broken(dir);
+        (None, None)
+    } else {
+        (None, Some(dir.to_owned()))
+    }
+}
+
+/// Off x86_64 Linux there is no snapshot, nor a shape that names one.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn shape_snapshot(_: &Path) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    (None, None)
+}
+
+/// Beside a snapshot whose restores do not come up, which a machine of its shape then boots
+/// without and takes none of.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const SNAPSHOT_BROKEN: &str = "broken";
+
+/// How many restores of one snapshot may end before their agent is ready, with none ready since,
+/// before it is taken for broken: one cut short as its sandbox closed is not.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const RESTORES_LOST: usize = 3;
+
+/// Named in a snapshot by the process restoring it, until its agent is ready.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn restoring(dir: &Path, pid: u32) -> std::path::PathBuf {
+    dir.join(format!("restoring-{pid}"))
+}
+
+/// The restores of `dir` whose process has ended before their agent was ready.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn lost_restores(dir: &Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix("restoring-"))
+                .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+                // SAFETY: signal 0 is only asked whether the process is there.
+                .is_some_and(|pid| unsafe { libc::kill(pid, 0) } != 0)
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Whether `dir`'s restores keep ending before their agent is ready.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn restores_lost(dir: &Path) -> bool {
+    lost_restores(dir).len() >= RESTORES_LOST
+}
+
+/// A restore of `dir` has come up: it and those lost before it are forgotten.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn restore_ready(dir: &Path) {
+    let _ = std::fs::remove_file(restoring(dir, std::process::id()));
+    for lost in lost_restores(dir) {
+        let _ = std::fs::remove_file(lost);
+    }
+}
+
+/// Marks `dir` broken and removes all of it but its root image's name, which `sweep_snapshots`
+/// reads.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn snapshot_broken(dir: &Path) {
+    log::error!("snapshot {}: its restores do not come up", dir.display());
+    let _ = File::create(dir.join(SNAPSHOT_BROKEN));
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        if name != "rootfs" && name != SNAPSHOT_BROKEN {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// How long a snapshot no machine has been restored from is kept once none can be: the
+/// restores a server of another binary sharing the home may still be making from it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const SNAPSHOT_KEPT: Duration = Duration::from_secs(60 * 60);
+
+/// Removes, beside `taken`, the snapshots no machine here can be restored from -- another
+/// binary's or host's, one whose root image is gone, one left half written -- once none has been
+/// taken or restored from for `SNAPSHOT_KEPT`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn sweep_snapshots(taken: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let Some(ours) = taken.parent() else { return };
+    let Some(snapshots) = ours.parent() else {
+        return;
+    };
+    let entries = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>()
+    };
+    for binary in entries(snapshots) {
+        for snapshot in entries(&binary) {
+            let idle = std::fs::metadata(&snapshot)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|idle| idle > SNAPSHOT_KEPT);
+            let unusable = binary != ours
+                || snapshot.extension().is_some()
+                || std::fs::read(snapshot.join("rootfs"))
+                    .is_ok_and(|rootfs| !Path::new(std::ffi::OsStr::from_bytes(&rootfs)).exists());
+            if idle && unusable {
+                let _ = std::fs::remove_dir_all(&snapshot);
+            }
+        }
+        if binary != ours {
+            let _ = std::fs::remove_dir(&binary);
+        }
+    }
 }
 
 /// 64 bytes of the host's randomness, or none where it has none to read.

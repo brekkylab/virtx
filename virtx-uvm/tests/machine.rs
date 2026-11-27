@@ -2181,21 +2181,10 @@ async fn a_sandbox_s_machine_has_the_cpus_and_memory_asked_for(home: Home) {
     }
 }
 
-/// With snapshots on, a second machine of a shape is restored from the snapshot the first took
-/// as its agent waited, beside the sandboxes' disks, on x86_64 Linux; and comes up its own: its
-/// randomness not the first's, and its clock the host's rather than the snapshot's.
+/// A second machine of a shape is restored from the snapshot the first took as its agent waited,
+/// beside the sandboxes' disks, on x86_64 Linux; and comes up its own: its randomness not the
+/// first's, and its clock the host's rather than the snapshot's.
 async fn a_machine_is_restored_from_the_snapshot_its_shape_s_first_took(home: Home) {
-    // Snapshots on until this test ends, a panic included: the tests after it boot without.
-    struct SnapshotsOn;
-    impl Drop for SnapshotsOn {
-        fn drop(&mut self) {
-            // SAFETY: as below.
-            unsafe { env::remove_var("VIRTX_SNAPSHOTS") };
-        }
-    }
-    // SAFETY: this test runs alone; the machines it starts inherit it.
-    unsafe { env::set_var("VIRTX_SNAPSHOTS", "1") };
-    let snapshots_on = SnapshotsOn;
     let script = [
         "sh",
         "-c",
@@ -2207,7 +2196,6 @@ async fn a_machine_is_restored_from_the_snapshot_its_shape_s_first_took(home: Ho
     let second = home.sandbox(&small(), None).await;
     let (b, code) = run(&second, &script, None).await.unwrap();
     assert_eq!(code, 0, "{b:?}");
-    drop(snapshots_on);
 
     assert_ne!(a[0], b[0], "each machine's randomness its own");
     let now = std::time::SystemTime::now()
@@ -2223,14 +2211,114 @@ async fn a_machine_is_restored_from_the_snapshot_its_shape_s_first_took(home: Ho
         let taken = walkdir(&home.root).into_iter().any(|path| {
             path.ends_with("state")
                 && path
-                    .parent()
-                    .and_then(|p| p.parent())
+                    .ancestors()
+                    .nth(3)
                     .is_some_and(|p| p.ends_with("snapshots"))
         });
         assert!(taken, "a snapshot under {:?}", home.root);
     }
     close(first).await;
     close(second).await;
+}
+
+/// The one entry of `dir`.
+fn only_entry(dir: &std::path::Path) -> PathBuf {
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    entries.into_iter().next().unwrap()
+}
+
+/// A snapshot taken removes, beside it, those no machine here can be restored from and none has
+/// been for an hour -- another binary's or host's, one whose root image is gone -- and keeps one
+/// whose image is there, or one restored from within the hour.
+async fn a_snapshot_taken_removes_those_no_machine_here_can_restore(home: Home) {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return;
+    }
+    let first = home.sandbox(&small(), None).await;
+    let snapshots = home.root.join("snapshots");
+    let ours = only_entry(&snapshots);
+    let image = PathBuf::from(
+        String::from_utf8(std::fs::read(only_entry(&ours).join("rootfs")).unwrap()).unwrap(),
+    );
+    assert!(image.exists(), "{image:?}");
+    let gone = home.root.join("gone.vmdk");
+    let now = std::time::SystemTime::now();
+    let old = now - Duration::from_secs(2 * 60 * 60);
+    let plant = |dir: PathBuf, rootfs: &std::path::Path, at| {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("state"), "").unwrap();
+        std::fs::write(dir.join("rootfs"), rootfs.to_str().unwrap()).unwrap();
+        std::fs::File::open(&dir).unwrap().set_modified(at).unwrap();
+        dir
+    };
+    let image_gone = plant(ours.join("0000000000000001"), &gone, old);
+    let image_there = plant(ours.join("0000000000000002"), &image, old);
+    let image_gone_lately = plant(ours.join("0000000000000003"), &gone, now);
+    let other_host = plant(snapshots.join("0000000000000004").join("1"), &image, old);
+    let other_lately = plant(snapshots.join("0000000000000005").join("1"), &image, now);
+
+    // Another shape, whose snapshot is taken.
+    let second = home.sandbox(&small().memory_mib(2048), None).await;
+    let (lines, code) = run(&second, &["true"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+
+    assert!(!image_gone.exists());
+    assert!(image_there.exists());
+    assert!(image_gone_lately.exists());
+    assert!(!other_host.parent().unwrap().exists());
+    assert!(other_lately.exists());
+    close(first).await;
+    close(second).await;
+}
+
+/// A shape whose restores end before their agent is ready -- three, with none ready since --
+/// boots without its snapshot from then on, and takes none; a restore that comes up forgets
+/// those lost before it.
+async fn a_shape_whose_restores_do_not_come_up_boots_without_its_snapshot(home: Home) {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return;
+    }
+    let first = home.sandbox(&small(), None).await;
+    let taken = only_entry(&only_entry(&home.root.join("snapshots")));
+    // Processes no longer running: no pid reaches this high.
+    let lost = |n: i32| {
+        std::fs::File::create(taken.join(format!("restoring-{}", i32::MAX - n))).unwrap();
+    };
+    let restoring = || {
+        std::fs::read_dir(&taken)
+            .unwrap()
+            .filter(|entry| {
+                let name = entry.as_ref().unwrap().file_name();
+                name.to_str().unwrap().starts_with("restoring-")
+            })
+            .count()
+    };
+
+    lost(1);
+    lost(2);
+    let second = home.sandbox(&small(), None).await;
+    assert_eq!(restoring(), 0);
+    assert!(taken.join("state").exists());
+
+    lost(3);
+    lost(4);
+    lost(5);
+    let third = home.sandbox(&small(), None).await;
+    let (lines, code) = run(&third, &["true"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(taken.join("broken").exists());
+    assert!(!taken.join("state").exists());
+    let fourth = home.sandbox(&small(), None).await;
+    let (lines, code) = run(&fourth, &["true"], None).await.unwrap();
+    assert_eq!(code, 0, "{lines:?}");
+    assert!(!taken.join("state").exists());
+    for sandbox in [first, second, third, fourth] {
+        close(sandbox).await;
+    }
 }
 
 /// Every file under `dir`, at any depth.
@@ -3179,7 +3267,6 @@ fn main() -> ExitCode {
     // no other test beside it.
     let mut alone = Vec::from(tests![
         a_machine_boots_only_with_room_given_back_as_it_goes_down,
-        a_machine_is_restored_from_the_snapshot_its_shape_s_first_took
     ]);
     #[cfg(unix)]
     alone.extend(tests![
@@ -3201,6 +3288,9 @@ fn main() -> ExitCode {
     // run does not end waiting on one.
     let mut beside = Vec::from(tests![
         a_guest_that_halts_ends_its_machine_and_its_jobs,
+        a_shape_whose_restores_do_not_come_up_boots_without_its_snapshot,
+        a_snapshot_taken_removes_those_no_machine_here_can_restore,
+        a_machine_is_restored_from_the_snapshot_its_shape_s_first_took,
         a_command_reading_a_file_past_its_memory_again_and_again_is_not_killed,
         a_sandbox_closed_while_its_machine_stops_leaves_nothing,
         a_fork_bomb_leaves_the_sandbox_answering,

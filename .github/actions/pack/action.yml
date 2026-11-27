@@ -1,5 +1,6 @@
 # The one place the client's packages are built: the wheel (setuptools-rust), the platform's npm
-# package (napi) and `@brekkylab/virtx`. On Linux it runs in the manylinux image, with its Python.
+# package (`virtx-node/build.js`, from the wheel's build) and `@brekkylab/virtx`. On Linux it runs
+# in the manylinux image, with its Python.
 name: pack
 description: Build this platform's wheel and npm package, and @brekkylab/virtx, into a directory.
 
@@ -48,19 +49,16 @@ runs:
         esac
         python -m wheel tags --remove --python-tag py3 --abi-tag none "${plat[@]}" "$OUT"/virtx-*.whl
 
+    # From the wheel's build in `target/`: cargo compiles nothing again, and on macOS links again.
     - name: npm package
       shell: bash
       working-directory: virtx-node
       env:
         PLATFORM: ${{ inputs.platform }}
-        TARGET: ${{ inputs.target }}
+        CARGO_BUILD_TARGET: ${{ inputs.target }}
         OUT: ${{ inputs.out }}
       run: |
-        npm ci --ignore-scripts --no-audit --no-fund
-        npx napi create-npm-dirs
-        npx napi build --platform --release --no-js --target "$TARGET" \
-          --manifest-path ../virtx-cabi/Cargo.toml --output-dir "npm/$PLATFORM"
-        cp ../LICENSE "npm/$PLATFORM/"
+        node build.js --release --package "$PLATFORM"
         npm pack "./npm/$PLATFORM" --pack-destination "$GITHUB_WORKSPACE/$OUT"
 
     # npm packs only what is in `virtx-node/`. The platform packages are named here, not in
@@ -77,5 +75,5 @@ runs:
         for dir in npm/*/; do
           npm pkg set "optionalDependencies.$(node -p "require('./${dir}package.json').name")=$version"
         done
-        npm pkg delete scripts devDependencies napi
+        npm pkg delete scripts devDependencies
         npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/$OUT"

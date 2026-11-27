@@ -566,7 +566,7 @@ jobs:
           lib="$RUNNER_TEMP/libs"
           python -m zipfile -e dist/release/virtx-*.whl "$lib/wheel"
           python -m tarfile --filter data -e dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz "$lib/npm"
-          for f in "$lib"/wheel/virtx/_virtx_core.* "$lib"/npm/package/*.node; do
+          for f in "$lib"/wheel/virtx/_virtx_core.* "$lib"/npm/package/*virtx_core.*; do
             echo "$f:"
             if [ "$RUNNER_OS" = Windows ]; then
               "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
@@ -689,7 +689,7 @@ jobs:
           mkdir -p "$lib/wheel" "$lib/npm"
           python -m zipfile -e dist/release/*.whl "$lib/wheel"
           tar -xzf dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz -C "$lib/npm"
-          for f in target/release/virtx-stdio target/release/virtx-server-tcp "$lib"/wheel/virtx/_virtx_core*.so "$lib"/npm/package/*.node; do
+          for f in target/release/virtx-stdio target/release/virtx-server-tcp "$lib"/wheel/virtx/_virtx_core*.so "$lib"/npm/package/*virtx_core.*; do
             syms=$(objdump -T "$f")
             need=$(grep -oE 'GLIBC_2\.[0-9]+' <<<"$syms" | sort -t. -k2 -n -u | tail -1)
             libs=$(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')

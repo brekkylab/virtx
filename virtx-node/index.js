@@ -35,17 +35,13 @@ const FILE_NAME =
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
 
-// This platform, as napi names it (`napi.targets` in `package.json`).
-const PLATFORM = {
-  'darwin-arm64': 'darwin-arm64',
-  'linux-x64': 'linux-x64-gnu',
-  'linux-arm64': 'linux-arm64-gnu',
-  'win32-x64': 'win32-x64-msvc',
+// The package carrying this platform's library, which `build.js --package` makes.
+const PLATFORM_PACKAGE = {
+  'darwin-arm64': '@brekkylab/virtx-darwin-arm64',
+  'linux-x64': '@brekkylab/virtx-linux-x64-gnu',
+  'linux-arm64': '@brekkylab/virtx-linux-arm64-gnu',
+  'win32-x64': '@brekkylab/virtx-win32-x64-msvc',
 }[`${process.platform}-${process.arch}`]
-
-// What `napi build --platform` writes beside this file, and this platform's package's `main`.
-const BUILT = PLATFORM && `virtx.${PLATFORM}.node`
-const PLATFORM_PACKAGE = PLATFORM && `@brekkylab/virtx-${PLATFORM}`
 
 class VirtxError extends Error {
   constructor(message, status = null, body = null, source = 'client', code = null, written = null) {
@@ -313,7 +309,7 @@ function libraryPath() {
 // The library in this platform's package, or `null` where it is not installed.
 function platformLibrary() {
   try {
-    return require.resolve(PLATFORM_PACKAGE)
+    return path.join(path.dirname(require.resolve(`${PLATFORM_PACKAGE}/package.json`)), FILE_NAME)
   } catch {
     return null
   }
@@ -324,10 +320,10 @@ function platformLibrary() {
 // loader to look up.
 function library() {
   if (opened === null) {
-    const beside = BUILT && path.join(__dirname, BUILT)
+    const beside = path.join(__dirname, FILE_NAME)
     load(
       process.env[LIBRARY_ENV] ||
-        (beside && fs.existsSync(beside) ? beside : PLATFORM && platformLibrary()) ||
+        (fs.existsSync(beside) ? beside : PLATFORM_PACKAGE && platformLibrary()) ||
         FILE_NAME,
     )
   }

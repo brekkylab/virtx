@@ -1746,7 +1746,7 @@ fn compiled_since(since: std::time::SystemTime) -> Vec<String> {
     compiled
 }
 
-/// `libvirtx_core` in `dev`, as virtx-rs's tests and virtx-py's editable install build it.
+/// `libvirtx_core` in `dev`, as virtx-rs's tests and the bindings' installs build it.
 fn build_test_library() -> anyhow::Result<()> {
     cargo_in_root(
         &["build", "-p", LIBRARY_PACKAGE],
@@ -1754,24 +1754,10 @@ fn build_test_library() -> anyhow::Result<()> {
     )
 }
 
-/// Where [`build_test_library`] leaves it.
-fn test_library() -> PathBuf {
-    target_path().join("debug").join(client_library())
-}
-
 /// Each binding's install: its directory and its command, a no-op once done.
 const INSTALLS: &[(&str, &[&str])] = &[
     ("virtx-py", &["uv", "sync"]),
-    (
-        "virtx-node",
-        &[
-            NPM,
-            "install",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-        ],
-    ),
+    ("virtx-node", &[NPM, "install", "--no-audit", "--no-fund"]),
 ];
 
 /// Install the packages of the binding in `dir`, if it is one.
@@ -1850,8 +1836,6 @@ fn sign_in_args(args: &[OsString]) -> Option<Vec<OsString>> {
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
 /// pytest, and virtx-node's with Node's own runner; the bindings with what [`INSTALLS`] installs.
-/// virtx-node's open [`test_library`] with `pretest` skipped: napi would rebuild every crate
-/// under `target/<triple>/`.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     (
         "virtx-rs",
@@ -1863,15 +1847,8 @@ const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     ),
     ("virtx-cli", ".", &[SIGN_IN_TESTS]),
     ("virtx-py", "virtx-py", &[&["uv", "run", "pytest"]]),
-    (
-        "virtx-node",
-        "virtx-node",
-        &[&[NPM, "test", "--ignore-scripts"]],
-    ),
+    ("virtx-node", "virtx-node", &[&[NPM, "test"]]),
 ];
-
-/// The variable a package's client opens the library named in.
-const LIBRARY_ENV: &str = "VIRTX_CORE_LIB";
 
 /// How a suite of `test_all` ended.
 enum Outcome {
@@ -2015,9 +1992,6 @@ fn test_all() -> anyhow::Result<()> {
                             .args(&argv[1..])
                             .envs(fixture.vars())
                             .current_dir(root_path().join(dir));
-                        if *name == "virtx-node" {
-                            command.env(LIBRARY_ENV, test_library());
-                        }
                         let ran = command.status();
                         let why = match ran {
                             Ok(status) if status.success() => continue,

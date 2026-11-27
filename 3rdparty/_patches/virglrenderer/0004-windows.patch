@@ -6,7 +6,7 @@ Subject: windows: build on Windows, with venus served in-process
 ## Why virtx needs it
 
 virtx's server runs on Windows hosts, and upstream does not build there.
-Both of upstream's render server forms pass descriptors over a unix socket, which Windows cannot, so render-server-mode=none serves venus from an in-process context (src/venus_context.c), and a host-visible blob is handed over as the pointer vkMapMemory answers (virgl_renderer_resource_get_map_ptr) rather than as an fd.
+Both of upstream's render server forms pass descriptors over a unix socket, which Windows cannot, so render-server-mode=none serves venus from an in-process context (src/venus_context.c), and a host-visible blob is handed over as the pointer vkMapMemory answers rather than as an fd, lent through the context's resource_map hook.
 The rest is the POSIX surface venus assumes (src/win32_compat.h) and what an MSVC-style compiler takes differently.
 Built with -Dvrend=false: vrend is not ported.
 
@@ -45,7 +45,7 @@ ones:
   memory plainly. A mapped pointer is what the probe below says Windows
   should do.
   That path — `vkMapMemory` in `export_blob`, a `map_ptr` in the blob and the
-  resource, `virgl_renderer_resource_get_map_ptr()` and
+  resource, the venus context's `resource_map` hook that lends it, and
   `VIRGL_RENDERER_BLOB_FD_TYPE_APPLE` (the name is the in-process context's
   history; the value is what rutabaga matches) — is guarded by `_WIN32`. It used
   to be shared with macOS, which now exports shm instead. `nanosleep` in place
@@ -76,9 +76,8 @@ case VIRGL_RESOURCE_OPAQUE_HANDLE:
 When the export cannot be made either — always, here — `export_fd_type` stays
 `OPAQUE_HANDLE` and the null call takes the process with it. macOS never sees
 this because it can still hand back an shm descriptor. Leaving `map` NULL
-instead turns it into the `-EINVAL` the function already returns below, and
-rutabaga falls back to `virgl_renderer_resource_get_map_ptr()`, which is where
-the mapping was always going to come from.
+instead turns it into the `-EINVAL` the function already returns below. The
+venus context does not reach it: it has the hook (below).
 
 `src/drm/drm-uapi/drm.h` gained a `_WIN32` branch for the same reason its
 `#else` says "one of the BSDs": it reaches for `sys/ioccom.h` to spell ioctl
@@ -129,6 +128,48 @@ object that `MapViewOfFile` accepts, which macOS could not offer: the
 descriptor route stays open here, and `export_blob` need not stay
 `Unsupported` forever.
 
+**The venus context lends a blob's pointer through `resource_map`, and unmap
+leaves it.** `virgl_renderer_resource_map` maps an `OPAQUE_HANDLE` blob through
+its context's `resource_map` hook, which the in-process context at first did not
+have. Every map then failed, rutabaga took the pointer through a side accessor,
+and virglrenderer never recorded the blob as mapped: the
+`virgl_renderer_resource_unmap` that followed answered `-EINVAL` for every blob,
+libkrun, which removes the hypervisor's alias first, was left believing the blob
+still mapped, and the `RESOURCE_UNREF` after it failed too, so the blob stayed
+until the VM ended. On virtx main, 20 runs of `vulkaninfo` left 40 blobs that
+way (80 guest errors), and 10 llama.cpp runs 462. The hook lends the `map_ptr`
+the blob was made with, so the map is recorded as any other, and
+`virgl_renderer_resource_unmap` forgets an `OPAQUE_HANDLE` map on Windows rather
+than `munmap` it: the mapping is the context's own, undone with the memory
+(`vkFreeMemory`, or an shm blob's destroy).
+
+**The venus context retires its fences under a lock, by the seqno it gave
+vkr.** Its fences are added by the virtio-gpu worker (`submit_fence`) and
+retired by vkr's queue threads (`VKR_RENDERER_ASYNC_FENCE_CB`) at the same time,
+but the proxy context's `timeline_mutex` and `free_fences_mutex` had been left
+commented out. Two threads changing a timeline's fence list and the free list
+at once could make a list circular; a queue thread then went round its retire
+loop for good, calling `fence_retire` again and again while holding its queue's
+sync mutex, and the worker's next `vkr_queue_sync_submit` waited for that mutex
+for good. Every later virtio-gpu command went unanswered, a blob map among
+them, and the guest hung in `virtio_gpu_vram_mmap`: found with a game (DARK
+SOULS III through DXVK) that stopped at its first logos, where `!locks` on the
+host showed the one critical section held, by a thread running in
+`fence_retire`. The context also gave vkr the guest's fence id where the proxy
+context gives the render server the fence's seqno, and the retire callback
+takes what it is given back for a seqno, so a fence id, far ahead of any seqno,
+retired every fence pending on its timeline as soon as the first did. On virtx
+main without the fix, 10 llama.cpp runs failed every time, twice over:
+`SUBMIT_3D` was refused and the app lost its device, and from the fifth run on
+a new process could not load the model at all.
+
+So a timeline's fences and busy mask change under `timeline_mutex`, which
+`submit_fence` lets go of before asking vkr — vkr's queue thread takes it while
+holding its own lock — and the retire holds across `fence_retire`, as the proxy
+context does. The free list changes under `free_fences_mutex`, vkr is given the
+seqno, and the list of contexts, which the retire callback looks a context up
+in while contexts come and go, changes and is read under a mutex of its own.
+
 The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 `CONFIG_DRM_VIRTIO_GPU=y` and `CONFIG_DRM_VIRTIO_GPU_KMS=y`.
 
@@ -146,16 +187,16 @@ Parts of it stand alone and go when upstream has them: the null resource_map cal
  src/mman_win32.c                    |   9 +
  src/mman_win32.h                    |   4 +
  src/venus/vkr_allocator.c           |   4 +
- src/venus/vkr_context.c             |  53 ++++
- src/venus/vkr_device_memory.c       |  56 ++++
+ src/venus/vkr_context.c             |  53 +++
+ src/venus/vkr_device_memory.c       |  56 +++
  src/venus/vkr_library.c             |   5 +
  src/venus/vkr_physical_device.c     |   5 +
  src/venus/vkr_queue.c               |   4 +
  src/venus/vkr_renderer.c            |   8 +
  src/venus/vkr_renderer.h            |   1 +
  src/venus/vkr_ring.c                |  16 +-
- src/venus_context.c                 | 475 ++++++++++++++++++++++++++++
- src/venus_context.h                 |  98 ++++++
+ src/venus_context.c                 | 511 ++++++++++++++++++++++++++++
+ src/venus_context.h                 | 102 ++++++
  src/virgl_context.c                 |   5 +
  src/virgl_context.h                 |   5 +
  src/virgl_fence.c                   |   5 +
@@ -163,11 +204,11 @@ Parts of it stand alone and go when upstream has them: the null resource_map cal
  src/virgl_resource.c                |   8 +
  src/virgl_resource.h                |   1 +
  src/virgl_util.c                    |   4 +
- src/virglrenderer.c                 |  61 +++-
- src/virglrenderer.h                 |  17 +-
+ src/virglrenderer.c                 |  58 +++-
+ src/virglrenderer.h                 |  16 +-
  src/win32_compat.c                  |  78 +++++
  src/win32_compat.h                  |  61 ++++
- 30 files changed, 1046 insertions(+), 16 deletions(-)
+ 30 files changed, 1082 insertions(+), 16 deletions(-)
  create mode 100644 src/venus_context.c
  create mode 100644 src/venus_context.h
  create mode 100644 src/win32_compat.c
@@ -735,10 +776,10 @@ index a3fce795..9bd8ec84 100644
     }
 diff --git a/src/venus_context.c b/src/venus_context.c
 new file mode 100644
-index 00000000..972459a7
+index 00000000..d0101489
 --- /dev/null
 +++ b/src/venus_context.c
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,511 @@
 +#include "venus_context.h"
 +
 +#include "util/hash_table.h"
@@ -758,6 +799,7 @@ index 00000000..972459a7
 +};
 +
 +struct list_head contexts;
++static mtx_t contexts_mutex;
 +static uint32_t venus_renderer_flags;
 +
 +static inline void
@@ -919,16 +961,15 @@ index 00000000..972459a7
 +{
 +   struct venus_fence *fence = NULL;
 +
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_lock(&ctx->free_fences_mutex);
++   /* Fences are freed by vkr's queue threads as they retire them. */
++   mtx_lock(&ctx->free_fences_mutex);
 +
 +   if (!list_is_empty(&ctx->free_fences)) {
 +      fence = list_first_entry(&ctx->free_fences, struct venus_fence, head);
 +      list_del(&fence->head);
 +   }
 +
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_unlock(&ctx->free_fences_mutex);
++   mtx_unlock(&ctx->free_fences_mutex);
 +
 +   return fence ? fence : malloc(sizeof(*fence));
 +}
@@ -936,13 +977,9 @@ index 00000000..972459a7
 +static void
 +venus_context_free_fence(struct venus_context *ctx, struct venus_fence *fence)
 +{
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_lock(&ctx->free_fences_mutex);
-+
++   mtx_lock(&ctx->free_fences_mutex);
 +   list_add(&fence->head, &ctx->free_fences);
-+
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_unlock(&ctx->free_fences_mutex);
++   mtx_unlock(&ctx->free_fences_mutex);
 +}
 +
 +#if 0
@@ -958,21 +995,28 @@ index 00000000..972459a7
 +{
 +   struct venus_timeline *timeline = &ctx->timelines[ring_idx];
 +
++   /* Held across fence_retire, as the proxy context holds it: what is retired is taken off
++    * the timeline a submit is adding to.
++    */
++   mtx_lock(&ctx->timeline_mutex);
++
 +   timeline->cur_seqno = seqno;
 +   //timeline->cur_seqno_stall_count = 0;
 +
-+   //fprintf(stderr, "%s: ring_idx=%d seqno=%d\n", __func__, ring_idx, seqno);
-+
 +   list_for_each_entry_safe (struct venus_fence, fence, &timeline->fences, head) {
 +      if (!venus_fence_is_signaled(fence, timeline->cur_seqno))
-+         return;
++         break;
 +
-+      //fprintf(stderr, "%s: fence_retire ring_idx=%d seqno=%d\n", __func__, ring_idx, seqno);
 +      ctx->base.fence_retire(&ctx->base, ring_idx, fence->fence_id);
 +
 +      list_del(&fence->head);
 +      venus_context_free_fence(ctx, fence);
 +   }
++
++   if (list_is_empty(&timeline->fences))
++      ctx->timeline_busy_mask &= ~(1ull << ring_idx);
++
++   mtx_unlock(&ctx->timeline_mutex);
 +}
 +
 +static void
@@ -1016,9 +1060,6 @@ index 00000000..972459a7
 +                           uint64_t fence_id)
 +{
 +   struct venus_context *ctx = (struct venus_context *)base;
-+   const uint64_t old_busy_mask = ctx->timeline_busy_mask;
-+
-+   //fprintf(stderr, "%s: ring_idx=%d fence_id=%llu\n", __func__, ring_idx, fence_id);
 +
 +   if (ring_idx >= VENUS_CONTEXT_TIMELINE_COUNT)
 +      return -EINVAL;
@@ -1028,34 +1069,35 @@ index 00000000..972459a7
 +   if (!fence)
 +      return -ENOMEM;
 +
++   mtx_lock(&ctx->timeline_mutex);
++
++   const uint64_t old_busy_mask = ctx->timeline_busy_mask;
 +   fence->flags = flags;
 +   fence->seqno = timeline->next_seqno++;
 +   fence->fence_id = fence_id;
-+
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_lock(&ctx->timeline_mutex);
-+
 +   list_addtail(&fence->head, &timeline->fences);
 +   ctx->timeline_busy_mask |= 1ull << ring_idx;
 +
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_unlock(&ctx->timeline_mutex);
++   const uint32_t seqno = fence->seqno;
 +
-+   if (vkr_renderer_submit_fence(base->ctx_id, flags, ring_idx, fence_id))
++   /* Let go of before vkr is asked: its queue thread retires holding its own lock, and takes
++    * this one in venus_context_retire_fences_internal.
++    */
++   mtx_unlock(&ctx->timeline_mutex);
++
++   /* vkr is given the seqno, as the proxy context gives the render server, and retires with
++    * what it was given: venus_state_cb_retire_fence takes it for the seqno it is.
++    */
++   if (vkr_renderer_submit_fence(base->ctx_id, flags, ring_idx, seqno))
 +      return 0;
 +
 +   /* recover timeline fences and busy_mask on submit_fence request failure */
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_lock(&ctx->timeline_mutex);
-+
++   mtx_lock(&ctx->timeline_mutex);
 +   list_del(&fence->head);
 +   ctx->timeline_busy_mask = old_busy_mask;
-+
-+   //if (venus_renderer.flags & VIRGL_RENDERER_ASYNC_FENCE_CB)
-+   //   mtx_unlock(&ctx->timeline_mutex);
++   mtx_unlock(&ctx->timeline_mutex);
 +
 +   venus_context_free_fence(ctx, fence);
-+   //fprintf(stderr, "%s: failed to submit fence\n", __func__);
 +   return -1;
 +}
 +
@@ -1065,12 +1107,15 @@ index 00000000..972459a7
 +{
 +   struct venus_context *ctx = NULL;
 +
++   /* Looked up by vkr's queue threads as they retire, while contexts come and go. */
++   mtx_lock(&contexts_mutex);
 +   list_for_each_entry (struct venus_context, iter, &contexts, head) {
 +      if (iter->base.ctx_id == ctx_id) {
 +         ctx = iter;
 +         break;
 +      }
 +   }
++   mtx_unlock(&contexts_mutex);
 +
 +   return ctx;
 +}
@@ -1078,13 +1123,17 @@ index 00000000..972459a7
 +static void
 +venus_add_context(struct venus_context *ctx)
 +{
++   mtx_lock(&contexts_mutex);
 +   list_addtail(&ctx->head, &contexts);
++   mtx_unlock(&contexts_mutex);
 +}
 +
 +static void
 +venus_remove_context(struct venus_context *ctx)
 +{
++   mtx_lock(&contexts_mutex);
 +   list_del(&ctx->head);
++   mtx_unlock(&contexts_mutex);
 +}
 +
 +static void
@@ -1100,8 +1149,30 @@ index 00000000..972459a7
 +
 +   venus_remove_context(ctx);
 +
++   mtx_destroy(&ctx->free_fences_mutex);
++   mtx_destroy(&ctx->timeline_mutex);
 +   free(ctx);
 +}
++
++#ifdef _WIN32
++/* A blob here is host memory this context mapped when it made it -- vkMapMemory for device
++ * memory, an anonymous mapping for shm -- and handed over as its map_ptr rather than as a
++ * descriptor. Mapping it lends that pointer; it cannot be placed at an address of the
++ * caller's choosing. virgl_renderer_resource_unmap leaves it alone: it goes with the memory.
++ */
++static void *
++venus_context_resource_map(UNUSED struct virgl_context *base,
++                           struct virgl_resource *res,
++                           void *addr,
++                           UNUSED int32_t prot,
++                           UNUSED int32_t flags)
++{
++   if (addr || !res->map_ptr)
++      return NULL;
++
++   return (void *)(uintptr_t)res->map_ptr;
++}
++#endif
 +
 +static void
 +venus_context_init_base(struct venus_context *ctx)
@@ -1116,6 +1187,9 @@ index 00000000..972459a7
 +   ctx->base.get_fencing_fd = venus_context_get_fencing_fd;
 +   ctx->base.retire_fences = venus_context_retire_fences;
 +   ctx->base.submit_fence = venus_context_submit_fence;
++#ifdef _WIN32
++   ctx->base.resource_map = venus_context_resource_map;
++#endif
 +}
 +
 +static void
@@ -1148,7 +1222,9 @@ index 00000000..972459a7
 +
 +   venus_context_init_base(ctx);
 +   venus_context_resource_table_init(ctx);
++   mtx_init(&ctx->timeline_mutex, mtx_plain);
 +   venus_context_init_timelines(ctx);
++   mtx_init(&ctx->free_fences_mutex, mtx_plain);
 +   list_inithead(&ctx->free_fences);
 +   venus_add_context(ctx);
 +
@@ -1183,6 +1259,7 @@ index 00000000..972459a7
 +{
 +   //fprintf(stderr, "%s: entry\n", __func__);
 +
++   mtx_init(&contexts_mutex, mtx_plain);
 +   list_inithead(&contexts);
 +
 +   static const uint32_t required_flags =
@@ -1216,10 +1293,10 @@ index 00000000..972459a7
 +}
 diff --git a/src/venus_context.h b/src/venus_context.h
 new file mode 100644
-index 00000000..3e17bcc4
+index 00000000..c7a610ee
 --- /dev/null
 +++ b/src/venus_context.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,102 @@
 +#ifndef VENUS_CONTEXT_H_
 +#define VENUS_CONTEXT_H_
 +
@@ -1229,6 +1306,7 @@ index 00000000..3e17bcc4
 +#include <stdatomic.h>
 +#include <stdbool.h>
 +
++#include "c11/threads.h"
 +#include "util/hash_table.h"
 +#include "util/list.h"
 +#include "util/macros.h"
@@ -1255,14 +1333,17 @@ index 00000000..3e17bcc4
 +   /* this tracks resources early attached in get_blob */
 +   struct hash_table *resource_table;
 +
-+   //mtx_t timeline_mutex;
++   /* The timelines and their busy mask: a fence is added by whoever submits it and retired by
++    * one of vkr's queue threads (VKR_RENDERER_ASYNC_FENCE_CB), at the same time.
++    */
++   mtx_t timeline_mutex;
 +   struct venus_timeline timelines[VENUS_CONTEXT_TIMELINE_COUNT];
 +   /* which timelines have fences */
 +   uint64_t timeline_busy_mask;
 +   /* this points a region of shmem updated by the render worker */
 +   const volatile atomic_uint *timeline_seqnos;
 +
-+   //mtx_t free_fences_mutex;
++   mtx_t free_fences_mutex;
 +   struct list_head free_fences;
 +};
 +
@@ -1456,7 +1537,7 @@ index b770a0a9..3b4cd655 100644
  #include "util/os_misc.h"
  #include "util/u_pointer.h"
 diff --git a/src/virglrenderer.c b/src/virglrenderer.c
-index a4b760b6..318b7f8c 100644
+index a4b760b6..366b7d9b 100644
 --- a/src/virglrenderer.c
 +++ b/src/virglrenderer.c
 @@ -38,7 +38,11 @@
@@ -1571,39 +1652,38 @@ index a4b760b6..318b7f8c 100644
     } else if (blob.type != VIRGL_RESOURCE_FD_INVALID) {
        res = virgl_resource_create_from_fd(args->res_handle,
                                            blob.type,
-@@ -1469,6 +1502,13 @@ int virgl_renderer_resource_map(uint32_t res_handle, void **out_map, uint64_t *o
+@@ -1469,6 +1502,12 @@ int virgl_renderer_resource_map(uint32_t res_handle, void **out_map, uint64_t *o
           ret = vkr_allocator_resource_map(res, &map, &map_size);
           break;
        case VIRGL_RESOURCE_OPAQUE_HANDLE:
 +         /* Reached with no `resource_map` hook when the transient dmabuf above
 +          * could not be made either -- which is every time on a host with no
 +          * dmabufs. Calling the null hook the branch above just tested for is
-+          * a crash; leaving `map` NULL turns it into the -EINVAL below, and
-+          * the caller falls back to virgl_renderer_resource_get_map_ptr(). */
++          * a crash; leaving `map` NULL turns it into the -EINVAL below. */
 +         if (!ctx->resource_map)
 +            break;
           map = ctx->resource_map(ctx, res, NULL, PROT_WRITE | PROT_READ, MAP_SHARED);
           map_size = res->map_size;
           break;
-@@ -1600,6 +1640,17 @@ int virgl_renderer_resource_get_map_info(uint32_t res_handle, uint32_t *map_info
-    return 0;
- }
- 
-+int virgl_renderer_resource_get_map_ptr(uint32_t res_handle, uint64_t *map_ptr)
-+{
-+   TRACE_FUNC();
-+   struct virgl_resource *res = virgl_resource_lookup(res_handle);
-+   if (!res)
-+      return -EINVAL;
-+
-+  *map_ptr = res->map_ptr;
-+   return 0;
-+}
-+
- int
- virgl_renderer_resource_export_blob(uint32_t res_id, uint32_t *fd_type, int *fd)
- {
-@@ -1619,6 +1670,10 @@ virgl_renderer_resource_export_blob(uint32_t res_id, uint32_t *fd_type, int *fd)
+@@ -1565,8 +1604,17 @@ int virgl_renderer_resource_unmap(uint32_t res_handle)
+       switch (res->fd_type) {
+       case VIRGL_RESOURCE_FD_DMABUF:
+       case VIRGL_RESOURCE_FD_SHM:
++         ret = munmap(res->mapped, res->map_size);
++         break;
+       case VIRGL_RESOURCE_OPAQUE_HANDLE:
++#ifdef _WIN32
++         /* The venus context's resource_map lent its own mapping of the memory, which it
++          * undoes with the memory (vkFreeMemory, or the shm blob's destroy). Only the
++          * record of the map goes. */
++         ret = 0;
++#else
+          ret = munmap(res->mapped, res->map_size);
++#endif
+          break;
+       case VIRGL_RESOURCE_FD_OPAQUE:
+          ret = vkr_allocator_resource_unmap(res);
+@@ -1619,6 +1667,10 @@ virgl_renderer_resource_export_blob(uint32_t res_id, uint32_t *fd_type, int *fd)
        *fd_type = VIRGL_RENDERER_BLOB_FD_TYPE_SHM;
        break;
     case VIRGL_RESOURCE_OPAQUE_HANDLE:
@@ -1614,7 +1694,7 @@ index a4b760b6..318b7f8c 100644
     case VIRGL_RESOURCE_FD_INVALID:
        /* Avoid a default case so that -Wswitch will tell us at compile time if a
         * new virgl resource type is added without being handled here.
-@@ -1712,7 +1767,9 @@ static int attach_in_fence_fd(struct virgl_context *ctx, int fence_fd)
+@@ -1712,7 +1764,9 @@ static int attach_in_fence_fd(struct virgl_context *ctx, int fence_fd)
     int ret = -EINVAL;
  
  #ifndef WIN32
@@ -1625,7 +1705,7 @@ index a4b760b6..318b7f8c 100644
     close(fence_fd);
  
 diff --git a/src/virglrenderer.h b/src/virglrenderer.h
-index 0bcafef4..26ef265d 100644
+index 0bcafef4..ce3aa70d 100644
 --- a/src/virglrenderer.h
 +++ b/src/virglrenderer.h
 @@ -36,7 +36,18 @@
@@ -1648,12 +1728,7 @@ index 0bcafef4..26ef265d 100644
  
  typedef void *virgl_renderer_gl_context;
  
-@@ -431,10 +442,14 @@ VIRGL_EXPORT int virgl_renderer_resource_unmap(uint32_t res_handle);
- #define VIRGL_RENDERER_MAP_CACHE_WC        0x03
- 
- VIRGL_EXPORT int virgl_renderer_resource_get_map_info(uint32_t res_handle, uint32_t *map_info);
-+VIRGL_EXPORT int virgl_renderer_resource_get_map_ptr(uint32_t res_handle, uint64_t *map_ptr);
- 
+@@ -435,6 +446,9 @@ VIRGL_EXPORT int virgl_renderer_resource_get_map_info(uint32_t res_handle, uint3
  #define VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF        0x0001
  #define VIRGL_RENDERER_BLOB_FD_TYPE_OPAQUE        0x0002
  #define VIRGL_RENDERER_BLOB_FD_TYPE_SHM           0x0003

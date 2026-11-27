@@ -440,7 +440,7 @@ pub(super) fn boot(
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network || !published.is_empty() || machine.client_ports.is_some() {
+    if info.network.is_some() {
         devices.add(net::device(
             machine.spec.network,
             published,
@@ -500,6 +500,7 @@ pub(super) fn boot(
         Some(dir) => {
             if restored.is_some() {
                 snapshot::restoring(dir);
+                log::warn!(target: super::machine::RESTORING_TARGET, "{}", dir.display());
             }
             vmm.restore(dir)
         }
@@ -568,9 +569,7 @@ pub(super) fn boot(
                             }
                             std::process::exit(0);
                         }
-                        // Written aside and moved into place whole, so a machine restored from
-                        // it never reads one half written; the first of two to finish wins.
-                        let aside = dir.with_extension(format!("taking-{}", std::process::id()));
+                        let aside = snapshot::taking(dir);
                         match handle.snapshot(&aside) {
                             Ok(()) => {
                                 use std::os::unix::ffi::OsStrExt;
@@ -581,6 +580,7 @@ pub(super) fn boot(
                                 if named.is_err() || std::fs::rename(&aside, dir).is_err() {
                                     let _ = std::fs::remove_dir_all(&aside);
                                 }
+                                let _ = std::fs::remove_file(dir.join(snapshot::TAKEN_BY));
                                 taken = true;
                             }
                             Err(e) => {

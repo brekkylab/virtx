@@ -11,9 +11,10 @@ use std::time::Duration;
 use super::MachineConfig;
 use super::wire;
 
-/// Names what restores a snapshot here: `program`, whose libkrun and agent write it, and this
-/// host's CPU and kernel, whose KVM it names the features of. None off x86_64 Linux, where no
-/// machine is restored.
+/// Names what restores a snapshot here: `program`, whose libkrun and agent write it, the guest
+/// kernel it opens beside it, which a restored guest runs as the snapshot's machine booted it,
+/// and this host's CPU and kernel, whose KVM it names the features of. None off x86_64 Linux,
+/// where no machine is restored.
 pub(crate) fn host(program: &Path) -> Option<String> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return None;
@@ -21,12 +22,19 @@ pub(crate) fn host(program: &Path) -> Option<String> {
     // The same for the process's life, and read once: every machine it starts asks.
     static MACHINE: OnceLock<Option<u64>> = OnceLock::new();
     let machine = (*MACHINE.get_or_init(cpu_and_kernel))?;
+    let kernel = fs::metadata(program.with_file_name(KRUNFW)).ok();
     let program = fs::metadata(program).ok()?;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     machine.hash(&mut hash);
     (program.len(), program.modified().ok()).hash(&mut hash);
+    kernel
+        .map(|kernel| (kernel.len(), kernel.modified().ok()))
+        .hash(&mut hash);
     Some(format!("{:016x}", hash.finish()))
 }
+
+/// The guest kernel libkrun opens on Linux, from beside the binary it runs in.
+const KRUNFW: &str = "libkrunfw.so.5";
 
 /// This host's kernel release and its first CPU's identity, which every other's matches.
 fn cpu_and_kernel() -> Option<u64> {
@@ -71,7 +79,8 @@ pub(super) fn shape(
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     machine.spec.vcpus.hash(&mut hash);
     machine.spec.ram_mib.hash(&mut hash);
-    (machine.spec.network || !machine.ports.is_empty()).hash(&mut hash);
+    // Whether it has a network device, which its ports on either side give it too.
+    info.network.is_some().hash(&mut hash);
     info.shares.hash(&mut hash);
     machine.rootfs.hash(&mut hash);
     // The agent's, which every command inherits: an image's own though another has its layers.
@@ -88,7 +97,7 @@ pub(super) fn use_of(dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
     if dir.join(BROKEN).exists() {
         (None, None)
     } else if !dir.join("state").exists() {
-        (Some(dir.to_owned()), None)
+        (claim(dir).then(|| dir.to_owned()), None)
     } else if restores_lost(dir) {
         broken(dir);
         (None, None)
@@ -101,6 +110,48 @@ pub(super) fn use_of(dir: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub(super) fn use_of(_: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
     (None, None)
+}
+
+/// Where the snapshot `dir` is written by the machine that claimed it, to be moved into place
+/// whole, so that no machine restored from it reads one half written.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(super) fn taking(dir: &Path) -> PathBuf {
+    dir.with_extension("taking")
+}
+
+/// In [`taking`], the pid of the process that claimed it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(super) const TAKEN_BY: &str = "taken-by";
+
+/// Claims the taking of the snapshot `dir` for this process, so that one machine of a shape made
+/// beside others takes it: false while another's process that claimed it runs on.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn claim(dir: &Path) -> bool {
+    let aside = taking(dir);
+    for _ in 0..2 {
+        if fs::create_dir(&aside).is_ok() {
+            return fs::write(aside.join(TAKEN_BY), std::process::id().to_string()).is_ok();
+        }
+        // A claim not yet named is taken for one under way.
+        let taker = fs::read_to_string(aside.join(TAKEN_BY))
+            .ok()
+            .and_then(|pid| pid.parse::<libc::pid_t>().ok());
+        match taker {
+            Some(pid) if ended(pid) => {
+                let _ = fs::remove_dir_all(&aside);
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Whether the process `pid` has ended. Another user's, which this one may not signal, has not.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn ended(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 is only asked whether the process is there.
+    (unsafe { libc::kill(pid, 0) }) != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// Beside a snapshot whose restores do not come up, which a machine of its shape then boots
@@ -141,12 +192,7 @@ fn lost_restores(dir: &Path) -> Vec<PathBuf> {
                 .to_str()
                 .and_then(|name| name.strip_prefix("restoring-"))
                 .and_then(|pid| pid.parse::<libc::pid_t>().ok())
-                // SAFETY: signal 0 is only asked whether the process is there. Another user's
-                // answers EPERM, and is there.
-                .is_some_and(|pid| {
-                    (unsafe { libc::kill(pid, 0) }) != 0
-                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-                })
+                .is_some_and(ended)
         })
         .map(|entry| entry.path())
         .collect()
@@ -307,7 +353,7 @@ mod tests {
         let ours = home.join("ours");
         let image_gone = plant(ours.join("1"), &gone, 1, 2 * HOUR);
         let image_gone_lately = plant(ours.join("2"), &gone, 1, Duration::ZERO);
-        let half_written = plant(ours.join("3.taking-1"), &image, 1, 2 * HOUR);
+        let half_written = plant(ours.join("3.taking"), &image, 1, 2 * HOUR);
         let image_there = plant(ours.join("4"), &image, 1, 2 * HOUR);
         let unused = plant(ours.join("5"), &image, 1, 25 * HOUR);
         let other_host = plant(home.join("theirs").join("1"), &image, 1, 2 * HOUR);

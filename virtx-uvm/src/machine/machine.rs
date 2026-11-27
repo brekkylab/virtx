@@ -27,6 +27,10 @@ const TAIL: usize = 50;
 /// [`Error::told`] has it.
 const TOLD_TARGET: &str = "virtx_uvm::told";
 
+/// The log target a machine's process says it is restored from its shape's snapshot under,
+/// before it is built.
+pub(super) const RESTORING_TARGET: &str = "virtx_uvm::restoring";
+
 /// How long a machine told to shut down has to, before it is killed.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -296,7 +300,31 @@ impl Machine {
     /// after them as its last argument. The program has to call [`enter`] first thing in its
     /// `main` when it is run so, and on macOS be signed with the
     /// `com.apple.security.hypervisor` entitlement.
+    ///
+    /// A machine restored from its shape's snapshot that does not come up is started once more
+    /// without it: the snapshot's failure is its own, not the machine's.
     pub fn start(config: MachineConfig, cmd: &[OsString]) -> Result<Machine> {
+        let booted = config.snapshots.is_some().then(|| MachineConfig {
+            snapshots: None,
+            ..config.clone()
+        });
+        let mut restoring = false;
+        match (Machine::start_once(config, cmd, &mut restoring), booted) {
+            (Err(e), Some(booted)) if restoring => {
+                log::warn!("a machine restored from its shape's snapshot did not come up: {e}");
+                Machine::start_once(booted, cmd, &mut restoring)
+            }
+            (started, _) => started,
+        }
+    }
+
+    /// [`start`](Machine::start) once, saying in `restoring` whether the process said it was
+    /// restored from its shape's snapshot.
+    fn start_once(
+        config: MachineConfig,
+        cmd: &[OsString],
+        restoring: &mut bool,
+    ) -> Result<Machine> {
         let Some((program, cmd)) = cmd.split_first() else {
             return Err(Error::NoCommand);
         };
@@ -366,6 +394,9 @@ impl Machine {
                 Some(CtrlResp::Log {
                     target, message, ..
                 }) if target == TOLD_TARGET => told = Some(message),
+                Some(CtrlResp::Log { target, .. }) if target == RESTORING_TARGET => {
+                    *restoring = true;
+                }
                 Some(CtrlResp::Log {
                     target, message, ..
                 }) => {

@@ -2446,7 +2446,7 @@ async fn a_restore_that_fails_once_leaves_the_snapshot_to_the_next(home: Home) {
     let taken = only_entry(&only_entry(&home.root.join("snapshots")));
     let state = std::fs::read(taken.join("state")).unwrap();
     std::fs::write(taken.join("state"), b"no state").unwrap();
-    assert!(home.making(&small(), None, None).await.is_err());
+    assert!(home.making(&small(), None, false).await.is_err());
     std::fs::write(taken.join("state"), &state).unwrap();
 
     let second = home.sandbox(&small(), None).await;

@@ -13,10 +13,11 @@ use sha2::{Digest as _, Sha256};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use virtx_core::{
-    ImageName, SandboxCreateArgs, SandboxJob, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
-    SandboxPort, SandboxResizeArgs, SandboxResources,
+    ImageName, PortSide, PortSpec, SandboxCreateArgs, SandboxJob, SandboxJobEndReason,
+    SandboxJobEntry, SandboxJobKind, SandboxPort, SandboxResizeArgs, SandboxResources,
 };
 
+use super::client_ports::{ClientPortTaker, ClientPorts};
 use super::job::Written;
 use super::record::Record;
 use super::upper::Upper;
@@ -42,11 +43,13 @@ const MAX_DISK_GIB: u32 = 1024;
 /// The directory under a server's root its sandboxes keep what they make on the host in.
 const SANDBOX: &str = "sandbox";
 
-/// The directory beside the server's program its own programs for `/abin` are in, and where each
-/// one's `SKILL.md` is in that.
+/// The directory beside the server's program its own programs for `/abin` are in, where each
+/// one's `SKILL.md` is in that, and where what each one installs beside itself is: under
+/// `install/<name>/`, at the paths it has in `/abin`.
 const ABIN_HOST: &str = "abin";
 const SKILLS: &str = "skills";
 const SKILL: &str = "SKILL.md";
+const INSTALL: &str = "install";
 
 /// The most characters a port's label has.
 const LABEL_MOST: usize = 128;
@@ -153,7 +156,7 @@ enum State {
 /// [parked](Sandbox::idle) for want of use, and the processes run in it.
 ///
 /// What it wrote is kept across its machine's stops, on the upper disk it made for itself, until
-/// it is closed; what ran in it is not. One made with keys is kept past its process too, with a
+/// it is closed; what ran in it is not. One made to be kept is kept past its process too, with a
 /// record beside its disk: [let go](Sandbox::leave) of as its server ends, it is known again,
 /// parked, by the next server over its root ([`Sandbox::kept`]).
 pub struct Sandbox {
@@ -178,8 +181,8 @@ pub struct Sandbox {
     _held: ImageHold,
     /// The upper disk it made for itself, until it is closed.
     upper: Mutex<Option<Upper>>,
-    /// The ports it was made with, as asked for again: what each is for and how it is reached,
-    /// with no `url`, which is its server's.
+    /// The ports it was made with, on either side, as asked for again: what each is for, with
+    /// no `url`, which is its server's.
     ports_opened: Vec<SandboxPort>,
     /// The programs it was made with, by name, and the directory its machines show them from,
     /// until it is closed.
@@ -217,6 +220,8 @@ pub struct Sandbox {
     served: Mutex<Option<bool>>,
     /// Where its machine's ports are reached.
     ports: Ports,
+    /// The relay its machines reach its client's ports through, where it was made with any.
+    client_ports: Option<ClientPorts>,
     /// How long it is in use by nothing before its machine is parked, `None` for never, and
     /// whether that is watched for, from its first boot on.
     park_after: Option<Duration>,
@@ -239,9 +244,8 @@ impl Sandbox {
     /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
     /// under `root` has, has made or keeps; under an id it picks otherwise.
     ///
-    /// With `keys`, the port each opens, it is kept past this process: its record is written
-    /// once it has booted, and a making cut short before then leaves nothing. Without, it goes
-    /// with this process.
+    /// `kept`, it is kept past this process: its record is written once it has booted, and a
+    /// making cut short before then leaves nothing. Otherwise it goes with this process.
     ///
     /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
     /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
@@ -256,7 +260,7 @@ impl Sandbox {
         vm: Vec<OsString>,
         park_after: Option<Duration>,
         id: Option<&str>,
-        keys: Option<HashMap<String, u16>>,
+        kept: bool,
         backing: &Backing,
     ) -> Result<Arc<Sandbox>, Error> {
         // What can be refused without starting anything, first.
@@ -279,13 +283,11 @@ impl Sandbox {
             }
         }
         let mut given = HashSet::new();
-        if let Some(spec) = args
-            .ports
-            .iter()
-            .find(|spec| spec.port == 0 || !given.insert(spec.port))
+        if let Some(spec) =
+            (args.ports.iter()).find(|spec| spec.port == 0 || !given.insert((spec.on, spec.port)))
         {
             return Err(Error::Invalid(format!(
-                "ports: {} is not a port, or is given twice",
+                "ports: {} is not a port, or is given twice on one side",
                 spec.port
             )));
         }
@@ -433,14 +435,13 @@ impl Sandbox {
         }
         let made = async {
             sandbox.wake_in(Some(room)).await?;
-            match keys {
-                Some(keys) => sandbox.keep(Record {
+            match kept {
+                true => sandbox.keep(Record {
                     args,
-                    keys,
                     exited: false,
                     jobs: Vec::new(),
                 }),
-                None => Ok(()),
+                false => Ok(()),
             }
         };
         if let Err(e) = made.await {
@@ -515,6 +516,12 @@ impl Sandbox {
             }
         };
 
+        let on = |side| (args.ports.iter()).filter(move |spec: &&PortSpec| spec.on == side);
+        let local: Vec<u16> = on(PortSide::Local).map(|spec| spec.port).collect();
+        let client_ports = match local.is_empty() {
+            true => None,
+            false => Some(ClientPorts::open(&local)?),
+        };
         let config = MachineConfig {
             rootfs,
             config: image.config().clone().unwrap_or_default(),
@@ -522,7 +529,8 @@ impl Sandbox {
             spec: machine_spec(args),
             volumes,
             abin: abin.as_ref().map(|abin| abin.dir.clone()),
-            ports: args.ports.iter().map(|spec| spec.port).collect(),
+            ports: on(PortSide::Sandbox).map(|spec| spec.port).collect(),
+            client_ports: client_ports.as_ref().map(|ports| ports.relay().clone()),
             // Set as each of its machines boots ([`Sandbox::wake`]).
             sandbox_disk: None,
         };
@@ -545,11 +553,9 @@ impl Sandbox {
                 .iter()
                 .map(|spec| SandboxPort {
                     port: spec.port,
+                    on: spec.on,
                     url: None,
                     label: spec.label.clone(),
-                    protocol: spec.protocol.clone(),
-                    address: None,
-                    inbound_error: None,
                 })
                 .collect(),
             abins: args.abins.clone(),
@@ -575,6 +581,7 @@ impl Sandbox {
             synced: Mutex::default(),
             served: Mutex::default(),
             ports: Ports::default(),
+            client_ports,
             park_after,
             watching: AtomicBool::new(false),
             used: Mutex::new(Instant::now()),
@@ -604,8 +611,8 @@ impl Sandbox {
         self.up_since.lock().unwrap().map(|(at, _)| at)
     }
 
-    /// The sandbox as the server answers it, each port with what it is for and how it is
-    /// reached but no `url`: only its making answers those, which its server forms.
+    /// The sandbox for its server to answer, each port with what it is for and how it is reached
+    /// but no `url`, which is the server's to give.
     pub fn answer(&self) -> virtx_core::Sandbox {
         virtx_core::Sandbox {
             id: self.id.clone(),
@@ -616,16 +623,6 @@ impl Sandbox {
             abins: self.abins.clone(),
             error: None,
         }
-    }
-
-    /// The port each of its keys opens, as it was made with them: none for one not kept past
-    /// its process.
-    pub fn keys(&self) -> HashMap<String, u16> {
-        let record = self.record.lock().unwrap();
-        record
-            .as_ref()
-            .map(|record| record.keys.clone())
-            .unwrap_or_default()
     }
 
     /// Keep it past this process as `record` says: written beside its upper disk, which is
@@ -770,6 +767,18 @@ impl Sandbox {
     /// listens on is: a parked one is not booted for it, since nothing would listen there.
     pub async fn connect(&self, port: u16) -> io::Result<TcpStream> {
         self.ports.connect(port).await
+    }
+
+    /// A taker of its port `port` on local, beside any others, until it drops: each connection a
+    /// process in it makes to the port goes to one of its takers, and one to a port with none is
+    /// refused. Refused [`NotFound`](Error::NotFound) for a port it was not made with.
+    pub fn take_client_port(&self, port: u16) -> Result<ClientPortTaker, Error> {
+        match &self.client_ports {
+            Some(ports) => ports.take(port),
+            None => Err(Error::NotFound(format!(
+                "this sandbox was made with no port {port} on local"
+            ))),
+        }
     }
 
     /// Something done with it from outside, such as a connection through a port or a request
@@ -984,6 +993,9 @@ impl Sandbox {
             upper.kept = leaving && record.is_some();
         }
         drop(self.abin.lock().unwrap().take());
+        if let Some(ports) = &self.client_ports {
+            ports.close();
+        }
         for job in std::mem::take(&mut *self.jobs.lock().unwrap()).into_values() {
             job.cut(reason.clone());
             job.remove();
@@ -1336,7 +1348,8 @@ impl Drop for Activity {
 }
 
 /// The directory a sandbox made with [`abins`](SandboxCreateArgs::abins) shows at `/abin`: each
-/// program it named, and its `SKILL.md` under `skills/`, linked from the server's own.
+/// program it named, its `SKILL.md` under `skills/`, and what it installs beside itself, linked
+/// from the server's own.
 ///
 /// One is shared, read-only, by every sandbox made with the same programs as they stand: `<key>/`
 /// in `<root>/sandbox/abin/`, keyed by the programs' names, sizes and times, so that only the
@@ -1352,22 +1365,41 @@ impl Abin {
         root.join(SANDBOX).join(ABIN_HOST)
     }
 
-    /// The one in `dir` of `names`, each a program in `programs`, and the `SKILL.md` of each
-    /// that has one: made, when no sandbox has made it yet.
+    /// The one in `dir` of `names`, each a program in `programs`, the `SKILL.md` of each that
+    /// has one, and what each installs: made, when no sandbox has made it yet.
     fn create(dir: &Path, programs: &Path, names: &[String]) -> Result<Abin, Error> {
         let io = |context: String| move |source| Error::Io { context, source };
+        // Each file as `(where it is in programs, where it goes in /abin)`.
         let mut files = Vec::new();
         for program in names {
-            files.push(PathBuf::from(program));
+            files.push((PathBuf::from(program), PathBuf::from(program)));
             let skill = Path::new(SKILLS).join(program).join(SKILL);
             if programs.join(&skill).is_file() {
-                files.push(skill);
+                files.push((skill.clone(), skill));
+            }
+            let installed = Path::new(INSTALL).join(program);
+            let mut found = Vec::new();
+            installs(programs, &installed, &mut found).map_err(io(format!(
+                "reading {}",
+                programs.join(&installed).display()
+            )))?;
+            for file in found {
+                let to = file.strip_prefix(&installed).unwrap_or(&file).to_path_buf();
+                files.push((file, to));
             }
         }
         files.sort();
+        // Two of them at one path in /abin would be one linked over the other.
+        let mut at = HashSet::new();
+        if let Some((_, to)) = files.iter().find(|(_, to)| !at.insert(to)) {
+            return Err(Error::Invalid(format!(
+                "abins: more than one of them has {} in /abin",
+                to.display()
+            )));
+        }
         let mut key = Sha256::new();
         key.update(programs.as_os_str().as_encoded_bytes());
-        for file in &files {
+        for (file, _) in &files {
             let from = programs.join(file);
             let meta = fs::metadata(&from).map_err(io(format!("reading {}", from.display())))?;
             let time = meta.modified().ok();
@@ -1397,7 +1429,7 @@ impl Abin {
             let part = dir.join(format!("{key}.{name}"));
             let filled = files
                 .iter()
-                .try_for_each(|file| link(&programs.join(file), &part.join(file)))
+                .try_for_each(|(from, to)| link(&programs.join(from), &part.join(to)))
                 .and_then(|()| {
                     fs::rename(&part, &made).map_err(|source| Error::Io {
                         context: format!("placing {}", made.display()),
@@ -1448,6 +1480,26 @@ impl Abin {
             // The lock itself stays: one waiting for it holds what it opened, not a new one.
         }
     }
+}
+
+/// Each file under `programs/dir`, as a path relative to `programs`; none when there is no
+/// such directory.
+fn installs(programs: &Path, dir: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let entries = match fs::read_dir(programs.join(dir)) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = dir.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            installs(programs, &path, found)?;
+        } else {
+            found.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// `from` at `to`, making its directory: a hard link, or a copy where `to` cannot be one, such
@@ -1774,6 +1826,9 @@ mod tests {
             fs::write(programs.join(program), program).unwrap();
         }
         fs::write(programs.join(SKILLS).join("index").join(SKILL), "skill").unwrap();
+        let installed = programs.join(INSTALL).join("docread").join(".models/tf");
+        fs::create_dir_all(&installed).unwrap();
+        fs::write(installed.join("model.onnx"), "model").unwrap();
 
         let dir = host.path().join("sandbox").join(ABIN_HOST);
         let names = ["index".to_string(), "display".to_string()];
@@ -1781,12 +1836,33 @@ mod tests {
         assert_eq!(fs::read(abin.dir.join("index")).unwrap(), b"index");
         assert_eq!(fs::read(abin.dir.join("display")).unwrap(), b"display");
         assert!(!abin.dir.join("docread").exists());
+        assert!(!abin.dir.join(".models").exists());
+        assert!(!abin.dir.join(INSTALL).exists());
         let skills = abin.dir.join(SKILLS);
         assert_eq!(
             fs::read(skills.join("index").join(SKILL)).unwrap(),
             b"skill"
         );
         assert!(!skills.join("display").exists());
+
+        // What a program installs is beside it, at the path it installed it at.
+        let docread = Abin::create(&dir, &programs, &["docread".to_string()]).unwrap();
+        assert_eq!(
+            fs::read(docread.dir.join(".models/tf/model.onnx")).unwrap(),
+            b"model"
+        );
+        drop(docread);
+
+        // And two programs that install one path are not shown together.
+        let clash = programs.join(INSTALL).join("display").join(".models/tf");
+        fs::create_dir_all(&clash).unwrap();
+        fs::write(clash.join("model.onnx"), "other").unwrap();
+        let both = ["docread".to_string(), "display".to_string()];
+        assert!(matches!(
+            Abin::create(&dir, &programs, &both),
+            Err(Error::Invalid(_))
+        ));
+        fs::remove_dir_all(programs.join(INSTALL).join("display")).unwrap();
 
         let reversed = ["display".to_string(), "index".to_string()];
         let same = Abin::create(&dir, &programs, &reversed).unwrap();

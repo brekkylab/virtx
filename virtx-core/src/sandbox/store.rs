@@ -28,8 +28,8 @@ pub struct Sandbox {
     /// is `false` is still held until it is removed.
     pub running: bool,
 
-    /// Each port it opened, in the order asked for: with its `url` in what making it answers
-    /// only, since the URLs carry credentials, and without it in what asking for it answers.
+    /// Each port it was made with, on either side, in the order asked for, each reached with
+    /// [`PortForwarder`](crate::PortForwarder).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SandboxPort>,
 
@@ -63,9 +63,11 @@ pub struct SandboxCreateArgs {
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub network: bool,
 
-    /// Ports in it to open, each answered with where it is reached from: a number, or one with
-    /// what it is for, how it is reached and whom it lets in ([`PortSpec`]). Reserved as it is
-    /// made, and kept until it is removed; `0` and a port given twice are refused.
+    /// Its TCP ports, each on one side ([`PortSide`]): one in the sandbox is opened in it, and one
+    /// on local, the machine a client forwards it from, is reached by its processes at
+    /// `10.0.2.2`, which does not need `network`. Each a number, a port in the sandbox, or one
+    /// with its side and what it is for ([`PortSpec`]). Kept until it is removed; `0`, and a
+    /// port given twice on one side, are refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortSpec>,
 
@@ -147,8 +149,8 @@ impl SandboxCreateArgs {
         self
     }
 
-    /// Open the port `port` in it, beside those given before: a number for TCP, or a
-    /// [`PortSpec`] to say what it is for, whether it is HTTP, and whom it lets in.
+    /// Give it the TCP port `port`, beside those given before: a number for one in it, or a
+    /// [`PortSpec`] to say its side and what it is for.
     pub fn port(mut self, port: impl Into<PortSpec>) -> Self {
         self.ports.push(port.into());
         self
@@ -271,145 +273,81 @@ fn is_on(flag: &bool) -> bool {
     *flag
 }
 
-/// A port opened in a sandbox, and where it is reached from.
+/// A sandbox's port, the side it is on, and where it is reached from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxPort {
-    /// The port in the sandbox.
+    /// The port, on its side.
     pub port: u16,
 
-    /// Where it is reached from: a loopback address from a server on the client's machine, or
-    /// a URL carrying the credentials it needs from one reachable from other machines. As secret
-    /// as those credentials, and the server's to form: a client does not build one or take it
-    /// apart. Answered by the sandbox's making alone, and `None` in what asking for it answers.
+    /// Which side it is on.
+    #[serde(default)]
+    pub on: PortSide,
+
+    /// For a port in the sandbox, where a server on the client's machine has it reached: a
+    /// loopback address, which only that machine reaches. `None` from a server reachable from
+    /// other machines, whose ports are reached at `/sandboxes/{id}/ports/{port}`, and for a port
+    /// on local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
-    /// What it is for, as it was opened with.
+    /// What it is for, as it was asked for with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-
-    /// How it is reached ([`PortProtocol`]).
-    #[serde(default, skip_serializing_if = "PortProtocol::is_tcp")]
-    pub protocol: PortProtocol,
-
-    /// A `host:port` any TCP client reaches a TCP port at directly, from a server that gives it
-    /// one. Not secret, as `url` is: what listens there answers whoever connects.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
-
-    /// Why its inbound rules were not set, from a server that made the port all the same: it
-    /// lets no one in, and is reached at no `address`, until they are.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inbound_error: Option<InboundError>,
 }
 
-/// Why a port's inbound rules were not set, in the shape of a refusal.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InboundError {
-    /// As a refusal's `code`, such as `quota` or `unavailable`.
-    pub code: String,
-
-    /// For a person to read.
-    pub message: String,
-
-    /// What a `quota` is past, as a refusal's `reason`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// How a port is reached from outside its sandbox.
-///
-/// A protocol a later version of the protocol adds is read as [`Other`](Self::Other), as it was
-/// sent, so a sandbox with such a port still reads. A port asked for with one is refused.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Which side of a sandbox a port is on: in the sandbox, where connections to it come from
+/// local, or on local, the machine a client forwards it from, where the sandbox's processes
+/// reach it at `10.0.2.2`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum PortProtocol {
-    /// TCP: at a loopback address, or carried in a WebSocket of the subprotocol `virtx.tcp` to
-    /// its `url`.
+pub enum PortSide {
     #[default]
-    Tcp,
-
-    /// HTTP served in the sandbox, reached at its `url` as HTTP -- over TLS, from a server
-    /// reachable from other machines -- by a browser as by any client, WebSockets included. A
-    /// server that cannot reach a port so refuses it.
-    Http,
-
-    /// One this version does not know, as the server said it.
-    #[serde(untagged)]
-    Other(String),
+    Sandbox,
+    Local,
 }
 
-impl PortProtocol {
-    pub fn is_tcp(&self) -> bool {
-        matches!(self, PortProtocol::Tcp)
-    }
-}
-
-/// A port's protocol as a request names it: one this version knows, as a server opens no other.
-fn known_protocol<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PortProtocol, D::Error> {
-    match PortProtocol::deserialize(deserializer)? {
-        PortProtocol::Other(other) => Err(de::Error::custom(format!(
-            "{other:?} is not a protocol this server opens"
-        ))),
-        known => Ok(known),
-    }
-}
-
-/// A port to open in a sandbox: its number, what it is for, how it is reached, and whom it lets
-/// in. Written as the number alone when it is TCP and says nothing more,
-/// `{port, label?, protocol?, inbound?}` otherwise; read as either.
+/// A sandbox's port to make it with: its number, its side, and what it is for. Written as the
+/// number alone for a port in the sandbox that says nothing more, `{port, on?, label?}`
+/// otherwise; read as either.
 ///
 /// ```
-/// # use virtx_core::{InboundRule, PortProtocol, PortSpec, SandboxCreateArgs};
+/// # use virtx_core::{PortSide, PortSpec, SandboxCreateArgs};
 /// let args = SandboxCreateArgs::new("node:22")
-///     .port(PortSpec::new(5173).label("dev server").protocol(PortProtocol::Http))
-///     .port(PortSpec::new(22).inbound([InboundRule::new("203.0.113.0/24")]));
+///     .port(PortSpec::new(5173).label("dev server"))
+///     .port(PortSpec::new(5037).on(PortSide::Local).label("adb"));
 ///
 /// assert_eq!(args.ports[0].label.as_deref(), Some("dev server"));
+/// assert_eq!(args.ports[1].on, PortSide::Local);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortSpec {
-    /// The port in the sandbox.
+    /// The port, on its side.
     pub port: u16,
+
+    /// Which side it is on: in the sandbox, unless it says otherwise.
+    pub on: PortSide,
 
     /// What it is for, free text of up to 128 characters, answered with it.
     pub label: Option<String>,
-
-    /// How it is reached.
-    pub protocol: PortProtocol,
-
-    /// Its inbound rules: whom it lets in, by address. `None` leaves that to the server, and
-    /// `Some` of none lets in no one. A server that keeps no rules refuses them, rather than
-    /// open a port to whoever it was meant to keep out.
-    pub inbound: Option<Vec<InboundRule>>,
 }
 
 impl PortSpec {
-    /// The TCP port `port`, saying nothing more. Each method after sets one field, so they
-    /// chain.
+    /// The port `port` in the sandbox, saying nothing more.
     pub fn new(port: u16) -> PortSpec {
         PortSpec {
             port,
+            on: PortSide::Sandbox,
             label: None,
-            protocol: PortProtocol::Tcp,
-            inbound: None,
         }
+    }
+
+    pub fn on(mut self, on: PortSide) -> PortSpec {
+        self.on = on;
+        self
     }
 
     pub fn label(mut self, label: impl Into<String>) -> PortSpec {
         self.label = Some(label.into());
-        self
-    }
-
-    pub fn protocol(mut self, protocol: PortProtocol) -> PortSpec {
-        self.protocol = protocol;
-        self
-    }
-
-    /// Letting in only what `rules` let in.
-    pub fn inbound(mut self, rules: impl IntoIterator<Item = InboundRule>) -> PortSpec {
-        self.inbound = Some(rules.into_iter().collect());
         self
     }
 }
@@ -425,28 +363,25 @@ impl From<u16> for PortSpec {
 #[serde(deny_unknown_fields)]
 struct PortSpecObject {
     port: u16,
+    #[serde(default, skip_serializing_if = "is_sandbox")]
+    on: PortSide,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     label: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "known_protocol",
-        skip_serializing_if = "PortProtocol::is_tcp"
-    )]
-    protocol: PortProtocol,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    inbound: Option<Vec<InboundRule>>,
+}
+
+fn is_sandbox(on: &PortSide) -> bool {
+    *on == PortSide::Sandbox
 }
 
 impl Serialize for PortSpec {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.label.is_none() && self.protocol.is_tcp() && self.inbound.is_none() {
+        if self.label.is_none() && self.on == PortSide::Sandbox {
             return serializer.serialize_u16(self.port);
         }
         PortSpecObject {
             port: self.port,
+            on: self.on,
             label: self.label.clone(),
-            protocol: self.protocol.clone(),
-            inbound: self.inbound.clone(),
         }
         .serialize(serializer)
     }
@@ -462,9 +397,7 @@ impl<'de> Deserialize<'de> for PortSpec {
             type Value = PortSpec;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str(
-                    r#"a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#,
-                )
+                f.write_str(r#"a whole number from 0 to 65535, or {"port", "on"?, "label"?}"#)
             }
 
             fn visit_u64<E: de::Error>(self, port: u64) -> Result<PortSpec, E> {
@@ -484,42 +417,13 @@ impl<'de> Deserialize<'de> for PortSpec {
                 let spec = PortSpecObject::deserialize(MapAccessDeserializer::new(map))?;
                 Ok(PortSpec {
                     port: spec.port,
+                    on: spec.on,
                     label: spec.label,
-                    protocol: spec.protocol,
-                    inbound: spec.inbound,
                 })
             }
         }
 
         deserializer.deserialize_any(Either)
-    }
-}
-
-/// One of a port's inbound rules: the addresses it lets in, and whose they are.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InboundRule {
-    /// An IPv4 or IPv6 CIDR, as `203.0.113.0/24`, or one address, as `203.0.113.7`.
-    pub source: String,
-
-    /// What it is for: whose they are.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-impl InboundRule {
-    /// A rule letting in `source`, described by nothing.
-    pub fn new(source: impl Into<String>) -> InboundRule {
-        InboundRule {
-            source: source.into(),
-            description: None,
-        }
-    }
-
-    /// Described as `description`.
-    pub fn description(mut self, description: impl Into<String>) -> InboundRule {
-        self.description = Some(description.into());
-        self
     }
 }
 
@@ -559,11 +463,9 @@ mod tests {
             sandbox.ports,
             [SandboxPort {
                 port: 80,
+                on: PortSide::Sandbox,
                 url: Some("http://127.0.0.1:1/".into()),
                 label: None,
-                protocol: PortProtocol::Tcp,
-                address: None,
-                inbound_error: None,
             }]
         );
     }
@@ -647,18 +549,28 @@ mod tests {
     fn a_port_is_written_as_its_number_unless_it_says_more() {
         let plain = PortSpec::new(8080);
         assert_eq!(serde_json::to_value(&plain).unwrap(), json!(8080));
-        let web = PortSpec::new(5173)
-            .label("dev server")
-            .protocol(PortProtocol::Http);
-        let written = serde_json::to_value(&web).unwrap();
-        assert_eq!(
-            written,
-            json!({"port": 5173, "label": "dev server", "protocol": "http"})
-        );
+        let labelled = PortSpec::new(5173).label("dev server");
+        let written = serde_json::to_value(&labelled).unwrap();
+        assert_eq!(written, json!({"port": 5173, "label": "dev server"}));
         let read: Vec<PortSpec> =
             serde_json::from_value(json!([8080, written, {"port": 22}])).unwrap();
-        assert_eq!(read, [plain, web, PortSpec::new(22)]);
+        assert_eq!(read, [plain, labelled, PortSpec::new(22)]);
         assert!(serde_json::from_value::<PortSpec>(json!({"port": 1, "x": 2})).is_err());
+    }
+
+    #[test]
+    fn a_port_on_local_says_so_and_one_on_no_side_is_refused() {
+        let local = PortSpec::new(5037).on(PortSide::Local);
+        let written = serde_json::to_value(&local).unwrap();
+        assert_eq!(written, json!({"port": 5037, "on": "local"}));
+        assert_eq!(serde_json::from_value::<PortSpec>(written).unwrap(), local);
+        let sandbox = json!({"port": 5037, "on": "sandbox"});
+        assert_eq!(
+            serde_json::from_value::<PortSpec>(sandbox).unwrap(),
+            PortSpec::new(5037)
+        );
+        let elsewhere = json!({"port": 5037, "on": "host"});
+        assert!(serde_json::from_value::<PortSpec>(elsewhere).is_err());
     }
 
     #[test]
@@ -666,93 +578,31 @@ mod tests {
         let refused = serde_json::from_value::<PortSpec>(json!("5900")).unwrap_err();
         assert_eq!(
             refused.to_string(),
-            r#"invalid type: string "5900", expected a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}"#
+            r#"invalid type: string "5900", expected a whole number from 0 to 65535, or {"port", "on"?, "label"?}"#
         );
     }
 
     #[test]
-    fn a_port_with_inbound_rules_is_written_as_an_object() {
-        let ssh =
-            PortSpec::new(22).inbound([InboundRule::new("203.0.113.7").description("office")]);
-        let written = serde_json::to_value(&ssh).unwrap();
-        assert_eq!(
-            written,
-            json!({"port": 22, "inbound": [{"source": "203.0.113.7", "description": "office"}]})
-        );
-        assert_eq!(serde_json::from_value::<PortSpec>(written).unwrap(), ssh);
-        // No rules, which let in no one, are written; `None` is left out.
-        let closed = PortSpec::new(22).inbound([]);
-        assert_eq!(
-            serde_json::to_value(&closed).unwrap(),
-            json!({"port": 22, "inbound": []})
-        );
+    fn a_port_asked_for_with_a_way_in_other_than_its_url_is_refused() {
+        for asked in [
+            json!({"port": 5173, "protocol": "http"}),
+            json!({"port": 22, "inbound": [{"source": "203.0.113.7"}]}),
+        ] {
+            assert!(serde_json::from_value::<PortSpec>(asked).is_err());
+        }
     }
 
     #[test]
-    fn a_port_answered_says_what_it_is_and_where_it_is_reached() {
-        let answered: SandboxPort =
-            serde_json::from_value(json!({"port": 1, "url": "ports/x"})).unwrap();
-        assert_eq!(
-            (answered.label, answered.protocol, answered.address),
-            (None, PortProtocol::Tcp, None)
-        );
-        let reached = json!({
-            "port": 22,
-            "url": "ports/y",
-            "label": "ssh",
-            "address": "tcp.example:20001",
-        });
-        let answered: SandboxPort = serde_json::from_value(reached.clone()).unwrap();
-        assert_eq!(answered.address.as_deref(), Some("tcp.example:20001"));
-        assert_eq!(serde_json::to_value(&answered).unwrap(), reached);
-        let web: SandboxPort = serde_json::from_value(
-            json!({"port": 80, "url": "https://w.example/", "protocol": "http"}),
-        )
-        .unwrap();
-        assert_eq!(web.protocol, PortProtocol::Http);
-    }
-
-    #[test]
-    fn a_protocol_this_version_does_not_know_is_read_in_an_answer_and_refused_in_a_request() {
-        let answered = json!({"port": 53, "url": "ports/z", "protocol": "udp"});
-        let port: SandboxPort = serde_json::from_value(answered.clone()).unwrap();
-        assert_eq!(port.protocol, PortProtocol::Other("udp".into()));
-        assert_eq!(serde_json::to_value(&port).unwrap(), answered);
-
-        let asked = json!({"port": 53, "protocol": "udp"});
-        assert!(serde_json::from_value::<PortSpec>(asked).is_err());
-    }
-
-    #[test]
-    fn a_port_asked_for_again_is_read_without_its_url() {
-        let asked = json!({"port": 5173, "label": "dev server", "protocol": "http"});
-        let port: SandboxPort = serde_json::from_value(asked.clone()).unwrap();
+    fn a_port_asked_for_again_is_read_without_its_url_and_answered_with_its_side() {
+        let asked = json!({"port": 5173, "label": "dev server"});
+        let port: SandboxPort = serde_json::from_value(asked).unwrap();
         assert_eq!(port.url, None);
+        assert_eq!(port.on, PortSide::Sandbox);
         assert_eq!(port.label.as_deref(), Some("dev server"));
-        assert_eq!(serde_json::to_value(&port).unwrap(), asked);
-    }
-
-    #[test]
-    fn a_port_whose_inbound_rules_are_not_set_says_why() {
-        let value = json!({
-            "port": 8000,
-            "url": "https://p.example/",
-            "inbound_error": {
-                "code": "quota",
-                "message": "past the organization's public ports",
-                "reason": "public_ports",
-            },
-        });
-        let port: SandboxPort = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(
-            port.inbound_error,
-            Some(InboundError {
-                code: "quota".into(),
-                message: "past the organization's public ports".into(),
-                reason: Some("public_ports".into()),
-            })
+            serde_json::to_value(&port).unwrap(),
+            json!({"port": 5173, "on": "sandbox", "label": "dev server"})
         );
-        assert_eq!(serde_json::to_value(&port).unwrap(), value);
     }
 
     #[test]

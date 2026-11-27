@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from ._library import VirtxError, args
 from .files import Files
@@ -23,125 +23,58 @@ if TYPE_CHECKING:
 E = TypeVar("E", bound=Enum)
 
 
-class PortProtocol(str, Enum):
-    """How a sandbox's port is reached from outside it. A protocol this version does not know is
-    read as the server's string itself."""
-
-    TCP = "tcp"
-    """TCP: at a loopback address, or through a ``PortForwarder`` opened with its ``url``."""
-
-    HTTP = "http"
-    """HTTP served in the sandbox, reached at its ``url`` as HTTP by a browser as by any client,
-    WebSockets included. A server that cannot reach a port so refuses it."""
-
-
-@dataclass(frozen=True)
-class InboundError:
-    """Why a port's inbound rules were not set, in the shape of a refusal."""
-
-    code: str
-    """As a refusal's, such as ``quota`` or ``unavailable``."""
-
-    message: str
-    """For a person to read."""
-
-    reason: str | None = None
-    """What a ``quota`` is past, as a refusal's ``reason``."""
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> InboundError:
-        return cls(value["code"], value["message"], value.get("reason"))
+PortSide = Literal["sandbox", "local"]
+"""Which side of a sandbox a port is on: in the sandbox, where connections to it come from
+local, or on local, the machine a client forwards it from, where the sandbox's processes reach
+it at ``10.0.2.2``."""
 
 
 @dataclass(frozen=True)
 class SandboxPort:
-    """A port opened in a sandbox as it was made, and the ``url`` it is reached by: a
-    ``PortForwarder``'s for TCP, a browser's for HTTP."""
+    """A sandbox's port, on either side, as it was made with it, which a ``PortForwarder``
+    forwards."""
 
     port: int
 
     url: str | None = None
-    """Answered by ``create_sandbox`` alone, as secret as the credentials it carries: ``None``
-    in a sandbox ``get_sandbox`` or ``list_sandbox`` answers."""
+    """For a port in the sandbox, the loopback address a server on this machine has it reached
+    at: ``None`` from a server reachable from other machines, and for a port on local."""
 
     label: str | None = None
-    """What it is for, as it was opened with."""
+    """What it is for, as it was asked for with."""
 
-    protocol: PortProtocol | str = PortProtocol.TCP
-    """A ``str`` for a protocol this version does not know."""
-
-    address: str | None = None
-    """A ``host:port`` any TCP client reaches a TCP port at directly, from a server that gives it
-    one. Not secret, as ``url`` is: what listens there answers whoever connects."""
-
-    inbound_error: InboundError | None = None
-    """Why its inbound rules were not set, from a server that made the port all the same: it lets
-    no one in, and is reached at no ``address``, until they are."""
+    on: PortSide = "sandbox"
+    """Which side it is on."""
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxPort:
-        why = value.get("inbound_error")
-        return cls(
-            value["port"],
-            value.get("url"),
-            value.get("label"),
-            _known(PortProtocol, value.get("protocol", "tcp")),
-            value.get("address"),
-            InboundError.from_dict(why) if why is not None else None,
-        )
-
-
-@dataclass(frozen=True)
-class InboundRule:
-    """One of a port's inbound rules: the addresses it lets in, and whose they are."""
-
-    source: str
-    """An IPv4 or IPv6 CIDR, as ``203.0.113.0/24``, or one address, as ``203.0.113.7``."""
-
-    description: str | None = None
-    """What it is for: whose they are."""
-
-    def to_dict(self) -> dict[str, Any]:
-        """As the wire has it."""
-        rule: dict[str, Any] = {"source": self.source}
-        if self.description is not None:
-            rule["description"] = self.description
-        return rule
+        return cls(value["port"], value.get("url"), value.get("label"), value.get("on", "sandbox"))
 
 
 @dataclass(frozen=True)
 class PortSpec:
-    """A port to open in a sandbox as ``create_sandbox`` makes it: its number, what it is for,
-    how it is reached, and whom it lets in. ``ports`` takes a plain ``int`` for a TCP port that
-    says nothing more."""
+    """A sandbox's port to make it with, as ``create_sandbox`` takes it: its number, what it is
+    for, and its side, ``"sandbox"`` unless it says otherwise. ``ports`` takes a plain ``int`` for
+    a port in the sandbox that says nothing more."""
 
     port: int
 
     label: str | None = None
     """What it is for, up to 128 characters, answered with it."""
 
-    protocol: PortProtocol | str = PortProtocol.TCP
-
-    inbound: Iterable[InboundRule | Mapping[str, Any]] | None = None
-    """Its inbound rules, each an ``InboundRule`` or its ``{source, description?}``. ``None``
-    leaves whom it lets in to the server, and ``[]`` lets in no one. A server that keeps no rules
-    refuses them."""
+    on: PortSide = "sandbox"
+    """Which side it is on."""
 
     def to_dict(self) -> int | dict[str, Any]:
-        """As the wire has it: the number alone when it says no more."""
-        protocol = PortProtocol(self.protocol)
-        if self.label is None and protocol == PortProtocol.TCP and self.inbound is None:
+        """As the wire has it: the number alone for a port in the sandbox that says no more."""
+        if self.label is None and self.on == "sandbox":
             return self.port
-        spec: dict[str, Any] = {"port": self.port}
+        written: dict[str, Any] = {"port": self.port}
+        if self.on != "sandbox":
+            written["on"] = self.on
         if self.label is not None:
-            spec["label"] = self.label
-        if protocol != PortProtocol.TCP:
-            spec["protocol"] = protocol.value
-        if self.inbound is not None:
-            spec["inbound"] = [
-                r.to_dict() if isinstance(r, InboundRule) else dict(r) for r in self.inbound
-            ]
-        return spec
+            written["label"] = self.label
+        return written
 
 
 @dataclass(frozen=True)
@@ -192,7 +125,7 @@ class Sandbox(Files):
     running: bool
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports, each with its ``url`` where ``create_sandbox`` answered it only."""
+    """Its ports, on either side."""
 
     abins: list[str] = field(default_factory=list)
     """virtx's own programs it has at ``/abin``."""

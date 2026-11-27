@@ -78,9 +78,9 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
-      # cargo reads the manifests of libkrun's and rutabaga_gfx's crates, which it takes by path
-      # from their submodules, whatever package it is asked for.
-      - run: git submodule update --init --depth 1 3rdparty/libkrun 3rdparty/rutabaga_gfx
+      # cargo reads the manifests of libkrun's, rutabaga_gfx's and smoltcp's crates, which it takes
+      # by path from their submodules, whatever package it is asked for.
+      - run: git submodule update --init --depth 1 3rdparty/libkrun 3rdparty/rutabaga_gfx 3rdparty/smoltcp
 
       - uses: actions/setup-node@v7.1.0
         with:
@@ -233,9 +233,9 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
-      # cargo reads the manifests of libkrun's and rutabaga_gfx's crates, which it takes by path
-      # from their submodules, whatever package it is asked for.
-      - run: git submodule update --init --depth 1 3rdparty/libkrun 3rdparty/rutabaga_gfx
+      # cargo reads the manifests of libkrun's, rutabaga_gfx's and smoltcp's crates, which it takes
+      # by path from their submodules, whatever package it is asked for.
+      - run: git submodule update --init --depth 1 3rdparty/libkrun 3rdparty/rutabaga_gfx 3rdparty/smoltcp
 
       - id: toolchain
         run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"

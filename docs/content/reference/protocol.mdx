@@ -23,6 +23,8 @@ A server offers several endpoints, and each speaks its own protocol:
 | [`/volumes/{name}/files/`](#files) | WebDAV | The files in a volume |
 | [`/sandboxes/`](#sandboxes) | HTTP | Sandbox CRUD |
 | [`/sandboxes/{id}/files/`](#files) | WebDAV | The files in a sandbox, as its processes see them |
+| [`/sandboxes/{id}/ports/{port}`](#ports) | WebSocket | A connection to a sandbox's port |
+| [`/sandboxes/{id}/client-ports/{port}`](#a-port-on-local) | WebSocket, or held on the client's machine | A connection to a sandbox's port on local, carried from the sandbox |
 | [`/sandboxes/{id}/jobs/`](#sandbox-jobs) | HTTP | Sandbox jobs: read, signal, cancel |
 | [`/sandboxes/{id}/jobs/exec/`](#sandbox-jobs) | HTTP | Starting a process in a sandbox |
 | [`/sandboxes/{id}/jobs/{job}/stdin`](#sandbox-jobs) | HTTP | Writing to a process's stdin |
@@ -89,7 +91,6 @@ A request that names none belongs to its sender's own project, `default`, which 
 - `virtx-project`, and `{project}` in the paths below, name a project by its id, or a project of the sender's by its name. `default` names the sender's own, and no request makes a project of that name: it is refused with `400`, `invalid`.
 - Projects are apart: the volume `data` of one project is not that of another, and nothing in one is reached from another.
 - A request to a project its credentials do not reach, or to one that does not exist, is refused with `403 Forbidden`, `forbidden`, the one not told apart from the other.
-- A [port's](#ports) URL names no project: the capability in it alone finds the port.
 
 Each member of a project has a role:
 
@@ -240,6 +241,7 @@ A server MAY refuse to connect to a registry, or to a host that registry sends i
 The job then fails, its `error` naming the host.
 
 A build builds an image from `recipe` into the server's images and tags it `reference`, as a push of it would.
+The image's history keeps each step as its Dockerfile instruction, in `created_by`; its config's labels `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` name its base as `recipe` does and by the base's digest on the server, in place of any the base had. A build keeps no time in the image, so the same recipe over the same base builds the same image.
 
 Cancelling one stops it:
 
@@ -336,29 +338,63 @@ Everything written to its root filesystem is kept across that, as it is for as l
 A connection to one of its ports while its VM is stopped is closed, as one to a port nothing listens on is, and does not boot it.
 
 A server that ends MAY keep its sandboxes for when it is started again over what it kept, and otherwise deletes them as it ends.
-It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports at the URLs its `POST` answered, and its `running` as it was.
+It stops the VM of each it keeps, and, started again, knows each as one whose VM it stopped: booted again as above, its files as it left them, its ports reached as before, and its `running` as it was.
 One it kept and cannot know again, such as one whose image is gone, it MAY still list until its `DELETE`, with `running` `false` and an `error`, a string saying why: every other request about it is refused `409`, `ended`, and its `DELETE` removes what it kept of it.
 
 #### Ports
 
-`ports` in the body are ports in the sandbox to open, each a number, or `{port, label?, protocol?, inbound?}` to say what it is for, how it is reached and whom it lets in: `[5900, {"port": 5173, "label": "dev server", "protocol": "http"}]`.
+`ports` in the body are the sandbox's TCP ports, each on one side of it: a number for a port in the sandbox, or `{port, on?, label?}` to say its side and what it is for: `[5900, {"port": 5173, "label": "dev server"}, {"port": 5037, "on": "local", "label": "adb"}]`.
+`on` is `"sandbox"`, the port is in the sandbox and connections to it come from the client's side, or `"local"`, the port is on the machine a client forwards it from and the sandbox's processes connect to it; `"sandbox"` without it.
+`label` is free text of up to 128 characters, answered with it.
+A port with any other member, or another `on`, is refused `400`, `invalid`.
 
-- `label` is what it is for, free text of up to 128 characters, answered with it.
-- `protocol` is `tcp`, the default: TCP, reached as below; or `http`: HTTP served in the sandbox, reached at its `url` as HTTP by a browser as by any client, WebSockets included -- over TLS, from a server reachable from other machines, the sandbox serving plain HTTP. A server that cannot reach a port over HTTP MUST refuse `http` with `400`, `invalid`. A later version of this protocol may add a protocol; a server refuses one it does not know with `400`, `invalid`, and a client keeps one it does not know in an answer as it was sent.
-- `inbound` is the port's inbound rules, `[{source, description?}]`, each `source` an IPv4 or IPv6 CIDR or one address: whom it lets in. A server MAY keep them; one that keeps none MUST refuse `inbound` with `400`, `invalid`, rather than open a port to whoever it was meant to keep out. Whom a port given none lets in is the server's to say; `[]` lets in no one.
+They are kept from the sandbox's `POST` until its `DELETE`.
+`0`, and a port given twice on one side, are refused.
+A port is its side and its number: the same number on both sides is two ports, and both may be given.
 
-They are reserved when the sandbox is made, and kept until its `DELETE`. `0` and a port given twice are refused.
+The `POST` and every `GET` answer each as `{port, on, url?, label?}`, in the order given, until the sandbox's `DELETE`, across a restart of the server that keeps it too. One with an `error` answers none, since none of its ports is open.
 
-The `POST` answers each with where it is reached from, as `{port, url, label?, protocol?, address?, inbound_error?}` -- `protocol` left out for `tcp`, `address` for a port that has none, `inbound_error` for any but one whose rules could not be set -- in the order given.
-A `GET` of the sandbox, and of them all, answers each as `{port, label?, protocol?, address?}`, in the same order, until the sandbox's `DELETE`, across a restart of the server that keeps it too: with no `url`, which the `POST` alone answers, since the URLs carry credentials. One with an `error` answers none, since none of its ports is open.
+##### A port in the sandbox
 
-- A server on the client's machine answers a loopback address, such as `http://127.0.0.1:54123`, on a port it picks. Only that machine reaches it.
-- A server reachable from other machines answers a URL that carries the credentials it needs, and MUST NOT open a port that is reached without them but at its `address`. The URL is as secret as those credentials, and the client MUST keep it so.
-- A server reachable from other machines MAY answer a `tcp` port with an `address` too, `host:port`, such as `tcp.example.com:20001`, where any TCP client reaches it directly, with no WebSocket and no credentials. It is not secret, as the URL is: what listens on the port answers whoever connects there, and authenticates them itself. An `http` port has none, and nor does any on a server on the client's machine. A server that keeps no inbound rules MUST NOT answer one, since the client could not narrow whom it lets in.
-- The URL is the server's to form: a client MUST NOT build one or take it apart.
-- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does. Over a remote URL, a `tcp` port's TCP is carried in a WebSocket to that URL, opened with the subprotocol `virtx.tcp`; a server that could not reach the port at all, such as while no VM runs, SHOULD close it with a reason saying why, for a person. An `http` port's URL is an `https` one that a browser opens.
-- Ports are the way in, and do not need `network`, which is the way out.
-- A server that keeps inbound rules MAY open a port whose rules it could not set, such as past a quota, with `inbound_error`, `{code, message, reason?}` in a refusal's shape, beside its `url`: it lets no one in, and is reached at no `address`, until they are. The sandbox is answered `201` as any is, since a refusal would read as nothing made.
+A port in the sandbox is reserved when the sandbox is made.
+
+- A server on the client's machine answers its `url`, a loopback address such as `http://127.0.0.1:54123` on a port it picks, where the port is reached as it is. Only that machine reaches it.
+- A server reachable from other machines answers no `url`. A port is reached by opening `GET /sandboxes/{id}/ports/{port}` as a WebSocket of the subprotocol `virtx.tcp`, a request as any other, with its credentials and its project: one connection to the port in each, its TCP carried as binary messages. It is refused `404`, `not_found`, for a port the sandbox was not made with in the sandbox, `426` unless it opens a WebSocket, and `400` unless of the subprotocol. A server that could not reach the port at all, such as while no VM runs, SHOULD close it with a reason saying why, for a person.
+- A client reaches a port from its own machine through a forwarder it opens there, which opens such a WebSocket for each connection to it.
+- A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does.
+- Ports in the sandbox are the way in, and do not need `network`, which is the way out.
+
+##### A port on local
+
+A port on local is the other way: a process in the sandbox connects to `10.0.2.2` at it, and the connection is carried to the machine of a client that forwards it.
+It has no `url`.
+
+- A server reachable from other machines reaches it through a client that takes it, over a WebSocket, as below.
+- A server on the client's machine reaches it itself while a client takes it, as [below](#a-port-on-local-on-the-clients-machine).
+- A connection to a port no client takes is refused, as one to a port nothing listens on is.
+- A connection to `10.0.2.2` at a port the sandbox was not made with on local is refused. `10.0.2.2` is never reached on the server's network.
+- Ports on local are reached with or without `network`.
+
+A client takes a port by opening `GET /sandboxes/{id}/client-ports/{port}` as a WebSocket of the subprotocol `virtx.tcp`, as a port in the sandbox is reached, and holding it open.
+It is refused `404`, `not_found`, for a port the sandbox was not made with on local, `426` unless it opens a WebSocket, and `400` unless of the subprotocol.
+Any number of WebSockets may take a port at once, of one client or of several, and each carries one connection:
+
+1. The server holds the WebSocket until a process connects to the port, and then sends an empty binary message. The process's `connect` waits.
+2. The client connects to what the port is on its machine. Reached, it answers with an empty binary message, and the process's `connect` succeeds. Not reached, it closes the WebSocket, and the process's `connect` is refused.
+3. The connection's TCP is then carried as a port's is, each direction ending on its own: an empty binary message is its sender's end of what it sends, and its receiver shuts its TCP's writing for it. The WebSocket is closed once both have ended.
+
+A client that keeps a port taken opens another WebSocket as soon as one is sent a connection.
+A connection that comes while no WebSocket is waiting, of a port one has waited on within a time the server chooses, waits for one for that time, and is refused after it.
+The server MAY send pings while a WebSocket waits, and close one that answers none before the next; it refuses a connection whose client answers neither way in a time it chooses, and closes every WebSocket waiting once the sandbox is deleted.
+
+##### A port on local, on the client's machine
+
+A server on the client's machine, as over stdio, takes `GET /sandboxes/{id}/client-ports/{port}?target=host:port`, with no WebSocket: the port is taken while the answer is held, and the server connects each connection to `target` on the machine itself, `127.0.0.1:{port}` without one.
+It is answered `200` with a body that carries nothing and ends once the sandbox is deleted, or refused `404`, `not_found`, for a port the sandbox was not made with on local, and `400`, `invalid`, for a `target` that is not `host:port`.
+A connection whose target is not reached is refused; one that is is carried as above, and closed once the request that took it ends.
+
+What a connection is carried to is the client's alone, and the server is not told it.
+A port on local gives the sandbox's processes whatever what it reaches gives: a browser's debugging port reaches what the browser does, and `adb`'s server reaches the device.
 
 ### Sandbox jobs
 

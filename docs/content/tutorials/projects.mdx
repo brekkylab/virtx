@@ -1,0 +1,172 @@
+---
+title: "Managing projects"
+description: "Group what you keep on a server into projects, share them with your team, and clean them up together."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A **project** is how you organize what you keep on a server.
+Everything you create there belongs to a project.
+
+Use projects to:
+
+- Keep separate work apart, such as one project per app, customer, or environment.
+- Share resources with teammates by adding them to a project.
+- Clean up everything for one piece of work at once by removing its project.
+
+You do not need a project to get started.
+Until you choose one, everything goes into your own project, `default`.
+
+## Create a project
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+project = await client.create_project("demo")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const project = await client.createProject('demo')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let project = client.create_project("demo").await?;
+```
+
+</TabItem>
+</Tabs>
+
+You become the project's owner.
+A project name is at most 128 characters of lower-case letters, digits, `.`, `_` and `-`, not starting with `.` or `-`.
+It cannot be `default`, which is your own, or be spelled like a project `id`.
+
+To see your projects, use `list_project`, which includes those others have shared with you.
+To look one up, use `get_project`.
+
+## Work in a project
+
+Choose the project when you connect, and everything you do through that client happens in it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+client = Client.connect("https://virtx.example", auth, project="demo")
+
+volume = await client.create_volume("data")  # a volume in "demo"
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const client = Client.connect('https://virtx.example', auth, 'demo')
+
+const volume = await client.createVolume('data') // a volume in "demo"
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let client = Client::connect("https://virtx.example", auth, Some("demo"), [] as [(&str, &str); 0])?;
+
+let volume = client.create_volume(Some("data")).await?; // a volume in "demo"
+```
+
+</TabItem>
+</Tabs>
+
+To switch projects on a client you already have, use `set_project`.
+In the `virtx` command, use `--project`; see [CLI](/docs/reference/cli/#which-server).
+
+Each project only sees its own resources.
+A volume named `data` in one project and a volume named `data` in another are two different volumes.
+
+## Share a project
+
+Add teammates to a project so they can use what is in it.
+Name them as the server knows them, usually by email address.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import Role
+
+await project.set_member("bob@example.com", Role.MEMBER)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await project.setMember('bob@example.com', 'member')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use virtx::Role;
+
+project.set_member("bob@example.com", Role::Member).await?;
+```
+
+</TabItem>
+</Tabs>
+
+There are two roles:
+
+- A **member** can use everything in the project.
+- An **owner** can also add and remove members, and remove the project.
+
+`members` lists who is in a project, and `remove_member` takes someone out.
+A member can also leave a project on their own with `remove_member`.
+
+A teammate's project is named by its owner, so your teammates reach a shared project by its `id` rather than its name: `project.id` is what to pass them.
+
+Members are for servers with users, such as [your own server](/docs/tutorials/self-hosting/).
+A server on your own machine, started with `Client.spawn()`, has only you.
+On virtx cloud, you create projects and add members in the console instead.
+
+## Remove a project
+
+When the work is done, remove the project to delete everything in it at once.
+Remove its sandboxes first: a project with a sandbox still in it is not removed.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+await project.remove()
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+await project.remove()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+project.remove().await?;
+```
+
+</TabItem>
+</Tabs>
+
+Removing your `default` project removes it like any other, and you get a new, empty `default` the next time you use it.
+The new one has a new `id` and only you in it, so teammates you shared the old one with need to be added again.
+
+For every call and what each returns, see the [API reference](/docs/reference/api/#projects).

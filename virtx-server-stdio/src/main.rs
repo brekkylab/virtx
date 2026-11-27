@@ -290,8 +290,9 @@ mod tests {
     };
 
     use virtx_core::{
-        Client, DirEntry, Error, FileRoot, ImageName, InboundRule, MountSource, MountType,
-        PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume,
+        Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, PortForwarderArgs,
+        PortSide, PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs,
+        SandboxVolume, Step,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -400,6 +401,83 @@ mod tests {
         assert_eq!(server.client.list_image_job().await.unwrap(), []);
     }
 
+    /// A build names its base by the OCI's labels, in place of those the base had, and keeps
+    /// the others; built again, it is the same image. Of steps that boot no machine, so the
+    /// build runs here.
+    #[tokio::test]
+    async fn a_build_names_its_base_and_is_the_same_image_built_again() {
+        let server = Server::spawn("build-history").await;
+        // A base whose history tells its one layer apart, naming a base of its own.
+        let store = ImageStore::new(server.home.join("images")).unwrap();
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {"Labels": {
+                "org.opencontainers.image.base.name": "alpine:3.20",
+                "maintainer": "virtx",
+            }},
+            "rootfs": {"type": "layers", "diff_ids": []},
+            "history": [{"created_by": "ADD rootfs /"}],
+        }))
+        .unwrap();
+        let base = store.insert_image(&config, &[layer]).unwrap();
+        store.insert_tag(&"base:1".parse().unwrap(), &base).unwrap();
+
+        let recipe = Recipe::new("base:1")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let built = async |reference: &str| {
+            let job = server
+                .client
+                .build_image(recipe.clone(), reference)
+                .await
+                .unwrap();
+            // A guard against a hang, not a measure of anything.
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let job = server.client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the build went on");
+            ended.digest.expect("the build failed")
+        };
+        let image = built("built:1").await;
+        assert_eq!(built("built:2").await, image);
+
+        let (config, _) = store.get_image(&image.parse().unwrap()).unwrap().unwrap();
+        let labels = config.config().clone().unwrap().labels().clone().unwrap();
+        assert_eq!(labels[virtx_uvm::ANNOTATION_BASE_IMAGE_NAME], "base:1");
+        assert_eq!(
+            labels[virtx_uvm::ANNOTATION_BASE_IMAGE_DIGEST],
+            base.to_string()
+        );
+        assert_eq!(labels["maintainer"], "virtx");
+    }
+
+    /// A port on local of a sandbox that is not here is `404`, and a target that is not
+    /// `host:port` is `400`.
+    #[tokio::test]
+    async fn a_port_on_local_of_no_sandbox_or_no_target_is_refused() {
+        let server = Server::spawn("local-port").await;
+        let args = PortForwarderArgs::new("nope", 9222).on(PortSide::Local);
+        let (forward, forwarding) = server
+            .client
+            .forward_port(args.clone().local("127.0.0.1:9222"));
+        forwarding.await;
+        assert_eq!(status(forward.opened().await), 404);
+        for target in ["9222", ":9222", "localhost:port"] {
+            let (forward, forwarding) = server.client.forward_port(args.clone().local(target));
+            forwarding.await;
+            assert_eq!(status(forward.opened().await), 400, "{target}");
+        }
+    }
+
     #[tokio::test]
     async fn creates_lists_and_removes_a_volume() {
         let server = Server::spawn("volume").await;
@@ -484,20 +562,18 @@ mod tests {
             async |args: SandboxCreateArgs| status(server.client.create_sandbox(&args).await);
         let here = || SandboxCreateArgs::new("here:latest");
 
-        for ports in [vec![0], vec![8080, 8080]] {
-            let mut args = here();
-            args.ports = ports.into_iter().map(PortSpec::new).collect();
-            assert_eq!(refused(args).await, 400);
+        for on in [PortSide::Sandbox, PortSide::Local] {
+            for ports in [vec![0], vec![8080, 8080]] {
+                let mut args = here();
+                args.ports = (ports.into_iter())
+                    .map(|port| PortSpec::new(port).on(on))
+                    .collect();
+                assert_eq!(refused(args).await, 400);
+            }
+            // A label is at most 128 characters.
+            let long = PortSpec::new(80).on(on).label("x".repeat(129));
+            assert_eq!(refused(here().port(long)).await, 400);
         }
-        // Inbound rules are kept by no server here, and a label is at most 128 characters.
-        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
-        assert_eq!(refused(here().port(ssh)).await, 400);
-        assert_eq!(
-            refused(here().port(PortSpec::new(22).inbound([]))).await,
-            400
-        );
-        let long = PortSpec::new(80).label("x".repeat(129));
-        assert_eq!(refused(here().port(long)).await, 400);
         let long = "x".repeat(129);
         for name in [
             "",
@@ -1514,7 +1590,7 @@ mod tests {
                 "POST",
                 "/sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "on"?, "label"?}, not "5900""#,
             ),
             (
                 "GET",

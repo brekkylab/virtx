@@ -1,7 +1,7 @@
 {
   "name": "virtx",
   "version": "0.1.0",
-  "description": "Run tasks in Linux microVMs from Python, Node.js or Rust.",
+  "description": "A microVM sandbox for AI agents: run tasks in Linux microVMs from Python, Node.js or Rust.",
   "author": {
     "name": "brekkylab",
     "url": "https://github.com/brekkylab"
@@ -14,6 +14,9 @@
     "sandbox",
     "microvm",
     "agent",
+    "ai-agents",
+    "code-execution",
+    "llm",
     "python",
     "nodejs",
     "rust"
@@ -21,10 +24,10 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "virtx",
-    "shortDescription": "Linux microVMs from your own code",
+    "shortDescription": "microVM sandbox for AI agents",
     "developerName": "brekkylab",
     "category": "Developer Tools",
-    "longDescription": "virtx runs tasks in Linux microVMs from Python, Node.js or Rust, with no Docker and no daemon to install. A sandbox boots from an image you build or pull, runs commands in it, and is gone when you remove it; what should outlive it is kept in a volume, and remote stores such as Notion or Google Drive can be mounted inside a volume, read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too.",
+    "longDescription": "virtx is a microVM sandbox for AI agents. It runs tasks in Linux microVMs from Python, Node.js or Rust, with no Docker and no daemon to install. A sandbox boots from an image you build or pull, runs commands in it, and is gone when you remove it; what should outlive it is kept in a volume, and remote stores such as Notion or Google Drive can be mounted inside a volume, read-only. The GPU reaches into the VM through Vulkan, so heavy work such as deep learning runs there too.",
     "capabilities": [
       "Build or pull an image, and boot Linux microVMs from it",
       "Run commands in it and read their output, from Python, Node.js or Rust",

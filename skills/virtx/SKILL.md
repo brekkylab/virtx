@@ -1,13 +1,13 @@
 ---
 name: virtx
-description: "Run a task in a Linux microVM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx."
+description: "A microVM sandbox for AI agents. Run a task in a Linux microVM from Python, Node.js or Rust with virtx, with no Docker. Use when code, a tool or an AI agent should not run on the host: a job with heavy dependencies, an untrusted script, a model that needs a sandbox, a GPU workload, or files a task should read and write apart from the host. Consider it too when someone is about to set up Docker, a chroot or a sandbox by hand for one task, since virtx is the lighter way to the same place. Needs only the package and a virtx server, never a checkout of virtx."
 ---
 
 # virtx
 
 A **sandbox** is a Linux microVM a virtx server boots from an image, in which you run commands and read what they wrote. The server keeps what outlives a sandbox, apart from it: **images** to boot, and **volumes** mounted into sandboxes, whose files the client reads and writes directly. A sandbox is gone when you remove it, and nothing it did outlives it but what it wrote to a volume. So "run this somewhere disposable" is a few requests, not an environment you set up.
 
-virtx works under any AI agent: a sandbox is a tool like any other, and the steps below are the same whether a program or a model drives it. For an agent, the best choice is [Ailoy](https://github.com/brekkylab/ailoy), which is built on virtx: each agent gets a sandbox of its own, and its skill covers the rest.
+virtx works under any AI agent: a sandbox is a tool like any other, and the steps below are the same whether a program or a model drives it.
 
 Work the steps below in order. Step 2 is the one that gets skipped: a command that needs a tool the image lacks fails inside the VM, not on the host.
 
@@ -46,7 +46,7 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 | files it must not change | the same, with `readonly=True` |
 | room to install more than 2 GiB over its image | `disk_gib=8`, or as much as it needs |
 | what it installs kept for the next sandbox | an image with it installed, built with `build_image`, as the image each sandbox is made of |
-| a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0])`; a connection closed at once usually means nothing listens there yet; `forwarder.last_error` and a warning of the `virtx` logger say what the server answered, and `last_error` is `None` again once a connection gets a byte back |
+| a server in it reached from here | `ports=[8000]`, then `await PortForwarder.open(sandbox, 8000)`, reached at its `local`; a connection closed at once usually means nothing listens there yet; `forwarder.last_error` and a warning of the `virtx` logger say what the server answered, and `last_error` is `None` again once a connection gets a byte back |
 | no network | `network=False`; on unless turned off |
 | the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |
 | more CPUs or memory | `vcpus=`, `memory_mib=` |

@@ -9,7 +9,7 @@ Node.js uses the same names in camelCase, such as `createSandbox` for `create_sa
 What a call returns, once awaited where it is async, is named as Python has it.
 The types share their names in all three: `list[Sandbox]` is `Sandbox[]` in Node.js, inside a `Promise`, and `Vec<Sandbox>` in Rust, inside a `Result`.
 
-A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Follow a job](/docs/guides/running-commands/#follow-a-job) in Running commands.
+A call that starts a job, marked **job** below, is completed with `complete` for how it ended, iterated for its log, or awaited for the job; see [Follow a job](/docs/tutorials/running-commands/#follow-a-job) in Running commands.
 In Rust, `complete` is the job's, after awaiting the call.
 Its log, like a job's `log`, yields a `LogEntry` at a time.
 `download_image` and `upload_image` yield `Progress` events, then one event carrying their output.
@@ -28,7 +28,7 @@ Its log, like a job's `log`, yields a `LogEntry` at a time.
 ## Projects
 
 Everything on a server belongs to a project, which a client names at `connect`, or with `set_project`: a project of the user's by its name, or any by its id.
-See [Managing projects](/docs/guides/projects/), and [Projects](/docs/reference/protocol/#projects) in the protocol.
+See [Managing projects](/docs/tutorials/projects/), and [Projects](/docs/reference/protocol/#projects) in the protocol.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ Over stdio it has no members, and the calls on them are refused with `404`:
 
 ## Images
 
-See [Working with images](/docs/guides/images/).
+See [Working with images](/docs/tutorials/images/).
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -67,13 +67,13 @@ In Rust, `Recipe::new(base).step(..)` takes a `Step::run`, `Step::env` or `Step:
 
 ## Sandboxes
 
-See [Setting up sandboxes](/docs/guides/setting-sandboxes/) for the options `create_sandbox` takes.
+See [Setting up sandboxes](/docs/tutorials/setting-sandboxes/) for the options `create_sandbox` takes.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
 | `create_sandbox(image, ...)` | `Sandbox` | Makes a sandbox of `image`, with the options given. `image` has to be on the server already, pulled or built: this does not pull it. |
-| `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes, each port without its `url`. |
-| `find_sandbox(name)` | `Sandbox` or none | The sandbox made with `name`, each port without its `url`; none if no sandbox has it. |
+| `list_sandbox()`, `get_sandbox(id)` | `list[Sandbox]`, `Sandbox` | The server's sandboxes. |
+| `find_sandbox(name)` | `Sandbox` or none | The sandbox made with `name`; none if no sandbox has it. |
 
 A `Sandbox` carries its client, and acts on itself:
 
@@ -81,17 +81,16 @@ A `Sandbox` carries its client, and acts on itself:
 | --- | --- | --- |
 | `exec(cmd, stdin, timeout_ms)` | `SandboxJob` | **Job.** Runs `cmd`, an argv. With `stdin`, its stdin stays open for `write_stdin`; with `timeout_ms`, it is killed when the time runs out. Iterated before it is awaited, the job is started and its log read as one request where the server answers so. In Rust, `exec_with_log(args)` yields the job, then its log. |
 | `jobs()`, `job(id)` | `list[SandboxJob]`, `SandboxJob` | Its jobs. |
-| `resize(vcpus, memory_mib, disk_gib)` | `SandboxResources` | Its vCPUs and memory from its VM's next boot on, its VM stopped now if nothing uses it and refused `409` if something does; its disk grown, never shrunk, at its VM's next boot, stopping nothing. Answers `vcpus`, `memory_mib`, `disk_gib` and `up`, whether its VM is up now. See [Resize a sandbox](/docs/guides/setting-sandboxes/#resize-a-sandbox). |
+| `resize(vcpus, memory_mib, disk_gib)` | `SandboxResources` | Its vCPUs and memory from its VM's next boot on, its VM stopped now if nothing uses it and refused `409` if something does; its disk grown, never shrunk, at its VM's next boot, stopping nothing. Answers `vcpus`, `memory_mib`, `disk_gib` and `up`, whether its VM is up now. See [Resize a sandbox](/docs/tutorials/setting-sandboxes/#resize-a-sandbox). |
 | `remove()` | `None` | Stops it, ends its jobs, and forgets it, with everything it wrote outside its volumes. |
 
 Its [files](#files) are as its processes see them.
 
 In Rust, `Sandbox` answers `id()`, `name()` and `info()`, which holds its `image`, `running` and `ports`, and `resize` takes a `SandboxResizeArgs`, chained from `SandboxResizeArgs::default()`.
 
-A port in `create_sandbox`'s `ports` is a number, for TCP, or a `PortSpec(port, label, protocol, inbound)`; in Node.js, `{ port, label?, protocol?, inbound? }`.
-Each comes back as a `SandboxPort`: its `port` and `url`, its `label` and `protocol` as given, an `address` where the server gives a TCP port one, and an `inbound_error` where it opened one whose rules it could not set.
-`list_sandbox` and `get_sandbox` answer each port with its `port`, `label`, `protocol` and `address`, and no `url`: `create_sandbox` alone answers that, since it carries the port's credentials. A `protocol` this version does not know is kept as the server's string: a `str` in Python, `PortProtocol::Other` in Rust.
-An `InboundRule(source, description)` lets in `source`, an IPv4 or IPv6 CIDR or one address; a server that keeps no rules, as `virtx-stdio` and `virtx-server-tcp` do not, refuses `inbound` with `400`.
+A port in `create_sandbox`'s `ports` is a number, a port in the sandbox, or a `PortSpec(port, label, on)`, `on` `"sandbox"` or `"local"`; in Node.js, `{ port, on?, label? }`; in Rust, `PortSpec::new(port).on(PortSide::Local).label(...)`.
+Each comes back as a `SandboxPort`: its `port`, `on`, `url` and `label`.
+`get_sandbox`, `list_sandbox` and `find_sandbox` answer the ports as `create_sandbox` does. A port's `url` is a loopback address, which only the client's machine reaches, from a server on that machine; a server over HTTP answers none, and a port on local has none.
 
 A sandbox a server kept across its restart but could not know again, such as one whose image is gone, is listed with `running` false and an `error` saying why; it takes nothing but `remove`.
 
@@ -101,7 +100,7 @@ A job is a sandbox's process, from `exec`, or an image's build, pull or push.
 
 ### Sandbox jobs
 
-A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Set a timeout](/docs/guides/running-commands/#set-a-timeout) in Running commands says, or `restarted`, for one that ran when its server restarted, keeping its sandbox. A reason this version does not know is kept as the server's string: a `str` in Python, `SandboxJobEndReason::Other` in Rust.
+A `SandboxJob`, from awaiting `exec` or from `job(id)`, has its `id`, `pid`, `cmd`, whether it is `running`, and once it has ended, its exit `code` and, if it did not end by itself, the `reason`: `timeout`, `cancelled`, `sandbox_deleted`, `vm_exited` or `oom`, as [Set a timeout](/docs/tutorials/running-commands/#set-a-timeout) in Running commands says, or `restarted`, for one that ran when its server restarted, keeping its sandbox. A reason this version does not know is kept as the server's string: a `str` in Python, `SandboxJobEndReason::Other` in Rust.
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -155,7 +154,7 @@ A `429` `quota` for a limit that frees up only as you close or delete something,
 
 ## Volumes
 
-See [Mounting volumes](/docs/guides/mounting-volumes/).
+See [Mounting volumes](/docs/tutorials/mounting-volumes/).
 
 | Call | Returns | What it does |
 | --- | --- | --- |
@@ -191,14 +190,15 @@ A `Sandbox` and a `Volume` share these calls, each on its own files, by a path r
 
 ## PortForwarder
 
-See [Networks and ports](/docs/guides/networks-ports/).
+See [Networks and ports](/docs/tutorials/networks-ports/).
 
 | Call | Returns | What it does |
 | --- | --- | --- |
-| `PortForwarder.open(client, port)` | `PortForwarder` | Forwards a sandbox's port, as `ports` answers it, or the `url` answered for it, to an address on this machine's loopback. Given the port, a failed connection's error names its number. |
-| `last_error` | `VirtxError` or `None` | Why the last connection that failed did -- its WebSocket refused, or closed before the port sent a byte, with the server's reason if it gave one -- naming the port; `None` again once a later connection's port sends a byte. Each failure is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
-| `address`, `host`, `port` | `str`, `str`, `int` | Where it is reached. In Rust, `address()`. |
-| `close()` | `None` | Stops forwarding; the port in the sandbox stays open. In Rust, dropping it does the same. |
+| `PortForwarder.open(sandbox, port, on, local)` | `PortForwarder` | Forwards the sandbox's port `port` on the side `on`, `"sandbox"` without it. A port in the sandbox is reached at `local`, a free port on `127.0.0.1` without it; a port on local is reached by the sandbox's processes at `10.0.2.2:port`, each connection carried to `local`, `127.0.0.1:port` without it. Awaited, once it is open. In Node, `open(sandbox, port, { on, local })`. |
+| `port`, `on`, `local` | `int`, `str`, `str` | The port, its side, and its local end as `host:port`. In Rust, `port()`, `on()` and `local()`. |
+| `last_error` | `VirtxError` or `None` | Why the last connection that failed did -- its WebSocket refused, or closed before the port sent a byte, with the server's reason if it gave one, or its target not reached -- naming the port; `None` again once a later connection reaches the port. Each failure is also logged as a warning. In Node, `lastError`; in Rust, `last_error()`. |
+| `wait_closed()` | `VirtxError` | Waits until it has ended, and answers why: for a port on local, `404` once the sandbox is gone. A port in the sandbox is forwarded until it is closed. In Node, `waitClosed()`. |
+| `close()` | `None` | Stops forwarding; the sandbox keeps its port. In Rust, dropping it does the same. |
 
 ## Environment variables
 

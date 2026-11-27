@@ -12,8 +12,8 @@
 //!            virtx-ctrl     the control channel to the agent, passed on to and from the host
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
-//! virtio-vsock              the guest's network, on a machine with one or with published
-//!                           ports -- see [`net`]
+//! virtio-net eth0           the guest's network, on a machine with one, with published ports
+//!                           or with its client's -- see `net`
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag once the overlay is
@@ -45,7 +45,7 @@
 //! What the init runs is not a command but `virtx-uvm-guest`, the agent, built into this
 //! binary (see `build.rs`). The first thing it reads on its port is a
 //! [`MachineInfo`](wire::MachineInfo), which this process writes there: it builds the root
-//! that names -- the upper disk overlaid on the lower, the shares mounted, the resolver named
+//! that names -- the upper disk overlaid on the lower, the shares mounted, the network set up
 //! -- steps into it, and runs the commands the host sends.
 //!
 //! # `/abin` and `/alib`
@@ -70,7 +70,7 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "gpu")]
 use super::gpu;
+use super::wire::GuestNetwork;
 use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
 use super::{Error, MachineConfig, Result, STOP_TIMEOUT, net};
 use crate::volume::{Remote, Served};
@@ -131,28 +132,28 @@ const ALIB_HOST: &str = "alib";
 /// The log target libkrun gives what the guest's console prints.
 pub(super) const CONSOLE_TARGET: &str = "init_or_kernel";
 
-/// What a machine's process is spawned with, as one argument: the machine, its ends of the
-/// control channel and the I/O channel, and the directory its published ports' sockets go in.
+/// What a machine's process is spawned with, as one argument: the machine, and its ends of
+/// the control channel and the I/O channel.
 #[derive(Serialize, Deserialize)]
 pub(super) struct BootArgs {
     pub config: MachineConfig,
-    pub sockets: PathBuf,
     pub ctrlin: u64,
     pub ctrlout: u64,
     pub ioin: u64,
     pub ioout: u64,
 }
 
-/// Whether a machine's RAM is backed with host pages before it boots rather than as the guest
-/// first touches them: `VIRTX_PREFAULT_MEMORY=1`, off otherwise.
+/// Whether a machine's memory, its RAM and its GPU's window, is backed with host pages before it
+/// boots rather than as the guest first touches them: `VIRTX_PREFAULT_MEMORY=1`, off otherwise.
 ///
 /// Only WHP heeds it. There each first touch is a fault the hypervisor resolves on its own,
-/// and nested -- a Windows instance in a cloud, as a CI runner is -- one costs about 130µs:
+/// and nested -- a Windows instance in a cloud, as a spot CI runner is -- one costs about 130µs:
 /// the guest's struct pages alone, initialised before it reaches init, are 2s of a 3.8s
 /// boot, where faulting all 4 GiB in at once is 1.2s, and the machine tests there take 59s
 /// rather than 182. On a desktop the faults are cheap and the cost is all the other way:
-/// every machine holds its whole RAM on the host from the start, used or not. So it is for a
-/// runner to turn on, and nothing else.
+/// every machine holds its whole RAM and GPU window on the host from the start, used or
+/// not. So it is for a runner whose Windows is itself a virtual machine to turn on, and
+/// nothing else.
 fn prefault_memory() -> bool {
     std::env::var_os("VIRTX_PREFAULT_MEMORY").is_some_and(|v| v == "1")
 }
@@ -186,23 +187,17 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 
 /// Build `machine`, running the agent, and become it: load the guest kernel, lay the init over
 /// an empty root, attach the devices, pass `ctrlin` on to the agent and the agent on to
-/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, put the published ports'
-/// sockets in `sockets`, and run.
+/// `ctrlout`, give it `io`, `ioin` and `ioout`, as its I/O port, and run.
 ///
 /// **This does not return.** The VMM exits this process with the guest's own status, so what
 /// comes back is a machine that could not be built, or a failure of the event loop.
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
-pub(super) fn boot(
-    machine: MachineConfig,
-    sockets: &Path,
-    ctrlin: File,
-    io: (File, File),
-) -> Result<Infallible> {
+pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
-        executable(dir);
+        executable(dir, true);
     }
     let alib = beside(ALIB_HOST);
     let env = env(&machine.config, abin.is_some());
@@ -212,9 +207,11 @@ pub(super) fn boot(
         upper_device: UPPER_DEVICE.to_owned(),
         upper_fstype: UPPER_FSTYPE.to_owned(),
         shares: Vec::new(),
-        nameserver: machine.spec.network.then(|| net::NAMESERVER.to_string()),
+        network: (machine.spec.network
+            || !machine.ports.is_empty()
+            || machine.client_ports.is_some())
+        .then(|| GuestNetwork::new(machine.spec.network)),
         workdir: workdir(&machine.config),
-        ports: machine.ports.clone(),
     };
 
     // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
@@ -433,8 +430,12 @@ pub(super) fn boot(
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network || !published.is_empty() {
-        devices.add(net::attach(machine.spec.network, published, sockets)?);
+    if machine.spec.network || !published.is_empty() || machine.client_ports.is_some() {
+        devices.add(net::device(
+            machine.spec.network,
+            published,
+            machine.client_ports.clone(),
+        )?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module
@@ -634,7 +635,7 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
             return refused("given twice");
         }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| Error::Io {
-            context: format!("binding a relay for guest port {port}"),
+            context: format!("publishing guest port {port}"),
             source: e,
         })?;
         published.push((port, listener));
@@ -645,7 +646,7 @@ fn published(ports: &[u16]) -> Result<Vec<(u16, TcpListener)>> {
 /// The path of `what`, such as `/abin`, as libkrun takes it, which is a `&str`. Refused rather
 /// than lossily converted: a name with a replacement character in it opens some other file or
 /// none.
-pub(super) fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
+fn utf8<'a>(path: &'a Path, what: &str) -> Result<&'a str> {
     path.to_str().ok_or_else(|| Error::Io {
         context: format!("the path of {what} is not valid UTF-8, which libkrun cannot name"),
         source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
@@ -660,14 +661,14 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     #[cfg(windows)]
-    executable(&dir);
+    executable(&dir, false);
     Some(dir)
 }
 
-/// Mark each file directly in `dir` executable for the guest: the programs `/abin` runs by path.
-/// What is in their directories is read, not run -- a library is mapped by the guest's loader
-/// whatever its mode -- so it is left as it is, and a boot writes a stream for a handful of
-/// files rather than for every one.
+/// Mark each file in `dir` executable for the guest, and with `deep` each file under it: `/abin`'s
+/// programs, and what they install beside themselves, which they run by path too, such as
+/// `browser`'s Chromium. `alib/`'s directories hold libraries, which the guest's loader maps
+/// whatever their mode, and many of them, so only its top level is marked.
 ///
 /// libkrun's virtiofs on Windows answers `0644` for a regular file unless an alternate data
 /// stream beside it, in libkrun's own `uid:gid:0mode` form, says otherwise -- and NTFS keeps no
@@ -675,7 +676,7 @@ fn beside(name: &str) -> Option<std::path::PathBuf> {
 /// marked again. A file it fails on is said and skipped, as a host with no `alib/` is a machine
 /// without it.
 #[cfg(windows)]
-fn executable(dir: &Path) {
+fn executable(dir: &Path, deep: bool) {
     const OVERRIDE_STAT: &str = ":user.containers.override_stat";
     const ROOT_EXECUTABLE: &str = "0:0:0100755";
 
@@ -683,6 +684,9 @@ fn executable(dir: &Path) {
         return;
     };
     for path in entries.flatten().map(|entry| entry.path()) {
+        if deep && path.is_dir() {
+            executable(&path, true);
+        }
         if !path.is_file() {
             continue;
         }

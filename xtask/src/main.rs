@@ -21,11 +21,13 @@ usage: cargo xtask init     [--force]
        cargo xtask run      <cargo run args>... [-- <program args>...]
        cargo xtask test     [<cargo test args>... [-- <test harness args>...]]
        cargo xtask test     --no-run
+       cargo xtask test     abin
        cargo xtask fixture  -- <command>...
        cargo xtask fixture  --serve
 
-  init      checks out the submodules that are not, applies 3rdparty/_patches to libkrun's
-            and rutabaga_gfx's, and adds the guest's musl target -- ready to build the servers
+  init      checks out the submodules that are not, applies 3rdparty/_patches to libkrun's,
+            rutabaga_gfx's and smoltcp's, and adds the guest's musl target -- ready to build
+            the servers
   build     builds the components from source
   install   installs what was built into <prefix>/bin
   check     what a change has to pass before it is pushed: the format, clippy and the tests,
@@ -46,7 +48,9 @@ usage: cargo xtask init     [--force]
             and installs everything `test` would -- the crates' tests, the agent's on Linux,
             the servers, abin, the packages' cargo tests, the library they open and the
             bindings' packages -- and runs none, which needs no guest kernel. With XTASK_TESTS_COMPILED set after it,
-            `test` fails if cargo compiles anything
+            `test` fails if cargo compiles anything. With abin alone, the tests of virtx-abins/,
+            built for the guest's musl target and run on a Linux host; on any other, compiled
+            and not run
   fixture   runs any <command> against the servers, built and signed, over a home of its own:
             VIRTX_TEST_STDIO names virtx-stdio for it to spawn, and VIRTX_TEST_URL,
             VIRTX_TEST_TOKEN and VIRTX_TEST_PROJECT virtx-server-tcp, served for it on the
@@ -429,10 +433,12 @@ fn init(force: bool) -> anyhow::Result<()> {
 
 /// The submodules cargo takes crates from by path, each with its patches: a submodule's tree is
 /// the commit this repository pins with each patch applied to it in order. libkrun is
-/// `virtx-uvm`'s dependency, and rutabaga_gfx is patched in for libkrun's.
+/// `virtx-uvm`'s dependency, rutabaga_gfx is patched in for libkrun's, and smoltcp for
+/// `virtx-uvm`'s.
 const PATCHED: &[(&str, &str)] = &[
     ("3rdparty/libkrun", "3rdparty/_patches/libkrun"),
     ("3rdparty/rutabaga_gfx", "3rdparty/_patches/rutabaga_gfx"),
+    ("3rdparty/smoltcp", "3rdparty/_patches/smoltcp"),
 ];
 
 /// What `git` in `dir` prints for `args`.
@@ -1672,6 +1678,7 @@ fn test(args: Vec<OsString>) -> anyhow::Result<()> {
     }
     match args.as_slice() {
         [] => test_all(),
+        [abin] if abin == "abin" => abin::test(),
         // virtx-rs's tests are against the fixture too.
         _ if args.iter().any(|arg| arg == "virtx") => {
             let fixture = Fixture::start()?;

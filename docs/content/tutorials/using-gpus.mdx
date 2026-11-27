@@ -1,0 +1,77 @@
+---
+title: "Using GPUs"
+description: "Give a sandbox the host's GPU through Vulkan, with the loader and driver that come with every sandbox."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+The server gives a sandbox the host's GPU through Vulkan, on every host.
+The host needs a Vulkan loader.
+The guest's half of Vulkan, the loader and the venus driver that reaches the host's GPU, comes with every sandbox, so the image needs neither.
+
+## Create a GPU sandbox
+
+Set `gpu=True` when creating a sandbox.
+`gpu_memory_mib` sets how much memory the GPU may hold, apart from the sandbox's own memory, 8 GiB when left out.
+This installs `vulkaninfo` in a GPU sandbox and checks the GPU with it:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.create_sandbox("alpine:latest", gpu=True)
+await sandbox.exec(
+    ["sh", "-c", "apk add --no-cache vulkan-tools && vulkaninfo --summary"]
+).complete(print=True)
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', { gpu: true })
+await sandbox
+  .exec(['sh', '-c', 'apk add --no-cache vulkan-tools && vulkaninfo --summary'])
+  .complete({ print: true })
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let sandbox = client
+    .create_sandbox(&SandboxCreateArgs::new("alpine:latest").gpu(true))
+    .await?;
+sandbox
+    .exec(&SandboxExecArgs::new([
+        "sh",
+        "-c",
+        "apk add --no-cache vulkan-tools && vulkaninfo --summary",
+    ]))
+    .complete(true)
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+The host's GPU appears in the guest as `Virtio-GPU Venus (<the host's GPU>)`.
+A server built without GPU support refuses a GPU sandbox rather than run it on the CPU, and `gpu_memory_mib` without `gpu` is refused too.
+
+## What the sandbox brings
+
+Every sandbox has `/alib`, a read-only directory of virtx's own libraries, with the Vulkan loader and venus built twice: in `/alib/musl` for images on musl, such as Alpine, and in `/alib/glibc` for images on glibc 2.28 or later, such as Debian and Ubuntu.
+When a GPU sandbox starts, the directory for the image's C library, the one `/bin/sh` runs on, goes on `LD_LIBRARY_PATH`, after any the image sets.
+`VK_DRIVER_FILES` names venus from there too, so a program finds the host's GPU whatever the image has installed.
+A sandbox without a GPU gets neither, and runs the image's own Vulkan, if it has any.
+
+- **An image's own Vulkan driver is passed over in a GPU sandbox.** Set `VK_DRIVER_FILES` in the image to choose another.
+- **In a GPU sandbox, a program that links the Vulkan loader finds the one in `/alib` before the image's,** and one that opens `libvulkan.so.1` by name does too.
+
+## What the device offers
+
+The device reports up to Vulkan 1.4, as the host's driver allows.
+On a Mac with an Apple7 GPU or later (M1 and later), it also offers bfloat16 (`VK_KHR_shader_bfloat16`) and cooperative matrices (`VK_KHR_cooperative_matrix`), in 8x8 and 16x16 shapes.
+An image that brings its own venus driver through `VK_DRIVER_FILES` needs Mesa 26.0 or later for those two: earlier venus does not pass them through.
+
+See [Working with images](/docs/tutorials/images/) for building the guest image, and [Running commands](/docs/tutorials/running-commands/) for reading command output.

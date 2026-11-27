@@ -21,7 +21,7 @@ pub use backend::StorageBackend;
 pub use files::Files;
 pub use fstree::*;
 pub use image::{
-    image_build::{Error as BuildError, build_step},
+    image_build::{Error as BuildError, based_on, build_step},
     registry_client::{
         Error as RegistryError, ProxyPass, ProxyRefusal, PublicImages, Reference, RegistryClient,
         RegistryProxy,
@@ -31,11 +31,14 @@ pub use image::{
     store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };
 pub use machine::{
-    Error as MachineError, Machine, MachineConfig, MachineSpec, Paused, Ports, Publication,
-    SandboxDisk, VolumeMount, enter as enter_machine, wire,
+    CLIENT_ACCEPTED, CLIENT_GREETING, ClientRelay, Error as MachineError, Machine, MachineConfig,
+    MachineSpec, Paused, Ports, Publication, SandboxDisk, VolumeMount, enter as enter_machine,
+    wire,
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;
+/// The labels a built image names its base by: see [`based_on`].
+pub use oci_spec::image::{ANNOTATION_BASE_IMAGE_DIGEST, ANNOTATION_BASE_IMAGE_NAME};
 /// An image's config, and the OS it says it is for.
 pub use oci_spec::image::{ImageConfiguration, Os};
 pub use project::{
@@ -44,9 +47,9 @@ pub use project::{
 };
 pub use sandbox::runs;
 pub use sandbox::{
-    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
-    Job as SandboxJob, KEEP_ENDED, Kept as KeptSandboxes, LOG_LIMIT, Sandbox,
-    Unknown as UnknownSandbox, park_after, signal_number,
+    Activity, ClientConnection, ClientPortTaker, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB,
+    DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob, KEEP_ENDED, Kept as KeptSandboxes,
+    LOG_LIMIT, Sandbox, Unknown as UnknownSandbox, park_after, signal_number,
 };
 pub use volume::{
     Dirent, DirentKind, Error as VolumeError, GDRIVE_ORIGINS_ENV, Gdrive, GdriveConfig,

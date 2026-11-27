@@ -1,36 +1,22 @@
 //! The server's routes, for an [`Access`]: the endpoints of the protocol ([`crate::endpoints`]),
-//! each answered from the home its request reaches, the images as an OCI registry, and each
-//! sandbox's ports. A server built on this one gives [`router`] an authenticator of its own in the
-//! access, and routes of its own beside these; the server a config alone makes is [`configured`],
-//! which does both.
-//!
-//! A sandbox's ports are at `/ports/<capability>` beside the endpoints, each a WebSocket of the
-//! subprotocol `virtx.tcp` carrying a TCP connection to the port: the capability, which only
-//! making the sandbox answers, is all a connection needs, and gives no more than the one port.
+//! each answered from the home its request reaches -- a sandbox's ports among them -- and the
+//! images as an OCI registry. A server built on this one gives [`router`] an authenticator of its
+//! own in the access, and routes of its own beside these; the server a config alone makes is
+//! [`configured`], which does both.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::access::{self, Access};
 use crate::config::Config;
-use crate::endpoints::{self, Tunnel};
+use crate::endpoints;
 use anyhow::Context as _;
 use axum::Extension;
-use axum::extract::Path;
-use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::middleware::Next;
-use axum::response::{IntoResponse as _, Response};
+use axum::response::IntoResponse as _;
 use axum::routing::any;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use http::{HeaderName, HeaderValue, Method, header};
 use tower_http::cors::CorsLayer;
-
-/// The WebSocket subprotocol a port's TCP is carried in.
-const TCP_SUBPROTOCOL: &str = "virtx.tcp";
-
-/// How much of a port's TCP one message carries at most.
-const CHUNK: usize = 64 << 10;
 
 /// What a server's binary is spawned with to be a machine.
 pub const MACHINE_SUBCOMMAND: &str = "vm";
@@ -105,7 +91,6 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
         }
     };
     let checked = Arc::clone(&access);
-    let reaching = Arc::clone(&access);
     endpoints::router()
         .layer(axum::middleware::from_fn(
             move |mut request: axum::extract::Request, next: Next| {
@@ -125,17 +110,6 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
         .route(&registry, any(images.clone()))
         .route(&format!("{registry}/"), any(images.clone()))
         .route(&format!("{registry}/{{*rest}}"), any(images))
-        .route(
-            "/ports/{capability}",
-            any(
-                move |Path(capability): Path<String>,
-                      headers: HeaderMap,
-                      upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>| {
-                    let access = Arc::clone(&reaching);
-                    async move { port(&access, &capability, &headers, upgrade) }
-                },
-            ),
-        )
         .layer(cors)
 }
 
@@ -257,101 +231,6 @@ fn cors(origins: &[String]) -> CorsLayer {
         .max_age(Duration::from_secs(3600))
 }
 
-/// A request to the port `capability` opens: `403` from an `Origin` not let in, `426` unless it
-/// opens a WebSocket, `400` unless of the subprotocol `virtx.tcp`, and `404` for a capability no
-/// sandbox here has -- one never answered, or of a sandbox gone.
-fn port(
-    access: &Access,
-    capability: &str,
-    headers: &HeaderMap,
-    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-) -> Response {
-    if let Err(status) = access.origin(headers) {
-        return endpoints::refusal(status).into_response();
-    }
-    let Ok(upgrade) = upgrade else {
-        return StatusCode::UPGRADE_REQUIRED.into_response();
-    };
-    let offered = headers
-        .get(header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|offered| offered.trim() == TCP_SUBPROTOCOL)
-        });
-    if !offered {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("a port is reached over the WebSocket subprotocol {TCP_SUBPROTOCOL}"),
-        )
-            .into_response();
-    }
-    let Some(tunnel) = access
-        .homes()
-        .iter()
-        .find_map(|home| home.tunnel(capability))
-    else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    upgrade
-        .protocols([TCP_SUBPROTOCOL])
-        .on_upgrade(move |socket| relay(socket, tunnel))
-}
-
-/// Carry bytes between `socket` and the port `tunnel` reaches until either ends: what is
-/// read from the port as binary messages, and the binary messages to the port. Closed at once
-/// when the port is not reached, such as when no machine runs, saying why as the close's reason.
-async fn relay(mut socket: WebSocket, tunnel: Tunnel) {
-    let mut reached = match tunnel.connect().await {
-        Ok(reached) => reached,
-        Err(e) => {
-            let frame = CloseFrame {
-                code: close_code::ERROR,
-                reason: close_reason(&e.to_string()).into(),
-            };
-            let _ = socket.send(Message::Close(Some(frame))).await;
-            return;
-        }
-    };
-    let (mut from, mut to) = reached.split();
-    let mut buffer = vec![0u8; CHUNK];
-    loop {
-        tokio::select! {
-            read = from.read(&mut buffer) => match read {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let message = Message::Binary(buffer[..n].to_vec().into());
-                    if socket.send(message).await.is_err() {
-                        break;
-                    }
-                }
-            },
-            received = socket.recv() => match received {
-                Some(Ok(Message::Binary(bytes))) => {
-                    if to.write_all(&bytes).await.is_err() {
-                        break;
-                    }
-                }
-                // Answered by the socket itself.
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                // Text is no TCP's, and anything else is the end.
-                Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
-            },
-        }
-    }
-    let _ = socket.send(Message::Close(None)).await;
-}
-
-/// `said` as a close's reason, which a WebSocket holds 123 bytes of: cut at a character's end.
-fn close_reason(said: &str) -> String {
-    let mut end = said.len().min(123);
-    while !said.is_char_boundary(end) {
-        end -= 1;
-    }
-    said[..end].to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     //! The app, served on the loopback over an identity of the test's own, and called over HTTP
@@ -370,10 +249,7 @@ mod tests {
     use tokio_tungstenite::tungstenite;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use virtx_core::VolumeListOutputItem;
-    use virtx_core::{
-        Auth, Client, DirEntry, FileRoot, ImageJob, InboundRule, PortProtocol, PortSpec, Recipe,
-        SandboxCreateArgs,
-    };
+    use virtx_core::{Auth, Client, DirEntry, FileRoot, ImageJob, Recipe, SandboxCreateArgs, Step};
     use virtx_uvm::backend::{Held, Refusal, Stored, Wanted};
     use virtx_uvm::{
         FsTree, ImageStore, ProjectId, PublicRegistries, Reference, RegistryProxy, StorageBackend,
@@ -508,17 +384,20 @@ mod tests {
             store.insert_tag(&tag.parse().unwrap(), &image).unwrap();
         }
 
-        /// A port's URL, as a client resolves what making its sandbox answered: against the URL
-        /// it called, as a WebSocket's.
+        /// The URL of `path` under the base, as a WebSocket's.
         fn port_url(&self, url: &str) -> Url {
             let mut url = Url::parse(&self.url).unwrap().join(url).unwrap();
             url.set_scheme("ws").unwrap();
             url
         }
 
-        /// A WebSocket to `url`, offering `protocol`: the socket, or the status it was refused with.
-        async fn open(url: &Url, protocol: Option<&str>) -> Result<Socket, u16> {
+        /// A WebSocket to `url` in `project`, offering `protocol`: the socket, or the status it
+        /// was refused with.
+        async fn open(url: &Url, project: &str, protocol: Option<&str>) -> Result<Socket, u16> {
             let mut request = url.as_str().into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert(virtx_core::PROJECT_HEADER, project.parse().unwrap());
             if let Some(protocol) = protocol {
                 request
                     .headers_mut()
@@ -918,6 +797,62 @@ mod tests {
         .expect("the job went on")
     }
 
+    /// A build names its base by the OCI's labels, in place of those the base had, and keeps
+    /// the others; built again, it is the same image. Of steps that boot no machine, so the
+    /// build runs here.
+    #[tokio::test]
+    async fn a_build_names_its_base_and_is_the_same_image_built_again() {
+        let served = Served::spawn("build-history").await;
+        let client = served.connect();
+        // A base whose history tells its one layer apart, naming a base of its own.
+        let store = ImageStore::new(served.project("demo").await.join("images")).unwrap();
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "architecture": "arm64",
+            "os": "linux",
+            "config": {"Labels": {
+                "org.opencontainers.image.base.name": "alpine:3.20",
+                "maintainer": "virtx",
+            }},
+            "rootfs": {"type": "layers", "diff_ids": []},
+            "history": [{"created_by": "ADD rootfs /"}],
+        }))
+        .unwrap();
+        let base = store.insert_image(&config, &[layer]).unwrap();
+        store.insert_tag(&"base:1".parse().unwrap(), &base).unwrap();
+
+        let recipe = Recipe::new("base:1")
+            .step(Step::env("TZ", "UTC"))
+            .step(Step::workdir("/app"));
+        let built = async |reference: &str| {
+            let job = client.build_image(recipe.clone(), reference).await.unwrap();
+            // A guard against a hang, not a measure of anything.
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let job = client.get_image_job(&job.id).await.unwrap();
+                    if !job.running {
+                        break job;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the build went on");
+            ended.digest.expect("the build failed")
+        };
+        let image = built("built:1").await;
+        assert_eq!(built("built:2").await, image);
+
+        let (config, _) = store.get_image(&image.parse().unwrap()).unwrap().unwrap();
+        let labels = config.config().clone().unwrap().labels().clone().unwrap();
+        assert_eq!(labels[virtx_uvm::ANNOTATION_BASE_IMAGE_NAME], "base:1");
+        assert_eq!(
+            labels[virtx_uvm::ANNOTATION_BASE_IMAGE_DIGEST],
+            base.to_string()
+        );
+        assert_eq!(labels["maintainer"], "virtx");
+    }
+
     /// A server's image jobs are held to registries on public addresses: a pull, a push and a
     /// build's base that name one on this host's loopback each fail saying so, and it is
     /// connected to not at all.
@@ -1271,7 +1206,7 @@ mod tests {
                 "POST",
                 "sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?, "protocol"?, "inbound"?}, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "on"?, "label"?}, not "5900""#,
             ),
             (
                 "GET",
@@ -1463,16 +1398,6 @@ mod tests {
         // boots.
         let args = SandboxCreateArgs::new("a:b").port(0);
         assert_eq!(status(client.create_sandbox(&args).await), 400);
-        // So are a port asked for over HTTP, which a port's tunnel here does not serve, and one
-        // with inbound rules, which this server keeps none of.
-        let web = PortSpec::new(5173).protocol(PortProtocol::Http);
-        let args = SandboxCreateArgs::new("a:b").port(web);
-        let refused = client.create_sandbox(&args).await.unwrap_err();
-        assert_eq!(refused.status(), Some(400), "{refused}");
-        assert!(refused.to_string().contains("HTTP"), "{refused}");
-        let ssh = PortSpec::new(22).inbound([InboundRule::new("10.0.0.0/8")]);
-        let args = SandboxCreateArgs::new("a:b").port(ssh);
-        assert_eq!(status(client.create_sandbox(&args).await), 400);
         let args = SandboxCreateArgs::new("a:b");
         assert_eq!(status(client.create_sandbox(&args).await), 404);
     }
@@ -1491,16 +1416,16 @@ mod tests {
         let digest = digest.unwrap().to_string();
         let dir = demo.join("sandbox");
         std::fs::create_dir_all(&dir).unwrap();
-        let capability = "c".repeat(64);
         let jobs = json!([
             { "id": "ran", "kind": "exec", "pid": 7, "cmd": ["sleep", "60"], "running": true },
             { "id": "done", "kind": "exec", "pid": 8, "cmd": ["true"], "running": false, "code": 0 },
         ]);
         let web = json!({ "port": 8080, "label": "web" });
         let kept = [
+            // An older server's, with the port keys it kept.
             (
                 "kept",
-                json!({ capability.clone(): 8080 }),
+                json!({ "c".repeat(64): 8080 }),
                 false,
                 jobs,
                 web.clone(),
@@ -1525,8 +1450,8 @@ mod tests {
         assert_eq!(
             listed,
             [
-                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080 }] }),
-                json!({ "id": "kept", "image": digest, "running": true, "ports": [web] }),
+                json!({ "id": "ended", "image": digest, "running": false, "ports": [{ "port": 8080, "on": "sandbox" }] }),
+                json!({ "id": "kept", "image": digest, "running": true, "ports": [{ "port": 8080, "on": "sandbox", "label": "web" }] }),
             ]
         );
         let (status, got) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
@@ -1566,14 +1491,25 @@ mod tests {
             "id: 1\ndata: {\"end\":{\"code\":137,\"reason\":\"restarted\"}}\n\n"
         );
 
-        // Its port's URL reaches it as it did: parked, no machine runs to reach the port in,
-        // which the close says.
-        let port = served.port_url(&format!("ports/{capability}"));
-        let mut socket = Served::open(&port, Some("virtx.tcp")).await.unwrap();
+        // Its port is reached as before: parked, no machine runs to reach the port in, which
+        // the close says. A WebSocket of no `virtx.tcp`, a request that opens none, and a port
+        // it was not made with are refused.
+        let port = served.port_url("sandboxes/kept/ports/8080");
+        let mut socket = Served::open(&port, "demo", Some("virtx.tcp"))
+            .await
+            .unwrap();
         let Some(Ok(tungstenite::Message::Close(Some(frame)))) = socket.next().await else {
             panic!("the WebSocket was not closed with a reason");
         };
         assert!(frame.reason.contains("no machine runs"), "{}", frame.reason);
+        assert_eq!(Served::open(&port, "demo", None).await.err(), Some(400));
+        let (status, _) = served
+            .send("GET", "sandboxes/kept/ports/8080", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+        let other = served.port_url("sandboxes/kept/ports/9090");
+        let refused = Served::open(&other, "demo", Some("virtx.tcp")).await;
+        assert_eq!(refused.err(), Some(404));
 
         let (status, _) = served
             .send("DELETE", "sandboxes/kept", Some("demo"), "")
@@ -1587,7 +1523,58 @@ mod tests {
         let (status, _) = served.send("GET", "sandboxes/kept", Some("demo"), "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(
-            Served::open(&port, Some("virtx.tcp")).await.err(),
+            Served::open(&port, "demo", Some("virtx.tcp")).await.err(),
+            Some(404)
+        );
+    }
+
+    /// A port on local is taken over a WebSocket of `virtx.tcp`, in a sandbox of the project a
+    /// request names, one it was made with: here one a server before this one kept, its relay
+    /// opened anew. Its WebSocket is closed once the sandbox is deleted.
+    #[tokio::test]
+    async fn a_port_on_local_is_taken_in_a_sandbox_of_the_project_named() {
+        let served = Served::spawn("local-ports").await;
+        served.file_image("kept:1").await;
+        let demo = served.project("demo").await;
+        let images = ImageStore::new(demo.join("images")).unwrap();
+        let digest = images.get_tag(&"kept:1".parse().unwrap()).unwrap();
+        let dir = demo.join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = json!({ "type": "digest", "digest": digest.unwrap().to_string() });
+        let ports = json!([{ "port": 9222, "on": "local", "label": "cdp" }, 5037]);
+        let args = json!({ "image": image, "ports": ports });
+        std::fs::write(dir.join("kept.ext4"), b"").unwrap();
+        let record = json!({ "args": args, "exited": false, "jobs": [] });
+        std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
+
+        let port = served.port_url("sandboxes/kept/client-ports/9222");
+        let mut taken = Served::open(&port, "demo", Some("virtx.tcp"))
+            .await
+            .unwrap();
+        assert_eq!(Served::open(&port, "demo", None).await.err(), Some(400));
+        let (status, _) = served
+            .send("GET", "sandboxes/kept/client-ports/9222", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+        // 5037 is a port in the sandbox, not on local.
+        let undeclared = served.port_url("sandboxes/kept/client-ports/5037");
+        let refused = Served::open(&undeclared, "demo", Some("virtx.tcp")).await;
+        assert_eq!(refused.err(), Some(404));
+        let refused = Served::open(&port, "other", Some("virtx.tcp")).await;
+        assert_eq!(refused.err(), Some(404));
+
+        let (status, _) = served
+            .send("DELETE", "sandboxes/kept", Some("demo"), "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), taken.next());
+        let closed = closed.await;
+        assert!(
+            matches!(closed, Ok(None | Some(Ok(tungstenite::Message::Close(_))))),
+            "{closed:?}"
+        );
+        assert_eq!(
+            Served::open(&port, "demo", Some("virtx.tcp")).await.err(),
             Some(404)
         );
     }
@@ -1683,27 +1670,22 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
-    /// A port is a WebSocket of `virtx.tcp` and nothing else, behind a capability no one guesses.
+    /// A port is reached in a sandbox of the project a request names, from an origin let in.
     #[tokio::test]
-    async fn a_port_is_a_websocket_behind_its_capability() {
+    async fn a_port_is_reached_in_a_sandbox_of_the_project_named() {
         let served = Served::spawn("ports").await;
-        let guessed = served.port_url(&format!("ports/{}", "0".repeat(64)));
-        let mut plain = guessed.clone();
+        let port = served.port_url("sandboxes/nope/ports/8080");
+        let mut plain = port.clone();
         plain.set_scheme("http").unwrap();
         let elsewhere = reqwest::Client::new()
-            .get(plain.clone())
+            .get(plain)
             .header("origin", "https://elsewhere.example")
             .send()
             .await
             .unwrap();
         assert_eq!(elsewhere.status(), StatusCode::FORBIDDEN);
-        let plain = reqwest::get(plain).await.unwrap();
-        assert_eq!(plain.status(), StatusCode::UPGRADE_REQUIRED);
-        assert_eq!(Served::open(&guessed, None).await.err(), Some(400));
-        assert_eq!(
-            Served::open(&guessed, Some("virtx.tcp")).await.err(),
-            Some(404)
-        );
+        let none = Served::open(&port, "demo", Some("virtx.tcp")).await;
+        assert_eq!(none.err(), Some(404));
     }
 
     /// Two clients writing over one etag at once: the one whose body has all arrived first
@@ -2115,33 +2097,16 @@ mod tests {
     }
 
     /// A backend that keeps nothing, whose `want` -- the first wait of a sandbox's making --
-    /// says it was reached in `wanting` and, while `holding`, waits for `go`; and writes the
-    /// record `writes` names, where it names one, as another making under its id would.
-    struct Holding {
-        holding: std::sync::atomic::AtomicBool,
-        wanting: tokio::sync::Semaphore,
-        go: tokio::sync::Semaphore,
+    /// writes the record `writes` names, where it names one, as another making under its id
+    /// would.
+    #[derive(Default)]
+    struct Racing {
         writes: Mutex<Option<PathBuf>>,
     }
 
-    impl Default for Holding {
-        fn default() -> Holding {
-            Holding {
-                holding: Default::default(),
-                wanting: tokio::sync::Semaphore::new(0),
-                go: tokio::sync::Semaphore::new(0),
-                writes: Mutex::default(),
-            }
-        }
-    }
-
-    impl StorageBackend for Holding {
+    impl StorageBackend for Racing {
         fn want<'a>(&'a self, _: Wanted<'a>) -> BoxFuture<'a, anyhow::Result<()>> {
             Box::pin(async move {
-                self.wanting.add_permits(1);
-                if self.holding.load(std::sync::atomic::Ordering::SeqCst) {
-                    self.go.acquire().await.unwrap().forget();
-                }
                 if let Some(record) = self.writes.lock().unwrap().take() {
                     std::fs::write(record, b"{}").unwrap();
                 }
@@ -2150,13 +2115,11 @@ mod tests {
         }
     }
 
-    /// A sandbox made under an id and keys given it is refused, before its machine boots, an id
-    /// a sandbox here has or one made meanwhile takes, a key one here opens a port by or one
-    /// being made was given, an id that cannot be one and keys that are not one for each port;
-    /// a port over HTTP and with inbound rules is not refused for it. Nothing of it is made,
-    /// and a key a making that failed was given is given back.
+    /// A sandbox made under an id given it is refused, before its machine boots, an id a
+    /// sandbox here has or one made meanwhile takes, and an id that cannot be one. Nothing of it
+    /// is made. A record of an older server, with the port keys it kept, is read as any other.
     #[tokio::test]
-    async fn a_sandbox_made_under_an_id_and_keys_given_it_is_refused_only_what_it_cannot_be() {
+    async fn a_sandbox_made_under_an_id_given_it_is_refused_only_what_it_cannot_be() {
         use crate::endpoints::{Given, Home};
 
         let root = tempfile::tempdir().unwrap();
@@ -2168,78 +2131,38 @@ mod tests {
             .unwrap();
         let dir = root.join("sandbox");
         std::fs::create_dir_all(&dir).unwrap();
-        let capability = "c".repeat(64);
         let image = json!({ "type": "digest", "digest": digest.to_string() });
         let args = json!({ "image": image, "ports": [8080] });
-        let record = json!({ "args": args, "keys": { capability.clone(): 8080 } });
+        let record = json!({ "args": args, "keys": { "c".repeat(64): 8080 } });
         std::fs::write(dir.join("kept.ext4"), b"").unwrap();
         std::fs::write(dir.join("kept.json"), record.to_string()).unwrap();
         let registry =
             virtx_uvm::RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH).unwrap();
-        let backend = Arc::new(Holding::default());
+        let backend = Arc::new(Racing::default());
         let home = Home::new(images, Arc::new(registry), root).unwrap();
         let home = home.backed_by(Arc::clone(&backend) as Arc<dyn StorageBackend>);
         assert!(home.sandboxes().get("kept").is_some());
 
-        let web = PortSpec::new(8080)
-            .protocol(PortProtocol::Http)
-            .inbound([InboundRule::new("10.0.0.0/8")]);
-        let made = async |image: &str, id: &str, keys: &[(&str, u16)]| {
-            let args = SandboxCreateArgs::new(image).port(web.clone());
-            let keys = keys.iter().map(|(key, port)| (key.to_string(), *port));
-            let given = Given {
-                id: id.to_owned(),
-                keys: keys.collect(),
-            };
+        let made = async |image: &str, id: &str| {
+            let args = SandboxCreateArgs::new(image).port(8080);
+            let given = Given { id: id.to_owned() };
             refused_with(home.make(args, given).await.err().unwrap()).await
         };
         let exists = (StatusCode::CONFLICT, "exists".to_owned());
-        assert_eq!(made("kept:1", "kept", &[("k", 8080)]).await, exists);
+        assert_eq!(made("kept:1", "kept").await, exists);
         // Taken before its image is looked for.
-        assert_eq!(made("none:1", "kept", &[("k", 8080)]).await, exists);
-        assert_eq!(made("kept:1", "new", &[(&capability, 8080)]).await, exists);
+        assert_eq!(made("none:1", "kept").await, exists);
         let invalid = (StatusCode::BAD_REQUEST, "invalid".to_owned());
         for id in ["", "../x", "a.b", &"a".repeat(65)] {
-            assert_eq!(made("kept:1", id, &[("k", 8080)]).await, invalid, "{id:?}");
-        }
-        let unkeyed: [&[(&str, u16)]; 7] = [
-            &[],
-            &[("k", 9090)],
-            &[("k", 8080), ("j", 8080)],
-            &[("k", 8080), ("j", 9090)],
-            &[("", 8080)],
-            &[("k-1", 8080)],
-            &[(&"k".repeat(129), 8080)],
-        ];
-        for keys in unkeyed {
-            assert_eq!(made("kept:1", "new", keys).await, invalid, "{keys:?}");
+            assert_eq!(made("kept:1", id).await, invalid, "{id:?}");
         }
         // Past each check of its own, refused for what is not here alone.
         let missing = (StatusCode::NOT_FOUND, "not_found".to_owned());
-        assert_eq!(made("none:1", "new", &[("k", 8080)]).await, missing);
-
-        // A key one being made was given is taken until its making ends, and then given back.
-        backend
-            .holding
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let first = made("none:1", "first", &[("k", 8080)]);
-        let second = async {
-            backend.wanting.acquire().await.unwrap().forget();
-            // The first held; this one, past `keying`, would not be.
-            backend
-                .holding
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            let second = made("none:1", "second", &[("k", 8080)]).await;
-            backend.go.add_permits(1);
-            second
-        };
-        let (first, second) = tokio::join!(first, second);
-        assert_eq!((first, second), (missing.clone(), exists.clone()));
-        assert_eq!(made("none:1", "second", &[("k", 8080)]).await, missing);
+        assert_eq!(made("none:1", "new").await, missing);
 
         // An id another making takes after it was looked at is refused as its disk is made.
         *backend.writes.lock().unwrap() = Some(dir.join("raced.json"));
-        assert_eq!(made("kept:1", "raced", &[("k", 8080)]).await, exists);
+        assert_eq!(made("kept:1", "raced").await, exists);
         // What the other making holds, as it would.
         for left in ["raced.json", "raced.ext4.lock"] {
             std::fs::remove_file(dir.join(left)).unwrap();
@@ -2256,7 +2179,7 @@ mod tests {
     }
 
     /// A sandbox whose record and disk are put in a home is taken in, its image wanted from the
-    /// home's backend: parked, behind its port URLs, and taken in once. Let go of, no request
+    /// home's backend: parked, its ports reached, and taken in once. Let go of, no request
     /// reaches it, and its record and disk stay for it to be taken in again; in use, it is not
     /// let go of. Deleted, its disk is removed beyond this machine first, and where that is
     /// refused it stays.
@@ -2296,9 +2219,8 @@ mod tests {
         let digest = empty_image(&ImageStore::new(elsewhere.path()).unwrap()).to_string();
         let dir = home.root.join("sandbox");
         std::fs::create_dir_all(&dir).unwrap();
-        let capability = "c".repeat(64);
         let image = json!({ "type": "digest", "digest": digest });
-        let record = json!({ "args": { "image": image, "ports": [8080] }, "keys": { capability.clone(): 8080 } });
+        let record = json!({ "args": { "image": image, "ports": [8080] } });
         std::fs::write(dir.join("moved.ext4"), b"").unwrap();
         std::fs::write(dir.join("moved.json"), record.to_string()).unwrap();
         let (status, _) = served
@@ -2320,8 +2242,8 @@ mod tests {
             serde_json::from_str::<Value>(&got).unwrap()["image"],
             digest
         );
-        let port = served.port_url(&format!("ports/{capability}"));
-        assert!(Served::open(&port, Some("virtx.tcp")).await.is_ok());
+        let port = served.port_url("sandboxes/moved/ports/8080");
+        assert!(Served::open(&port, "demo", Some("virtx.tcp")).await.is_ok());
         let again = home.take_in("moved").await.err().unwrap();
         assert_eq!(
             refused_with(again).await,
@@ -2342,21 +2264,22 @@ mod tests {
         std::fs::remove_file(disk).unwrap();
         std::fs::remove_file(unread).unwrap();
 
-        // In use, it stays; let go of, it is reached no more, and its record and disk stay.
-        let tunnel = home.tunnel(&capability).unwrap();
+        // In use, as a connection through a port holds it, it stays; let go of, it is reached
+        // no more, and its record and disk stay.
+        let activity = home.sandboxes().get("moved").unwrap().activity();
         let in_use = home.let_go("moved").await.err().unwrap();
         assert_eq!(
             refused_with(in_use).await,
             (StatusCode::CONFLICT, "in_use".into())
         );
-        drop(tunnel);
+        drop(activity);
         home.let_go("moved").await.ok().unwrap();
         let (status, _) = served
             .send("GET", "sandboxes/moved", Some("demo"), "")
             .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(
-            Served::open(&port, Some("virtx.tcp")).await.err(),
+            Served::open(&port, "demo", Some("virtx.tcp")).await.err(),
             Some(404)
         );
         assert!(dir.join("moved.ext4").is_file() && dir.join("moved.json").is_file());

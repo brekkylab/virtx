@@ -1,7 +1,7 @@
 //! A sandbox: a machine booted from an image, with volumes mounted into it, and the processes
 //! run in it as [jobs](Job), each with its log.
 //!
-//! A sandbox made with keys is kept past its process, its record beside its upper disk, for the
+//! A sandbox made to be kept is kept past its process, its record beside its upper disk, for the
 //! next server over its root to know it again ([`Sandbox::kept`]), or for a server it is moved
 //! to to take in ([`Sandbox::take_in`]).
 //!
@@ -11,6 +11,7 @@
 //! What a sandbox is to a server beyond this -- how its ports are reached from outside the
 //! host -- is the server's.
 
+mod client_ports;
 mod error;
 mod job;
 mod record;
@@ -19,6 +20,7 @@ pub mod runs;
 mod sandbox;
 mod upper;
 
+pub use client_ports::{ClientConnection, ClientPortTaker};
 pub use error::Error;
 pub use job::Job;
 pub use sandbox::{

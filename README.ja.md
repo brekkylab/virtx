@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">コードとAIエージェントのための使い捨てLinux VM</h3>
+<h3 align="center">AIエージェントのためのmicroVMサンドボックス</h3>
+
+<p align="center">Dockerもデーモンも、セットアップは不要です。</p>
 
 <p align="center">
   <img src="https://cdn.simpleicons.org/python" width="16"/> <a href="https://pypi.org/project/virtx/"><img src="https://img.shields.io/pypi/v/virtx?color=blue&label=virtx" alt="PyPI"></a>
@@ -25,12 +27,9 @@
 
 <br>
 
-virtxを使うと、自分のコードから使い捨てのLinux VMを立ち上げてタスクを実行できます。
+virtxは、AIエージェントのためのmicroVMサンドボックスです。自分のコードから使い捨てのLinux VMを立ち上げてタスクを実行でき、VMは手元のマシン、自分で運用するサーバー、またはvirtx cloudで動かせます。
 
 手元のマシンには入れたくない重い依存関係が必要な処理や、AIエージェントが自分の判断で実行するコマンドのように、そもそも手元で動かしたくないコードを扱うときに役立ちます。VMの中でインストールしたものや変更した内容はVMを削除すると消え、残るのは保存しておいたボリュームに書き込んだものだけです。
-
-> [!TIP]
-> virtxでAIエージェントを作るなら、私たちが開発しているオープンソースのエージェントSDK、[Ailoy](https://github.com/brekkylab/ailoy)もぜひ試してみてください。virtxをベースにしていて、エージェントごとに専用のサンドボックスを用意するので、設定なしでコマンドやファイル操作のツールがVMの中で動きます。
 
 ## クイックスタート
 
@@ -147,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### リモート
 
-[自分でサーバーを運用する](https://virtx.sh/docs/guides/self-hosting/)に従って、自分で管理するマシンに`virtx-server-tcp`をセットアップします。
+[自分でサーバーを運用する](https://virtx.sh/docs/tutorials/self-hosting/)に従って、自分で管理するマシンに`virtx-server-tcp`をセットアップします。
 
 `uvx`または`npx`でインストールせずに実行できる`virtx`コマンドで一度サインインし、`Client.spawn()`の代わりに、それが出力するトークンで接続します。
 それ以外はローカルの例と同じです。
@@ -207,16 +206,17 @@ let client = Client::connect(
 ## 特長
 
 - **信頼できないコードを手元から切り離す:** サンドボックスはすべて独自のカーネルを持つmicroVMで、名前空間だけでなくハイパーバイザーによって隔離され、ネットワークを完全に遮断することもできます。
-- **どこで作業していても同じように使える:** どのクライアントも、どのホスト上のどのサーバーとも組み合わせられ、ローカルサーバーからリモートやクラウドへの切り替えも1行の変更で済みます。
+- **ミリ秒単位で起動:** 新しいサンドボックスは35msでコマンドを実行できる状態になります(M3 Pro Mac、vCPU 1つ、メモリ128MBの場合)。
+- **何でも取り込み、何でも中で実行:** サンドボックス内のエージェントが、手元のブラウザ、Androidデバイス、データベースなどのサービスをそのまま使えます。サンドボックスが届くのは、あなたが開いたサービスだけです。詳しくは[ローカルのポート](https://virtx.sh/docs/tutorials/networks-ports/#a-port-on-local)を参照してください。
+- **AIエージェント開発に最適化:** RAG、ブラウザ操作、GUI自動化といったAIエージェントの作業を、サンドボックスですぐに行えます。詳しくは[RAG](https://virtx.sh/docs/guides/implementing-rag/)、[ブラウザ操作](https://virtx.sh/docs/guides/browser/)、[GUIプログラム](https://virtx.sh/docs/guides/gui-programs/)のガイドを参照してください。
+- **外部のコンテキストを取り込む:** Notion、Google Drive、OneDriveを普通のファイルとしてサンドボックスにマウントできます。
+- **GPUを使う:** Linux、macOS、WindowsでホストのGPUを準仮想化しているので、サンドボックス内でディープラーニングのモデルを動かしたり、グラフィックスの処理をしたりできます。
+- **どこでも動く:** どのクライアントも、どのホスト上のどのサーバーとも組み合わせられ、ローカルサーバーからリモートやクラウドへの切り替えも1行の変更で済みます。
   - **クライアント:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **サーバー:** 💻 ローカル (stdio) · 🖥️ リモート (tcp) · ☁️ クラウド
   - **ホスト:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
 - **セットアップはほぼ不要:** パッケージを入れればすぐに使え、Dockerも常駐させるデーモンもいりません。
-- **いつものイメージがそのまま使える:** Docker Hubや任意のOCIレジストリからpullしたり、レシピやDockerfileからビルドしたりでき、pushし直すことも別のサーバーにコピーすることもできます。
-- **シェルを使わずにファイルをやり取り:** サンドボックス内のファイルの読み書き、コピー、削除をコードから直接行えます。
-- **サンドボックス内のサービスに接続:** サンドボックス内のWebサーバー、SSH、VNCデスクトップ、データベースに、手元のマシンのアドレスからアクセスできます。
-- **前回の続きから再開:** サンドボックスが書き込んだ内容をボリュームに残して次のサンドボックスに引き継いだり、ボリュームを複数のサンドボックスで共有したり、Notion、Google Drive、OneDriveを普通のファイルとしてマウントしたりできます。
-- **GPUも使える:** サンドボックスの中から、ホストのGPUでディープラーニングなどのVulkan処理を実行できます。
+- **どのエージェントフレームワークでも:** サンドボックスは他のツールと同じように使えるので、どのフレームワークやコーディングエージェントからでも操作できます。オープンソースのエージェントSDK [Ailoy](https://github.com/brekkylab/ailoy) もその一つです。
 
 ## 動作要件
 
@@ -244,7 +244,7 @@ let client = Client::connect(
 
 #### GPU（任意）
 
-GPUを使うサンドボックスの場合だけ必要です。ホストにVulkanローダーを用意してください。ゲスト側のVulkanはすべてのサンドボックスに付いてくるので、イメージには不要です。詳しくは[GPUを使う](https://virtx.sh/docs/guides/using-gpus/)を参照してください。
+GPUを使うサンドボックスの場合だけ必要です。ホストにVulkanローダーを用意してください。ゲスト側のVulkanはすべてのサンドボックスに付いてくるので、イメージには不要です。詳しくは[GPUを使う](https://virtx.sh/docs/tutorials/using-gpus/)を参照してください。
 
 ## 仕組み
 

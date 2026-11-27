@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oci_spec::image::{Digest, ImageConfiguration};
+use oci_spec::image::{
+    ANNOTATION_BASE_IMAGE_DIGEST, ANNOTATION_BASE_IMAGE_NAME, Digest, HistoryBuilder,
+    ImageConfiguration,
+};
 use virtx_core::Step;
 
 use super::store::{self, Store};
@@ -49,6 +52,18 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// `image` marked as built on the image `name` -- the reference a recipe names it by -- which
+/// is `digest` in the store it was built in: under the OCI's `base.name` and `base.digest`
+/// labels, in place of any its base had.
+pub fn based_on(image: &mut ImageConfiguration, name: &str, digest: &Digest) {
+    let mut config = image.config().clone().unwrap_or_default();
+    let mut labels = config.labels().clone().unwrap_or_default();
+    labels.insert(ANNOTATION_BASE_IMAGE_NAME.into(), name.into());
+    labels.insert(ANNOTATION_BASE_IMAGE_DIGEST.into(), digest.to_string());
+    config.set_labels(Some(labels));
+    image.set_config(Some(config));
+}
+
 /// Take the image of `layers` and `image`'s config one `step` further: an `ENV` or a
 /// `WORKDIR` into the config, and what a `RUN` wrote onto `layers`, filed in `store` --
 /// nothing, for a command that wrote nothing.
@@ -57,7 +72,43 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// not there -- and in a machine as `spec` says, spawned as `vm` (see [`Machine::start`]).
 /// Each line it writes goes to `report`. One that exits with anything but 0 is
 /// [`Error::Failed`], and changes nothing.
+///
+/// The step is kept in the image's history, as `docker history` reads it: its instruction as
+/// `created_by`, and whether it added a layer. Not where the history did not already tell each
+/// layer apart -- a base that kept none -- as it would then name the wrong ones. No time is
+/// kept, so the same steps over the same base make the same image.
 pub async fn build_step(
+    store: &Store,
+    image: &mut ImageConfiguration,
+    layers: &mut Vec<Digest>,
+    step: &Step,
+    vm: &[OsString],
+    spec: &MachineSpec,
+    report: impl FnMut(String) + Send,
+) -> Result<()> {
+    let before = layers.len();
+    step_further(store, image, layers, step, vm, spec, report).await?;
+    let layered = layers.len() > before;
+    let mut history = image.history().clone().unwrap_or_default();
+    let told = history
+        .iter()
+        .filter(|h| !h.empty_layer().unwrap_or(false))
+        .count();
+    if told + usize::from(layered) == layers.len() {
+        history.push(
+            HistoryBuilder::default()
+                .created_by(step.to_string())
+                .comment("virtx")
+                .empty_layer(!layered)
+                .build()
+                .expect("every field is optional"),
+        );
+        image.set_history(Some(history));
+    }
+    Ok(())
+}
+
+async fn step_further(
     store: &Store,
     image: &mut ImageConfiguration,
     layers: &mut Vec<Digest>,
@@ -119,6 +170,7 @@ pub async fn build_step(
         volumes: Vec::new(),
         abin: None,
         ports: Vec::new(),
+        client_ports: None,
         sandbox_disk: None,
     };
     let vm = vm.to_vec();
@@ -291,5 +343,59 @@ mod tests {
         .unwrap();
         let config = image.config().clone().unwrap();
         assert_eq!(config.working_dir().as_deref(), Some("/srv"));
+    }
+
+    /// Each step is kept after the base's history, as its instruction and with no layer of
+    /// its own; over a base whose history does not tell its layers apart, none is.
+    #[tokio::test]
+    async fn a_step_is_kept_in_the_history_where_the_history_tells_the_layers_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("images")).unwrap();
+        let spec = MachineSpec {
+            vcpus: 1,
+            ram_mib: 512,
+            gpu: false,
+            gpu_memory_mib: None,
+            network: false,
+        };
+        let steps = [Step::env("TZ", "UTC"), Step::workdir("/app")];
+        let layer: Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();
+        let built = async |history: serde_json::Value| {
+            let mut image: ImageConfiguration = serde_json::from_value(serde_json::json!({
+                "architecture": "arm64",
+                "os": "linux",
+                "rootfs": {"type": "layers", "diff_ids": []},
+                "history": history,
+            }))
+            .unwrap();
+            let mut layers = vec![layer.clone()];
+            for step in &steps {
+                build_step(&store, &mut image, &mut layers, step, &[], &spec, |_| {})
+                    .await
+                    .unwrap();
+            }
+            image
+                .history()
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| {
+                    (
+                        h.created_by().clone().unwrap_or_default(),
+                        h.empty_layer().unwrap_or(false),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            built(serde_json::json!([{"created_by": "ADD rootfs /"}])).await,
+            [
+                ("ADD rootfs /".to_string(), false),
+                ("ENV TZ=UTC".to_string(), true),
+                ("WORKDIR /app".to_string(), true),
+            ]
+        );
+        assert_eq!(built(serde_json::json!([])).await, []);
     }
 }

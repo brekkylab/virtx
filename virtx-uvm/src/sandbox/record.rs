@@ -6,7 +6,6 @@
 //! <dir>/<id>.json.part   a record being written, renamed over the record once whole
 //! ```
 
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,10 +21,6 @@ pub(super) struct Record {
     /// What it was made with, its `image` the digest it booted, which it boots every time, and
     /// its size as it was last [resized](super::Sandbox::resize) to.
     pub(super) args: SandboxCreateArgs,
-    /// The port each key opens: what its server reaches a port by, such as a capability in the
-    /// port's URL.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub(super) keys: HashMap<String, u16>,
     /// Whether its machine ended on its own: nothing boots it again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) exited: bool,
@@ -88,7 +83,6 @@ mod tests {
             args: SandboxCreateArgs::new(
                 "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             ),
-            keys: HashMap::from([("key".to_owned(), 8080)]),
             exited: false,
             jobs: Vec::new(),
         };

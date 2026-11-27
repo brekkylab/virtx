@@ -22,10 +22,8 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
-use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, TcpStream};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
-use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
@@ -38,7 +36,6 @@ mod wire;
 
 use wire::{
     CtrlReq, CtrlResp, IO_PORT_NAME, IoFailure, IoMeta, IoReq, IoResp, MAX_DATA, PORT_NAME, Taken,
-    VSOCK_PORT_BASE,
 };
 
 /// The port's writing half, shared by everything that says something on it, so two messages
@@ -482,17 +479,149 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
     let _ = std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd");
     mount(None, "/", None, libc::MS_REC | libc::MS_SHARED, None)?;
 
-    // An image whose `/etc/resolv.conf` cannot be written resolves no names and runs anyway.
-    if let Some(nameserver) = &asked.nameserver
-        && let Err(e) = fs::write("/etc/resolv.conf", format!("nameserver {nameserver}\n"))
-    {
-        eprintln!("{}: naming the resolver: {e}", env!("CARGO_BIN_NAME"));
+    // A guest whose network interface cannot be set up, or an image whose `/etc/resolv.conf`
+    // cannot be written, reaches nothing or resolves no names, and runs anyway.
+    if let Some(network) = &asked.network {
+        if let Err(e) = network_interface(network) {
+            eprintln!(
+                "{}: setting up {NETWORK_INTERFACE}: {e}",
+                env!("CARGO_BIN_NAME")
+            );
+        }
+        if let Some(nameserver) = network.nameserver
+            && let Err(e) = fs::write("/etc/resolv.conf", format!("nameserver {nameserver}\n"))
+        {
+            eprintln!("{}: naming the resolver: {e}", env!("CARGO_BIN_NAME"));
+        }
     }
     for (tag, at) in &asked.shares {
         fs::create_dir_all(at)?;
         mount(Some(tag), at, Some("virtiofs"), 0, None)?;
     }
     std::env::set_current_dir(&asked.workdir)
+}
+
+/// The guest's one virtio-net interface, which the kernel names first.
+const NETWORK_INTERFACE: &str = "eth0";
+
+/// Give [`NETWORK_INTERFACE`] its v4 and v6 addresses and MTU, bring it up, and route everything
+/// off the link through the gateway. Connections to a published port arrive at the guest's
+/// loopback over the link, which the kernel takes as martian unless told otherwise
+/// (`route_localnet`).
+fn network_interface(network: &wire::GuestNetwork) -> io::Result<()> {
+    fs::write(
+        format!("/proc/sys/net/ipv4/conf/{NETWORK_INTERFACE}/route_localnet"),
+        "1",
+    )?;
+    let ioctl = |fd: libc::c_int, request: libc::c_ulong, arg: *mut libc::c_void| {
+        // SAFETY: each `arg` is the struct `request` takes, alive for the call.
+        match unsafe { libc::ioctl(fd, request as _, arg) } {
+            -1 => Err(io::Error::last_os_error()),
+            _ => Ok(()),
+        }
+    };
+    let inet = |ip: std::net::Ipv4Addr| {
+        let mut addr: libc::sockaddr = unsafe { std::mem::zeroed() };
+        let sin = &mut addr as *mut libc::sockaddr as *mut libc::sockaddr_in;
+        // SAFETY: a `sockaddr_in` fits in a `sockaddr`, which is what it is passed as.
+        unsafe {
+            (*sin).sin_family = libc::AF_INET as libc::sa_family_t;
+            (*sin).sin_addr.s_addr = u32::from(ip).to_be();
+        }
+        addr
+    };
+    // SAFETY: a socket, closed when `fd` drops.
+    let fd = match unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) }
+    {
+        -1 => return Err(io::Error::last_os_error()),
+        fd => unsafe { OwnedFd::from_raw_fd(fd) },
+    };
+    let fd = fd.as_raw_fd();
+
+    // SAFETY: zero is an empty request, filled in below.
+    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (to, from) in req.ifr_name.iter_mut().zip(NETWORK_INTERFACE.bytes()) {
+        *to = from as libc::c_char;
+    }
+    req.ifr_ifru.ifru_addr = inet(network.address);
+    ioctl(fd, libc::SIOCSIFADDR, &mut req as *mut _ as _)?;
+    let mask = u32::MAX
+        .checked_shl(32 - u32::from(network.prefix))
+        .unwrap_or(0);
+    req.ifr_ifru.ifru_netmask = inet(mask.into());
+    ioctl(fd, libc::SIOCSIFNETMASK, &mut req as *mut _ as _)?;
+    req.ifr_ifru.ifru_mtu = network.mtu as libc::c_int;
+    ioctl(fd, libc::SIOCSIFMTU, &mut req as *mut _ as _)?;
+    ioctl(fd, libc::SIOCGIFFLAGS, &mut req as *mut _ as _)?;
+    // SAFETY: `SIOCGIFFLAGS` filled in the flags.
+    unsafe { req.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short };
+    ioctl(fd, libc::SIOCSIFFLAGS, &mut req as *mut _ as _)?;
+
+    // SAFETY: zero is the default route to nowhere, filled in below.
+    let mut route: libc::rtentry = unsafe { std::mem::zeroed() };
+    route.rt_dst = inet(std::net::Ipv4Addr::UNSPECIFIED);
+    route.rt_genmask = inet(std::net::Ipv4Addr::UNSPECIFIED);
+    route.rt_gateway = inet(network.gateway);
+    route.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
+    ioctl(fd, libc::SIOCADDRT, &mut route as *mut _ as _)?;
+
+    // v6 is given by hand too, as the gateway sends no router advertisements; duplicate address
+    // detection, which would hold the address back a second, finds nothing on a link of two.
+    fs::write(
+        format!("/proc/sys/net/ipv6/conf/{NETWORK_INTERFACE}/accept_dad"),
+        "0",
+    )?;
+    // SAFETY: a socket, closed when `fd6` drops.
+    let fd6 =
+        match unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) } {
+            -1 => return Err(io::Error::last_os_error()),
+            fd => unsafe { OwnedFd::from_raw_fd(fd) },
+        };
+    let fd6 = fd6.as_raw_fd();
+    let name = std::ffi::CString::new(NETWORK_INTERFACE).map_err(io::Error::other)?;
+    // SAFETY: a NUL-terminated name.
+    let index = match unsafe { libc::if_nametoindex(name.as_ptr()) } {
+        0 => return Err(io::Error::last_os_error()),
+        index => index as libc::c_int,
+    };
+    let mut address = libc::in6_ifreq {
+        ifr6_addr: libc::in6_addr {
+            s6_addr: network.address_v6.octets(),
+        },
+        ifr6_prefixlen: u32::from(network.prefix_v6),
+        ifr6_ifindex: index,
+    };
+    ioctl(fd6, libc::SIOCSIFADDR, &mut address as *mut _ as _)?;
+    // The kernel's `struct in6_rtmsg`, whose fields libc keeps private.
+    #[repr(C)]
+    struct In6Rtmsg {
+        dst: libc::in6_addr,
+        src: libc::in6_addr,
+        gateway: libc::in6_addr,
+        kind: u32,
+        dst_len: u16,
+        src_len: u16,
+        metric: u32,
+        info: libc::c_ulong,
+        flags: u32,
+        ifindex: libc::c_int,
+    }
+    let any = libc::in6_addr { s6_addr: [0; 16] };
+    let mut route = In6Rtmsg {
+        dst: any,
+        src: any,
+        gateway: libc::in6_addr {
+            s6_addr: network.gateway_v6.octets(),
+        },
+        kind: 0,
+        dst_len: 0,
+        src_len: 0,
+        metric: 1,
+        info: 0,
+        flags: u32::from(libc::RTF_UP | libc::RTF_GATEWAY),
+        ifindex: index,
+    };
+    ioctl(fd6, libc::SIOCADDRT, &mut route as *mut _ as _)
 }
 
 /// `mount(2)`, its failure naming what was being mounted where.
@@ -596,11 +725,6 @@ fn serve() -> io::Result<()> {
         }
     });
 
-    // Before the guest is up, so a connection the host makes once it is finds the port taken.
-    for &port in &asked.ports {
-        forward(port)?;
-    }
-
     JOBS.get_or_init(jobs_cgroup);
     thread::spawn(watch_thrashing);
     send(&out, &CtrlResp::Ready(Vec::new()));
@@ -647,119 +771,6 @@ fn serve() -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Carry each connection the host makes to guest port `port`, which arrives on the vsock port
-/// [`VSOCK_PORT_BASE`] plus it, to whatever listens on that port on the guest's loopback: v4
-/// first and v6 after, because a program listens in whichever family it chose. With nothing
-/// listening the connection is closed, as the port would have answered.
-fn forward(port: u16) -> io::Result<()> {
-    // SAFETY: plain values.
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a descriptor just made, owned by nothing else.
-    let listener = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: all zeroes is a `sockaddr_vm`, which the fields set below then name.
-    let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
-    addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
-    addr.svm_port = VSOCK_PORT_BASE + u32::from(port);
-    addr.svm_cid = libc::VMADDR_CID_ANY;
-    let len = std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
-    // SAFETY: a socket held open, and an address of the length given.
-    if unsafe { libc::bind(listener.as_raw_fd(), (&raw const addr).cast(), len) } != 0
-        || unsafe { libc::listen(listener.as_raw_fd(), libc::SOMAXCONN) } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-
-    thread::spawn(move || {
-        loop {
-            // SAFETY: a listening socket held open, and no address asked for.
-            let fd = unsafe {
-                libc::accept4(
-                    listener.as_raw_fd(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    libc::SOCK_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                // Out of descriptors, most likely: waited out rather than spun on.
-                thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-            // A vsock stream socket, which `UnixStream`'s calls -- read, write, shutdown,
-            // duplicating it -- serve as they do any stream socket.
-            // SAFETY: a descriptor just accepted, owned by nothing else.
-            let host = unsafe { UnixStream::from_raw_fd(fd) };
-            thread::spawn(move || {
-                let Ok(guest) = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
-                    .or_else(|_| TcpStream::connect((Ipv6Addr::LOCALHOST, port)))
-                else {
-                    return;
-                };
-                let _ = guest.set_nodelay(true);
-                // Non-blocking, so that no thread waits inside a TSI socket's call, which
-                // holds the socket's lock: a read waiting there for the answer would keep the
-                // other thread from sending what it answers. Each waits in `poll` instead.
-                if guest.set_nonblocking(true).is_err() {
-                    return;
-                }
-                let (Ok(host_back), Ok(guest_back)) = (host.try_clone(), guest.try_clone())
-                else {
-                    return;
-                };
-                // Each direction ends with the half-close that says so, and the other keeps
-                // going until its own end says the same.
-                let back = thread::spawn(move || {
-                    let _ = copy(&guest_back, &host_back, &guest_back);
-                    let _ = host_back.shutdown(Shutdown::Write);
-                });
-                let _ = copy(&host, &guest, &guest);
-                let _ = guest.shutdown(Shutdown::Write);
-                let _ = back.join();
-            });
-        }
-    });
-    Ok(())
-}
-
-/// [`io::copy`] from `from` to `to`, one of which is `guest`, non-blocking: waiting in `poll`
-/// for `guest` where it takes or has nothing now.
-fn copy(mut from: impl Read, mut to: impl io::Write, guest: &TcpStream) -> io::Result<()> {
-    let wait = |events| {
-        let mut polled = libc::pollfd {
-            fd: guest.as_raw_fd(),
-            events,
-            revents: 0,
-        };
-        // SAFETY: one `pollfd` of a descriptor held open.
-        unsafe { libc::poll(&mut polled, 1, -1) };
-    };
-    let mut buf = vec![0; 64 << 10];
-    loop {
-        let read = match from.read(&mut buf) {
-            Ok(0) => return Ok(()),
-            Ok(read) => read,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                wait(libc::POLLIN);
-                continue;
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        let mut left = &buf[..read];
-        while !left.is_empty() {
-            match to.write(left) {
-                Ok(written) => left = &left[written..],
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => wait(libc::POLLOUT),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-    }
 }
 
 /// How long a port is waited for. The host adds and names each port once the guest's driver
@@ -874,10 +885,12 @@ fn exec(out: &Out, stdins: &Stdins, cmd: Vec<String>, stdin: bool) {
         let code = code(&mut child);
         // Killed, and the kernel's OOM killer killed in its cgroup, or it was killed for
         // thrashing at its limit: its memory ran out. Read before the cgroup goes.
-        let starved = cgroup.as_ref().and_then(|own| WATCHED.lock().unwrap().remove(own));
+        let starved = cgroup
+            .as_ref()
+            .and_then(|own| WATCHED.lock().unwrap().remove(own));
         let starved = starved.is_some_and(|thrash| thrash.killed);
-        let oom = code == 128 + libc::SIGKILL
-            && (starved || cgroup.as_deref().is_some_and(oom_killed));
+        let oom =
+            code == 128 + libc::SIGKILL && (starved || cgroup.as_deref().is_some_and(oom_killed));
         // Its cgroup gone with it, unless a program it left running is in it still.
         if let Some(own) = &cgroup {
             let _ = fs::remove_dir(own);

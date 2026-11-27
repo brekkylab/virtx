@@ -47,14 +47,15 @@ test('a port forwarder listens on the loopback until it is closed', async () => 
     await alpine(client)
     const sandbox = await client.createSandbox(ALPINE, { ports: [8000] })
     try {
-      const forwarder = PortForwarder.open(client, sandbox.ports[0].url)
-      assert.equal(typeof forwarder.port, 'number')
-      assert.equal(forwarder.address, `${forwarder.host}:${forwarder.port}`)
-      assert.equal(forwarder.host, '127.0.0.1')
+      const forwarder = await PortForwarder.open(sandbox, 8000)
+      assert.deepEqual([forwarder.port, forwarder.on], [8000, 'sandbox'])
+      const at = forwarder.local.lastIndexOf(':')
+      const [host, port] = [forwarder.local.slice(0, at), Number(forwarder.local.slice(at + 1))]
+      assert.equal(host, '127.0.0.1')
       // What connecting comes to: `connected`, or the error's code.
       const connect = () =>
         new Promise((resolve) => {
-          const stream = net.connect(forwarder.port, forwarder.host)
+          const stream = net.connect(port, host)
           stream.on('connect', () => {
             stream.destroy()
             resolve('connected')
@@ -63,6 +64,14 @@ test('a port forwarder listens on the loopback until it is closed', async () => 
         })
       // A connection is taken, whatever the sandbox does with it.
       assert.equal(await connect(), 'connected')
+      // At an address asked for.
+      const free = net.createServer()
+      await new Promise((resolve) => free.listen(0, '127.0.0.1', resolve))
+      const asked = `127.0.0.1:${free.address().port}`
+      await new Promise((resolve) => free.close(resolve))
+      const atAsked = await PortForwarder.open(sandbox, 8000, { local: asked })
+      assert.equal(atAsked.local, asked)
+      atAsked.close()
 
       forwarder.close()
       forwarder.close()

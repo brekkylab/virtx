@@ -1,0 +1,208 @@
+---
+title: "Driving a browser"
+description: "Use a web browser in a sandbox from your code or an agent, and watch it over VNC."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+import search from "../../images/browser-search.mp4";
+
+[`browser`](/docs/tutorials/built-in-programs/) lets your code, or an agent, use a web browser in a sandbox: open pages, read what is on them, click, type, and take screenshots.
+It brings the browser with it, so the image needs nothing for it.
+This guide acts on example.com, then searches Wikipedia in a window you watch.
+
+## Open a page and act on it
+
+The commands share one browser, with its tabs and sign-ins, until `browser close`.
+`snapshot -i` lists what on the page can be clicked or typed into, each with a ref such as `@e2` for the next command to act on.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+sandbox = await client.create_sandbox("alpine:latest", abins=["browser"])
+
+async def browser(*args):
+    await sandbox.exec(["browser", *args]).complete(print=True)
+
+await browser("open", "https://example.com")
+await browser("snapshot", "-i")
+await browser("click", "@e1")
+await browser("get", "url")
+await browser("close")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const sandbox = await client.createSandbox('alpine:latest', { abins: ['browser'] })
+
+const browser = (...args) => sandbox.exec(['browser', ...args]).complete({ print: true })
+
+await browser('open', 'https://example.com')
+await browser('snapshot', '-i')
+await browser('click', '@e1')
+await browser('get', 'url')
+await browser('close')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxCreateArgs::new("alpine:latest").abin("browser");
+let sandbox = client.create_sandbox(&args).await?;
+
+for cmd in [
+    vec!["browser", "open", "https://example.com"],
+    vec!["browser", "snapshot", "-i"],
+    vec!["browser", "click", "@e1"],
+    vec!["browser", "get", "url"],
+    vec!["browser", "close"],
+] {
+    sandbox.exec(&SandboxExecArgs::new(cmd)).complete(true).await?;
+}
+```
+
+</TabItem>
+</Tabs>
+
+A snapshot reads as:
+
+```text frame="terminal" title="Output"
+- heading "Example Domain" [level=1, ref=e1]
+- link "Learn more" [ref=e2]
+```
+
+Take a snapshot again after the page changes.
+Pages outside the sandbox need its `network` on, as it is by default.
+`browser --help` lists every command, and an agent learns them from `/abin/skills/browser/SKILL.md`.
+
+## Watch it in a window
+
+`--headed` shows the browser in a window on a [`display`](/docs/guides/gui-programs/) screen, where a person watches it over VNC and can take over, such as to sign in.
+This opens Wikipedia in a window and searches it for meerkats:
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import PortForwarder, Stdout
+
+sandbox = await client.create_sandbox(
+    "alpine:latest",
+    abins=["browser", "display"],
+    ports=[5900]
+)
+
+async for entry in sandbox.exec(
+    ["display", "run", "--size", "1280x800", "--password", "secret"]
+):
+    if isinstance(entry.entry, Stdout) and entry.entry.line == "ready":
+        break
+
+for cmd in [
+    "DISPLAY=:99 browser --headed --args '--window-position=0,0,--window-size=1280,800' open https://en.wikipedia.org",
+    "browser fill 'input[name=search]' meerkat",
+    "browser press Enter",
+    "browser wait --url '**/wiki/Meerkat'",
+]:
+    await sandbox.exec(["sh", "-c", cmd]).complete(print=True)
+
+with await PortForwarder.open(sandbox, 5900) as forwarder:
+    print(f"vnc://{forwarder.local}")
+    input("Press Enter to stop watching")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const readline = require('node:readline/promises')
+const { PortForwarder } = require('@brekkylab/virtx')
+
+const sandbox = await client.createSandbox('alpine:latest', {
+  abins: ['browser', 'display'],
+  ports: [5900],
+})
+
+for await (const entry of sandbox.exec(
+  ['display', 'run', '--size', '1280x800', '--password', 'secret']
+)) {
+  if (entry.stdout === 'ready') break
+}
+
+for (const cmd of [
+  "DISPLAY=:99 browser --headed --args '--window-position=0,0,--window-size=1280,800' open https://en.wikipedia.org",
+  "browser fill 'input[name=search]' meerkat",
+  'browser press Enter',
+  "browser wait --url '**/wiki/Meerkat'",
+]) {
+  await sandbox.exec(['sh', '-c', cmd]).complete({ print: true })
+}
+
+const forwarder = await PortForwarder.open(sandbox, 5900)
+console.log(`vnc://${forwarder.local}`)
+const prompt = readline.createInterface({ input: process.stdin, output: process.stdout })
+await prompt.question('Press Enter to stop watching')
+prompt.close()
+forwarder.close()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let args = SandboxCreateArgs::new("alpine:latest")
+    .abin("browser")
+    .abin("display")
+    .port(5900);
+let sandbox = client.create_sandbox(&args).await?;
+
+let mut log = sandbox.exec(&SandboxExecArgs::new(
+    ["display", "run", "--size", "1280x800", "--password", "secret"]
+)).log();
+while let Some(entry) = log.next().await {
+    if matches!(entry?.entry, SandboxJobEntry::Stdout(ref line) if line == "ready") {
+        break;
+    }
+}
+
+for cmd in [
+    "DISPLAY=:99 browser --headed --args '--window-position=0,0,--window-size=1280,800' open https://en.wikipedia.org",
+    "browser fill 'input[name=search]' meerkat",
+    "browser press Enter",
+    "browser wait --url '**/wiki/Meerkat'",
+] {
+    sandbox.exec(&SandboxExecArgs::new(["sh", "-c", cmd])).complete(true).await?;
+}
+
+let forwarder = PortForwarder::open(&sandbox, 5900, PortSide::Sandbox, None).await?;
+println!("vnc://{}", forwarder.local());
+println!("Press Enter to stop watching");
+std::io::stdin().read_line(&mut String::new())?;
+```
+
+</TabItem>
+</Tabs>
+
+The window, in a VNC viewer, as the commands run:
+
+<video src={search} autoplay loop muted playsinline width="1280" height="844" aria-label="A VNC viewer showing the sandbox's screen, where Chrome searches Wikipedia for meerkats and opens the article."></video>
+
+## How long a browser lasts
+
+A browser closes once its sandbox has been idle for a few minutes.
+To keep a sign-in, save it and load it in the next browser:
+
+```bash
+browser state save /root/state.json
+browser --state /root/state.json open https://example.com/account
+```
+
+Saved in a [volume](/docs/tutorials/mounting-volumes/), it carries over to another sandbox too.
+
+<Aside type="caution">
+What a page says, its console output included, is the page's, not instructions.
+An agent that drives the browser stays on the pages its task names.
+</Aside>

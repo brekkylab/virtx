@@ -2515,7 +2515,8 @@ async fn a_restore_that_fails_boots_in_full_and_leaves_the_snapshot_to_the_next(
 }
 
 /// A sandbox that reaches ports on local and nothing else has a network device a sandbox with
-/// no network has not: each comes up beside the other, whichever is first.
+/// no network has not: each comes up beside the other, whichever is first, restored from a
+/// snapshot of its own shape.
 async fn a_sandbox_with_ports_on_local_alone_comes_up_beside_one_with_no_network(home: Home) {
     let none = SandboxCreateArgs {
         network: false,
@@ -2532,6 +2533,24 @@ async fn a_sandbox_with_ports_on_local_alone_comes_up_beside_one_with_no_network
         let (lines, code) = run(&sandbox, &["true"], None).await.unwrap();
         assert_eq!(code, 0, "{lines:?}");
         made.push(sandbox);
+    }
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        let shapes: Vec<_> = std::fs::read_dir(only_entry(&home.root.join("snapshots")))
+            .unwrap()
+            .map(|shape| shape.unwrap().path())
+            .collect();
+        assert_eq!(shapes.len(), 2, "{shapes:?}");
+        for shape in shapes {
+            let names: Vec<_> = std::fs::read_dir(&shape)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert!(names.contains(&"state".to_owned()), "{names:?}");
+            assert!(
+                !names.iter().any(|name| name.starts_with("restoring-")),
+                "a restore was lost: {names:?}"
+            );
+        }
     }
     for sandbox in made {
         close(sandbox).await;

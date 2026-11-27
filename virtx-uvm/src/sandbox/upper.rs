@@ -487,7 +487,6 @@ mod tests {
         let args = virtx_core::SandboxCreateArgs::new("alpine:3.20");
         let record = Record {
             args,
-            keys: Default::default(),
             exited: false,
             jobs: Vec::new(),
         };

@@ -125,7 +125,16 @@ def _wake(key: int | None) -> None:
 
 @_CALLBACK
 def _release(key: int | None) -> None:
-    _pending.pop(key or 0, None)
+    # Settled too, so a poll whose stream is freed under it is not left waiting.
+    entry = _pending.pop(key or 0, None)
+    if entry is None:
+        return
+    loop, future = entry
+    try:
+        loop.call_soon_threadsafe(_settle, future)
+    except RuntimeError:
+        # The loop has closed; nothing is waiting on it.
+        pass
 
 
 _HANDLE = ctypes.c_void_p
@@ -238,9 +247,10 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_sandbox_job_log": _WITH_ARGS,
     "virtx_client_exec_sandbox_log": _WITH_ARGS,
     "virtx_port_forwarder_open": (
-        [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_HANDLE), _OUT],
-        ctypes.c_int,
+        [_HANDLE, ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(_HANDLE)],
+        _HANDLE,
     ),
+    "virtx_port_forwarder_closed": ([_HANDLE], _HANDLE),
     "virtx_port_forwarder_last_error": ([_HANDLE, _OUT], ctypes.c_int),
     "virtx_port_forwarder_free": ([_HANDLE], None),
     "virtx_set_warn": ([_WARN], None),
@@ -322,6 +332,22 @@ class Library:
                 await woken
         finally:
             self.virtx_future_free(handle)
+
+    async def next_item(
+        self, handle: int, freed: Callable[[], bool] | None = None
+    ) -> tuple[bool, Any]:
+        """The next item of the stream ``handle``, as ``(True, item)``, or ``(False, None)`` once it
+        has ended, or once ``freed()`` says its holder freed it while this waited, which wakes
+        it; its error raised. The stream is left to its holder to free."""
+        while True:
+            status, out, woken = self._poll(self.virtx_stream_poll_next, handle)
+            if status == END:
+                return False, None
+            if status != PENDING:
+                return True, self.take(status, out)
+            await woken
+            if freed is not None and freed():
+                return False, None
 
     async def items(self, handle: int) -> AsyncIterator[Any]:
         """Each item of the stream ``handle``, freeing it after, or on closing, which cancels

@@ -68,6 +68,11 @@ pub struct MachineConfig {
     #[serde(default)]
     pub ports: Vec<u16>,
 
+    /// TCP ports of its sandbox's client the guest reaches at its gateway: the way out to the
+    /// client, which does not need a [`network`](MachineSpec::network) either.
+    #[serde(default)]
+    pub client_ports: Option<ClientRelay>,
+
     /// Whether [`upper`](Self::upper) is a sandbox's disk, opened in the machine's process
     /// through the embedder's [`Disks`](crate::disks::Disks). `None`, as a build's is: its file
     /// alone.
@@ -82,6 +87,44 @@ pub struct SandboxDisk {
     /// [`Disks::serve`](crate::disks::Disks::serve) answered: `None` for a disk all in its
     /// file.
     pub source: Option<PathBuf>,
+}
+
+/// Where a machine's connections to its client's ports go: a relay on this host's loopback,
+/// which carries each on to the client that takes the port.
+///
+/// A connection to the relay opens with the [`greeting`](ClientRelay::greeting), and is
+/// answered one byte before anything else: [`CLIENT_ACCEPTED`] once the client has reached
+/// what the port is, anything else, or the end, for a refusal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientRelay {
+    /// Where on this host's loopback the relay listens.
+    pub address: SocketAddr,
+    /// The ports the guest may connect to, at `10.0.2.2`.
+    pub ports: Vec<u16>,
+    /// What tells the relay a connection is the machine's: 64 characters, handed to the
+    /// machine's process in its environment rather than its arguments, which every user of
+    /// this host may read.
+    #[serde(skip)]
+    pub key: String,
+}
+
+/// The byte the relay answers a connection it carries on with.
+pub const CLIENT_ACCEPTED: u8 = 1;
+
+/// How long a [`ClientRelay`]'s greeting is.
+pub const CLIENT_GREETING: usize = 66;
+
+/// The environment variable a machine's process is handed its relay's key in.
+const CLIENT_KEY_ENV: &str = "VIRTX_CLIENT_RELAY_KEY";
+
+impl ClientRelay {
+    /// What a connection to `port` opens with: the key, then the port, big-endian.
+    pub fn greeting(&self, port: u16) -> Vec<u8> {
+        let mut greeting = Vec::with_capacity(CLIENT_GREETING);
+        greeting.extend_from_slice(self.key.as_bytes());
+        greeting.extend_from_slice(&port.to_be_bytes());
+        greeting
+    }
 }
 
 /// Make an empty upper disk at `path`, where nothing is yet, that may grow to `gib` GiB: a
@@ -270,6 +313,9 @@ impl Machine {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(relay) = &args.config.client_ports {
+            command.env(CLIENT_KEY_ENV, &relay.key);
+        }
         inherit(
             &mut command,
             [args.ctrlin, args.ctrlout, args.ioin, args.ioout],
@@ -755,8 +801,11 @@ fn inherit(_: &mut Command, ends: [u64; 4]) -> io::Result<()> {
 /// unless the machine could not be built or broke, and either way tells the host why first.
 pub fn enter() -> Result<Infallible> {
     let args = std::env::args_os().last().unwrap_or_default();
-    let args: BootArgs = serde_json::from_slice(args.as_encoded_bytes())
+    let mut args: BootArgs = serde_json::from_slice(args.as_encoded_bytes())
         .map_err(|e| Error::io("reading the machine to be", io::Error::other(e)))?;
+    if let Some(relay) = &mut args.config.client_ports {
+        relay.key = std::env::var(CLIENT_KEY_ENV).unwrap_or_default();
+    }
     #[cfg(unix)]
     raise_open_files();
     // SAFETY: `start` left these open for this process, and named them to it alone.
@@ -940,6 +989,11 @@ mod tests {
             }],
             abin: Some(PathBuf::from("/sandbox/abin/work")),
             ports: vec![3000],
+            client_ports: Some(ClientRelay {
+                address: "127.0.0.1:4000".parse().unwrap(),
+                ports: vec![9222],
+                key: "k".repeat(64),
+            }),
             sandbox_disk: Some(SandboxDisk {
                 source: Some(PathBuf::from("/run/disk.sock")),
             }),
@@ -954,5 +1008,12 @@ mod tests {
         assert_eq!(read.spec.network, sent.spec.network);
         assert_eq!(read.ports, sent.ports);
         assert_eq!(read.sandbox_disk, sent.sandbox_disk);
+        // All of the relay but its key, which goes in the process's environment.
+        let relay = read.client_ports.unwrap();
+        assert_eq!(relay.address, "127.0.0.1:4000".parse().unwrap());
+        assert_eq!(relay.ports, [9222]);
+        assert_eq!(relay.key, "");
+        let arguments = serde_json::to_string(&sent).unwrap();
+        assert!(!arguments.contains(&"k".repeat(64)), "{arguments}");
     }
 }

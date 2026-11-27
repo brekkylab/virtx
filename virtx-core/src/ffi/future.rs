@@ -82,7 +82,7 @@ impl Drop for Completion {
 
 /// Run `future`, which answers a status and the bytes to write with it, on `runtime`, tracked
 /// in `tasks`, and hand C the future.
-pub(super) fn start(
+pub(crate) fn start(
     runtime: &Handle,
     tasks: &Mutex<task::JoinSet<()>>,
     future: impl Future<Output = (c_int, Vec<u8>)> + Send + 'static,

@@ -1,0 +1,122 @@
+---
+title: "Driving an Android device from a sandbox"
+description: "Let an agent in a sandbox see and use an Android emulator or phone on your machine through adb and a port on local."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+An Android device cannot move into a sandbox: an emulator needs your machine's hardware acceleration, and a phone is plugged into your machine.
+`adb` reaches either through a server on your machine, at `127.0.0.1:5037`, which an `adb` elsewhere can be pointed at with `-H`.
+So an agent in a sandbox uses the device through a [port on local](/docs/tutorials/networks-ports/#a-port-on-local): its `adb` talks to `10.0.2.2:5037`, and the forwarder carries that to the `adb` server on your machine.
+This guide takes a screenshot of an emulator and taps on it from a sandbox.
+
+## Start a device to hand over
+
+Start an emulator, or plug in a phone with USB debugging on, and check that `adb` on your machine sees it:
+
+```bash
+emulator -avd agent &
+adb devices
+```
+
+`adb devices` starts the `adb` server if none runs, and lists the device.
+
+<Aside type="caution">
+Whatever reaches the `adb` server can do nearly all a person holding the device can: read its photos and files, install apps, and use the apps signed in on it.
+It can also open ports between the device and your machine with `adb reverse` and `adb forward`.
+Hand the agent an emulator, or a device kept for testing.
+</Aside>
+
+## Use it from a sandbox
+
+The sandbox is made from an image with `adb` from Alpine's packages, with the port `5037` on local, and is told where the server is with `ADB_SERVER_SOCKET`, so every `adb` command in it reaches the device on your machine.
+
+<Tabs syncKey="lang">
+<TabItem label="Python">
+
+```python
+from virtx import PortForwarder, PortSpec, Recipe
+
+recipe = Recipe("alpine:latest").run("apk add -q android-tools")
+await client.build_image(recipe, "adb:latest").complete(print=True)
+
+sandbox = await client.create_sandbox("adb:latest", ports=[PortSpec(5037, on="local")])
+
+async def adb(*args):
+    cmd = ["env", "ADB_SERVER_SOCKET=tcp:10.0.2.2:5037", "adb", *args]
+    await sandbox.exec(cmd).complete(print=True)
+
+async with await PortForwarder.open(sandbox, 5037, on="local"):
+    await adb("devices")
+    await adb("shell", "screencap", "-p", "/sdcard/screen.png")
+    await adb("pull", "/sdcard/screen.png", "/root/screen.png")
+    await adb("shell", "input", "tap", "540", "1200")
+
+screen = await sandbox.read_file("root/screen.png")
+```
+
+</TabItem>
+<TabItem label="Node.js">
+
+```js
+const { PortForwarder, Recipe } = require('@brekkylab/virtx')
+
+const recipe = new Recipe('alpine:latest').run('apk add -q android-tools')
+await client.buildImage(recipe, 'adb:latest').complete({ print: true })
+
+const sandbox = await client.createSandbox('adb:latest', { ports: [{ port: 5037, on: 'local' }] })
+
+const adb = (...args) =>
+  sandbox
+    .exec(['env', 'ADB_SERVER_SOCKET=tcp:10.0.2.2:5037', 'adb', ...args])
+    .complete({ print: true })
+
+const forwarder = await PortForwarder.open(sandbox, 5037, { on: 'local' })
+await adb('devices')
+await adb('shell', 'screencap', '-p', '/sdcard/screen.png')
+await adb('pull', '/sdcard/screen.png', '/root/screen.png')
+await adb('shell', 'input', 'tap', '540', '1200')
+forwarder.close()
+
+const screen = await sandbox.readFile('root/screen.png')
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let recipe = Recipe::new("alpine:latest").step("apk add -q android-tools");
+client.build_image(recipe, "adb:latest").complete(true).await?;
+
+let args = SandboxCreateArgs::new("adb:latest").port(PortSpec::new(5037).on(PortSide::Local));
+let sandbox = client.create_sandbox(&args).await?;
+
+let forwarder = PortForwarder::open(&sandbox, 5037, PortSide::Local, None).await?;
+for args in [
+    &["devices"][..],
+    &["shell", "screencap", "-p", "/sdcard/screen.png"],
+    &["pull", "/sdcard/screen.png", "/root/screen.png"],
+    &["shell", "input", "tap", "540", "1200"],
+] {
+    let cmd = ["env", "ADB_SERVER_SOCKET=tcp:10.0.2.2:5037", "adb"];
+    let cmd = SandboxExecArgs::new(cmd.iter().chain(args).copied());
+    sandbox.exec(&cmd).complete(true).await?;
+}
+drop(forwarder);
+
+let screen = sandbox.read_file("root/screen.png", 0, None).await?;
+```
+
+</TabItem>
+</Tabs>
+
+`adb devices` lists the emulator, the screenshot lands in the sandbox, and the tap lands on the emulator's screen.
+An agent goes on the same way: it reads the screen, from a screenshot or from `adb shell uiautomator dump`, and acts with `adb shell input`.
+
+## When it is not reached
+
+`adb` in the sandbox and the `adb` server on your machine are best of one version: an `adb` that finds a server of another version may try to restart it, which it cannot do on another machine.
+Install the same version on both sides, or check `adb version` on each if a command fails so.
+
+A connection to `10.0.2.2:5037` is refused, as one to a closed port is, while no forwarder is open, and while no `adb` server runs on your machine: run `adb devices` there first.
+What the forwarder could not reach is logged as a warning, as the [tutorial](/docs/tutorials/networks-ports/#a-port-on-local) says.

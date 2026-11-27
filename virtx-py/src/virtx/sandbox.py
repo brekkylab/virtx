@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from ._library import VirtxError, args
 from .files import Files
@@ -23,40 +23,58 @@ if TYPE_CHECKING:
 E = TypeVar("E", bound=Enum)
 
 
+PortSide = Literal["sandbox", "local"]
+"""Which side of a sandbox a port is on: in the sandbox, where connections to it come from
+local, or on local, the machine a client forwards it from, where the sandbox's processes reach
+it at ``10.0.2.2``."""
+
+
 @dataclass(frozen=True)
 class SandboxPort:
-    """A port opened in a sandbox as it was made, and the ``url`` a ``PortForwarder`` reaches it
-    by."""
+    """A sandbox's port, on either side, as it was made with it, which a ``PortForwarder``
+    forwards."""
 
     port: int
 
     url: str | None = None
-    """Answered by ``create_sandbox`` alone, as secret as the credentials it carries: ``None``
-    in a sandbox ``get_sandbox`` or ``list_sandbox`` answers."""
+    """For a port in the sandbox, the loopback address a server on this machine has it reached
+    at: ``None`` from a server reachable from other machines, and for a port on local."""
 
     label: str | None = None
-    """What it is for, as it was opened with."""
+    """What it is for, as it was asked for with."""
+
+    on: PortSide = "sandbox"
+    """Which side it is on."""
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxPort:
-        return cls(value["port"], value.get("url"), value.get("label"))
+        return cls(value["port"], value.get("url"), value.get("label"), value.get("on", "sandbox"))
 
 
 @dataclass(frozen=True)
 class PortSpec:
-    """A port to open in a sandbox as ``create_sandbox`` makes it: its number, and what it is
-    for. ``ports`` takes a plain ``int`` for a port that says nothing more."""
+    """A sandbox's port to make it with, as ``create_sandbox`` takes it: its number, what it is
+    for, and its side, ``"sandbox"`` unless it says otherwise. ``ports`` takes a plain ``int`` for
+    a port in the sandbox that says nothing more."""
 
     port: int
 
     label: str | None = None
     """What it is for, up to 128 characters, answered with it."""
 
+    on: PortSide = "sandbox"
+    """Which side it is on."""
+
     def to_dict(self) -> int | dict[str, Any]:
-        """As the wire has it: the number alone when it says no more."""
-        if self.label is None:
+        """As the wire has it: the number alone for a port in the sandbox that says no more."""
+        if self.label is None and self.on == "sandbox":
             return self.port
-        return {"port": self.port, "label": self.label}
+        written: dict[str, Any] = {"port": self.port}
+        if self.on != "sandbox":
+            written["on"] = self.on
+        if self.label is not None:
+            written["label"] = self.label
+        return written
 
 
 @dataclass(frozen=True)
@@ -107,7 +125,7 @@ class Sandbox(Files):
     running: bool
 
     ports: list[SandboxPort] = field(default_factory=list)
-    """Its opened ports, each with its ``url`` where ``create_sandbox`` answered it only."""
+    """Its ports, on either side."""
 
     abins: list[str] = field(default_factory=list)
     """virtx's own programs it has at ``/abin``."""

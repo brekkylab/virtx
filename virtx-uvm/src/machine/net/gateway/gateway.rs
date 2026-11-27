@@ -16,6 +16,7 @@ use super::dns::Dns;
 use super::egress::{Egress, is_dns};
 use super::flow::{EndpointPair, Flows};
 use super::link::Link;
+use crate::machine::ClientRelay;
 
 /// The link's key in the poller, below the one the poller keeps for itself. The nameserver's
 /// socket is under it, and a published port's listener under that, by its place; a flow's is
@@ -41,8 +42,9 @@ impl Gateway {
         link: Link,
         egress: bool,
         published: Vec<(u16, TcpListener)>,
+        client: Option<ClientRelay>,
     ) -> io::Result<Self> {
-        Self::with_egress(link, Egress::new(egress), published)
+        Self::with_egress(link, Egress::new(egress, client), published)
     }
 
     fn with_egress(
@@ -169,7 +171,7 @@ impl Gateway {
                 }
                 Frame::Syn { ends } => {
                     self.flows.syn(&self.poller, &mut self.sockets, ends, || {
-                        self.egress.route(ends.1)
+                        self.egress.connect(ends.1)
                     });
                     self.iface
                         .poll_ingress_single(now, &mut self.link, &mut self.sockets);
@@ -417,6 +419,7 @@ mod tests {
         Egress {
             enabled: true,
             resolver: Some(at),
+            client: None,
         }
     }
 
@@ -573,6 +576,80 @@ mod tests {
         });
     }
 
+    /// A relay for the client's port 9222 at `relay`, with no network.
+    fn relayed(relay: &TcpListener) -> Egress {
+        Egress {
+            enabled: false,
+            resolver: None,
+            client: Some(ClientRelay {
+                address: relay.local_addr().unwrap(),
+                ports: vec![9222],
+                key: "k".repeat(64),
+            }),
+        }
+    }
+
+    /// A connection to a client's port opens with the relay's greeting, and is answered only
+    /// once the relay accepts it: then it carries, with no network.
+    #[test]
+    fn a_clients_port_is_answered_once_the_relay_accepts_it() {
+        let relay = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let egress = relayed(&relay);
+        let greeting = egress.client.as_ref().unwrap().greeting(9222);
+        let mut guest = Guest::new(egress, vec![]);
+        let handle = guest.connect(SocketAddr::from((LAN.gateway, 9222)));
+        let (accept, accepted) = std::sync::mpsc::channel();
+
+        let host = thread::spawn(move || {
+            let (mut host, _) = relay.accept().unwrap();
+            let mut said = vec![0; greeting.len()];
+            host.read_exact(&mut said).unwrap();
+            assert_eq!(said, greeting);
+            accepted.recv().unwrap();
+            host.write_all(&[crate::machine::CLIENT_ACCEPTED]).unwrap();
+            let mut got = [0u8; 2];
+            host.read_exact(&mut got).unwrap();
+            got
+        });
+        let deadline = Clock::now() + Duration::from_millis(300);
+        guest.until("a while has passed unanswered", |sockets| {
+            let state = sockets.get::<tcp::Socket>(handle).state();
+            assert_ne!(state, tcp::State::Established, "answered before the relay");
+            Clock::now() >= deadline
+        });
+        accept.send(()).unwrap();
+        guest.until("the connection is answered", |sockets| {
+            sockets.get::<tcp::Socket>(handle).state() == tcp::State::Established
+        });
+        guest
+            .sockets
+            .get_mut::<tcp::Socket>(handle)
+            .send_slice(b"hi")
+            .unwrap();
+        guest.until("the relay has what was sent", |_| host.is_finished());
+        assert_eq!(&host.join().unwrap(), b"hi");
+    }
+
+    /// A connection to a client's port the relay refuses, by closing it, is reset without being
+    /// answered.
+    #[test]
+    fn a_clients_port_the_relay_refuses_is_reset_without_being_answered() {
+        let relay = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut guest = Guest::new(relayed(&relay), vec![]);
+        let handle = guest.connect(SocketAddr::from((LAN.gateway, 9222)));
+        let host = thread::spawn(move || drop(relay.accept().unwrap()));
+        guest.until("the connection is reset", |sockets| {
+            let state = sockets.get::<tcp::Socket>(handle).state();
+            assert_ne!(
+                state,
+                tcp::State::Established,
+                "the guest's SYN was answered"
+            );
+            state == tcp::State::Closed
+        });
+        host.join().unwrap();
+    }
+
     /// While the guest's SYN is held for the host's connect, the gateway sleeps until something
     /// arrives rather than turning at once.
     #[test]
@@ -716,6 +793,7 @@ mod tests {
         let none = Egress {
             enabled: false,
             resolver: None,
+            client: None,
         };
         let mut guest = Guest::new(none, vec![(8080, listener)]);
         let buffer = || tcp::SocketBuffer::new(vec![0; 1 << 16]);

@@ -31,8 +31,9 @@ pub use image::{
     store::{EROFS_LAYER, Error as ImageStoreError, ImageHold, Pruned, Store as ImageStore},
 };
 pub use machine::{
-    Error as MachineError, Machine, MachineConfig, MachineSpec, Paused, Ports, Publication,
-    SandboxDisk, VolumeMount, enter as enter_machine, wire,
+    CLIENT_ACCEPTED, CLIENT_GREETING, ClientRelay, Error as MachineError, Machine, MachineConfig,
+    MachineSpec, Paused, Ports, Publication, SandboxDisk, VolumeMount, enter as enter_machine,
+    wire,
 };
 /// What every image, layer and blob here is named by.
 pub use oci_spec::image::Digest;
@@ -46,9 +47,9 @@ pub use project::{
 };
 pub use sandbox::runs;
 pub use sandbox::{
-    Activity, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Error as SandboxError,
-    Job as SandboxJob, KEEP_ENDED, Kept as KeptSandboxes, LOG_LIMIT, Sandbox,
-    Unknown as UnknownSandbox, park_after, signal_number,
+    Activity, ClientConnection, ClientPortTaker, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB,
+    DEFAULT_VCPUS, Error as SandboxError, Job as SandboxJob, KEEP_ENDED, Kept as KeptSandboxes,
+    LOG_LIMIT, Sandbox, Unknown as UnknownSandbox, park_after, signal_number,
 };
 pub use volume::{
     Dirent, DirentKind, Error as VolumeError, GDRIVE_ORIGINS_ENV, Gdrive, GdriveConfig,

@@ -290,8 +290,9 @@ mod tests {
     };
 
     use virtx_core::{
-        Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, PortSpec, Recipe,
-        SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs, SandboxVolume, Step,
+        Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, PortForwarderArgs,
+        PortSide, PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs,
+        SandboxVolume, Step,
     };
     use virtx_uvm::{FsTree, ImageStore};
 
@@ -459,6 +460,24 @@ mod tests {
         assert_eq!(labels["maintainer"], "virtx");
     }
 
+    /// A port on local of a sandbox that is not here is `404`, and a target that is not
+    /// `host:port` is `400`.
+    #[tokio::test]
+    async fn a_port_on_local_of_no_sandbox_or_no_target_is_refused() {
+        let server = Server::spawn("local-port").await;
+        let args = PortForwarderArgs::new("nope", 9222).on(PortSide::Local);
+        let (forward, forwarding) = server
+            .client
+            .forward_port(args.clone().local("127.0.0.1:9222"));
+        forwarding.await;
+        assert_eq!(status(forward.opened().await), 404);
+        for target in ["9222", ":9222", "localhost:port"] {
+            let (forward, forwarding) = server.client.forward_port(args.clone().local(target));
+            forwarding.await;
+            assert_eq!(status(forward.opened().await), 400, "{target}");
+        }
+    }
+
     #[tokio::test]
     async fn creates_lists_and_removes_a_volume() {
         let server = Server::spawn("volume").await;
@@ -543,14 +562,18 @@ mod tests {
             async |args: SandboxCreateArgs| status(server.client.create_sandbox(&args).await);
         let here = || SandboxCreateArgs::new("here:latest");
 
-        for ports in [vec![0], vec![8080, 8080]] {
-            let mut args = here();
-            args.ports = ports.into_iter().map(PortSpec::new).collect();
-            assert_eq!(refused(args).await, 400);
+        for on in [PortSide::Sandbox, PortSide::Local] {
+            for ports in [vec![0], vec![8080, 8080]] {
+                let mut args = here();
+                args.ports = (ports.into_iter())
+                    .map(|port| PortSpec::new(port).on(on))
+                    .collect();
+                assert_eq!(refused(args).await, 400);
+            }
+            // A label is at most 128 characters.
+            let long = PortSpec::new(80).on(on).label("x".repeat(129));
+            assert_eq!(refused(here().port(long)).await, 400);
         }
-        // A label is at most 128 characters.
-        let long = PortSpec::new(80).label("x".repeat(129));
-        assert_eq!(refused(here().port(long)).await, 400);
         let long = "x".repeat(129);
         for name in [
             "",
@@ -1567,7 +1590,7 @@ mod tests {
                 "POST",
                 "/sandboxes/",
                 &ports,
-                r#"ports[0]: a whole number from 0 to 65535, or {"port", "label"?}, not "5900""#,
+                r#"ports[0]: a whole number from 0 to 65535, or {"port", "on"?, "label"?}, not "5900""#,
             ),
             (
                 "GET",

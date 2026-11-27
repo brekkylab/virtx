@@ -207,6 +207,7 @@ let client = Client::connect(
 
 - **在隔离环境中运行不可信代码：** 每个沙箱都是拥有独立内核的 microVM，由 Hypervisor 提供隔离，而不只是靠命名空间，需要时还能完全断开网络。
 - **毫秒级启动：** 新建的沙箱 35 毫秒内即可执行命令（M3 Pro Mac，1 个 vCPU，128 MB 内存）。
+- **任何服务都能接入，任何代码都在里面运行：** 沙箱里的智能体可以直接使用你电脑上的浏览器、Android 设备、数据库等服务。沙箱能访问的，只有你开放给它的服务。详见[本地端口](https://virtx.sh/docs/tutorials/networks-ports/#a-port-on-local)。
 - **为构建 AI 智能体而优化：** RAG、浏览器操控、GUI 自动化等 AI 智能体任务，在沙箱里开箱即用。详见 [RAG](https://virtx.sh/docs/guides/implementing-rag/)、[浏览器操控](https://virtx.sh/docs/guides/browser/)和 [GUI 程序](https://virtx.sh/docs/guides/gui-programs/) 指南。
 - **接入外部上下文：** 把 Notion、Google Drive、OneDrive 当作普通文件挂载进沙箱。
 - **使用 GPU：** 在 Linux、macOS、Windows 上对宿主机 GPU 做了半虚拟化，沙箱里就能跑深度学习模型和图形任务。

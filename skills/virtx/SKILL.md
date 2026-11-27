@@ -46,7 +46,7 @@ sandbox = await client.create_sandbox("jq:latest", volumes=[SandboxVolume(volume
 | files it must not change | the same, with `readonly=True` |
 | room to install more than 2 GiB over its image | `disk_gib=8`, or as much as it needs |
 | what it installs kept for the next sandbox | an image with it installed, built with `build_image`, as the image each sandbox is made of |
-| a server in it reached from here | `ports=[8000]`, then `PortForwarder.open(client, sandbox.ports[0])`; a connection closed at once usually means nothing listens there yet; `forwarder.last_error` and a warning of the `virtx` logger say what the server answered, and `last_error` is `None` again once a connection gets a byte back |
+| a server in it reached from here | `ports=[8000]`, then `await PortForwarder.open(sandbox, 8000)`, reached at its `local`; a connection closed at once usually means nothing listens there yet; `forwarder.last_error` and a warning of the `virtx` logger say what the server answered, and `last_error` is `None` again once a connection gets a byte back |
 | no network | `network=False`; on unless turned off |
 | the host's GPU | `gpu=True`, and a Vulkan loader plus the venus driver in the image; the server refuses the sandbox if it cannot give one |
 | more CPUs or memory | `vcpus=`, `memory_mib=` |

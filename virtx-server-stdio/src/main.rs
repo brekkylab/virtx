@@ -920,6 +920,26 @@ mod tests {
         assert!(store.get_image(&tagged.parse().unwrap()).unwrap().is_some());
     }
 
+    /// A prune takes the machines' snapshots no machine here can restore: another host's, not
+    /// taken or restored from for an hour, here.
+    #[tokio::test]
+    async fn a_prune_takes_a_snapshot_no_machine_here_can_restore() {
+        let server = Server::spawn("prune-snapshots").await;
+        let snapshots = server.home.join("snapshots");
+        let elsewhere = snapshots.join("0000000000000000");
+        let (old, lately) = (elsewhere.join("1"), snapshots.join("0000000000000001").join("1"));
+        for (dir, idle) in [(&old, 2 * 60 * 60), (&lately, 0)] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("state"), "").unwrap();
+            let at = std::time::SystemTime::now() - std::time::Duration::from_secs(idle);
+            std::fs::File::open(dir).unwrap().set_modified(at).unwrap();
+        }
+
+        server.client.prune_image().await.unwrap();
+        assert!(!elsewhere.exists());
+        assert!(lately.exists());
+    }
+
     /// The client owns every project: its own, `default`, there from the start, and each it
     /// makes. A project's things are its own, and go with it.
     #[tokio::test]

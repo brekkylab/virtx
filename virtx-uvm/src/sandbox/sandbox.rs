@@ -43,6 +43,9 @@ const MAX_DISK_GIB: u32 = 1024;
 /// The directory under a server's root its sandboxes keep what they make on the host in.
 const SANDBOX: &str = "sandbox";
 
+/// Under a home, where its machines keep the snapshots they are restored from.
+const SNAPSHOTS: &str = "snapshots";
+
 /// The directory beside the server's program its own programs for `/abin` are in, where each
 /// one's `SKILL.md` is in that, and where what each one installs beside itself is: under
 /// `install/<name>/`, at the paths it has in `/abin`.
@@ -533,6 +536,7 @@ impl Sandbox {
             client_ports: client_ports.as_ref().map(|ports| ports.relay().clone()),
             // Set as each of its machines boots ([`Sandbox::wake`]).
             sandbox_disk: None,
+            snapshots: Some(root.join(SNAPSHOTS)),
         };
         let disk_gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
         let exited = record.as_ref().is_some_and(|record| record.exited);
@@ -1520,6 +1524,16 @@ impl Sandbox {
     pub fn sweep(root: &Path) {
         Upper::sweep(&root.join(SANDBOX));
         Abin::sweep(&Abin::dir(root));
+    }
+
+    /// Delete the snapshots under `root` its machines, each a process of `vm`, no longer need:
+    /// those none can be restored from, those none has been restored from for a day, and the
+    /// least lately used past what a home's may hold. A snapshot taken does the same.
+    pub fn sweep_snapshots(root: &Path, vm: &[OsString]) {
+        let host = vm
+            .first()
+            .and_then(|program| crate::machine::snapshot::host(Path::new(program)));
+        crate::machine::snapshot::sweep(&root.join(SNAPSHOTS), host.as_deref());
     }
 
     /// Each sandbox kept under `root` past the process that made it or last knew it, that no

@@ -335,6 +335,12 @@ impl Home {
         &self.images
     }
 
+    /// Delete the snapshots its machines no longer need, as [`Sandbox::sweep_snapshots`] says.
+    /// Blocking work.
+    pub fn sweep_snapshots(&self) {
+        Sandbox::sweep_snapshots(&self.root, &self.vm);
+    }
+
     /// What answers this home's `/images/oci/v2/`.
     pub fn registry(&self) -> &Arc<RegistryServer> {
         &self.registry
@@ -1240,8 +1246,13 @@ async fn image_job_events(
 /// Delete what no reference and no sandbox needs, once it is too old to be what a pull, push
 /// or build in flight is putting together.
 async fn image_prune(Extension(home): Extension<Arc<Home>>) -> Answer {
-    let images = home.images.clone();
-    let pruned = tokio::task::spawn_blocking(move || images.prune(PRUNE_GRACE)).await??;
+    let pruned = tokio::task::spawn_blocking(move || {
+        let pruned = home.images.prune(PRUNE_GRACE);
+        // A snapshot of an image pruned is restored from no more.
+        Sandbox::sweep_snapshots(&home.root, &home.vm);
+        pruned
+    })
+    .await??;
     Ok(json(&ImagePruneOutput {
         images: pruned.images.iter().map(Digest::to_string).collect(),
         reclaimed: pruned.reclaimed,

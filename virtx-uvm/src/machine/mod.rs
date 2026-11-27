@@ -26,6 +26,7 @@ mod gpu;
 mod machine;
 mod net;
 mod ports;
+pub(crate) mod snapshot;
 pub mod wire;
 
 pub(crate) use boot::workdir;

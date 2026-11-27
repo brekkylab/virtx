@@ -113,15 +113,19 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
         .layer(cors)
 }
 
-/// The images of every home `access` has, pruned every hour from now on, as
-/// `POST /images/prune` does.
+/// The images and the machines' snapshots of every home `access` has, pruned every hour from
+/// now on, as `POST /images/prune` does.
 pub fn keep_pruned(access: Arc<Access>) {
     tokio::spawn(async move {
         let mut every = tokio::time::interval(PRUNE_EVERY);
         loop {
             every.tick().await;
             for home in access.homes() {
-                let pruned = move || home.images().prune(endpoints::PRUNE_GRACE);
+                let pruned = move || {
+                    let pruned = home.images().prune(endpoints::PRUNE_GRACE);
+                    home.sweep_snapshots();
+                    pruned
+                };
                 match tokio::task::spawn_blocking(pruned).await {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => eprintln!("pruning the images: {e}"),

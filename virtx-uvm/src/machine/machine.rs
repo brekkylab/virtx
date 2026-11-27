@@ -78,6 +78,12 @@ pub struct MachineConfig {
     /// alone.
     #[serde(default)]
     pub sandbox_disk: Option<SandboxDisk>,
+
+    /// Where machines of its shape keep the snapshot they are restored from, on x86_64 Linux: a
+    /// home's `snapshots/`, as [`Sandbox`](crate::Sandbox) names it. `None` takes none, as a
+    /// build's machine does.
+    #[serde(default)]
+    pub snapshots: Option<PathBuf>,
 }
 
 /// A sandbox's upper disk, as its machine is handed it.
@@ -299,8 +305,14 @@ impl Machine {
             io::pipe().map_err(|e| Error::io("making ctrlout", e))?;
         let (their_ioin, ioin) = io::pipe().map_err(|e| Error::io("making ioin", e))?;
         let (ioout, their_ioout) = io::pipe().map_err(|e| Error::io("making ioout", e))?;
+        // Named here, once for every machine this process starts, rather than in each.
+        let snapshot_host = config
+            .snapshots
+            .as_ref()
+            .and_then(|_| super::snapshot::host(Path::new(program)));
         let args = BootArgs {
             config,
+            snapshot_host,
             ctrlin: raw(&their_ctrlin),
             ctrlout: raw(&their_ctrlout),
             ioin: raw(&their_ioin),
@@ -812,7 +824,7 @@ pub fn enter() -> Result<Infallible> {
     let ctrlin = unsafe { boot::hold(args.ctrlin, args.ctrlout) };
     // SAFETY: as above.
     let io = unsafe { (boot::from_raw(args.ioin), boot::from_raw(args.ioout)) };
-    let entered = boot::boot(args.config, ctrlin, io);
+    let entered = boot::boot(args.config, args.snapshot_host, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
         log::error!(target: TOLD_TARGET, "{}", e.told());
@@ -997,6 +1009,7 @@ mod tests {
             sandbox_disk: Some(SandboxDisk {
                 source: Some(PathBuf::from("/run/disk.sock")),
             }),
+            snapshots: Some(PathBuf::from("/home/snapshots")),
         };
         let read: MachineConfig =
             serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
@@ -1008,6 +1021,7 @@ mod tests {
         assert_eq!(read.spec.network, sent.spec.network);
         assert_eq!(read.ports, sent.ports);
         assert_eq!(read.sandbox_disk, sent.sandbox_disk);
+        assert_eq!(read.snapshots, sent.snapshots);
         // All of the relay but its key, which goes in the process's environment.
         let relay = read.client_ports.unwrap();
         assert_eq!(relay.address, "127.0.0.1:4000".parse().unwrap());

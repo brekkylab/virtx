@@ -2416,6 +2416,45 @@ async fn an_image_s_environment_is_its_own_though_another_has_its_layers(home: H
     close(own).await;
 }
 
+/// A build's machine takes no snapshot: its root image is the step's own, and its disk is in
+/// the temp directory, no home's.
+async fn a_build_s_machine_takes_no_snapshot(home: Home) {
+    let alpine = home
+        .images
+        .get_tag(&ALPINE.parse().unwrap())
+        .unwrap()
+        .unwrap();
+    let (mut image, mut layers) = home.images.get_image(&alpine).unwrap().unwrap();
+    let spec = MachineSpec {
+        vcpus: 1,
+        ram_mib: 512,
+        gpu: false,
+        gpu_memory_mib: None,
+        network: false,
+    };
+    let started = std::time::SystemTime::now();
+    let step = virtx_core::Step::Run("echo built > /built".into());
+    virtx_uvm::build_step(&home.images, &mut image, &mut layers, &step, &vm(), &spec, |_| {})
+        .await
+        .unwrap();
+    // Where a snapshot taken beside its disk would be.
+    let snapshots = env::temp_dir().join("snapshots");
+    let taken: Vec<_> = std::fs::read_dir(&snapshots)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|host| std::fs::read_dir(host.path()).into_iter().flatten().flatten())
+        .filter(|shape| {
+            shape
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|at| at >= started)
+        })
+        .map(|shape| shape.path())
+        .collect();
+    assert_eq!(taken, Vec::<PathBuf>::new());
+}
+
 /// A machine has the host's clock, the first of its shape -- which takes the snapshot as its
 /// agent waits -- among them.
 async fn a_machine_has_the_host_s_clock(home: Home) {
@@ -2662,6 +2701,7 @@ async fn a_machine_that_did_not_start_tells_why_without_this_host_s_paths(home: 
         ports: Vec::new(),
         client_ports: None,
         sandbox_disk: None,
+        snapshots: None,
     };
     let started = tokio::task::spawn_blocking(move || Machine::start(config, &vm()))
         .await
@@ -3469,6 +3509,7 @@ fn main() -> ExitCode {
         a_guest_that_halts_ends_its_machine_and_its_jobs,
         a_shape_whose_restores_do_not_come_up_boots_without_its_snapshot,
         an_image_s_environment_is_its_own_though_another_has_its_layers,
+        a_build_s_machine_takes_no_snapshot,
         a_machine_has_the_host_s_clock,
         a_restore_that_fails_once_leaves_the_snapshot_to_the_next,
         a_restore_in_another_user_s_process_is_not_lost,

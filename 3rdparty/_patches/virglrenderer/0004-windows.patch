@@ -179,6 +179,18 @@ such context left its device and its memory until the VM ended, some 17 MiB of d
 memory a device plus all the host-visible memory it had in use, and some 73 MiB a llama.cpp run.
 Without a render server, `on_worker_thread` is set, as it is on a worker thread.
 
+**A short sleep sleeps as long as asked.** venus's ring thread polls for the guest's commands
+for the idle timeout the guest gives it (venus asks for 1 ms) with sleeps from 10 us up
+(`vkr_ring_relax`), and only then waits for a notify. `Sleep` wakes on the system timer's tick
+-- 1 to 2 ms where something has raised the timer's resolution, 15.6 ms where nothing has --
+and `nanosleep` here took every request under a millisecond to `Sleep(1)`, so a command the
+guest sent while the thread slept waited for that tick. A submission's round trip took about
+2 ms against 40 us natively, and llama.cpp generated 228 tokens/s against 641. A wait shorter
+than the timer's finest period (`NtQueryTimerResolution`; 0.5 ms where measured, 1 ms if it
+cannot be asked) is now waited on the performance counter, yielding between reads, and a
+longer one on a high-resolution waitable timer. The round trip is 87 us, and llama.cpp
+generates 614 tokens/s.
+
 The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 `CONFIG_DRM_VIRTIO_GPU=y` and `CONFIG_DRM_VIRTIO_GPU_KMS=y`.
 
@@ -216,9 +228,9 @@ Parts of it stand alone and go when upstream has them: the null resource_map cal
  src/virgl_util.c                    |   4 +
  src/virglrenderer.c                 |  58 +++-
  src/virglrenderer.h                 |  16 +-
- src/win32_compat.c                  |  78 +++++
+ src/win32_compat.c                  | 126 +++++++
  src/win32_compat.h                  |  61 ++++
- 31 files changed, 1090 insertions(+), 18 deletions(-)
+ 31 files changed, 1138 insertions(+), 18 deletions(-)
  create mode 100644 src/venus_context.c
  create mode 100644 src/venus_context.h
  create mode 100644 src/win32_compat.c
@@ -1778,15 +1790,16 @@ index 0bcafef4..ce3aa70d 100644
  virgl_renderer_resource_export_blob(uint32_t res_id, uint32_t *fd_type, int *fd);
 diff --git a/src/win32_compat.c b/src/win32_compat.c
 new file mode 100644
-index 00000000..c23b0e81
+index 00000000..7354846d
 --- /dev/null
 +++ b/src/win32_compat.c
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,126 @@
 +/**************************************************************************
 + *
 + * The POSIX calls from win32_compat.h that are more than a rename.
 + *
 + **************************************************************************/
++#include <stdint.h>
 +#include <windows.h>
 +
 +#include "win32_compat.h"
@@ -1839,18 +1852,65 @@ index 00000000..c23b0e81
 +   return GetThreadId((HANDLE)thread_handle) == GetCurrentThreadId();
 +}
 +
++#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
++#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
++#endif
++
++/* The shortest wait a timer can time on this machine, in ns: the finest period the system timer
++ * takes (0.5ms on many), from NtQueryTimerResolution; 1ms where that cannot be asked.
++ */
++static uint64_t
++timer_floor_ns(void)
++{
++   static volatile LONG64 floor_ns;
++   if (!floor_ns) {
++      typedef LONG(NTAPI * query_fn)(PULONG, PULONG, PULONG);
++      query_fn query = (query_fn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"),
++                                                         "NtQueryTimerResolution");
++      ULONG coarsest, finest, current;
++      LONG64 ns = 1000000;
++      if (query && query(&coarsest, &finest, &current) == 0 && finest)
++         ns = (LONG64)finest * 100;
++      InterlockedExchange64(&floor_ns, ns);
++   }
++   return (uint64_t)floor_ns;
++}
++
 +int
 +nanosleep(const struct timespec *req, struct timespec *rem)
 +{
-+   /* Sleep() has millisecond resolution and rounds down, so a sub-millisecond
-+    * request would not sleep at all. Callers here use this to yield, so round
-+    * any non-zero request up to 1ms rather than spin. */
-+   DWORD ms = (DWORD)(req->tv_sec * 1000 + req->tv_nsec / 1000000);
++   const uint64_t ns = (uint64_t)req->tv_sec * NSEC_PER_SEC + (uint64_t)req->tv_nsec;
 +
-+   if (!ms && (req->tv_sec || req->tv_nsec))
-+      ms = 1;
-+
-+   Sleep(ms);
++   /* Sleep() wakes on the system timer's tick: 1-2ms where something has raised its resolution,
++    * 15.6ms where nothing has. A wait shorter than any timer can time -- venus's ring thread
++    * polls for the guest's commands with sleeps from 10us up (vkr_ring_relax) -- is waited on
++    * the performance counter instead, handing the CPU to any other ready thread between reads.
++    * A longer one sleeps on a high-resolution waitable timer, which keeps to the timer's finest
++    * period whatever resolution the system runs at.
++    */
++   if (!ns) {
++      /* nothing */
++   } else if (ns < timer_floor_ns()) {
++      LARGE_INTEGER freq, start, now;
++      QueryPerformanceFrequency(&freq);
++      QueryPerformanceCounter(&start);
++      const int64_t ticks = (int64_t)(ns * (uint64_t)freq.QuadPart / NSEC_PER_SEC);
++      do {
++         SwitchToThread();
++         QueryPerformanceCounter(&now);
++      } while (now.QuadPart - start.QuadPart < ticks);
++   } else {
++      HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++                                            TIMER_ALL_ACCESS);
++      LARGE_INTEGER due;
++      due.QuadPart = -(LONGLONG)(ns / 100);
++      if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
++         WaitForSingleObject(timer, INFINITE);
++      else
++         Sleep((DWORD)((ns + 999999) / 1000000));
++      if (timer)
++         CloseHandle(timer);
++   }
 +
 +   /* Sleep is not interruptible by a signal, so nothing ever remains. */
 +   if (rem) {

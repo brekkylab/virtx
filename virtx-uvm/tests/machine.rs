@@ -2434,16 +2434,29 @@ async fn a_build_s_machine_takes_no_snapshot(home: Home) {
     };
     let started = std::time::SystemTime::now();
     let step = virtx_core::Step::Run("echo built > /built".into());
-    virtx_uvm::build_step(&home.images, &mut image, &mut layers, &step, &vm(), &spec, |_| {})
-        .await
-        .unwrap();
+    virtx_uvm::build_step(
+        &home.images,
+        &mut image,
+        &mut layers,
+        &step,
+        &vm(),
+        &spec,
+        |_| {},
+    )
+    .await
+    .unwrap();
     // Where a snapshot taken beside its disk would be.
     let snapshots = env::temp_dir().join("snapshots");
     let taken: Vec<_> = std::fs::read_dir(&snapshots)
         .into_iter()
         .flatten()
         .flatten()
-        .flat_map(|host| std::fs::read_dir(host.path()).into_iter().flatten().flatten())
+        .flat_map(|host| {
+            std::fs::read_dir(host.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+        })
         .filter(|shape| {
             shape
                 .metadata()

@@ -229,9 +229,8 @@ fn sweep_to(snapshots: &Path, host: Option<&str>, held: u64) {
             let idle = idle(&snapshot);
             let unusable = !ours
                 || snapshot.extension().is_some()
-                || fs::read(snapshot.join("rootfs")).is_ok_and(|rootfs| {
-                    !Path::new(&*String::from_utf8_lossy(&rootfs)).exists()
-                });
+                || fs::read(snapshot.join("rootfs"))
+                    .is_ok_and(|rootfs| !Path::new(&*String::from_utf8_lossy(&rootfs)).exists());
             if (idle > KEPT && unusable) || idle > UNUSED {
                 let _ = fs::remove_dir_all(&snapshot);
             } else {
@@ -290,10 +289,8 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "virtx-uvm-snapshot-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("virtx-uvm-snapshot-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

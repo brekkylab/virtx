@@ -927,7 +927,10 @@ mod tests {
         let server = Server::spawn("prune-snapshots").await;
         let snapshots = server.home.join("snapshots");
         let elsewhere = snapshots.join("0000000000000000");
-        let (old, lately) = (elsewhere.join("1"), snapshots.join("0000000000000001").join("1"));
+        let (old, lately) = (
+            elsewhere.join("1"),
+            snapshots.join("0000000000000001").join("1"),
+        );
         for (dir, idle) in [(&old, 2 * 60 * 60), (&lately, 0)] {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("state"), "").unwrap();

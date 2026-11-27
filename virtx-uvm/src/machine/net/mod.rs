@@ -23,6 +23,10 @@
 //! guest's loopback -- so a program listening on `127.0.0.1` alone is reached -- with or
 //! without a network.
 //!
+//! Its client's ports are reached at the gateway's address, with or without a network too: a
+//! connection to one is carried to the sandbox's [`ClientRelay`], and the guest's SYN answered
+//! once the relay has said the client reached what the port is, or reset if it has not.
+//!
 //! # The link
 //!
 //! Its MTU is as large as libkrun's device carries, so a guest's TCP sends segments of tens of
@@ -30,7 +34,7 @@
 //! offloads it never uses as such: checksums the stack does not check, and segmentation, which
 //! is what has the guest's driver post receive buffers that large frames fit.
 //!
-//! A machine with neither a network nor a published port gets no device.
+//! A machine with no network, no published port and none of its client's gets no device.
 
 mod gateway;
 mod link;
@@ -44,7 +48,7 @@ pub(crate) use gateway::routed;
 pub(crate) use link::path as link_path;
 
 use super::wire::GuestNetwork;
-use super::{Error, Result};
+use super::{ClientRelay, Error, Result};
 use gateway::Gateway;
 use link::DeviceEnd;
 
@@ -103,10 +107,14 @@ impl GuestNetwork {
 }
 
 /// The guest's virtio-net device, its stack started at the other end: out to what the internet
-/// routes if `egress`, and in through `published`, the listeners on this host whose
-/// connections reach a port in the guest -- each bound by the caller, which is the end that
-/// knows where it is and says so.
-pub(crate) fn device(egress: bool, published: Vec<(u16, TcpListener)>) -> Result<NetDevice> {
+/// routes if `egress`, and to its client's ports through `client`; and in through `published`,
+/// the listeners on this host whose connections reach a port in the guest -- each bound by the
+/// caller, which is the end that knows where it is and says so.
+pub(crate) fn device(
+    egress: bool,
+    published: Vec<(u16, TcpListener)>,
+    client: Option<ClientRelay>,
+) -> Result<NetDevice> {
     // `VIRTIO_NET_F_CSUM`, `VIRTIO_NET_F_GUEST_CSUM` and `VIRTIO_NET_F_GUEST_TSO4`: see the
     // module doc.
     const FEATURES: u32 = (1 << 0) | (1 << 1) | (1 << 7);
@@ -135,7 +143,7 @@ pub(crate) fn device(egress: bool, published: Vec<(u16, TcpListener)>) -> Result
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            let run = || Gateway::new(pending.connect()?, egress, published)?.run();
+            let run = || Gateway::new(pending.connect()?, egress, published, client)?.run();
             if let Err(e) = run() {
                 log::error!("the guest's network stopped: {e}");
             }

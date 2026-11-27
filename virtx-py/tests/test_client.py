@@ -65,12 +65,18 @@ async def test_a_port_forwarder_listens_on_the_loopback_until_closed(tcp_client:
     await alpine(tcp_client)
     sandbox = await tcp_client.create_sandbox(ALPINE, ports=[8000])
     try:
-        forwarder = PortForwarder.open(tcp_client, sandbox.ports[0].url)
-        assert isinstance(forwarder.port, int)
-        assert forwarder.address == f"{forwarder.host}:{forwarder.port}"
-        assert forwarder.host == "127.0.0.1"
+        forwarder = await PortForwarder.open(sandbox, 8000)
+        assert (forwarder.port, forwarder.on) == (8000, "sandbox")
+        host, port = forwarder.local.rsplit(":", 1)
+        assert host == "127.0.0.1"
         # A connection is taken, whatever the sandbox does with it.
-        socket.create_connection((forwarder.host, forwarder.port), timeout=5).close()
+        socket.create_connection((host, int(port)), timeout=5).close()
+        # At an address asked for.
+        with socket.socket() as free:
+            free.bind(("127.0.0.1", 0))
+            asked = f"127.0.0.1:{free.getsockname()[1]}"
+        with await PortForwarder.open(sandbox, 8000, local=asked) as at:
+            assert at.local == asked
 
         forwarder.close()
         forwarder.close()
@@ -79,7 +85,7 @@ async def test_a_port_forwarder_listens_on_the_loopback_until_closed(tcp_client:
         until = time.monotonic() + 5
         while not refused and time.monotonic() < until:
             try:
-                socket.create_connection((forwarder.host, forwarder.port), timeout=5).close()
+                socket.create_connection((host, int(port)), timeout=5).close()
             except ConnectionRefusedError:
                 refused = True
             except ConnectionResetError:

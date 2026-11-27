@@ -714,7 +714,7 @@ impl Client {
         self.call(self.api.virtx_client_copy_file, args)
     }
 
-    /// Every sandbox the server holds, each port without its `url`.
+    /// Every sandbox the server holds.
     pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
         let client = self.clone();
         let call: Call<Vec<SandboxInfo>> = Call::new(self.api, unsafe {
@@ -728,8 +728,8 @@ impl Client {
         })
     }
 
-    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports' `url`s are
-    /// answered here only.
+    /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`]. Its ports, on either side,
+    /// are forwarded with [`PortForwarder::open`](crate::PortForwarder::open).
     ///
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
     /// tag the server has no image by is refused with `404`.
@@ -745,7 +745,7 @@ impl Client {
         Sandbox::new(self.clone(), info)
     }
 
-    /// The sandbox `id`, each port without its `url`.
+    /// The sandbox `id`.
     pub fn get_sandbox(&self, id: impl AsRef<str>) -> Call<Sandbox> {
         let args = json!({ "id": id.as_ref() });
         let client = self.clone();
@@ -753,7 +753,7 @@ impl Client {
         call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
-    /// The sandbox named `name`, each port without its `url`, if one is.
+    /// The sandbox named `name`, if one is.
     pub fn find_sandbox(&self, name: impl AsRef<str>) -> Call<Option<Sandbox>> {
         let args = json!({ "name": name.as_ref() });
         let client = self.clone();

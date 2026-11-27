@@ -12,8 +12,8 @@
 //!            virtx-ctrl     the control channel to the agent, passed on to and from the host
 //!            virtx-io       the I/O channel to the agent, the host's own pipes
 //! virtio-gpu                Vulkan, on a machine that asked for it and a build that has it
-//! virtio-net eth0           the guest's network, on a machine with one or with published
-//!                           ports -- see `net`
+//! virtio-net eth0           the guest's network, on a machine with one, with published ports
+//!                           or with its client's -- see `net`
 //! virtio-fs  abin           virtx's own programs, read-only, at /abin -- when it was given some
 //! virtio-fs  alib           what they run and load, read-only, at /alib -- when there is any
 //! virtio-fs  mnt0, mnt1     one per share of a volume, mounted by tag once the overlay is
@@ -143,16 +143,17 @@ pub(super) struct BootArgs {
     pub ioout: u64,
 }
 
-/// Whether a machine's RAM is backed with host pages before it boots rather than as the guest
-/// first touches them: `VIRTX_PREFAULT_MEMORY=1`, off otherwise.
+/// Whether a machine's memory, its RAM and its GPU's window, is backed with host pages before it
+/// boots rather than as the guest first touches them: `VIRTX_PREFAULT_MEMORY=1`, off otherwise.
 ///
 /// Only WHP heeds it. There each first touch is a fault the hypervisor resolves on its own,
-/// and nested -- a Windows instance in a cloud, as a CI runner is -- one costs about 130µs:
+/// and nested -- a Windows instance in a cloud, as a spot CI runner is -- one costs about 130µs:
 /// the guest's struct pages alone, initialised before it reaches init, are 2s of a 3.8s
 /// boot, where faulting all 4 GiB in at once is 1.2s, and the machine tests there take 59s
 /// rather than 182. On a desktop the faults are cheap and the cost is all the other way:
-/// every machine holds its whole RAM on the host from the start, used or not. So it is for a
-/// runner to turn on, and nothing else.
+/// every machine holds its whole RAM and GPU window on the host from the start, used or
+/// not. So it is for a runner whose Windows is itself a virtual machine to turn on, and
+/// nothing else.
 fn prefault_memory() -> bool {
     std::env::var_os("VIRTX_PREFAULT_MEMORY").is_some_and(|v| v == "1")
 }
@@ -206,8 +207,10 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         upper_device: UPPER_DEVICE.to_owned(),
         upper_fstype: UPPER_FSTYPE.to_owned(),
         shares: Vec::new(),
-        network: (machine.spec.network || !machine.ports.is_empty())
-            .then(|| GuestNetwork::new(machine.spec.network)),
+        network: (machine.spec.network
+            || !machine.ports.is_empty()
+            || machine.client_ports.is_some())
+        .then(|| GuestNetwork::new(machine.spec.network)),
         workdir: workdir(&machine.config),
     };
 
@@ -427,8 +430,12 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network || !published.is_empty() {
-        devices.add(net::device(machine.spec.network, published)?);
+    if machine.spec.network || !published.is_empty() || machine.client_ports.is_some() {
+        devices.add(net::device(
+            machine.spec.network,
+            published,
+            machine.client_ports.clone(),
+        )?);
     }
 
     // In this order, and the order is the whole of what names them -- see the module

@@ -6,12 +6,16 @@
 //! else of this host's is the guest's to reach -- its loopback, its private network, its
 //! cloud's metadata. A machine without reaches nothing.
 //!
+//! Its client's ports, at the gateway's address, it reaches with or without a network, through
+//! the sandbox's relay: a connection there opens with the relay's greeting.
+//!
 //! What goes nowhere: a SYN is reset, as a port nothing listens on is, and a datagram is
 //! dropped.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use super::{LAN, resolver};
+use crate::machine::ClientRelay;
 
 /// The DNS port, the one the nameserver answers on.
 const DNS_PORT: u16 = 53;
@@ -21,10 +25,21 @@ pub(super) struct Egress {
     /// Where a query to the nameserver goes, and `None` for a host that names no resolver --
     /// whose guest then resolves no names, which is what every other process there gets.
     pub(super) resolver: Option<SocketAddr>,
+    /// Where a connection to one of its client's ports goes.
+    pub(super) client: Option<ClientRelay>,
+}
+
+/// Where a guest's TCP connection goes on this host, and what is sent there first.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Route {
+    pub(super) at: SocketAddr,
+    /// What the host socket is written before the guest's bytes, and answered with a verdict
+    /// before the guest's SYN is: empty for a connection carried as it is.
+    pub(super) greeting: Vec<u8>,
 }
 
 impl Egress {
-    pub(super) fn new(enabled: bool) -> Egress {
+    pub(super) fn new(enabled: bool, client: Option<ClientRelay>) -> Egress {
         let resolver = match enabled {
             true => resolver::host_resolvers().first().copied(),
             false => None,
@@ -32,7 +47,25 @@ impl Egress {
         Egress {
             enabled,
             resolver: resolver.map(|ip| SocketAddr::new(ip.into(), DNS_PORT)),
+            client,
         }
+    }
+
+    /// Where a TCP connection the guest opened to `to` goes on this host, or `None` for
+    /// nowhere: one of its client's ports to the relay, whatever `enabled` is, and the rest as
+    /// [`route`](Self::route) says.
+    pub(super) fn connect(&self, to: SocketAddr) -> Option<Route> {
+        if to.ip() == LAN.gateway {
+            let relay = self.client.as_ref()?;
+            return relay.ports.contains(&to.port()).then(|| Route {
+                at: relay.address,
+                greeting: relay.greeting(to.port()),
+            });
+        }
+        self.route(to).map(|at| Route {
+            at,
+            greeting: Vec::new(),
+        })
     }
 
     /// Where a flow the guest sent to `to` goes on this host, or `None` for nowhere.
@@ -114,6 +147,16 @@ mod tests {
         Egress {
             enabled: true,
             resolver: Some(SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 53)),
+            client: None,
+        }
+    }
+
+    /// A relay for the client's port 9222.
+    fn relayed() -> ClientRelay {
+        ClientRelay {
+            address: "127.0.0.1:4000".parse().unwrap(),
+            ports: vec![9222],
+            key: "k".repeat(64),
         }
     }
 
@@ -184,6 +227,41 @@ mod tests {
         ] {
             assert_eq!(off.route(to), None, "{to}");
         }
+    }
+
+    /// A client's port is the relay's, with its greeting, with or without a network; another
+    /// port at the gateway, or any with no relay, goes nowhere.
+    #[test]
+    fn a_clients_port_at_the_gateway_goes_to_the_relay_alone() {
+        let port = SocketAddr::new(LAN.gateway.into(), 9222);
+        for enabled in [true, false] {
+            let egress = Egress {
+                enabled,
+                client: Some(relayed()),
+                ..on()
+            };
+            assert_eq!(
+                egress.connect(port),
+                Some(Route {
+                    at: relayed().address,
+                    greeting: relayed().greeting(9222),
+                })
+            );
+            assert_eq!(
+                egress.connect(SocketAddr::new(LAN.gateway.into(), 9223)),
+                None
+            );
+            // Not a UDP flow's.
+            assert_eq!(egress.route(port), None);
+        }
+        assert_eq!(on().connect(port), None);
+        assert_eq!(
+            on().connect(PUBLIC),
+            Some(Route {
+                at: PUBLIC,
+                greeting: Vec::new()
+            })
+        );
     }
 
     /// What `routed` says of v6, which the registry proxy asks of the addresses a name resolves

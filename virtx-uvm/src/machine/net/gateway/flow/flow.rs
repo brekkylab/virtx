@@ -9,6 +9,7 @@ use smoltcp::wire::IpProtocol;
 use socket2::Socket;
 
 use super::super::LAN;
+use super::super::egress::Route;
 use super::super::link::Link;
 use super::tcp::TcpFlow;
 use super::udp::{self, UdpFlow};
@@ -117,13 +118,13 @@ impl Flows {
         poller: &Poller,
         sockets: &mut SocketSet<'static>,
         ends: EndpointPair,
-        route: impl FnOnce() -> Option<SocketAddr>,
+        route: impl FnOnce() -> Option<Route>,
     ) {
         if self.by_ends.contains_key(&(IpProtocol::Tcp, ends)) || self.entries.len() >= self.most {
             return;
         }
-        if let Some(at) = route()
-            && let Ok(tcp) = TcpFlow::open(sockets, ends.1, at)
+        if let Some(route) = route()
+            && let Ok(tcp) = TcpFlow::open(sockets, ends.1, route)
             && let Err(flow) = self.insert(poller, ends, Flow::Tcp(tcp))
         {
             flow.close(sockets);
@@ -283,7 +284,10 @@ mod tests {
         }
         assert_eq!(flows.entries.len(), 2);
         flows.syn(&poller, &mut sockets, (from(40003), to), || {
-            listener.local_addr().ok()
+            Some(Route {
+                at: listener.local_addr().unwrap(),
+                greeting: Vec::new(),
+            })
         });
         assert_eq!(flows.entries.len(), 2);
     }

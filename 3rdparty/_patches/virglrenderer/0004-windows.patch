@@ -170,6 +170,15 @@ context does. The free list changes under `free_fences_mutex`, vkr is given the
 seqno, and the list of contexts, which the retire callback looks a context up
 in while contexts come and go, changes and is read under a mutex of its own.
 
+**The in-process context destroys what a guest left behind.** When a context is
+destroyed with Vulkan objects its guest never destroyed -- the process crashed, or exited
+without tearing down -- vkr destroys them only where `on_worker_thread` is set. It takes any
+other context to be in a render worker process of its own, which exits with the context and
+leaves the cleanup to the OS. Served in-process, that process is the VM's, which lives on: every
+such context left its device and its memory until the VM ended, some 17 MiB of dedicated GPU
+memory a device plus all the host-visible memory it had in use, and some 73 MiB a llama.cpp run.
+Without a render server, `on_worker_thread` is set, as it is on a worker thread.
+
 The guest kernel needs nothing: `config-libkrunfw-windows_x86_64` already sets
 `CONFIG_DRM_VIRTIO_GPU=y` and `CONFIG_DRM_VIRTIO_GPU_KMS=y`.
 
@@ -187,7 +196,8 @@ Parts of it stand alone and go when upstream has them: the null resource_map cal
  src/mman_win32.c                    |   9 +
  src/mman_win32.h                    |   4 +
  src/venus/vkr_allocator.c           |   4 +
- src/venus/vkr_context.c             |  53 +++
+ src/venus/vkr_context.c             |  59 +++-
+ src/venus/vkr_context.h             |   4 +-
  src/venus/vkr_device_memory.c       |  56 +++
  src/venus/vkr_library.c             |   5 +
  src/venus/vkr_physical_device.c     |   5 +
@@ -208,7 +218,7 @@ Parts of it stand alone and go when upstream has them: the null resource_map cal
  src/virglrenderer.h                 |  16 +-
  src/win32_compat.c                  |  78 +++++
  src/win32_compat.h                  |  61 ++++
- 30 files changed, 1082 insertions(+), 16 deletions(-)
+ 31 files changed, 1090 insertions(+), 18 deletions(-)
  create mode 100644 src/venus_context.c
  create mode 100644 src/venus_context.h
  create mode 100644 src/win32_compat.c
@@ -445,7 +455,7 @@ index 47ec2402..54ed7548 100644
  #include "util/list.h"
  #include "util/macros.h"
 diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
-index 03b46bcc..e857e6f1 100644
+index 03b46bcc..530b1a3e 100644
 --- a/src/venus/vkr_context.c
 +++ b/src/venus/vkr_context.c
 @@ -5,9 +5,15 @@
@@ -525,6 +535,34 @@ index 03b46bcc..e857e6f1 100644
  
  static bool
  vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
+@@ -714,7 +767,11 @@ vkr_context_create(uint32_t ctx_id,
+    if (VKR_DEBUG(VALIDATE))
+       ctx->validate_level = VKR_CONTEXT_VALIDATE_FULL;
+ 
+-#ifdef ENABLE_RENDER_SERVER_WORKER_THREAD
++#if defined(ENABLE_RENDER_SERVER_WORKER_THREAD) || !defined(ENABLE_RENDER_SERVER)
++   /* The process outlives the context -- a render worker thread's, or, with no render server,
++    * the one venus is served in -- so what the guest left behind is destroyed here rather than
++    * by the process's exit.
++    */
+    ctx->on_worker_thread = true;
+ #else
+    ctx->on_worker_thread = false;
+diff --git a/src/venus/vkr_context.h b/src/venus/vkr_context.h
+index 728fc2e8..efc7ae79 100644
+--- a/src/venus/vkr_context.h
++++ b/src/venus/vkr_context.h
+@@ -62,7 +62,9 @@ struct vkr_context {
+    enum vkr_context_validate_level validate_level;
+    bool validate_fatal;
+ 
+-   /* true if ENABLE_RENDER_SERVER_WORKER_THREAD is defined */
++   /* true where the process outlives the context: ENABLE_RENDER_SERVER_WORKER_THREAD, or venus
++    * served in-process with no render server
++    */
+    bool on_worker_thread;
+ 
+    mtx_t ring_mutex;
 diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
 index 00fb21db..7b9dd4fb 100644
 --- a/src/venus/vkr_device_memory.c

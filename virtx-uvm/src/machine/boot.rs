@@ -212,10 +212,8 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         .then(|| GuestNetwork::new(machine.spec.network)),
         workdir: workdir(&machine.config),
         seed: host_seed(),
-        now: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|since| (since.as_secs() as i64, since.subsec_nanos())),
+        // Read as the info is sent.
+        now: None,
     };
 
     // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
@@ -476,7 +474,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut shared = None;
     if save.is_none()
         && restore.is_none()
-        && let Some(dir) = snapshot_shape(&machine, &info)
+        && let Some(dir) = snapshot_shape(&machine, &info, &env)
     {
         (save, restore) = shape_snapshot(&dir);
         if save.is_some() || restore.is_some() {
@@ -505,14 +503,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let vmm = vmm
         .prefault_memory(prefault_memory())
         .build()
-        .map_err(|e| {
-            // A shape's snapshot this host cannot restore is not restored again.
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            if let Some(dir) = &restored {
-                snapshot_broken(dir);
-            }
-            Error::vmm("building the machine", e)
-        })?;
+        .map_err(|e| Error::vmm("building the machine", e))?;
     let handle = vmm
         .handle()
         .map_err(|e| Error::vmm("a handle on the machine", e))?;
@@ -530,13 +521,15 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut ctrlin = ctrlin;
     let for_guest = Arc::new(Mutex::new(for_guest));
     let heard = Arc::new(Mutex::new(None::<Instant>));
+    // The info goes to a restored agent at once, which waits already, and to any other once it
+    // says it waits: the clock in it is the host's as the agent takes it.
     std::thread::spawn({
         let for_guest = Arc::clone(&for_guest);
-        let saving = save.is_some();
+        let restoring = restore.is_some();
         let info = info.clone();
         move || {
-            if !saving {
-                let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
+            if restoring {
+                let _ = wire::send(&mut *for_guest.lock().unwrap(), &now(info));
             }
             while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
                 let _ = wire::send(&mut *for_guest.lock().unwrap(), &message);
@@ -552,9 +545,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
         let info_after = info.clone();
         let rootfs = machine.rootfs.clone();
         move || {
-            // Sent only after a snapshot, on x86_64 Linux.
+            // Read only where a snapshot is taken, on x86_64 Linux.
             #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-            let _ = (&for_info, &info_after, &rootfs, &restored);
+            let _ = (&rootfs, &restored);
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
                 if let CtrlResp::Waiting = message {
                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -588,9 +581,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
                             }
                         }
                         let _ = handle.resume();
-                        let _ = wire::send(&mut *for_info.lock().unwrap(), &info_after);
                     }
                     let _ = &handle;
+                    let _ = wire::send(&mut *for_info.lock().unwrap(), &now(info_after.clone()));
                     continue;
                 }
                 *heard.lock().unwrap() = Some(Instant::now());
@@ -655,9 +648,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
 /// Where a snapshot of a machine of this one's shape is kept -- beside the sandboxes' disks,
 /// `snapshots/<host>/<shape>`. The host is this binary, whose libkrun and agent write it, with the
 /// CPU and kernel whose KVM it names the features of; the shape is everything a restored guest
-/// has to find as it was: its vCPUs, memory, devices, root image and upper disk's size. None off
+/// has to find as it was: its vCPUs, memory, devices, root image, environment and upper disk's
+/// size. None off
 /// Linux x86_64 and for a GPU's machine.
-fn snapshot_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<std::path::PathBuf> {
+fn snapshot_shape(
+    machine: &MachineConfig,
+    info: &wire::MachineInfo,
+    env: &[String],
+) -> Option<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) || machine.spec.gpu {
         return None;
@@ -669,6 +667,8 @@ fn snapshot_shape(machine: &MachineConfig, info: &wire::MachineInfo) -> Option<s
     (machine.spec.network || !machine.ports.is_empty()).hash(&mut hash);
     info.shares.hash(&mut hash);
     machine.rootfs.hash(&mut hash);
+    // The agent's, which every command inherits: an image's own though another has its layers.
+    env.hash(&mut hash);
     std::fs::metadata(&machine.upper)
         .ok()?
         .len()
@@ -735,7 +735,8 @@ fn shape_snapshot(_: &Path) -> (Option<std::path::PathBuf>, Option<std::path::Pa
 const SNAPSHOT_BROKEN: &str = "broken";
 
 /// How many restores of one snapshot may end before their agent is ready, with none ready since,
-/// before it is taken for broken: one cut short as its sandbox closed is not.
+/// before it is taken for broken: one that failed to build, or was cut short as its sandbox
+/// closed, may have been the host's moment rather than the snapshot's.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const RESTORES_LOST: usize = 3;
 
@@ -758,8 +759,12 @@ fn lost_restores(dir: &Path) -> Vec<std::path::PathBuf> {
                 .to_str()
                 .and_then(|name| name.strip_prefix("restoring-"))
                 .and_then(|pid| pid.parse::<libc::pid_t>().ok())
-                // SAFETY: signal 0 is only asked whether the process is there.
-                .is_some_and(|pid| unsafe { libc::kill(pid, 0) } != 0)
+                // SAFETY: signal 0 is only asked whether the process is there. Another user's
+                // answers EPERM, and is there.
+                .is_some_and(|pid| {
+                    (unsafe { libc::kill(pid, 0) }) != 0
+                        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                })
         })
         .map(|entry| entry.path())
         .collect()
@@ -836,6 +841,15 @@ fn sweep_snapshots(taken: &Path) {
             let _ = std::fs::remove_dir(&binary);
         }
     }
+}
+
+/// `info` with the host's wall clock now.
+fn now(mut info: wire::MachineInfo) -> wire::MachineInfo {
+    info.now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since| (since.as_secs() as i64, since.subsec_nanos()));
+    info
 }
 
 /// 64 bytes of the host's randomness, or none where it has none to read.

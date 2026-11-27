@@ -56,8 +56,8 @@ pub struct MachineInfo {
     /// machine restored from a snapshot has the pool of every other restored from it.
     #[serde(default)]
     pub seed: Vec<u8>,
-    /// The host's wall clock, seconds and nanoseconds since the epoch, which the guest's is set
-    /// to: a restored machine's clock is the snapshot's.
+    /// The host's wall clock as the info is sent, seconds and nanoseconds since the epoch, which
+    /// the guest's is set to: a restored machine's clock is the snapshot's.
     #[serde(default)]
     pub now: Option<(i64, u32)>,
 }

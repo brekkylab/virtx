@@ -28,7 +28,6 @@ mod net;
 mod ports;
 pub mod wire;
 
-pub(crate) use boot::workdir;
 pub use error::{Error, Result};
 pub use machine::*;
 pub(crate) use net::routed;

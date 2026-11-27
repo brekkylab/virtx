@@ -434,7 +434,9 @@ fn a_built_image_runs_with_what_its_steps_made() {
         .step(Step::run("apk add --no-cache jq"))
         .step(Step::env("GREETING", "hello"))
         .step(Step::workdir("/work"))
-        .step(Step::run("echo \"$GREETING\" > note && rm /etc/motd"));
+        .step(Step::run("echo \"$GREETING\" > note && rm /etc/motd"))
+        // The image's working directory, which no `RUN` comes after to make.
+        .step(Step::workdir("left"));
     let job = client.build_image(recipe, &reference).wait().unwrap();
     let log = common::entries(job.log(None));
     let Some(ImageJobEntry::End(ImageJobEnd {
@@ -449,9 +451,11 @@ fn a_built_image_runs_with_what_its_steps_made() {
         .create_sandbox(&SandboxCreateArgs::new(reference.as_str()))
         .wait()
         .unwrap();
-    let made = "jq -n 1 && echo $GREETING && pwd && cat note && test ! -e /etc/motd";
+    let made = "jq -n 1 && echo $GREETING && pwd && cat ../note && test ! -e /etc/motd";
     let ran = common::run(&sandbox, &["sh", "-c", made]);
-    let expected = ["1", "hello", "/work", "hello"].map(String::from).to_vec();
+    let expected = ["1", "hello", "/work/left", "hello"]
+        .map(String::from)
+        .to_vec();
     assert_eq!(ran, (expected, 0));
     sandbox.remove().wait().unwrap();
     let by_digest = SandboxCreateArgs::new(ImageName::Digest { digest });

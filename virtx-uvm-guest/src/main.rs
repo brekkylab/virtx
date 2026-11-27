@@ -23,7 +23,9 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek as _, SeekFrom, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{
+    DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
@@ -415,7 +417,7 @@ const NEW_ROOT: &str = "/newroot";
 
 /// Build the root the commands run in and step into it: the upper disk overlaid on the lower,
 /// the kernel's filesystems, the resolver named on the overlay, and over it each share where
-/// it was asked.
+/// it was asked. Then stand in the working directory asked, made where the root has none.
 ///
 /// libkrun's init stays PID 1 on the boot root it started this from, which is where it tells
 /// the host how the machine ended.
@@ -498,7 +500,14 @@ fn root(asked: &wire::MachineInfo) -> io::Result<()> {
         fs::create_dir_all(at)?;
         mount(Some(tag), at, Some("virtiofs"), 0, None)?;
     }
-    std::env::set_current_dir(&asked.workdir)
+    // An image's config may name a directory none of its layers has, as a build leaves the
+    // one its last `WORKDIR` names when no `RUN` comes after.
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(&asked.workdir)
+        .and_then(|()| std::env::set_current_dir(&asked.workdir))
+        .map_err(|e| io::Error::new(e.kind(), format!("standing in {}: {e}", asked.workdir)))
 }
 
 /// The guest's one virtio-net interface, which the kernel names first.

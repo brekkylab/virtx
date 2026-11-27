@@ -703,7 +703,7 @@ fn executable(dir: &Path, deep: bool) {
 /// The directory the image's process starts in -- a machine's, and a build step's: its config's
 /// `WorkingDir`, or the root where the config names none -- unset, or set empty, as images built
 /// by older tools leave it.
-pub(crate) fn workdir(config: &Config) -> String {
+fn workdir(config: &Config) -> String {
     config
         .working_dir()
         .as_deref()

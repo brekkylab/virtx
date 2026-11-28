@@ -77,7 +77,8 @@ Two options are left to each sandbox, and a package that sets them is refused wi
 - **A port on local:** it reaches the machine of whoever makes the sandbox, so they ask for it as they make one.
 
 A package name is letters, digits, `.`, `_` and `-`, as a sandbox's.
-The server also gives the package an `id`, which names its project with it: an app names the package by its `id`, since its users are in no project.
+The server also gives the package an `id`.
+An app names the package by its name, and its project by the project's `id`, since its users are in no project.
 
 ### The image
 
@@ -92,7 +93,7 @@ Moving the tag to another image is not.
 
 Every sandbox made of a package mounts the volumes it names, the same volumes.
 Mount a volume for data every sandbox reads, read-only; what one sandbox should keep for itself goes in its own disk, which goes with it.
-A volume a package names cannot be removed, `409`, `in_use`, until the package is.
+A package does not hold its volumes: removing one is not refused, and a sandbox of the package is then refused, `404`, until the volume is made again or the package names another.
 
 ### Size
 
@@ -186,7 +187,7 @@ It knows nothing of the package: replacing or removing the package changes no sa
 ## Find, replace and remove a package
 
 - `list_package` lists the project's packages, and `get_package` finds one by its `id` or its name.
-- `put_package` with a name the project already has replaces that package in whole. Its `id` stays the same, so an app that names it keeps working, and the sandboxes made of it stay as they were.
+- `put_package` with a name the project already has replaces that package in whole. Its name and `id` stay the same, so an app that names it keeps working, and the sandboxes made of it stay as they were.
 - `remove` removes the package. The sandboxes made of it stay, each reached by who made it, until they are removed.
 
 <Tabs syncKey="lang">
@@ -249,7 +250,7 @@ For every call and what each returns, see [Packages](/docs/sdk/packages/) in the
 
    **Fix:** Check the client's project, or name the package by its `id`.
 
-4. **`409`, deleting an image, a tag or a volume**
+4. **`409`, deleting an image or a tag**
 
    **Cause:** A package names it.
 

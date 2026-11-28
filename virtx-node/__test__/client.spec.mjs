@@ -184,7 +184,9 @@ test('an app client reaches the sandbox a package lets it make', async () => {
   try {
     await alpine(client)
     const members = await client.putPackage(unique('members'), ALPINE)
-    await assert.rejects(virtx.AppClient.create(url, members.id), { status: 401 })
+    // An app names its package's project by the project's id.
+    const { id: projectId } = await client.getProject(project)
+    await assert.rejects(virtx.AppClient.create(url, projectId, members.name), { status: 401 })
     await members.remove()
 
     // The fixture's own issuer lets bob in, a member of another project.
@@ -195,7 +197,7 @@ test('an app client reaches the sandbox a package lets it make', async () => {
       ],
     })
     const bob = { type: 'bearer', token: JSON.parse(users).bob }
-    const app = await virtx.AppClient.create(url, pkg.id, bob)
+    const app = await virtx.AppClient.create(url, projectId, pkg.name, bob)
     const { id } = app.sandbox
     try {
       assert.equal(await app.sandbox.exec(['true']).complete(), 0)
@@ -204,11 +206,11 @@ test('an app client reaches the sandbox a package lets it make', async () => {
     }
     assert.equal((await client.getSandbox(id)).id, id, 'closed, it stays')
 
-    const resumed = await virtx.AppClient.open(url, pkg.id, bob, id)
+    const resumed = await virtx.AppClient.open(url, projectId, bob, id)
     assert.equal(resumed.sandbox.id, id)
     await resumed.remove()
     await assert.rejects(client.getSandbox(id), { status: 404 })
-    await assert.rejects(virtx.AppClient.open(url, pkg.id, bob, id), { status: 403 })
+    await assert.rejects(virtx.AppClient.open(url, projectId, bob, id), { status: 403 })
     await pkg.remove()
   } finally {
     await client.close()

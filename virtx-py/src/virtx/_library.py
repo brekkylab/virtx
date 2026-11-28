@@ -237,8 +237,6 @@ _SIGNATURES: dict[str, tuple[list[Any], Any]] = {
     "virtx_client_remove_package": _WITH_ARGS,
     "virtx_client_create_package_sandbox": _WITH_ARGS,
     "virtx_client_list_package_sandbox": _WITH_ARGS,
-    "virtx_client_app_create": _WITH_ARGS,
-    "virtx_client_app_open": _WITH_ARGS,
     "virtx_client_list_sandbox": _PLAIN,
     "virtx_client_create_sandbox": _WITH_ARGS,
     "virtx_client_get_sandbox": _WITH_ARGS,

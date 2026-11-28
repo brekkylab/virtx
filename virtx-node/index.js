@@ -139,8 +139,6 @@ const SIGNATURES = {
   virtx_client_remove_package: WITH_ARGS,
   virtx_client_create_package_sandbox: WITH_ARGS,
   virtx_client_list_package_sandbox: WITH_ARGS,
-  virtx_client_app_create: WITH_ARGS,
-  virtx_client_app_open: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
@@ -1181,23 +1179,24 @@ class AppClient {
     this.sandbox = sandbox
   }
 
-  // Make a sandbox of the package `pkg`, by its id, on the server at `url`, as `auth` lets in
-  // -- `{ type: 'bearer', token }` of the issuer its access names, sent with every request from
-  // then on.
-  static create(url, pkg, auth = null, { ports } = {}) {
-    return AppClient._open(url, auth, 'virtx_client_app_create', { package: pkg, ports })
+  // Make a sandbox of the package named `pkg` in the project `project`, by the project's id, on
+  // the server at `url`, as `auth` lets in -- `{ type: 'bearer', token }` of the issuer its
+  // access names, sent with every request from then on.
+  static create(url, project, pkg, auth = null, { ports } = {}) {
+    const args = { package: pkg, ports }
+    return AppClient._open(url, project, auth, 'virtx_client_create_package_sandbox', args)
   }
 
-  // Reach again `sandbox`, one made of the package `pkg` as `auth` lets in.
-  static open(url, pkg, auth, sandbox) {
-    const args = { package: pkg, sandbox }
-    return AppClient._open(url, auth, 'virtx_client_app_open', args)
+  // Reach again `sandbox` in the project `project`, each by its id, one made of a package as
+  // `auth` lets in.
+  static open(url, project, auth, sandbox) {
+    return AppClient._open(url, project, auth, 'virtx_client_get_sandbox', { id: sandbox })
   }
 
-  // A client of the server at `url` with `auth`, made one of a sandbox's by the library's
-  // `request`, which answers the sandbox: closed where it fails.
-  static async _open(url, auth, request, args) {
-    const client = Client.connect(url, auth)
+  // A client of the project `project` on the server at `url` with `auth`, made one of a
+  // sandbox's by the library's `request`, which answers the sandbox: closed where it fails.
+  static async _open(url, project, auth, request, args) {
+    const client = Client.connect(url, auth, project)
     try {
       return new AppClient(new Sandbox(client, await client._call(request, args)))
     } catch (e) {

@@ -149,13 +149,6 @@ impl Store {
 }
 
 impl Steady<'_> {
-    /// The name of a package that mounts volume `volume`, if one does.
-    pub fn naming_volume(&self, volume: &str) -> Result<Option<String>, SandboxError> {
-        Ok((self.store.list()?.into_iter())
-            .find(|package| (package.sandbox.volumes.iter()).any(|asked| asked.volume == volume))
-            .map(|package| package.name))
-    }
-
     /// The name of a package whose image is tag `tag`, if one's is.
     pub fn naming_tag(&self, tag: &Reference) -> Result<Option<String>, SandboxError> {
         Ok((self.store.list()?.into_iter())
@@ -412,19 +405,11 @@ mod tests {
     }
 
     #[test]
-    fn what_a_package_names_is_found_while_the_packages_hold_still() {
+    fn the_tag_a_package_names_is_found_while_the_packages_hold_still() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::new(root.path()).unwrap();
-        let mounting = SandboxCreateArgs::new("app:1").volume("data", "/data");
-        store
-            .put("app", PackagePutArgs::new(mounting), &[], || "p".into())
-            .unwrap();
+        store.put("app", args("app:1"), &[], || "p".into()).unwrap();
         let steady = store.steady();
-        assert_eq!(
-            steady.naming_volume("data").unwrap().as_deref(),
-            Some("app")
-        );
-        assert_eq!(steady.naming_volume("other").unwrap(), None);
         let tag = |tag: &str| tag.parse::<Reference>().unwrap();
         assert_eq!(
             steady.naming_tag(&tag("app:1")).unwrap().as_deref(),

@@ -193,8 +193,10 @@ async def test_an_app_client_reaches_the_sandbox_a_package_lets_it_make(tcp_clie
     await alpine(tcp_client)
     package = await tcp_client.put_package(unique("members"), ALPINE)
     url = fixture("VIRTX_TEST_URL")
+    # An app names its package's project by the project's id.
+    project = (await tcp_client.get_project(fixture("VIRTX_TEST_PROJECT"))).id
     with pytest.raises(VirtxError) as refused:
-        await virtx.AppClient.create(url, package.id)
+        await virtx.AppClient.create(url, project, package.name)
     assert refused.value.status == 401
     await package.remove()
 
@@ -205,19 +207,19 @@ async def test_an_app_client_reaches_the_sandbox_a_package_lets_it_make(tcp_clie
     access = virtx.JwtAccess(issuer, oidc["client_id"], jwks=f"{issuer}/keys")
     package = await tcp_client.put_package(unique("jwt"), ALPINE, access=[access])
     bob = BearerAuth(json.loads(fixture("VIRTX_TEST_USERS"))["bob"])
-    async with await virtx.AppClient.create(url, package.id, bob) as app:
+    async with await virtx.AppClient.create(url, project, package.name, bob) as app:
         assert await app.sandbox.exec(["true"]).complete() == 0
         id = app.sandbox.id
     assert (await tcp_client.get_sandbox(id)).id == id, "closed, it stays"
 
-    app = await virtx.AppClient.open(url, package.id, bob, id)
+    app = await virtx.AppClient.open(url, project, bob, id)
     assert app.sandbox.id == id
     await app.remove()
     with pytest.raises(VirtxError) as gone:
         await tcp_client.get_sandbox(id)
     assert gone.value.status == 404, "removed, it is deleted"
     with pytest.raises(VirtxError) as refused:
-        await virtx.AppClient.open(url, package.id, bob, id)
+        await virtx.AppClient.open(url, project, bob, id)
     assert refused.value.status == 403
     await package.remove()
 

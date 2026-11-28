@@ -254,7 +254,7 @@ pub fn remove(&self) -> Call<()>
 
 ## `AppClient.create`
 
-Makes a sandbox of the package `package`, by its id, on the server at `url`, as `auth` lets in: a bearer token of the issuer its access names, such as the ID token your app's user signed in with.
+Makes a sandbox of the package named `package` in the project `project`, by the project's id, on the server at `url`, as `auth` lets in: a bearer token of the issuer its access names, such as the ID token your app's user signed in with.
 `ports` are its ports on local, each `on="local"`, beside those the package gives it in the sandbox.
 From then on the client sends `auth` with every request, and its `sandbox` reaches that sandbox: `auth` reaches the sandboxes the user made of the package, and nothing else.
 Keep the sandbox's `id` to come back to it with [`open`](#appclientopen).
@@ -267,7 +267,12 @@ It is refused as making the sandbox is: `401` or `403` for one the package does 
 ```python
 @classmethod
 async def create(
-    url: str, package: str, auth: Auth | None = None, *, ports: Iterable[PortSpec] = ()
+    url: str,
+    project: str,
+    package: str,
+    auth: Auth | None = None,
+    *,
+    ports: Iterable[PortSpec] = (),
 ) -> AppClient
 
 sandbox: Sandbox
@@ -277,7 +282,13 @@ sandbox: Sandbox
 <TabItem label="Node.js" icon="node">
 
 ```ts
-static create(url: string, pkg: string, auth?: Auth | null, options?: { ports?: PortSpec[] }): Promise<AppClient>
+static create(
+  url: string,
+  project: string,
+  pkg: string,
+  auth?: Auth | null,
+  options?: { ports?: PortSpec[] },
+): Promise<AppClient>
 
 readonly sandbox: Sandbox
 ```
@@ -288,6 +299,7 @@ readonly sandbox: Sandbox
 ```rust
 pub async fn create(
     url: &str,
+    project: &str,
     package: &str,
     auth: Auth,
     ports: impl IntoIterator<Item = PortSpec>,
@@ -301,7 +313,7 @@ pub fn sandbox(&self) -> &Sandbox
 
 ## `AppClient.open`
 
-Reaches again the sandbox `sandbox`, one the user made of the package `package` as `auth` lets in, such as [`list_sandbox`](#list_sandbox) finds.
+Reaches again the sandbox `sandbox` in the project `project`, each by its id, one the user made of a package as `auth` lets in, such as [`list_sandbox`](#list_sandbox) finds.
 It is refused with `401` or `403` for a sandbox they did not make, or one removed.
 
 <Tabs syncKey="lang">
@@ -309,21 +321,21 @@ It is refused with `401` or `403` for a sandbox they did not make, or one remove
 
 ```python
 @classmethod
-async def open(url: str, package: str, auth: Auth, sandbox: str) -> AppClient
+async def open(url: str, project: str, auth: Auth, sandbox: str) -> AppClient
 ```
 
 </TabItem>
 <TabItem label="Node.js" icon="node">
 
 ```ts
-static open(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
+static open(url: string, project: string, auth: Auth, sandbox: string): Promise<AppClient>
 ```
 
 </TabItem>
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-pub async fn open(url: &str, package: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
+pub async fn open(url: &str, project: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
 ```
 
 </TabItem>

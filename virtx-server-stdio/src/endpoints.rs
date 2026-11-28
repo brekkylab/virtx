@@ -846,14 +846,6 @@ async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    let steady = home.packages.steady();
-    if let Some(package) = steady.naming_volume(&name)? {
-        return Err(refused(
-            StatusCode::CONFLICT,
-            "in_use",
-            format!("volume {name} is in use: package {package} mounts it"),
-        ));
-    }
     home.volumes.remove(&name)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }

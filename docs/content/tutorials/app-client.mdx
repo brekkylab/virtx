@@ -17,7 +17,7 @@ The sandbox stays until it is removed, so the user can come back to it later, su
 You need:
 
 - **The server's URL**, such as `https://virtx.example`.
-- **The package's `id`**, which `put_package` answered. An app names a package by its `id`, since its users are in no project.
+- **The package's name, and its project's `id`**, which `get_project` answers. An app names the project by its `id`, since its users are in no project and name none of theirs by name.
 - **What the package lets in:** a token of the issuer its access names, such as the ID token your app got when the user signed in.
 
 ## Make a sandbox and use it
@@ -36,7 +36,7 @@ from virtx import AppClient, BearerAuth
 
 async def main(id_token: str) -> None:
     async with await AppClient.create(
-        "https://virtx.example", "<package id>", BearerAuth(id_token)
+        "https://virtx.example", "<project id>", "workspace", BearerAuth(id_token)
     ) as app:
         await app.sandbox.exec(["uname", "-a"]).complete(print=True)
         await app.sandbox.write_file("notes.txt", "hello\n")
@@ -49,7 +49,7 @@ async def main(id_token: str) -> None:
 const { AppClient } = require('@brekkylab/virtx')
 
 async function main(idToken) {
-  const app = await AppClient.create('https://virtx.example', '<package id>', {
+  const app = await AppClient.create('https://virtx.example', '<project id>', 'workspace', {
     type: 'bearer',
     token: idToken,
   })
@@ -71,7 +71,8 @@ use virtx::{AppClient, Auth, SandboxExecArgs};
 async fn run(id_token: String) -> Result<(), virtx::Error> {
     let app = AppClient::create(
         "https://virtx.example",
-        "<package id>",
+        "<project id>",
+        "workspace",
         Auth::Bearer { token: id_token },
         [],
     )
@@ -154,7 +155,8 @@ from virtx import AppClient, BearerAuth, PortForwarder, PortSpec
 
 async with await AppClient.create(
     "https://virtx.example",
-    "<package id>",
+    "<project id>",
+    "workspace",
     BearerAuth(id_token),
     ports=[PortSpec(9222, on="local")],
 ) as app:
@@ -169,7 +171,7 @@ async with await AppClient.create(
 const { AppClient, PortForwarder } = require('@brekkylab/virtx')
 
 const auth = { type: 'bearer', token: idToken }
-const app = await AppClient.create('https://virtx.example', '<package id>', auth, {
+const app = await AppClient.create('https://virtx.example', '<project id>', 'workspace', auth, {
   ports: [{ port: 9222, on: 'local' }],
 })
 const forwarder = await PortForwarder.open(app.sandbox, 9222, { on: 'local' })
@@ -186,7 +188,8 @@ use virtx::{AppClient, Auth, PortForwarder, PortSide, PortSpec, SandboxExecArgs}
 
 let app = AppClient::create(
     "https://virtx.example",
-    "<package id>",
+    "<project id>",
+    "workspace",
     Auth::Bearer { token: id_token },
     [PortSpec::new(9222).on(PortSide::Local)],
 )
@@ -214,11 +217,11 @@ To come back to it, keep its `id` beside what it is for, such as the user's conv
 <TabItem label="Python" icon="seti:python">
 
 ```python
-async with await AppClient.create(url, package_id, BearerAuth(id_token)) as app:
+async with await AppClient.create(url, project_id, "workspace", BearerAuth(id_token)) as app:
     conversation.sandbox = app.sandbox.id
 
 # Later, as the user comes back.
-async with await AppClient.open(url, package_id, BearerAuth(id_token), conversation.sandbox) as app:
+async with await AppClient.open(url, project_id, BearerAuth(id_token), conversation.sandbox) as app:
     await app.sandbox.exec(["ls"]).complete(print=True)
 ```
 
@@ -226,24 +229,24 @@ async with await AppClient.open(url, package_id, BearerAuth(id_token), conversat
 <TabItem label="Node.js" icon="node">
 
 ```js
-const app = await AppClient.create(url, packageId, { type: 'bearer', token: idToken })
+const app = await AppClient.create(url, projectId, 'workspace', { type: 'bearer', token: idToken })
 conversation.sandbox = app.sandbox.id
 await app.close()
 
 // Later, as the user comes back.
-const again = await AppClient.open(url, packageId, { type: 'bearer', token: idToken }, conversation.sandbox)
+const again = await AppClient.open(url, projectId, { type: 'bearer', token: idToken }, conversation.sandbox)
 ```
 
 </TabItem>
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-let app = AppClient::create(url, package_id, Auth::Bearer { token: id_token.clone() }, []).await?;
+let app = AppClient::create(url, project_id, "workspace", Auth::Bearer { token: id_token.clone() }, []).await?;
 conversation.sandbox = app.sandbox().id().to_owned();
 app.close().await?;
 
 // Later, as the user comes back.
-let again = AppClient::open(url, package_id, Auth::Bearer { token: id_token }, &conversation.sandbox).await?;
+let again = AppClient::open(url, project_id, Auth::Bearer { token: id_token }, &conversation.sandbox).await?;
 ```
 
 </TabItem>
@@ -253,8 +256,8 @@ The id is no secret: only the user who made the sandbox reaches it, with their o
 To find their sandboxes without a kept id, `Client.list_package_sandbox` answers those the user made of the package:
 
 ```python
-client = Client.connect(url, BearerAuth(id_token))
-for sandbox in await client.list_package_sandbox(package_id):
+client = Client.connect(url, BearerAuth(id_token), project_id)
+for sandbox in await client.list_package_sandbox("workspace"):
     print(sandbox.id)
 ```
 

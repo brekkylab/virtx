@@ -526,29 +526,6 @@ impl Client {
         package::client::list_sandbox(self, package.as_ref()).await
     }
 
-    /// Make a sandbox of the package `package`, by its id, for an app's user, as the
-    /// credentials this client sends let them in, with `ports` on local beside those the package
-    /// gives it in the sandbox; and name the package's project from then on, where the user
-    /// reaches the sandbox with those credentials.
-    pub async fn app_create(
-        &self,
-        package: impl AsRef<str>,
-        ports: Vec<crate::PortSpec>,
-    ) -> Result<Sandbox, Error> {
-        package::client::app_create(self, package.as_ref(), ports).await
-    }
-
-    /// The sandbox `sandbox`, one the app's user made of the package `package`, by its id, as
-    /// [`app_create`](Client::app_create) answers it; and name the package's project from now
-    /// on. Refused `401` for a sandbox they did not make, or one removed.
-    pub async fn app_open(
-        &self,
-        package: impl AsRef<str>,
-        sandbox: impl AsRef<str>,
-    ) -> Result<Sandbox, Error> {
-        package::client::app_open(self, package.as_ref(), sandbox.as_ref()).await
-    }
-
     /// Every sandbox the server holds.
     pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
         sandbox::client::list(self).await
@@ -785,23 +762,6 @@ pub(crate) mod ffi {
         name: Option<String>,
         #[serde(default)]
         ports: Vec<crate::PortSpec>,
-    }
-
-    /// What an app client is made with: `{"package": "...", "ports": [...]}`.
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct AppCreate {
-        package: String,
-        #[serde(default)]
-        ports: Vec<crate::PortSpec>,
-    }
-
-    /// A sandbox made of a package: `{"package": "...", "sandbox": "..."}`.
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct PackageSandboxNamed {
-        package: String,
-        sandbox: String,
     }
 
     /// What resizing a sandbox takes: `{"id": "...", "vcpus": n, "memory_mib": n,
@@ -2049,47 +2009,6 @@ pub(crate) mod ffi {
         let args = unsafe { json::<PackageNamed>(args, args_len) };
         unsafe { &(*client).0 }
             .future(|client| async move { client.list_package_sandbox(args?.package).await })
-    }
-
-    /// Makes a sandbox of the package `package`, by its id, as the credentials `client` sends
-    /// let in, given `{"package": "...", "ports": [{"port": n, "on": "local", "label": "..."}]}`,
-    /// `ports` optional; and from then on names the package's project. Answers with the sandbox,
-    /// as `virtx_client_get_sandbox` answers it.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_app_create(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<AppCreate>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let AppCreate { package, ports } = args?;
-            client.app_create(&package, ports).await
-        })
-    }
-
-    /// Answers with the sandbox `sandbox`, one made of the package `package` with the
-    /// credentials `client` sends, given `{"package": "...", "sandbox": "..."}`, as
-    /// `virtx_client_app_create` answers; and from then on names the package's project.
-    ///
-    /// # Safety
-    ///
-    /// As `virtx_client_build_image`.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_app_open(
-        client: *mut VirtxClient,
-        args: *const u8,
-        args_len: usize,
-    ) -> *mut VirtxFuture {
-        let args = unsafe { json::<PackageSandboxNamed>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let PackageSandboxNamed { package, sandbox } = args?;
-            client.app_open(&package, &sandbox).await
-        })
     }
 
     /// Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`

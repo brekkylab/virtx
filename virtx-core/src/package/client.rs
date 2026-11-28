@@ -3,7 +3,7 @@
 use http_over_x::segment;
 
 use super::{Package, PackagePutArgs, PackageSandboxCreateArgs};
-use crate::{Client, Error, PortSpec, Sandbox};
+use crate::{Client, Error, Sandbox};
 
 /// The path of the package `package` names: by its id, or its name in the project set.
 fn package(package: &str) -> String {
@@ -54,33 +54,4 @@ pub(crate) async fn create_sandbox(
 pub(crate) async fn list_sandbox(client: &Client, name: &str) -> Result<Vec<Sandbox>, Error> {
     let path = format!("{}/sandboxes/", package(name));
     Ok(client.wire().get(&path, client.headers()).await?)
-}
-
-/// Make a sandbox of the package `id` for an app's user, with `ports` on local, and name the
-/// package's project through `client` from then on, which the sandbox is reached in.
-pub(crate) async fn app_create(
-    client: &Client,
-    id: &str,
-    ports: Vec<PortSpec>,
-) -> Result<Sandbox, Error> {
-    client.set_project(Some(project_of(id)?))?;
-    let args = PackageSandboxCreateArgs { name: None, ports };
-    create_sandbox(client, id, &args).await
-}
-
-/// The sandbox `sandbox`, one the app's user made of the package `id`, its project named through
-/// `client` from now on.
-pub(crate) async fn app_open(client: &Client, id: &str, sandbox: &str) -> Result<Sandbox, Error> {
-    client.set_project(Some(project_of(id)?))?;
-    client.get_sandbox(sandbox).await
-}
-
-/// The id of the project the package `id` is in, which the package's id starts with.
-fn project_of(id: &str) -> Result<&str, Error> {
-    match id.split_once('.') {
-        Some((project, _)) if !project.is_empty() => Ok(project),
-        _ => Err(Error::Client(format!(
-            "{id:?} is no package's id: an app names its package by the id put_package answered"
-        ))),
-    }
 }

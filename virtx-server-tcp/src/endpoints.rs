@@ -1525,16 +1525,6 @@ async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    let packages = home.packages.clone();
-    let looked = name.clone();
-    let naming = tokio::task::spawn_blocking(move || packages.steady().naming_volume(&looked));
-    if let Some(package) = naming.await?? {
-        return Err(refused(
-            StatusCode::CONFLICT,
-            "in_use",
-            format!("volume {name} is in use: package {package} mounts it"),
-        ));
-    }
     let Some(backend) = home.backing.get() else {
         home.volumes.remove(&name)?;
         return Ok(StatusCode::NO_CONTENT.into_response());

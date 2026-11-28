@@ -377,8 +377,8 @@ mod tests {
     }
 
     /// A package is kept as it is put, refused for an image or a volume not here, found by its id
-    /// or its name, and removed; while it is kept, its volume and its tag are refused their
-    /// removal. A sandbox is made of one by its id in the project the id names, or by its name
+    /// or its name, and removed; while it is kept, its tag is refused its removal, and its volume
+    /// is not. A sandbox is made of one by its id in the project the id names, or by its name
     /// in the one the request names.
     #[tokio::test]
     async fn a_project_s_packages_are_kept_and_what_they_name_is_in_use() {
@@ -423,9 +423,7 @@ mod tests {
             assert_eq!(send("GET", &format!("/packages/{named}"), "").await.0, 200);
         }
 
-        let (status, body) = send("DELETE", "/volumes/data", "").await;
-        assert_eq!(status, 409, "{body}");
-        assert!(body.contains("package app"), "{body}");
+        assert_eq!(send("DELETE", "/volumes/data", "").await.0, 204);
         let (status, body) = send("DELETE", "/images/oci/v2/app/manifests/1", "").await;
         assert_eq!(status, 409, "{body}");
 
@@ -446,7 +444,6 @@ mod tests {
 
         assert_eq!(send("DELETE", &format!("/packages/{id}"), "").await.0, 204);
         assert_eq!(send("GET", "/packages/app", "").await.0, 404);
-        assert_eq!(send("DELETE", "/volumes/data", "").await.0, 204);
         assert_eq!(
             send("DELETE", "/images/oci/v2/app/manifests/1", "").await.0,
             202

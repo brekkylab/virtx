@@ -800,7 +800,7 @@ mod tests {
 
     /// A package is kept as it is put, refused for an image or a volume the project has none of,
     /// replaced keeping its id, which names its project, found by that id or its name, and
-    /// removed; while it is kept, its volume and its tag are refused their removal.
+    /// removed; while it is kept, its tag is refused its removal, and its volume is not.
     #[tokio::test]
     async fn a_project_s_packages_are_kept_and_what_they_name_is_in_use() {
         let served = Served::spawn("packages").await;
@@ -858,12 +858,8 @@ mod tests {
         let (status, body) = served.send("PUT", "packages/named", demo, named).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-        let (status, body) = served.send("DELETE", "volumes/data", demo, "").await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert!(
-            body.contains("in_use") && body.contains("package app"),
-            "{body}"
-        );
+        let (status, _) = served.send("DELETE", "volumes/data", demo, "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
         let (status, body) = served
             .send("DELETE", "images/oci/v2/app/manifests/1", demo, "")
             .await;
@@ -876,8 +872,6 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         let (status, _) = served.send("DELETE", "packages/app", demo, "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = served.send("DELETE", "volumes/data", demo, "").await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
         let (status, _) = served
             .send("DELETE", "images/oci/v2/app/manifests/1", demo, "")
             .await;

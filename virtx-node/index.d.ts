@@ -511,24 +511,25 @@ export interface PackageSandboxOptions {
 export class AppClient {
   private constructor()
   /**
-   * Make a sandbox of the package `pkg`, by its id, on the server at `url`, as `auth` lets in --
-   * a bearer token of the issuer its access names, sent with every request from then on -- with
-   * `ports` on local beside those the package gives it in the sandbox. Refused as the server
-   * refuses making it: `401` or `403` for one the package does not let in, and `429` past its
-   * limits.
+   * Make a sandbox of the package named `pkg` in the project `project`, by the project's id, on
+   * the server at `url`, as `auth` lets in -- a bearer token of the issuer its access names, sent
+   * with every request from then on -- with `ports` on local beside those the package gives it in
+   * the sandbox. Refused as the server refuses making it: `401` or `403` for one the package does
+   * not let in, and `429` past its limits.
    */
   static create(
     url: string,
+    project: string,
     pkg: string,
     auth?: Auth | null,
     options?: { ports?: PortSpec[] },
   ): Promise<AppClient>
   /**
-   * Reach again the sandbox `sandbox`, one made of the package `pkg` as `auth` lets in, such as
-   * `Client.listPackageSandbox` finds: refused `401` or `403` for one they did not make, or one
-   * deleted.
+   * Reach again the sandbox `sandbox` in the project `project`, each by its id, one made of a
+   * package as `auth` lets in, such as `Client.listPackageSandbox` finds: refused `401` or `403`
+   * for one they did not make, or one deleted.
    */
-  static open(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
+  static open(url: string, project: string, auth: Auth, sandbox: string): Promise<AppClient>
   readonly sandbox: Sandbox
   /** Close the client, leaving its sandbox as it is. */
   close(): Promise<void>

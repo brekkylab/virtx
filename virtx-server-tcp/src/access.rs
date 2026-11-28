@@ -275,8 +275,9 @@ impl Access {
 
     /// The home of the package `named` names, the package, and who makes a sandbox of it, or
     /// finds those they made, with `headers`: a member of its project, with their token, or one
-    /// its access lets in. Named by its id, it is reached with no member's token; by its name,
-    /// in the project the request names, by members alone. Refused `404` for no such package,
+    /// its access lets in. Named by its id, or by its name in the project the request names by
+    /// its id, it is reached with no member's token; by its name in a project named by its name,
+    /// by members alone. Refused `404` for no such package,
     /// `401` for no credentials or a token no one's, `403` for one that is someone's but not
     /// one the package takes, and from an origin neither the server nor the package lets in.
     pub(crate) async fn maker(
@@ -294,7 +295,10 @@ impl Access {
         };
         let by_id =
             (named.split_once('.')).and_then(|(project, _)| project.parse::<ProjectId>().ok());
-        let (home, who, member) = match by_id {
+        let named_project = (headers.get(PROJECT_HEADER))
+            .and_then(|named| named.to_str().ok())
+            .and_then(|named| named.parse::<ProjectId>().ok());
+        let (home, who, member) = match by_id.or(named_project) {
             Some(project) => {
                 if self.membership.project(&project).await?.is_none() {
                     return Err(none());
@@ -777,8 +781,8 @@ mod tests {
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
     }
 
-    /// Who makes a sandbox of a package named by its id: a member of its project with their token,
-    /// or one its access lets in -- a token of its issuer's for its audience carrying its claims,
+    /// Who makes a sandbox of a package named by its id, or by its name in the project named by its
+    /// id: a member of its project with their token, or one its access lets in -- a token of its issuer's for its audience carrying its claims,
     /// its subject the token's -- from the server's origins or the package's. Refused `401` with
     /// no token or one no one's, `403` with someone's the package does not take, and `404` for
     /// no such package. One let in names no sandbox, and is held to the package's limits.
@@ -928,10 +932,21 @@ mod tests {
             "no such project"
         );
         assert!(!store.path(&nobody_s).exists(), "no such project's home");
+        let by_id = demo.to_string();
+        assert_eq!(
+            maker(Some(&good), Some(&by_id), None, "app").await,
+            Ok(let_in("user-1")),
+            "by name in the project named by its id"
+        );
+        assert_eq!(
+            maker(Some(&good), Some("demo"), None, "app").await.err(),
+            unauthorized,
+            "by name in the project named by its name, members alone"
+        );
         assert_eq!(
             refused(Some(&good), None, "app").await,
             unauthorized,
-            "by name, members alone"
+            "by name in no project named, members alone"
         );
 
         // One let in names no sandbox, and makes none past the package's limits, with those

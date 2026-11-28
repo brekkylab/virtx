@@ -703,29 +703,6 @@ struct VirtxFuture *virtx_client_list_package_sandbox(struct VirtxClient *client
                                                       const uint8_t *args,
                                                       size_t args_len);
 
-// Makes a sandbox of the package `package`, by its id, as the credentials `client` sends
-// let in, given `{"package": "...", "ports": [{"port": n, "on": "local", "label": "..."}]}`,
-// `ports` optional; and from then on names the package's project. Answers with the sandbox,
-// as `virtx_client_get_sandbox` answers it.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_app_create(struct VirtxClient *client,
-                                            const uint8_t *args,
-                                            size_t args_len);
-
-// Answers with the sandbox `sandbox`, one made of the package `package` with the
-// credentials `client` sends, given `{"package": "...", "sandbox": "..."}`, as
-// `virtx_client_app_create` answers; and from then on names the package's project.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_app_open(struct VirtxClient *client,
-                                          const uint8_t *args,
-                                          size_t args_len);
-
 // Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
 // answers each.
 //

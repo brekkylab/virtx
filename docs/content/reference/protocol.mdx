@@ -280,7 +280,7 @@ Its files are reached at [`/volumes/{name}/files/`](#files).
 
 Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
 `size` is the bytes the volume's files take on the server.
-`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`, and one a [package](#packages) names, from its `PUT` until its `DELETE`.
+`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`.
 
 #### Mounts
 
@@ -504,7 +504,7 @@ It lets the users of an app built on VirtX make sandboxes from the app itself, w
 A package is `{id, name, sandbox, max?, access, origins, limits?}`:
 
 - `id` is given it by the server once, kept as it is replaced, and names its project with it. `name` is letters, digits, `.`, `_` and `-`, as a sandbox's, and any other is refused with `400`, `invalid`.
-- `{package}` names a package by its id, or by its name in the project the request names. An app names it by its id: its users are no project's members, and name no project.
+- `{package}` names a package by its id, or by its name in the project the request names. An app names it by its name, and its project by its id: its users are no project's members, and name none of theirs by name.
 - `sandbox` is what a sandbox's `POST` takes, but `name` and a [port](#ports) on local, each refused with `400`, `invalid`: each sandbox is named, and has its ports on local, as it is made. It is held to what that `POST` holds it to as the `PUT` is answered. Its `image` names a tag or a digest as there; a tag is read as each sandbox is made, so a package of `app:latest` makes the next sandbox of the image the tag points at then.
 - `max` is `{vcpus?, memory_mib?, disk_gib?}`: how large one `access` lets in may [resize](#resizing) a sandbox they made of it, each no less than what `sandbox` makes it, or `400`, `invalid`. One left out, or no `max`, holds them to the size the sandbox was made with.
 - `access` is who beside the project's members may make a sandbox of it, as [Access](#access) says: a list of ways in, any of which lets a request in. Without it, or empty, its members alone may.
@@ -512,7 +512,8 @@ A package is `{id, name, sandbox, max?, access, origins, limits?}`:
 - `limits` is `{sandboxes?, per_subject?}`: how many sandboxes made of it by those `access` lets in may live at once, all of them and each subject's. A `POST` past either is refused with `429`, `quota`, its `reason` `sandboxes`, as [Refused for now](#refused-for-now) says. Without one, that is the server's to limit.
 
 `PUT` makes a package, answered `201`, or replaces one in whole, `200`, and is refused for an image or a volume the project has none of, as a sandbox's `POST` is.
-A package's tag and its volumes are in use from its `PUT` until its `DELETE`: the `DELETE` that would take the tag away is refused as under [Images](#images), and a volume's `DELETE` with `409`, `in_use`. Moving the tag to another image is not refused.
+A volume it names is not held by it: the volume's `DELETE` is not refused, and a sandbox of the package is then refused as a sandbox's `POST` of a volume the project has none of is.
+A package's tag is in use from its `PUT` until its `DELETE`: the `DELETE` that would take it away is refused as under [Images](#images). Moving the tag to another image is not refused.
 `DELETE` removes the package, and what it lets in from then on.
 A sandbox made of a package is a sandbox as any other, and knows nothing of it: replacing or removing the package changes no sandbox made of it, nor its grant.
 

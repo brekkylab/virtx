@@ -127,31 +127,40 @@ class AppClient:
 
     @classmethod
     async def create(
-        cls, url: str, package: str, auth: Auth | None = None, *, ports: Iterable[PortSpec] = ()
+        cls,
+        url: str,
+        project: str,
+        package: str,
+        auth: Auth | None = None,
+        *,
+        ports: Iterable[PortSpec] = (),
     ) -> AppClient:
-        """Make a sandbox of the package ``package``, by its id, on the server at ``url``, as
-        ``auth`` lets in -- a ``BearerAuth`` of a token of the issuer its access names, sent with
-        every request from then on -- with ``ports`` on local, each ``on="local"``, beside those
-        the package gives it in the sandbox. Refused as the server refuses making it: ``401`` or
-        ``403`` for one the package does not let in, and ``429`` past its limits."""
+        """Make a sandbox of the package named ``package`` in the project ``project``, by the
+        project's id, on the server at ``url``, as ``auth`` lets in -- a ``BearerAuth`` of a token
+        of the issuer its access names, sent with every request from then on -- with ``ports`` on
+        local, each ``on="local"``, beside those the package gives it in the sandbox. Refused as
+        the server refuses making it: ``401`` or ``403`` for one the package does not let in, and
+        ``429`` past its limits."""
         request = args(package=package, ports=[p.to_dict() for p in ports] or None)
-        return await cls._open(url, auth, "virtx_client_app_create", request)
+        return await cls._open(url, project, auth, "virtx_client_create_package_sandbox", request)
 
     @classmethod
-    async def open(cls, url: str, package: str, auth: Auth, sandbox: str) -> AppClient:
-        """Reach again the sandbox ``sandbox``, one made of the package ``package`` as ``auth``
-        lets in, such as ``Client.list_package_sandbox`` finds: refused ``401`` or ``403`` for
-        one they did not make, or one deleted."""
-        request = args(package=package, sandbox=sandbox)
-        return await cls._open(url, auth, "virtx_client_app_open", request)
+    async def open(cls, url: str, project: str, auth: Auth, sandbox: str) -> AppClient:
+        """Reach again the sandbox ``sandbox`` in the project ``project``, each by its id, one
+        made of a package as ``auth`` lets in, such as ``Client.list_package_sandbox`` finds:
+        refused ``401`` or ``403`` for one they did not make, or one deleted."""
+        return await cls._open(url, project, auth, "virtx_client_get_sandbox", args(id=sandbox))
 
     @classmethod
-    async def _open(cls, url: str, auth: Auth | None, request: str, arguments: bytes) -> AppClient:
-        """A client of the server at ``url`` with ``auth``, made one of a sandbox's by the
-        library's ``request``, which answers the sandbox: closed where it fails."""
+    async def _open(
+        cls, url: str, project: str, auth: Auth | None, request: str, arguments: bytes
+    ) -> AppClient:
+        """A client of the project ``project`` on the server at ``url`` with ``auth``, made one of
+        a sandbox's by the library's ``request``, which answers the sandbox: closed where it
+        fails."""
         from .client import Client
 
-        client = Client.connect(url, auth)
+        client = Client.connect(url, auth, project)
         try:
             made = await client._call(request, arguments)
         except BaseException:

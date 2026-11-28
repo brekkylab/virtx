@@ -18,37 +18,38 @@ pub struct AppClient {
 }
 
 impl AppClient {
-    /// Make a sandbox of the package `package`, by its id, on the server at `url`, as `auth`
-    /// lets in -- a token of the issuer the package's access names, sent with every request
-    /// from then on -- with `ports` on local, this machine's, beside those the package gives it
-    /// in the sandbox, each [`PortSide::Local`](crate::PortSide::Local). Refused as the server
-    /// refuses making it: `401` or `403` for one the package does not let in, `429` past its
-    /// limits, and `400` for a port in the sandbox.
+    /// Make a sandbox of the package named `package` in the project `project`, by the project's
+    /// id, on the server at `url`, as `auth` lets in -- a token of the issuer the package's access names,
+    /// sent with every request from then on -- with `ports` on local, this machine's, beside those
+    /// the package gives it in the sandbox, each [`PortSide::Local`](crate::PortSide::Local).
+    /// Refused as the server refuses making it: `401` or `403` for one the package does not let
+    /// in, `429` past its limits, and `400` for a port in the sandbox.
     pub async fn create(
         url: &str,
+        project: &str,
         package: &str,
         auth: Auth,
         ports: impl IntoIterator<Item = PortSpec>,
     ) -> Result<AppClient, Error> {
         let ports: Vec<_> = ports.into_iter().collect();
         let args = json!({ "package": package, "ports": ports });
-        let client = Client::connect(url, auth, None)?;
-        let request = client.api.virtx_client_app_create;
+        let client = Client::connect(url, auth, Some(project))?;
+        let request = client.api.virtx_client_create_package_sandbox;
         AppClient::reach(client, request, args).await
     }
 
-    /// Reach again the sandbox `sandbox`, one made of the package `package` as `auth` lets in,
-    /// such as [`Client::list_package_sandbox`] finds: refused `401` for one they did not make,
-    /// or one deleted.
+    /// Reach again the sandbox `sandbox` in the project `project`, each by its id, one made of a
+    /// package as `auth` lets in, such as [`Client::list_package_sandbox`] finds: refused `401`
+    /// or `403` for one they did not make, or one deleted.
     pub async fn open(
         url: &str,
-        package: &str,
+        project: &str,
         auth: Auth,
         sandbox: &str,
     ) -> Result<AppClient, Error> {
-        let args = json!({ "package": package, "sandbox": sandbox });
-        let client = Client::connect(url, auth, None)?;
-        let request = client.api.virtx_client_app_open;
+        let args = json!({ "id": sandbox });
+        let client = Client::connect(url, auth, Some(project))?;
+        let request = client.api.virtx_client_get_sandbox;
         AppClient::reach(client, request, args).await
     }
 

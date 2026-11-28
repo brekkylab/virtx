@@ -22,7 +22,7 @@ You need:
 
 ## Make a sandbox and use it
 
-`AppClient.connect` makes a sandbox of the package and answers once it is made.
+`AppClient.create` makes a sandbox of the package and answers once it is made.
 Its `sandbox` is a sandbox like any other, reached as the user:
 
 <Tabs syncKey="lang">
@@ -35,7 +35,7 @@ from virtx import AppClient, BearerAuth
 
 
 async def main(id_token: str) -> None:
-    async with await AppClient.connect(
+    async with await AppClient.create(
         "https://virtx.example", "<package id>", BearerAuth(id_token)
     ) as app:
         await app.sandbox.exec(["uname", "-a"]).complete(print=True)
@@ -49,7 +49,7 @@ async def main(id_token: str) -> None:
 const { AppClient } = require('@brekkylab/virtx')
 
 async function main(idToken) {
-  const app = await AppClient.connect('https://virtx.example', '<package id>', {
+  const app = await AppClient.create('https://virtx.example', '<package id>', {
     type: 'bearer',
     token: idToken,
   })
@@ -69,7 +69,7 @@ async function main(idToken) {
 use virtx::{AppClient, Auth, SandboxExecArgs};
 
 async fn run(id_token: String) -> Result<(), virtx::Error> {
-    let app = AppClient::connect(
+    let app = AppClient::create(
         "https://virtx.example",
         "<package id>",
         Auth::Bearer { token: id_token },
@@ -152,7 +152,7 @@ Here the sandbox reaches the user's browser at its debugging port, 9222, as in [
 ```python
 from virtx import AppClient, BearerAuth, PortForwarder, PortSpec
 
-async with await AppClient.connect(
+async with await AppClient.create(
     "https://virtx.example",
     "<package id>",
     BearerAuth(id_token),
@@ -169,7 +169,7 @@ async with await AppClient.connect(
 const { AppClient, PortForwarder } = require('@brekkylab/virtx')
 
 const auth = { type: 'bearer', token: idToken }
-const app = await AppClient.connect('https://virtx.example', '<package id>', auth, {
+const app = await AppClient.create('https://virtx.example', '<package id>', auth, {
   ports: [{ port: 9222, on: 'local' }],
 })
 const forwarder = await PortForwarder.open(app.sandbox, 9222, { on: 'local' })
@@ -184,7 +184,7 @@ await app.close()
 ```rust
 use virtx::{AppClient, Auth, PortForwarder, PortSide, PortSpec, SandboxExecArgs};
 
-let app = AppClient::connect(
+let app = AppClient::create(
     "https://virtx.example",
     "<package id>",
     Auth::Bearer { token: id_token },
@@ -208,17 +208,17 @@ A port in the sandbox given here is refused with `400`: those are the package's 
 `close` closes the client and leaves the sandbox as it is, as `async with` in Python, `await using` in Node.js and a dropped `AppClient` in Rust do too.
 The sandbox's machine stops while nothing uses it, and starts again when it is next reached, with its files as they were.
 
-To come back to it, keep its `id` beside what it is for, such as the user's conversation, and pass it to `AppClient.resume` with the user's token:
+To come back to it, keep its `id` beside what it is for, such as the user's conversation, and pass it to `AppClient.open` with the user's token:
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
 
 ```python
-async with await AppClient.connect(url, package_id, BearerAuth(id_token)) as app:
+async with await AppClient.create(url, package_id, BearerAuth(id_token)) as app:
     conversation.sandbox = app.sandbox.id
 
 # Later, as the user comes back.
-async with await AppClient.resume(url, package_id, BearerAuth(id_token), conversation.sandbox) as app:
+async with await AppClient.open(url, package_id, BearerAuth(id_token), conversation.sandbox) as app:
     await app.sandbox.exec(["ls"]).complete(print=True)
 ```
 
@@ -226,24 +226,24 @@ async with await AppClient.resume(url, package_id, BearerAuth(id_token), convers
 <TabItem label="Node.js" icon="node">
 
 ```js
-const app = await AppClient.connect(url, packageId, { type: 'bearer', token: idToken })
+const app = await AppClient.create(url, packageId, { type: 'bearer', token: idToken })
 conversation.sandbox = app.sandbox.id
 await app.close()
 
 // Later, as the user comes back.
-const again = await AppClient.resume(url, packageId, { type: 'bearer', token: idToken }, conversation.sandbox)
+const again = await AppClient.open(url, packageId, { type: 'bearer', token: idToken }, conversation.sandbox)
 ```
 
 </TabItem>
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-let app = AppClient::connect(url, package_id, Auth::Bearer { token: id_token.clone() }, []).await?;
+let app = AppClient::create(url, package_id, Auth::Bearer { token: id_token.clone() }, []).await?;
 conversation.sandbox = app.sandbox().id().to_owned();
 app.close().await?;
 
 // Later, as the user comes back.
-let again = AppClient::resume(url, package_id, Auth::Bearer { token: id_token }, &conversation.sandbox).await?;
+let again = AppClient::open(url, package_id, Auth::Bearer { token: id_token }, &conversation.sandbox).await?;
 ```
 
 </TabItem>
@@ -270,29 +270,29 @@ A member of the project finds every sandbox made of the package with `Package.li
 
 ## Troubleshooting
 
-1. **`401` or `403`, from `connect`**
+1. **`401` or `403`, from `create`**
 
    **Cause:** The package does not let this user in: no token, an expired one, or one its `access` does not take.
 
    **Fix:** See [Letting your users in](/docs/tutorials/package-access/#troubleshooting).
 
-2. **`404`, `not_found`, from `connect`**
+2. **`404`, `not_found`, from `create`**
 
    **Cause:** No package has that `id`.
 
    **Fix:** Check the `id` `put_package` answered. It stays the same when the package is replaced, but not when it is removed and kept again.
 
-3. **`429`, `quota`, from `connect`**
+3. **`429`, `quota`, from `create`**
 
    **Cause:** As many sandboxes of the package live as its `limits` allow, all of them or this user's.
 
    **Fix:** Remove the sandboxes the app no longer uses.
 
-4. **`401` or `403`, from `resume` or through `sandbox`**
+4. **`401` or `403`, from `open` or through `sandbox`**
 
    **Cause:** A request the sandbox's grant does not reach: a sandbox the user did not make, one removed, a resize past the package's `max`, or a token of another user or one expired.
 
-   **Fix:** Pick one `list_package_sandbox` answers, keep to the size the package allows, and send a fresh token of the user's. For one removed, make a new sandbox with `connect`.
+   **Fix:** Pick one `list_package_sandbox` answers, keep to the size the package allows, and send a fresh token of the user's. For one removed, make a new sandbox with `create`.
 
 ## Next
 

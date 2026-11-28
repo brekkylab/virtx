@@ -541,12 +541,12 @@ impl Client {
     /// The sandbox `sandbox`, one the app's user made of the package `package`, by its id, as
     /// [`app_create`](Client::app_create) answers it; and name the package's project from now
     /// on. Refused `401` for a sandbox they did not make, or one removed.
-    pub async fn app_resume(
+    pub async fn app_open(
         &self,
         package: impl AsRef<str>,
         sandbox: impl AsRef<str>,
     ) -> Result<Sandbox, Error> {
-        package::client::app_resume(self, package.as_ref(), sandbox.as_ref()).await
+        package::client::app_open(self, package.as_ref(), sandbox.as_ref()).await
     }
 
     /// Every sandbox the server holds.
@@ -2080,7 +2080,7 @@ pub(crate) mod ffi {
     ///
     /// As `virtx_client_build_image`.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_app_resume(
+    pub unsafe extern "C" fn virtx_client_app_open(
         client: *mut VirtxClient,
         args: *const u8,
         args_len: usize,
@@ -2088,7 +2088,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<PackageSandboxNamed>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let PackageSandboxNamed { package, sandbox } = args?;
-            client.app_resume(&package, &sandbox).await
+            client.app_open(&package, &sandbox).await
         })
     }
 

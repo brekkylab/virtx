@@ -722,9 +722,9 @@ struct VirtxFuture *virtx_client_app_create(struct VirtxClient *client,
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_app_resume(struct VirtxClient *client,
-                                            const uint8_t *args,
-                                            size_t args_len);
+struct VirtxFuture *virtx_client_app_open(struct VirtxClient *client,
+                                          const uint8_t *args,
+                                          size_t args_len);
 
 // Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
 // answers each.

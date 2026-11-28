@@ -70,7 +70,7 @@ pub(crate) async fn app_create(
 
 /// The sandbox `sandbox`, one the app's user made of the package `id`, its project named through
 /// `client` from now on.
-pub(crate) async fn app_resume(client: &Client, id: &str, sandbox: &str) -> Result<Sandbox, Error> {
+pub(crate) async fn app_open(client: &Client, id: &str, sandbox: &str) -> Result<Sandbox, Error> {
     client.set_project(Some(project_of(id)?))?;
     client.get_sandbox(sandbox).await
 }

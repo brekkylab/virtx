@@ -202,7 +202,7 @@ api! {
     virtx_client_create_package_sandbox: WithArgs,
     virtx_client_list_package_sandbox: WithArgs,
     virtx_client_app_create: WithArgs,
-    virtx_client_app_resume: WithArgs,
+    virtx_client_app_open: WithArgs,
     virtx_client_list_sandbox: Plain,
     virtx_client_create_sandbox: WithArgs,
     virtx_client_get_sandbox: WithArgs,

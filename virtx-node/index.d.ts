@@ -506,7 +506,7 @@ export interface PackageSandboxOptions {
  * user made of the package and nothing else.
  *
  * The sandbox lives until it is deleted, with `remove`: closed, or left by `await using`, this
- * leaves it, to be come back to with `resume` by its id.
+ * leaves it, to be come back to with `open` by its id.
  */
 export class AppClient {
   private constructor()
@@ -517,7 +517,7 @@ export class AppClient {
    * refuses making it: `401` or `403` for one the package does not let in, and `429` past its
    * limits.
    */
-  static connect(
+  static create(
     url: string,
     pkg: string,
     auth?: Auth | null,
@@ -528,7 +528,7 @@ export class AppClient {
    * `Client.listPackageSandbox` finds: refused `401` or `403` for one they did not make, or one
    * deleted.
    */
-  static resume(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
+  static open(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
   readonly sandbox: Sandbox
   /** Close the client, leaving its sandbox as it is. */
   close(): Promise<void>

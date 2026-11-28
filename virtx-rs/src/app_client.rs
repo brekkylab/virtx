@@ -12,7 +12,7 @@ use crate::{Client, Error, Sandbox};
 /// reaches the sandboxes that user made of the package and nothing else.
 ///
 /// The sandbox lives until it is deleted, with [`remove`](Self::remove): closed or dropped, this
-/// leaves it, to be come back to with [`resume`](Self::resume) by its id.
+/// leaves it, to be come back to with [`open`](Self::open) by its id.
 pub struct AppClient {
     sandbox: Sandbox,
 }
@@ -24,7 +24,7 @@ impl AppClient {
     /// in the sandbox, each [`PortSide::Local`](crate::PortSide::Local). Refused as the server
     /// refuses making it: `401` or `403` for one the package does not let in, `429` past its
     /// limits, and `400` for a port in the sandbox.
-    pub async fn connect(
+    pub async fn create(
         url: &str,
         package: &str,
         auth: Auth,
@@ -40,7 +40,7 @@ impl AppClient {
     /// Reach again the sandbox `sandbox`, one made of the package `package` as `auth` lets in,
     /// such as [`Client::list_package_sandbox`] finds: refused `401` for one they did not make,
     /// or one deleted.
-    pub async fn resume(
+    pub async fn open(
         url: &str,
         package: &str,
         auth: Auth,
@@ -48,7 +48,7 @@ impl AppClient {
     ) -> Result<AppClient, Error> {
         let args = json!({ "package": package, "sandbox": sandbox });
         let client = Client::connect(url, auth, None)?;
-        let request = client.api.virtx_client_app_resume;
+        let request = client.api.virtx_client_app_open;
         AppClient::reach(client, request, args).await
     }
 

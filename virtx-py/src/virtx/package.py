@@ -117,7 +117,7 @@ class AppClient:
     that user made of the package and nothing else.
 
     The sandbox lives until it is deleted, with ``remove``: closed, or left by ``async with``,
-    this leaves it, to be come back to with ``resume`` by its id."""
+    this leaves it, to be come back to with ``open`` by its id."""
 
     def __init__(self, sandbox: Sandbox) -> None:
         self.sandbox = sandbox
@@ -126,7 +126,7 @@ class AppClient:
         return f"AppClient({self.sandbox!r})"
 
     @classmethod
-    async def connect(
+    async def create(
         cls, url: str, package: str, auth: Auth | None = None, *, ports: Iterable[PortSpec] = ()
     ) -> AppClient:
         """Make a sandbox of the package ``package``, by its id, on the server at ``url``, as
@@ -138,12 +138,12 @@ class AppClient:
         return await cls._open(url, auth, "virtx_client_app_create", request)
 
     @classmethod
-    async def resume(cls, url: str, package: str, auth: Auth, sandbox: str) -> AppClient:
+    async def open(cls, url: str, package: str, auth: Auth, sandbox: str) -> AppClient:
         """Reach again the sandbox ``sandbox``, one made of the package ``package`` as ``auth``
         lets in, such as ``Client.list_package_sandbox`` finds: refused ``401`` or ``403`` for
         one they did not make, or one deleted."""
         request = args(package=package, sandbox=sandbox)
-        return await cls._open(url, auth, "virtx_client_app_resume", request)
+        return await cls._open(url, auth, "virtx_client_app_open", request)
 
     @classmethod
     async def _open(cls, url: str, auth: Auth | None, request: str, arguments: bytes) -> AppClient:

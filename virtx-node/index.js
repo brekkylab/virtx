@@ -140,7 +140,7 @@ const SIGNATURES = {
   virtx_client_create_package_sandbox: WITH_ARGS,
   virtx_client_list_package_sandbox: WITH_ARGS,
   virtx_client_app_create: WITH_ARGS,
-  virtx_client_app_resume: WITH_ARGS,
+  virtx_client_app_open: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
@@ -1175,7 +1175,7 @@ class Package {
 // app's user runs processes in, reads and writes the files of, and forwards the ports of, as
 // `sandbox`. Every request carries the token it was made with, which reaches the sandboxes that
 // user made of the package and nothing else. The sandbox lives until `remove`: closed, this
-// leaves it, to be come back to with `resume` by its id.
+// leaves it, to be come back to with `open` by its id.
 class AppClient {
   constructor(sandbox) {
     this.sandbox = sandbox
@@ -1184,14 +1184,14 @@ class AppClient {
   // Make a sandbox of the package `pkg`, by its id, on the server at `url`, as `auth` lets in
   // -- `{ type: 'bearer', token }` of the issuer its access names, sent with every request from
   // then on.
-  static connect(url, pkg, auth = null, { ports } = {}) {
+  static create(url, pkg, auth = null, { ports } = {}) {
     return AppClient._open(url, auth, 'virtx_client_app_create', { package: pkg, ports })
   }
 
   // Reach again `sandbox`, one made of the package `pkg` as `auth` lets in.
-  static resume(url, pkg, auth, sandbox) {
+  static open(url, pkg, auth, sandbox) {
     const args = { package: pkg, sandbox }
-    return AppClient._open(url, auth, 'virtx_client_app_resume', args)
+    return AppClient._open(url, auth, 'virtx_client_app_open', args)
   }
 
   // A client of the server at `url` with `auth`, made one of a sandbox's by the library's

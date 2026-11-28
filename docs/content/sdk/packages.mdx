@@ -16,8 +16,8 @@ See [Making packages](/docs/tutorials/packages/), [Letting your users in](/docs/
 | [`create_sandbox`](#create_sandbox) | Makes a sandbox of a package. |
 | [`list_sandbox`](#list_sandbox) | The sandboxes made of a package that the client's credentials made. |
 | [`remove`](#remove) | Removes the package; the sandboxes made of it stay. |
-| [`AppClient.connect`](#appclientconnect) | Makes a sandbox of a package as an app's user, and reaches it as them. |
-| [`AppClient.resume`](#appclientresume) | Reaches again a sandbox the user made, as them. |
+| [`AppClient.create`](#appclientcreate) | Makes a sandbox of a package as an app's user, and reaches it as them. |
+| [`AppClient.open`](#appclientopen) | Reaches again a sandbox the user made, as them. |
 | [`AppClient.close`](#appclientclose) | Closes the client, leaving its sandbox. |
 | [`AppClient.remove`](#appclientremove) | Removes its sandbox, and closes the client. |
 
@@ -252,12 +252,12 @@ pub fn remove(&self) -> Call<()>
 </TabItem>
 </Tabs>
 
-## `AppClient.connect`
+## `AppClient.create`
 
 Makes a sandbox of the package `package`, by its id, on the server at `url`, as `auth` lets in: a bearer token of the issuer its access names, such as the ID token your app's user signed in with.
 `ports` are its ports on local, each `on="local"`, beside those the package gives it in the sandbox.
 From then on the client sends `auth` with every request, and its `sandbox` reaches that sandbox: `auth` reaches the sandboxes the user made of the package, and nothing else.
-Keep the sandbox's `id` to come back to it with [`resume`](#appclientresume).
+Keep the sandbox's `id` to come back to it with [`open`](#appclientopen).
 
 It is refused as making the sandbox is: `401` or `403` for one the package does not let in, `429` past its limits, and `400` for a port in the sandbox.
 
@@ -266,7 +266,7 @@ It is refused as making the sandbox is: `401` or `403` for one the package does 
 
 ```python
 @classmethod
-async def connect(
+async def create(
     url: str, package: str, auth: Auth | None = None, *, ports: Iterable[PortSpec] = ()
 ) -> AppClient
 
@@ -277,7 +277,7 @@ sandbox: Sandbox
 <TabItem label="Node.js" icon="node">
 
 ```ts
-static connect(url: string, pkg: string, auth?: Auth | null, options?: { ports?: PortSpec[] }): Promise<AppClient>
+static create(url: string, pkg: string, auth?: Auth | null, options?: { ports?: PortSpec[] }): Promise<AppClient>
 
 readonly sandbox: Sandbox
 ```
@@ -286,7 +286,7 @@ readonly sandbox: Sandbox
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-pub async fn connect(
+pub async fn create(
     url: &str,
     package: &str,
     auth: Auth,
@@ -299,7 +299,7 @@ pub fn sandbox(&self) -> &Sandbox
 </TabItem>
 </Tabs>
 
-## `AppClient.resume`
+## `AppClient.open`
 
 Reaches again the sandbox `sandbox`, one the user made of the package `package` as `auth` lets in, such as [`list_sandbox`](#list_sandbox) finds.
 It is refused with `401` or `403` for a sandbox they did not make, or one removed.
@@ -309,21 +309,21 @@ It is refused with `401` or `403` for a sandbox they did not make, or one remove
 
 ```python
 @classmethod
-async def resume(url: str, package: str, auth: Auth, sandbox: str) -> AppClient
+async def open(url: str, package: str, auth: Auth, sandbox: str) -> AppClient
 ```
 
 </TabItem>
 <TabItem label="Node.js" icon="node">
 
 ```ts
-static resume(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
+static open(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
 ```
 
 </TabItem>
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-pub async fn resume(url: &str, package: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
+pub async fn open(url: &str, package: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
 ```
 
 </TabItem>

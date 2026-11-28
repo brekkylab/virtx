@@ -27,6 +27,10 @@ const TAIL: usize = 50;
 /// [`Error::told`] has it.
 const TOLD_TARGET: &str = "virtx_uvm::told";
 
+/// The log target a machine's process says it is restored from its shape's snapshot under,
+/// before it is built.
+pub(super) const RESTORING_TARGET: &str = "virtx_uvm::restoring";
+
 /// How long a machine told to shut down has to, before it is killed.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -78,6 +82,12 @@ pub struct MachineConfig {
     /// alone.
     #[serde(default)]
     pub sandbox_disk: Option<SandboxDisk>,
+
+    /// Where machines of its shape keep the snapshot they are restored from, on x86_64 Linux: a
+    /// home's `snapshots/`, as [`Sandbox`](crate::Sandbox) names it. `None` takes none, as a
+    /// build's machine does.
+    #[serde(default)]
+    pub snapshots: Option<PathBuf>,
 }
 
 /// A sandbox's upper disk, as its machine is handed it.
@@ -290,7 +300,31 @@ impl Machine {
     /// after them as its last argument. The program has to call [`enter`] first thing in its
     /// `main` when it is run so, and on macOS be signed with the
     /// `com.apple.security.hypervisor` entitlement.
+    ///
+    /// A machine restored from its shape's snapshot that does not come up is started once more
+    /// without it: the snapshot's failure is its own, not the machine's.
     pub fn start(config: MachineConfig, cmd: &[OsString]) -> Result<Machine> {
+        let booted = config.snapshots.is_some().then(|| MachineConfig {
+            snapshots: None,
+            ..config.clone()
+        });
+        let mut restoring = false;
+        match (Machine::start_once(config, cmd, &mut restoring), booted) {
+            (Err(e), Some(booted)) if restoring => {
+                log::warn!("a machine restored from its shape's snapshot did not come up: {e}");
+                Machine::start_once(booted, cmd, &mut restoring)
+            }
+            (started, _) => started,
+        }
+    }
+
+    /// [`start`](Machine::start) once, saying in `restoring` whether the process said it was
+    /// restored from its shape's snapshot.
+    fn start_once(
+        config: MachineConfig,
+        cmd: &[OsString],
+        restoring: &mut bool,
+    ) -> Result<Machine> {
         let Some((program, cmd)) = cmd.split_first() else {
             return Err(Error::NoCommand);
         };
@@ -299,8 +333,14 @@ impl Machine {
             io::pipe().map_err(|e| Error::io("making ctrlout", e))?;
         let (their_ioin, ioin) = io::pipe().map_err(|e| Error::io("making ioin", e))?;
         let (ioout, their_ioout) = io::pipe().map_err(|e| Error::io("making ioout", e))?;
+        // Named here, once for every machine this process starts, rather than in each.
+        let snapshot_host = config
+            .snapshots
+            .as_ref()
+            .and_then(|_| super::snapshot::host(Path::new(program)));
         let args = BootArgs {
             config,
+            snapshot_host,
             ctrlin: raw(&their_ctrlin),
             ctrlout: raw(&their_ctrlout),
             ioin: raw(&their_ioin),
@@ -354,6 +394,9 @@ impl Machine {
                 Some(CtrlResp::Log {
                     target, message, ..
                 }) if target == TOLD_TARGET => told = Some(message),
+                Some(CtrlResp::Log { target, .. }) if target == RESTORING_TARGET => {
+                    *restoring = true;
+                }
                 Some(CtrlResp::Log {
                     target, message, ..
                 }) => {
@@ -812,7 +855,7 @@ pub fn enter() -> Result<Infallible> {
     let ctrlin = unsafe { boot::hold(args.ctrlin, args.ctrlout) };
     // SAFETY: as above.
     let io = unsafe { (boot::from_raw(args.ioin), boot::from_raw(args.ioout)) };
-    let entered = boot::boot(args.config, ctrlin, io);
+    let entered = boot::boot(args.config, args.snapshot_host, ctrlin, io);
     if let Err(e) = &entered {
         log::error!("{e}");
         log::error!(target: TOLD_TARGET, "{}", e.told());
@@ -997,6 +1040,7 @@ mod tests {
             sandbox_disk: Some(SandboxDisk {
                 source: Some(PathBuf::from("/run/disk.sock")),
             }),
+            snapshots: Some(PathBuf::from("/home/snapshots")),
         };
         let read: MachineConfig =
             serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
@@ -1008,6 +1052,7 @@ mod tests {
         assert_eq!(read.spec.network, sent.spec.network);
         assert_eq!(read.ports, sent.ports);
         assert_eq!(read.sandbox_disk, sent.sandbox_disk);
+        assert_eq!(read.snapshots, sent.snapshots);
         // All of the relay but its key, which goes in the process's environment.
         let relay = read.client_ports.unwrap();
         assert_eq!(relay.address, "127.0.0.1:4000".parse().unwrap());

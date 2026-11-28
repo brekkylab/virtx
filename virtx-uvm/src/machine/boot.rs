@@ -85,7 +85,7 @@ use serde::{Deserialize, Serialize};
 use super::gpu;
 use super::wire::GuestNetwork;
 use super::wire::{self, CtrlReq, CtrlResp, IO_PORT_NAME, PORT_NAME};
-use super::{Error, MachineConfig, Result, STOP_TIMEOUT, net};
+use super::{Error, MachineConfig, Result, STOP_TIMEOUT, net, snapshot};
 use crate::volume::{Remote, Served};
 
 /// The tag the guest kernel mounts as `/`, which libkrun's default kernel cmdline names
@@ -137,6 +137,9 @@ pub(super) const CONSOLE_TARGET: &str = "init_or_kernel";
 #[derive(Serialize, Deserialize)]
 pub(super) struct BootArgs {
     pub config: MachineConfig,
+    /// What names this host and the program it runs in its snapshots ([`snapshot::host`]).
+    #[serde(default)]
+    pub snapshot_host: Option<String>,
     pub ctrlin: u64,
     pub ctrlout: u64,
     pub ioin: u64,
@@ -193,7 +196,12 @@ static CTRLOUT: OnceLock<Mutex<File>> = OnceLock::new();
 /// comes back is a machine that could not be built, or a failure of the event loop.
 ///
 /// On macOS the calling binary needs the `com.apple.security.hypervisor` entitlement.
-pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Result<Infallible> {
+pub(super) fn boot(
+    machine: MachineConfig,
+    snapshot_host: Option<String>,
+    ctrlin: File,
+    io: (File, File),
+) -> Result<Infallible> {
     let abin = machine.abin.clone();
     #[cfg(windows)]
     if let Some(dir) = &abin {
@@ -212,6 +220,9 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             || machine.client_ports.is_some())
         .then(|| GuestNetwork::new(machine.spec.network)),
         workdir: workdir(&machine.config),
+        seed: host_seed(),
+        // Read as the info is sent.
+        now: None,
     };
 
     // The virtio-fs devices the guest is shown, which the agent mounts by their tags in this
@@ -430,7 +441,7 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     }
 
     // The whole of what having neither is: no device -- see `net`.
-    if machine.spec.network || !published.is_empty() || machine.client_ports.is_some() {
+    if info.network.is_some() {
         devices.add(net::device(
             machine.spec.network,
             published,
@@ -459,12 +470,50 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let vmm = vmm
         .acpi(true)
         .map_err(|e| Error::vmm("describing the machine in ACPI", e))?;
+    // A machine snapshotted as its agent waits, or restored from such a snapshot: one snapshot
+    // per shape beside the sandboxes' disks, which the first machine of it takes as it boots on
+    // and every later one is restored from, but for a shape whose restores do not come up.
+    // `VIRTX_SNAPSHOT_SAVE` and `VIRTX_SNAPSHOT_RESTORE` name one directory to take or to
+    // restore from instead.
+    let (mut save, mut restore) = (
+        std::env::var_os("VIRTX_SNAPSHOT_SAVE").map(std::path::PathBuf::from),
+        std::env::var_os("VIRTX_SNAPSHOT_RESTORE").map(std::path::PathBuf::from),
+    );
+    // The shape's own snapshot, where this machine takes it or is restored from it.
+    let mut shared = None;
+    if save.is_none()
+        && restore.is_none()
+        && let Some(dir) = snapshot::shape(&machine, &info, &env, snapshot_host.as_deref())
+    {
+        (save, restore) = snapshot::use_of(&dir);
+        if save.is_some() || restore.is_some() {
+            shared = Some(dir);
+        }
+    }
+    let save_and_boot = shared.is_some() && save.is_some();
+    let restored = shared.clone().filter(|_| restore.is_some());
+    // Read only where a snapshot is taken, on x86_64 Linux.
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    let _ = save_and_boot;
+    let vmm = vmm.payload(payload).devices(devices);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let vmm = match &restore {
+        Some(dir) => {
+            if restored.is_some() {
+                snapshot::restoring(dir);
+                log::warn!(target: super::machine::RESTORING_TARGET, "{}", dir.display());
+            }
+            vmm.restore(dir)
+        }
+        None => vmm,
+    };
     let vmm = vmm
-        .payload(payload)
-        .devices(devices)
         .prefault_memory(prefault_memory())
         .build()
         .map_err(|e| Error::vmm("building the machine", e))?;
+    let handle = vmm
+        .handle()
+        .map_err(|e| Error::vmm("a handle on the machine", e))?;
 
     // The root for the agent to build, then the host's messages on to it, and the agent's back -- `Ready` with where the ports
     // are published, which only this side knows. A host that has closed `ctrlin`, or written
@@ -479,10 +528,16 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let mut ctrlin = ctrlin;
     let for_guest = Arc::new(Mutex::new(for_guest));
     let heard = Arc::new(Mutex::new(None::<Instant>));
+    // The info goes to a restored agent at once, which waits already, and to any other once it
+    // says it waits: the clock in it is the host's as the agent takes it.
     std::thread::spawn({
         let for_guest = Arc::clone(&for_guest);
+        let restoring = restore.is_some();
+        let info = info.clone();
         move || {
-            let _ = wire::send(&mut *for_guest.lock().unwrap(), &info);
+            if restoring {
+                let _ = wire::send(&mut *for_guest.lock().unwrap(), &now(info));
+            }
             while let Ok(Some(message)) = wire::recv::<CtrlReq>(&mut ctrlin) {
                 let _ = wire::send(&mut *for_guest.lock().unwrap(), &message);
             }
@@ -493,13 +548,69 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     });
     std::thread::spawn({
         let heard = Arc::clone(&heard);
+        let for_info = Arc::clone(&for_guest);
+        let info_after = info.clone();
+        let rootfs = machine.rootfs.clone();
+        let snapshots = machine.snapshots.clone();
         move || {
+            // Read only where a snapshot is taken, on x86_64 Linux.
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            let _ = (&rootfs, &restored, &snapshots, &snapshot_host);
             while let Ok(Some(message)) = wire::recv::<CtrlResp>(&mut from_guest) {
+                if let CtrlResp::Waiting = message {
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                    let mut taken = false;
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                    if let Some(dir) = &save {
+                        let started = Instant::now();
+                        if !save_and_boot {
+                            match handle.snapshot(dir) {
+                                Ok(()) => log::warn!("snapshot written in {:?}", started.elapsed()),
+                                Err(e) => log::error!("snapshot: {e}"),
+                            }
+                            std::process::exit(0);
+                        }
+                        let aside = snapshot::taking(dir);
+                        match handle.snapshot(&aside) {
+                            Ok(()) => {
+                                use std::os::unix::ffi::OsStrExt;
+                                let named = std::fs::write(
+                                    aside.join("rootfs"),
+                                    rootfs.as_os_str().as_bytes(),
+                                );
+                                if named.is_err() || std::fs::rename(&aside, dir).is_err() {
+                                    let _ = std::fs::remove_dir_all(&aside);
+                                }
+                                let _ = std::fs::remove_file(dir.join(snapshot::TAKEN_BY));
+                                taken = true;
+                            }
+                            Err(e) => {
+                                log::error!("snapshot: {e}");
+                                let _ = std::fs::remove_dir_all(&aside);
+                            }
+                        }
+                        let _ = handle.resume();
+                    }
+                    let _ = &handle;
+                    let _ = wire::send(&mut *for_info.lock().unwrap(), &now(info_after.clone()));
+                    // Out of the way of what the agent says next: a snapshot taken is what the
+                    // home's snapshots grow by.
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                    if taken && let Some(snapshots) = snapshots.clone() {
+                        let host = snapshot_host.clone();
+                        std::thread::spawn(move || snapshot::sweep(&snapshots, host.as_deref()));
+                    }
+                    continue;
+                }
                 *heard.lock().unwrap() = Some(Instant::now());
                 let _ = match message {
                     CtrlResp::Ready(_) => {
                         if let Some(disk) = &booting {
                             disk.booted();
+                        }
+                        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                        if let Some(dir) = &restored {
+                            snapshot::restore_ready(dir);
                         }
                         send(&CtrlResp::Ready(addresses.clone()))
                     }
@@ -548,6 +659,31 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
     let _held = holds;
     vmm.run();
     Err(Error::EventLoop)
+}
+
+/// `info` with the host's wall clock now.
+fn now(mut info: wire::MachineInfo) -> wire::MachineInfo {
+    info.now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|since| (since.as_secs() as i64, since.subsec_nanos()));
+    info
+}
+
+/// 64 bytes of the host's randomness, or none where it has none to read.
+fn host_seed() -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut seed = vec![0; 64];
+        if File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(&mut seed))
+            .is_ok()
+        {
+            return seed;
+        }
+    }
+    Vec::new()
 }
 
 /// Take the ends the host left this process: from here on everything it says goes to

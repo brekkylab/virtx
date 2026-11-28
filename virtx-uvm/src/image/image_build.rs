@@ -172,6 +172,8 @@ async fn step_further(
         ports: Vec::new(),
         client_ports: None,
         sandbox_disk: None,
+        // A step's root image is its own, which no later machine boots again.
+        snapshots: None,
     };
     let vm = vm.to_vec();
     let machine =

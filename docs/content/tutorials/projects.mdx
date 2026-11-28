@@ -76,7 +76,7 @@ const volume = await client.createVolume('data') // a volume in "demo"
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-let client = Client::connect("https://virtx.example", auth, Some("demo"), [] as [(&str, &str); 0])?;
+let client = Client::connect("https://virtx.example", auth, Some("demo"))?;
 
 let volume = client.create_volume(Some("data")).await?; // a volume in "demo"
 ```

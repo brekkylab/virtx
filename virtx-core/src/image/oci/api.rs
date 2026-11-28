@@ -7,10 +7,8 @@ use http_body_util::BodyExt;
 use serde::Deserialize;
 
 use super::manifest::{MANIFEST_TYPES, Manifest};
-use crate::{
-    Error, Members,
-    transport::{Body, TransportClient, full},
-};
+use crate::{Client, Error, Members};
+use http_over_x::{Body, full};
 
 /// What `Docker-Content-Digest` names: the digest of what was answered or stored.
 const CONTENT_DIGEST: &str = "docker-content-digest";
@@ -20,11 +18,11 @@ const PAGE: usize = 1000;
 
 /// The server's registry, over a client's connection.
 pub(crate) struct Registry<'a> {
-    client: &'a TransportClient,
+    client: &'a Client,
 }
 
 impl<'a> Registry<'a> {
-    pub(crate) fn new(client: &'a TransportClient) -> Registry<'a> {
+    pub(crate) fn new(client: &'a Client) -> Registry<'a> {
         Registry { client }
     }
 

@@ -61,7 +61,7 @@ pub(in crate::cli) fn run(provider: &ProviderArgs, command: SignInCommand) -> u8
             _ => None,
         };
         let sign_in = sign_in(provider, server, &dir)?;
-        let refused = std::env::var_os("VIRTX_TOKEN_REFUSED").is_some();
+        let refused = std::env::var_os(http_over_x::TOKEN_REFUSED).is_some();
         match command {
             SignInCommand::Login { scope, .. } => login(&dir, &sign_in, &scope, open),
             SignInCommand::Token { json } => {

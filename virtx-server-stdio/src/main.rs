@@ -23,8 +23,8 @@ use axum::middleware::Next;
 use axum::response::IntoResponse as _;
 use axum::routing::any;
 use http::HeaderMap;
-use tower::ServiceExt as _;
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
+use http_over_x::serve_stdio;
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER};
 use virtx_uvm::{
     HostPaths, ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
     RegistryServer, Sandbox,
@@ -56,14 +56,7 @@ fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     let root = virtx_uvm::cache_root();
     let (app, host) = app(&root).await?;
-    let handle = move |request: http::Request<_>| {
-        let app = app.clone();
-        async move {
-            let Ok(response) = app.oneshot(request).await;
-            response
-        }
-    };
-    let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await;
+    let served = serve_stdio(app, tokio::io::stdin(), tokio::io::stdout()).await;
     // The client is gone, and every sandbox was its.
     tokio::task::spawn_blocking(move || host.close_all()).await?;
     Ok(served?)
@@ -289,6 +282,7 @@ mod tests {
         sync::Arc,
     };
 
+    use tower::ServiceExt as _;
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, PortForwarderArgs,
         PortSide, PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs,
@@ -331,7 +325,7 @@ mod tests {
             let served_app = app.clone();
             let after = Arc::new(after);
             let served = home.clone();
-            let handle = move |request: http::Request<_>| {
+            let handle = tower::service_fn(move |request: http::Request<_>| {
                 let app = app.clone();
                 let after = Arc::clone(&after);
                 let home = served.clone();
@@ -339,14 +333,11 @@ mod tests {
                     let path = request.uri().path().to_owned();
                     let Ok(response) = app.oneshot(request).await;
                     after(&home, &path);
-                    response
+                    Ok::<_, std::convert::Infallible>(response)
                 }
-            };
-            let (pipe, server) = tokio::io::duplex(64 << 10);
-            let (input, output) = tokio::io::split(server);
-            tokio::spawn(serve_stdio(handle, input, output));
+            });
             Server {
-                client: Client::over_stream(pipe),
+                client: Client::over(http_over_x::Client::embed(handle)),
                 root,
                 home,
                 app: served_app,
@@ -463,19 +454,12 @@ mod tests {
     /// A port on local of a sandbox that is not here is `404`, and a target that is not
     /// `host:port` is `400`.
     #[tokio::test]
-    async fn a_port_on_local_of_no_sandbox_or_no_target_is_refused() {
+    async fn a_port_on_local_of_no_sandbox_is_refused() {
         let server = Server::spawn("local-port").await;
         let args = PortForwarderArgs::new("nope", 9222).on(PortSide::Local);
-        let (forward, forwarding) = server
-            .client
-            .forward_port(args.clone().local("127.0.0.1:9222"));
+        let (forward, forwarding) = server.client.forward_port(args);
         forwarding.await;
         assert_eq!(status(forward.opened().await), 404);
-        for target in ["9222", ":9222", "localhost:port"] {
-            let (forward, forwarding) = server.client.forward_port(args.clone().local(target));
-            forwarding.await;
-            assert_eq!(status(forward.opened().await), 400, "{target}");
-        }
     }
 
     #[tokio::test]

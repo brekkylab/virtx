@@ -138,8 +138,6 @@ api! {
         url: *const c_char,
         auth: *const u8,
         auth_len: usize,
-        headers: *const *const c_char,
-        headers_len: usize,
         client: *mut *mut Opaque,
         error: *mut VirtxBytes,
     ) -> c_int,
@@ -147,12 +145,6 @@ api! {
         client: *mut Opaque,
         auth: *const u8,
         auth_len: usize,
-        error: *mut VirtxBytes,
-    ) -> c_int,
-    virtx_client_set_headers: fn(
-        client: *mut Opaque,
-        headers: *const *const c_char,
-        headers_len: usize,
         error: *mut VirtxBytes,
     ) -> c_int,
     virtx_client_set_project: fn(

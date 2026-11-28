@@ -359,9 +359,9 @@ mod tests {
 
         /// A client in `demo`.
         fn connect(&self) -> Client {
-            let mut headers = http::HeaderMap::new();
-            headers.insert("virtx-project", "demo".parse().unwrap());
-            Client::connect(&self.url, Auth::None, headers).unwrap()
+            let client = Client::connect(&self.url, Auth::None).unwrap();
+            client.set_project(Some("demo")).unwrap();
+            client
         }
 
         /// The directory of the tester's project `name`.
@@ -1098,9 +1098,8 @@ mod tests {
         assert_eq!(pulled.len(), 1);
         assert_eq!(*told.asked.lock().unwrap(), pulled);
 
-        let mut headers = http::HeaderMap::new();
-        headers.insert("virtx-project", "other".parse().unwrap());
-        let other = Client::connect(&served.url, Auth::None, headers).unwrap();
+        let other = Client::connect(&served.url, Auth::None).unwrap();
+        other.set_project(Some("other")).unwrap();
         let job = other
             .build_image(Recipe::new(alpine), "built:1")
             .await

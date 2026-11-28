@@ -26,7 +26,7 @@ A server offers several endpoints, and each speaks its own protocol:
 | [`/sandboxes/`](#sandboxes) | HTTP | Sandbox CRUD |
 | [`/sandboxes/{id}/files/`](#files) | WebDAV | The files in a sandbox, as its processes see them |
 | [`/sandboxes/{id}/ports/{port}`](#ports) | WebSocket | A connection to a sandbox's port |
-| [`/sandboxes/{id}/client-ports/{port}`](#a-port-on-local) | WebSocket, or held on the client's machine | A connection to a sandbox's port on local, carried from the sandbox |
+| [`/sandboxes/{id}/client-ports/{port}`](#a-port-on-local) | WebSocket | A connection to a sandbox's port on local, carried from the sandbox |
 | [`/sandboxes/{id}/jobs/`](#sandbox-jobs) | HTTP | Sandbox jobs: read, signal, cancel |
 | [`/sandboxes/{id}/jobs/exec/`](#sandbox-jobs) | HTTP | Starting a process in a sandbox |
 | [`/sandboxes/{id}/jobs/{job}/stdin`](#sandbox-jobs) | HTTP | Writing to a process's stdin |
@@ -45,8 +45,9 @@ Both [transports](#transport) carry HTTP, and every endpoint is reached the same
 
 The server listens on TCP and is reached over HTTP at a base URL, such as `https://host/`.
 Endpoints are paths under it.
-The server SHOULD offer HTTP/2, and MAY also offer HTTP/1.1 and HTTP/3.
-Over HTTP/1.1 every event stream read at once holds a connection of its own, so a client reading many SHOULD reach the server over HTTP/2.
+The server MUST offer HTTP/2 (RFC 9113), which a client speaks alone: agreed on with ALPN as TLS opens over `https`, and with prior knowledge over `http`.
+It MAY also offer HTTP/1.1 and HTTP/3.
+A [port's](#ports) WebSocket is a stream of the HTTP/2 connection, opened with an extended `CONNECT` (RFC 8441), so the server MUST send `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
 
 The server keeps nothing between requests for the transport's sake.
 
@@ -63,6 +64,7 @@ A request with no `Origin`, from any non-browser client, is not refused for that
 The client starts the server as a child process, and the server's stdin and stdout together carry one HTTP/2 connection (RFC 9113), with the client as its client.
 
 - The connection starts with prior knowledge (RFC 9113, section 3.3): the client sends the connection preface first, with no TLS and no upgrade. Requests use the `http` scheme. The authority is not checked.
+- The server sends `SETTINGS_ENABLE_CONNECT_PROTOCOL`, and a [port's](#ports) WebSocket is opened as over TCP, with an extended `CONNECT` (RFC 8441).
 - Neither side writes anything else there: the client MUST NOT to stdin, and the server MUST NOT to stdout.
 - The server MAY write UTF-8 text to stderr for a person to read. The client MAY capture, forward or ignore it.
 - The connection has one client. The server takes no [credentials](#authentication) and checks no [`Origin`](#origin), and the client reaches every [project](#projects) it has.
@@ -360,9 +362,9 @@ The `POST` and every `GET` answer each as `{port, on, url?, label?}`, in the ord
 
 A port in the sandbox is reserved when the sandbox is made.
 
-- A server on the client's machine answers its `url`, a loopback address such as `http://127.0.0.1:54123` on a port it picks, where the port is reached as it is. Only that machine reaches it.
-- A server reachable from other machines answers no `url`. A port is reached by opening `GET /sandboxes/{id}/ports/{port}` as a WebSocket of the subprotocol `virtx.tcp`, a request as any other, with its credentials and its project: one connection to the port in each, its TCP carried as binary messages. It is refused `404`, `not_found`, for a port the sandbox was not made with in the sandbox, `426` unless it opens a WebSocket, and `400` unless of the subprotocol. A server that could not reach the port at all, such as while no VM runs, SHOULD close it with a reason saying why, for a person.
-- A client reaches a port from its own machine through a forwarder it opens there, which opens such a WebSocket for each connection to it.
+- A port is reached by opening `/sandboxes/{id}/ports/{port}` as a WebSocket of the subprotocol `virtx.tcp`, a request as any other, with its credentials and its project: one connection to the port in each, its TCP carried as binary messages. It is refused `404`, `not_found`, for a port the sandbox was not made with in the sandbox, `426` unless it opens a WebSocket, and `400` unless of the subprotocol. A server that could not reach the port at all, such as while no VM runs, SHOULD close it with a reason saying why, for a person.
+- A server on the client's machine MAY also answer its `url`, a loopback address such as `http://127.0.0.1:54123` on a port it picks, where the port is reached as it is. Only that machine reaches it. A server reachable from other machines answers no `url`.
+- A client reaches a port from its own machine through a forwarder it opens there, which opens such a WebSocket for each connection to it, or reaches the `url` where there is one.
 - A connection reaches whatever in the sandbox listens on that port, whichever address it listens on, and is closed when nothing does.
 - Ports in the sandbox are the way in, and do not need `network`, which is the way out.
 
@@ -371,13 +373,12 @@ A port in the sandbox is reserved when the sandbox is made.
 A port on local is the other way: a process in the sandbox connects to `10.0.2.2` at it, and the connection is carried to the machine of a client that forwards it.
 It has no `url`.
 
-- A server reachable from other machines reaches it through a client that takes it, over a WebSocket, as below.
-- A server on the client's machine reaches it itself while a client takes it, as [below](#a-port-on-local-on-the-clients-machine).
+- A server reaches it through a client that takes it, over a WebSocket, as below.
 - A connection to a port no client takes is refused, as one to a port nothing listens on is.
 - A connection to `10.0.2.2` at a port the sandbox was not made with on local is refused. `10.0.2.2` is never reached on the server's network.
 - Ports on local are reached with or without `network`.
 
-A client takes a port by opening `GET /sandboxes/{id}/client-ports/{port}` as a WebSocket of the subprotocol `virtx.tcp`, as a port in the sandbox is reached, and holding it open.
+A client takes a port by opening `/sandboxes/{id}/client-ports/{port}` as a WebSocket of the subprotocol `virtx.tcp`, as a port in the sandbox is reached, and holding it open.
 It is refused `404`, `not_found`, for a port the sandbox was not made with on local, `426` unless it opens a WebSocket, and `400` unless of the subprotocol.
 Any number of WebSockets may take a port at once, of one client or of several, and each carries one connection:
 
@@ -388,12 +389,6 @@ Any number of WebSockets may take a port at once, of one client or of several, a
 A client that keeps a port taken opens another WebSocket as soon as one is sent a connection.
 A connection that comes while no WebSocket is waiting, of a port one has waited on within a time the server chooses, waits for one for that time, and is refused after it.
 The server MAY send pings while a WebSocket waits, and close one that answers none before the next; it refuses a connection whose client answers neither way in a time it chooses, and closes every WebSocket waiting once the sandbox is deleted.
-
-##### A port on local, on the client's machine
-
-A server on the client's machine, as over stdio, takes `GET /sandboxes/{id}/client-ports/{port}?target=host:port`, with no WebSocket: the port is taken while the answer is held, and the server connects each connection to `target` on the machine itself, `127.0.0.1:{port}` without one.
-It is answered `200` with a body that carries nothing and ends once the sandbox is deleted, or refused `404`, `not_found`, for a port the sandbox was not made with on local, and `400`, `invalid`, for a `target` that is not `host:port`.
-A connection whose target is not reached is refused; one that is is carried as above, and closed once the request that took it ends.
 
 What a connection is carried to is the client's alone, and the server is not told it.
 A port on local gives the sandbox's processes whatever what it reaches gives: a browser's debugging port reaches what the browser does, and `adb`'s server reaches the device.

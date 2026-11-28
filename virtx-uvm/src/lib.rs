@@ -12,6 +12,7 @@ mod files;
 mod fstree;
 mod image;
 mod machine;
+pub mod ports;
 mod project;
 mod sandbox;
 mod volume;

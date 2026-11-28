@@ -560,17 +560,11 @@ export class Client {
   static spawn(program?: string | null, args?: string[]): Client
   /**
    * Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
-   * it wants, `project`, the project every request is in (the user's own without one),
-   * and `headers`, whatever else it asks of each request, with every request. `Authorization`
-   * is `auth`'s, and `virtx-project` names `project`, over one given as a header. Refused when a
-   * token would go in the clear: over `http` to any host but this machine.
+   * it wants, and `project`, the project every request is in (the user's own without one), with
+   * every request. Refused when a token would go in the clear: over `http` to any host but this
+   * machine.
    */
-  static connect(
-    url: string,
-    auth?: Auth | null,
-    project?: string | null,
-    headers?: Record<string, string>,
-  ): Client
+  static connect(url: string, auth?: Auth | null, project?: string | null): Client
   /**
    * Send `auth` with every request from now on, in place of what was given at `connect`: a new
    * token, when the server's are short-lived. A forwarder already open sends it with its next
@@ -579,16 +573,8 @@ export class Client {
    */
   setAuth(auth: Auth | null): void
   /**
-   * Send `headers` with every request from now on, in place of those given at `connect`. A
-   * forwarder already open sends them with its next connection. Over stdio, where none are
-   * sent, nothing changes. A header that cannot be sent throws, the headers unchanged.
-   */
-  setHeaders(headers: Record<string, string>): void
-  /**
-   * Name `project` in every request from now on, over either transport, in place of a
-   * `virtx-project` among the headers given. With null, that header names it where there is one,
-   * and otherwise none is named, for the user's own project. A name no header carries throws,
-   * the project unchanged.
+   * Name `project` in every request from now on, over either transport. With null, none is
+   * named, for the user's own project. A name no header carries throws, the project unchanged.
    */
   setProject(project: string | null): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */

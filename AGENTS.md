@@ -12,7 +12,7 @@ virtx is a microVM sandbox for AI agents: it runs tasks in disposable Linux micr
 
 ## Where a change goes
 
-- `virtx-core/` — the methods' args and outputs (`image/`, `sandbox/`, `volume/`), the client and server ends of the transport (`transport/`, plain HTTP over TCP or over a child's stdio), the C ABI (`ffi/`, declared by `include/virtx.h`, which the build writes).
+- `virtx-core/` — the methods' args and outputs (`image/`, `sandbox/`, `volume/`), what the client and the servers share of the transport (`transport/`: HTTP/2 over TCP or over a child's stdio, which the `http-over-x` crate speaks at both ends, and the WebDAV files and port forwarding over it), the C ABI (`ffi/`, declared by `include/virtx.h`, which the build writes).
 - `virtx-cabi/` — `libvirtx_core`, the C ABI exported as a cdylib: a crate of its own, so that no other crate's build makes one.
 - `virtx-rs/`, `virtx-py/`, `virtx-node/` — the packages: Rust over `libloading`, Python over `ctypes`, Node over `koffi`. The Python package builds `virtx-cabi` with setuptools-rust (`virtx-py/pyproject.toml`), and the Node package with `virtx-node/build.js`, which runs cargo as setuptools-rust does, so the two share one build in `target/`.
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), the sandboxes the servers make of them and the jobs run in each (`sandbox/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
@@ -78,7 +78,7 @@ The Python and Node packages, and the Rust crate without its `embedded` feature,
 
 Each test goes in the lowest layer that can show what it tests, fastest first:
 
-- **`virtx-core`: unit tests.** What it does by itself, in a `#[cfg(test)] mod tests {}` inside the module it tests. Its transport is tested from one end to the other there, since both ends are in the crate.
+- **`virtx-core`: unit tests.** What it does by itself, in a `#[cfg(test)] mod tests {}` inside the module it tests.
 - **`virtx-uvm`: unit tests, and the tests that boot machines.** Its unit tests sit in its modules as `virtx-core`'s do. A machine is a process the binary it is in spawns of itself (see `machine/`), which a module's test cannot be, so the tests that boot one are `virtx-uvm/tests/machine.rs`, a test binary with a `main` that becomes the machine when spawned so. They make sandboxes of `virtx-uvm` itself, with no server in front: a job's output, end and timeout, a job cancelled, a machine parked and booted again, what a closed sandbox leaves, sandboxes made, closed and mounting one volume at once, and what the files endpoints answer a write to a sandbox's file.
 - **`virtx-uvm-guest`: unit tests, on Linux alone.** The agent's own, in `virtx-uvm-guest/src/main.rs`, over directories standing in for the guest's `/dev` and sysfs. It is a workspace of its own and builds for Linux only, so `cargo xtask check` and `cargo xtask test` run them on Linux and skip them elsewhere.
 - **`virtx-server-*`: unit tests, and the app served in the test's process.** Each server's `app` -- what its binary serves -- is served in the test's own process, over a pipe as stdio serves it or on the loopback over HTTP, and called as a client calls it: the endpoints, what they refuse, who reaches which project, and what each keeps on disk. No machine is booted here: what a server does with one, such as a build's steps, is tested end to end.

@@ -197,7 +197,6 @@ let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
-    [] as [(&str, &str); 0],
 )?;
 ```
 

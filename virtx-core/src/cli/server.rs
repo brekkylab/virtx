@@ -64,8 +64,7 @@ pub(crate) async fn connect(args: &ServerArgs) -> anyhow::Result<Client> {
                 Ok(token) if !token.is_empty() => Auth::Bearer { token },
                 _ => Auth::None,
             };
-            Client::connect(&url, auth, http::HeaderMap::new())
-                .with_context(|| format!("reaching {url}"))?
+            Client::connect(&url, auth).with_context(|| format!("reaching {url}"))?
         }
         None => {
             let program = match &args.server {
@@ -96,7 +95,6 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
-    use crate::transport::http;
 
     #[tokio::test]
     async fn a_host_is_sent_the_project_in_the_virtx_project_header() {
@@ -119,7 +117,10 @@ mod tests {
             server: None,
         };
         let client = connect(&args).await.unwrap();
-        let sent = http::get::<String>(&client.inner, "/project").await;
+        let sent = client
+            .wire()
+            .get::<String>("/project", client.headers())
+            .await;
         assert_eq!(sent.unwrap(), "demo");
 
         let args = ServerArgs {

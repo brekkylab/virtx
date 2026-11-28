@@ -1,12 +1,10 @@
 //! The files of a volume or a sandbox, which the protocol's Files has a server serve with WebDAV
-//! (RFC 4918) under `/volumes/{name}/files/` or `/sandboxes/{id}/files/`: what each request names,
-//! and what a `PROPFIND` reads into. The client's end is [`client`].
+//! (RFC 4918) under `/volumes/{name}/files/` or `/sandboxes/{id}/files/`: whose they are, and what
+//! each call on them names, and what a file or a directory there is, as the C ABI and the packages
+//! read and write them.
 //!
 //! A path is relative to the root, `/`-separated, as `dir/file.txt`; the empty path is the
 //! root. The server refuses one that leads outside.
-
-#[cfg(feature = "client")]
-pub(crate) mod client;
 
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +113,22 @@ pub struct DirEntry {
     pub metadata: Metadata,
 }
 
+#[cfg(feature = "client")]
+impl From<http_over_x::webdav::Meta> for Metadata {
+    fn from(meta: http_over_x::webdav::Meta) -> Self {
+        let since_epoch = |at: std::time::SystemTime| at.duration_since(std::time::UNIX_EPOCH);
+        Metadata {
+            is_dir: meta.is_dir,
+            size: meta.size,
+            modified: meta
+                .modified
+                .and_then(|at| since_epoch(at).ok())
+                .map(|d| d.as_secs()),
+            etag: meta.etag,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -127,30 +141,6 @@ mod tests {
         assert_eq!(serde_json::to_value(&root).unwrap(), json!({"volume": "v"}));
         let decoded: FileRoot = serde_json::from_value(json!({"sandbox": "sb1"})).unwrap();
         assert_eq!(decoded, FileRoot::Sandbox("sb1".into()));
-    }
-
-    #[test]
-    fn a_path_s_root_is_beside_it() {
-        let args = FilePathArgs {
-            root: FileRoot::Sandbox("s".into()),
-            path: "a/b".into(),
-        };
-        let value = json!({"sandbox": "s", "path": "a/b"});
-        assert_eq!(serde_json::to_value(&args).unwrap(), value);
-        assert_eq!(serde_json::from_value::<FilePathArgs>(value).unwrap(), args);
-        let read: FileReadArgs =
-            serde_json::from_value(json!({"volume": "v", "path": "a", "length": 3})).unwrap();
-        assert_eq!((read.offset, read.length), (0, Some(3)));
-        let moved: FileMoveArgs =
-            serde_json::from_value(json!({"volume": "v", "from": "a", "to": "b"})).unwrap();
-        assert!(!moved.overwrite);
-        assert!(serde_json::from_value::<FilePathArgs>(json!({"path": "a"})).is_err());
-        let written: FileWriteArgs =
-            serde_json::from_value(json!({"volume": "v", "path": "a"})).unwrap();
-        assert_eq!(written.if_match, None);
-        let removed: FileRemoveArgs =
-            serde_json::from_value(json!({"volume": "v", "path": "a"})).unwrap();
-        assert!(!removed.missing_ok);
     }
 
     #[test]

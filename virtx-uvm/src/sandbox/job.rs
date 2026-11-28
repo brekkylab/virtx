@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use http_over_x::sse::Log;
 use tokio::sync::oneshot;
-use virtx_core::{Log, SandboxJob, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry};
+use virtx_core::{SandboxJob, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry};
 
 use super::sandbox::{LOG_LIMIT, SIGKILL};
 use crate::machine::wire::Taken;

@@ -3,10 +3,9 @@
 use super::{
     ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs,
 };
-use crate::{
-    Error,
-    transport::{TransportClient, http, segment},
-};
+use http_over_x::segment;
+
+use crate::{Client, Error};
 
 /// The path of the project `name` names: a project of the user's by name, or any by its id.
 fn project(name: &str) -> String {
@@ -14,59 +13,63 @@ fn project(name: &str) -> String {
 }
 
 /// Every project the client has a role in.
-pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ProjectListOutputItem>, Error> {
-    http::get(client, "/projects/").await
+pub(crate) async fn list(client: &Client) -> Result<Vec<ProjectListOutputItem>, Error> {
+    Ok(client.wire().get("/projects/", client.headers()).await?)
 }
 
 /// Make a project as `args` says, the client its owner.
 pub(crate) async fn create(
-    client: &TransportClient,
+    client: &Client,
     args: &ProjectCreateArgs,
 ) -> Result<ProjectListOutputItem, Error> {
-    http::post(client, "/projects/", args).await
+    Ok(client
+        .wire()
+        .post("/projects/", client.headers(), args)
+        .await?)
 }
 
 /// The project `name`, with the client's role in it.
-pub(crate) async fn get(
-    client: &TransportClient,
-    name: &str,
-) -> Result<ProjectListOutputItem, Error> {
-    http::get(client, &project(name)).await
+pub(crate) async fn get(client: &Client, name: &str) -> Result<ProjectListOutputItem, Error> {
+    Ok(client.wire().get(&project(name), client.headers()).await?)
 }
 
 /// Delete the project `name` and everything in it.
-pub(crate) async fn remove(client: &TransportClient, name: &str) -> Result<(), Error> {
-    http::delete(client, &project(name)).await
+pub(crate) async fn remove(client: &Client, name: &str) -> Result<(), Error> {
+    Ok(client
+        .wire()
+        .delete(&project(name), client.headers())
+        .await?)
 }
 
 /// The members of the project `name`.
 pub(crate) async fn list_member(
-    client: &TransportClient,
+    client: &Client,
     name: &str,
 ) -> Result<Vec<ProjectMemberListOutputItem>, Error> {
-    http::get(client, &format!("{}/members/", project(name))).await
+    Ok(client
+        .wire()
+        .get(&format!("{}/members/", project(name)), client.headers())
+        .await?)
 }
 
 /// Give `user` the role `args` says in the project `name`.
 pub(crate) async fn set_member(
-    client: &TransportClient,
+    client: &Client,
     name: &str,
     user: &str,
     args: &ProjectMemberSetArgs,
 ) -> Result<ProjectMemberListOutputItem, Error> {
     let path = format!("{}/members/{}", project(name), segment(user));
-    http::put(client, &path, args).await
+    Ok(client.wire().put(&path, client.headers(), args).await?)
 }
 
 /// Take `user`'s role in the project `name` away.
-pub(crate) async fn remove_member(
-    client: &TransportClient,
-    name: &str,
-    user: &str,
-) -> Result<(), Error> {
-    http::delete(
-        client,
-        &format!("{}/members/{}", project(name), segment(user)),
-    )
-    .await
+pub(crate) async fn remove_member(client: &Client, name: &str, user: &str) -> Result<(), Error> {
+    Ok(client
+        .wire()
+        .delete(
+            &format!("{}/members/{}", project(name), segment(user)),
+            client.headers(),
+        )
+        .await?)
 }

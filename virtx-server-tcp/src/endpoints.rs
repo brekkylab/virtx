@@ -19,35 +19,32 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpStream;
 use tokio::task::AbortHandle;
 
+use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortSide, ProjectCreateArgs,
-    ProjectListOutputItem, ProjectMemberListOutputItem, ProjectMemberSetArgs, Role,
-    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs,
-    SandboxStdinArgs, Step, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListOutputItem, accepts_event_stream, described_type, from_body,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, ProjectCreateArgs, ProjectListOutputItem,
+    ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
-    BuildError, ClientPortTaker, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError,
-    Files, HostPaths, ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT,
-    MachineError, MachineSpec, NoRoom, Os, PublicImages, PublicRegistries, Reference,
-    RegistryClient, RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError,
-    StorageBackend, UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after,
-    signal_number,
+    BuildError, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Digest, Error as FstreeError, Files, HostPaths,
+    ImageConfiguration, ImageHold, ImageStore, ImageStoreError, LOG_LIMIT, MachineError,
+    MachineSpec, NoRoom, Os, PublicImages, PublicRegistries, Reference, RegistryClient,
+    RegistryError, RegistryProxy, RegistryServer, Sandbox, SandboxError, StorageBackend,
+    UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after, signal_number,
 };
 
 use virtx_uvm::ProjectError;
@@ -638,10 +635,10 @@ pub fn router() -> Router {
                 .patch(sandbox_resize)
                 .delete(sandbox_remove),
         )
-        .route("/sandboxes/{id}/ports/{port}", get(sandbox_port))
+        .route("/sandboxes/{id}/ports/{port}", any(sandbox_port))
         .route(
             "/sandboxes/{id}/client-ports/{port}",
-            get(sandbox_client_port),
+            any(sandbox_client_port),
         )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
@@ -1492,50 +1489,8 @@ async fn sandbox_remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// How often a port on local's WebSocket is pinged while no connection comes, so that what stands
-/// between it and its client does not take it for idle.
-const CLIENT_PORT_KEEPALIVE: Duration = Duration::from_secs(15);
-
-/// How long a port on local's WebSocket has to answer the connection said on it, longer than a
-/// client takes to reach its target, before the connection is refused.
-const CLIENT_PORT_ANSWER: Duration = Duration::from_secs(20);
-
-/// The WebSocket subprotocol a port's TCP, and a port on local's, is carried in.
-const TCP_SUBPROTOCOL: &str = "virtx.tcp";
-
-/// How much of a port's TCP one message carries at most.
-const CHUNK: usize = 64 << 10;
-
-/// The WebSocket of `virtx.tcp` a request to a port, in the sandbox or on local, opens; or what it is
-/// answered otherwise: `426` unless it opens a WebSocket, `400` unless of the subprotocol.
-fn tcp_websocket(
-    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-    headers: &HeaderMap,
-) -> Result<WebSocketUpgrade, Box<Response>> {
-    let Ok(upgrade) = upgrade else {
-        return Err(Box::new(StatusCode::UPGRADE_REQUIRED.into_response()));
-    };
-    let offered = headers
-        .get(header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|offered| offered.trim() == TCP_SUBPROTOCOL)
-        });
-    if !offered {
-        let refusal = invalid(format!(
-            "a port is reached over the WebSocket subprotocol {TCP_SUBPROTOCOL}"
-        ));
-        return Err(Box::new(refusal.into_response()));
-    }
-    Ok(upgrade.protocols([TCP_SUBPROTOCOL]))
-}
-
-/// `GET /sandboxes/{id}/ports/{port}`, a WebSocket of `virtx.tcp` carrying a TCP connection to
-/// the port in the sandbox: closed at once, saying why, when the port is not reached, such as
-/// while no machine runs. Refused as [`tcp_websocket`] says, and `404` for a port the sandbox
-/// was not made with.
+/// `/sandboxes/{id}/ports/{port}`, a WebSocket of `virtx.tcp` to the port in the sandbox, as
+/// [`virtx_uvm::ports::port`] answers it.
 async fn sandbox_port(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, port)): Segments<(String, u16)>,
@@ -1543,183 +1498,21 @@ async fn sandbox_port(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Answer {
     let sandbox = home.sandbox(&id)?;
-    let opened =
-        (sandbox.args().ports.iter()).any(|spec| spec.on == PortSide::Sandbox && spec.port == port);
-    if !opened {
-        return Err(not_found(format!(
-            "sandbox {id} was made with no port {port}"
-        )));
-    }
-    let upgrade = match tcp_websocket(upgrade, &headers) {
-        Ok(upgrade) => upgrade,
-        Err(refused) => return Ok(*refused),
-    };
-    let activity = sandbox.activity();
-    Ok(upgrade.on_upgrade(move |mut socket| async move {
-        match activity.sandbox().connect(port).await {
-            Ok(reached) => carry(socket, reached).await,
-            Err(e) => {
-                let frame = CloseFrame {
-                    code: close_code::ERROR,
-                    reason: close_reason(&e.to_string()).into(),
-                };
-                let _ = socket.send(Message::Close(Some(frame))).await;
-            }
-        }
-    }))
+    Ok(virtx_uvm::ports::port(&sandbox, port, &headers, upgrade)?)
 }
 
-/// Carry bytes between `socket` and `reached` until either ends: what is read from `reached` as
-/// binary messages, and the binary messages to it.
-async fn carry(mut socket: WebSocket, mut reached: TcpStream) {
-    let (mut from, mut to) = reached.split();
-    let mut buffer = vec![0u8; CHUNK];
-    loop {
-        tokio::select! {
-            read = from.read(&mut buffer) => match read {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let message = Message::Binary(buffer[..n].to_vec().into());
-                    if socket.send(message).await.is_err() {
-                        break;
-                    }
-                }
-            },
-            received = socket.recv() => match received {
-                Some(Ok(Message::Binary(bytes))) => {
-                    if to.write_all(&bytes).await.is_err() {
-                        break;
-                    }
-                }
-                // Answered by the socket itself.
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                // Text is no TCP's, and anything else is the end.
-                Some(Ok(Message::Text(_) | Message::Close(_)) | Err(_)) | None => break,
-            },
-        }
-    }
-    let _ = socket.send(Message::Close(None)).await;
-}
-
-/// `said` as a close's reason, which a WebSocket holds 123 bytes of: cut at a character's end.
-fn close_reason(said: &str) -> String {
-    let mut end = said.len().min(123);
-    while !said.is_char_boundary(end) {
-        end -= 1;
-    }
-    said[..end].to_owned()
-}
-
-/// `GET /sandboxes/{id}/client-ports/{port}`, a WebSocket of `virtx.tcp`: the port taken by
-/// this client while it is open, and the next connection a process makes to it carried in it.
-/// The connection is said with an empty binary message; the client answers it with another once
-/// it has reached what the port is, and the process's `connect` succeeds then, or closes the
-/// WebSocket, which refuses it. Refused as [`tcp_websocket`] says, and `404` for a port the
-/// sandbox was not made with: before the port is taken, so a request refused takes no
-/// connection.
+/// `/sandboxes/{id}/client-ports/{port}`, a WebSocket of `virtx.tcp` that takes the port on
+/// local, as [`virtx_uvm::ports::client_port`] answers it.
 async fn sandbox_client_port(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, port)): Segments<(String, u16)>,
     headers: HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Answer {
-    let upgrade = match tcp_websocket(upgrade, &headers) {
-        Ok(upgrade) => upgrade,
-        Err(refused) => return Ok(*refused),
-    };
     let sandbox = home.sandbox(&id)?;
-    let taker = sandbox.take_client_port(port)?;
-    Ok(upgrade.on_upgrade(move |socket| take_client_port(socket, sandbox, taker)))
-}
-
-/// Wait on `socket` for the next connection `taker` has, and carry it if the client reaches its
-/// target in [`CLIENT_PORT_ANSWER`]. A client that closes `socket` meanwhile, or answers no ping
-/// before the next, takes none.
-async fn take_client_port(mut socket: WebSocket, sandbox: Arc<Sandbox>, taker: ClientPortTaker) {
-    let mut pinged = false;
-    let connection = loop {
-        tokio::select! {
-            connection = taker.next() => match connection {
-                Some(connection) => break connection,
-                None => {
-                    let _ = socket.send(Message::Close(None)).await;
-                    return;
-                }
-            },
-            received = socket.recv() => match received {
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => pinged = false,
-                _ => return,
-            },
-            () = tokio::time::sleep(CLIENT_PORT_KEEPALIVE) => {
-                if pinged || socket.send(Message::Ping(Bytes::new())).await.is_err() {
-                    return;
-                }
-                pinged = true;
-            }
-        }
-    };
-    drop(taker);
-    if socket.send(Message::Binary(Bytes::new())).await.is_err() {
-        return;
-    }
-    // Dropped unanswered, the connection is refused.
-    let answered = tokio::time::timeout(CLIENT_PORT_ANSWER, async {
-        loop {
-            match socket.recv().await {
-                Some(Ok(Message::Binary(said))) if said.is_empty() => return true,
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                _ => return false,
-            }
-        }
-    });
-    if answered.await != Ok(true) {
-        return;
-    }
-    let _activity = sandbox.activity();
-    let Ok(reached) = connection.accept().await else {
-        return;
-    };
-    carry_halves(socket, reached).await;
-}
-
-/// Carry bytes between `socket` and `reached` until both directions have ended: what is read
-/// from `reached` as binary messages, and its end as an empty one; the binary messages to it, and
-/// an empty one as the client's end, `reached`'s writing shut. Ended at once by a failure, or a
-/// close.
-async fn carry_halves(mut socket: WebSocket, mut reached: TcpStream) {
-    let (mut from, mut to) = reached.split();
-    let mut buffer = vec![0u8; CHUNK];
-    let (mut read_all, mut written_all) = (false, false);
-    while !(read_all && written_all) {
-        tokio::select! {
-            read = from.read(&mut buffer), if !read_all => match read {
-                Ok(n) => {
-                    read_all = n == 0;
-                    let message = Message::Binary(buffer[..n].to_vec().into());
-                    if socket.send(message).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            },
-            received = socket.recv() => match received {
-                Some(Ok(Message::Binary(bytes))) if bytes.is_empty() => {
-                    written_all = true;
-                    let _ = to.shutdown().await;
-                }
-                Some(Ok(Message::Binary(bytes))) => {
-                    if to.write_all(&bytes).await.is_err() {
-                        break;
-                    }
-                }
-                // Answered by the socket itself.
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                // Text is no TCP's, and anything else is the end.
-                _ => break,
-            },
-        }
-    }
-    let _ = socket.send(Message::Close(None)).await;
+    Ok(virtx_uvm::ports::client_port(
+        sandbox, port, &headers, upgrade,
+    )?)
 }
 
 async fn sandbox_job_list(

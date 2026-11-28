@@ -12,9 +12,8 @@ See [Quick start](/docs/hello-world/) for the three ways to reach a server.
 | Member | Does |
 | --- | --- |
 | [`spawn`](#spawn) | Starts a server as a child process and talks to it over its stdin and stdout. |
-| [`connect`](#connect) | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`. |
+| [`connect`](#connect) | Reaches a server over HTTP at its base `url`, sending `auth` with every request, every request in `project`. |
 | [`set_auth`](#set_auth) | Replaces the credentials every later request sends, such as a new token when the server's are short-lived. |
-| [`set_headers`](#set_headers) | Replaces the headers every later request sends. |
 | [`set_project`](#set_project) | Names the project of every later request. |
 | [`clone`](#clone) | Another hold of the same session. |
 | [`close`](#close) | Lets go of this hold; the last one ends the session. |
@@ -53,7 +52,7 @@ pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Opening
 
 ## `connect`
 
-Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`.
+Reaches a server over HTTP at its base `url`, sending `auth` with every request, every request in `project`.
 A token is sent over plain `http` only to this machine's loopback.
 For VirtX cloud, the `url` is `https://cloud.virtx.sh` and `auth` is a `BearerAuth` with an API key from the console; see [Hello world](/docs/hello-world/#virtx-cloud).
 
@@ -62,24 +61,21 @@ For VirtX cloud, the `url` is `https://cloud.virtx.sh` and `auth` is a `BearerAu
 
 ```python
 @classmethod
-def connect(url: str, auth: Auth | None = None, project: str | None = None,
-            headers: Mapping[str, str] | None = None) -> Client
+def connect(url: str, auth: Auth | None = None, project: str | None = None) -> Client
 ```
 
 </TabItem>
 <TabItem label="Node.js" icon="node">
 
 ```ts
-static connect(url: string, auth?: Auth | null, project?: string | null,
-               headers?: Record<string, string>): Client
+static connect(url: string, auth?: Auth | null, project?: string | null): Client
 ```
 
 </TabItem>
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-pub fn connect(url: impl AsRef<str>, auth: Auth, project: Option<&str>,
-               headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>) -> Result<Client, Error>
+pub fn connect(url: impl AsRef<str>, auth: Auth, project: Option<&str>) -> Result<Client, Error>
 ```
 
 </TabItem>
@@ -108,34 +104,6 @@ setAuth(auth: Auth | null): void
 
 ```rust
 pub fn set_auth(&self, auth: Auth) -> Result<(), Error>
-```
-
-</TabItem>
-</Tabs>
-
-## `set_headers`
-
-Replaces the headers every later request sends. Over stdio nothing changes.
-
-<Tabs syncKey="lang">
-<TabItem label="Python" icon="seti:python">
-
-```python
-def set_headers(headers: Mapping[str, str]) -> None
-```
-
-</TabItem>
-<TabItem label="Node.js" icon="node">
-
-```ts
-setHeaders(headers: Record<string, string>): void
-```
-
-</TabItem>
-<TabItem label="Rust" icon="seti:rust">
-
-```rust
-pub fn set_headers(&self, headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>) -> Result<(), Error>
 ```
 
 </TabItem>
@@ -261,7 +229,7 @@ pub fn ensure_virtx() -> Result<Call<PathBuf>, Error>
 
 - **None:** no credentials.
 - **A bearer token:** sent as it is. It isn't refreshed; replace it with `set_auth` before it expires.
-- **A command:** the client runs it to get a token, and runs it again when the token is about to expire or the server rejects it. On a rerun after a rejection, `VIRTX_TOKEN_REFUSED` is set in the command's environment.
+- **A command:** the client runs it to get a token, and runs it again when the token is about to expire or the server rejects it. On a rerun after a rejection, `TOKEN_REFUSED` is set in the command's environment.
 
 | Python | Node.js | Rust |
 | --- | --- | --- |

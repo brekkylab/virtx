@@ -86,18 +86,9 @@ const SIGNATURES = {
   ],
   virtx_client_connect: [
     'int',
-    [
-      'const char *',
-      'uint8_t *',
-      'size_t',
-      'const char **',
-      'size_t',
-      koffi.out(koffi.pointer('uintptr_t')),
-      Out,
-    ],
+    ['const char *', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
   virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
-  virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
   virtx_client_set_project: ['int', ['uintptr_t', 'const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['uintptr_t', ['uintptr_t']],
@@ -527,26 +518,15 @@ class Client {
   }
 
   // Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
-  // it wants as `{ type: 'bearer', token }` or null for none, `project`, the project every
-  // request is in (the user's own without one), and `headers`, a name to a value,
-  // whatever else it asks of each request, with every request. `Authorization` is `auth`'s, and
-  // `virtx-project` names `project`, over one given as a header. Refused when a token would go
-  // in the clear: over `http` to any host but this machine.
-  static connect(url, auth = null, project = null, headers = {}) {
+  // it wants as `{ type: 'bearer', token }` or null for none, and `project`, the project every
+  // request is in (the user's own without one), with every request. Refused when a token would
+  // go in the clear: over `http` to any host but this machine.
+  static connect(url, auth = null, project = null) {
     const lib = library()
     const bytes = authBytes(auth)
-    const strings = Object.entries(headers).flat()
     const raw = [0]
     const error = {}
-    const status = lib.virtx_client_connect(
-      url,
-      bytes,
-      bytes.length,
-      strings,
-      strings.length / 2,
-      raw,
-      error,
-    )
+    const status = lib.virtx_client_connect(url, bytes, bytes.length, raw, error)
     const client = opening(lib, status, raw, error)
     try {
       client.setProject(project)
@@ -568,26 +548,8 @@ class Client {
     if (status !== OK) this._lib.take(status, error)
   }
 
-  // Send `headers`, a name to a value, with every request from now on, in place of those given
-  // at `connect`. A forwarder already open sends them with its next connection. Over stdio,
-  // where none are sent, nothing changes. A header that cannot be sent throws, the headers
-  // unchanged.
-  setHeaders(headers) {
-    const strings = Object.entries(headers).flat()
-    const error = {}
-    const status = this._lib.virtx_client_set_headers(
-      this._held(),
-      strings,
-      strings.length / 2,
-      error,
-    )
-    if (status !== OK) this._lib.take(status, error)
-  }
-
-  // Name `project` in every request from now on, over either transport, in place of a
-  // `virtx-project` among the headers given. With null, that header names it where there is one,
-  // and otherwise none is named, for the user's own project. A name no header carries throws,
-  // the project unchanged.
+  // Name `project` in every request from now on, over either transport. With null, none is
+  // named, for the user's own project. A name no header carries throws, the project unchanged.
   setProject(project) {
     const error = {}
     const status = this._lib.virtx_client_set_project(this._held(), project, error)

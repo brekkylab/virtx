@@ -64,7 +64,7 @@ impl Served {
         let auth = Auth::Bearer {
             token: token.into(),
         };
-        Client::connect(&self.url, auth, Some(project), [] as [(&str, &str); 0]).unwrap()
+        Client::connect(&self.url, auth, Some(project)).unwrap()
     }
 
     /// `method` sent to `path` as `token` in `project`: the status, and the body.

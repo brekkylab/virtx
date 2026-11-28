@@ -63,6 +63,9 @@ anyhow = "1"
 # client; a member takes `server`.
 virtx-core = { path = "virtx-core", default-features = false }
 virtx-uvm = { path = "virtx-uvm" }
+# HTTP/2 between client and server, over TCP or over a child's stdio, both ends of it. No
+# default features, which are its client; a member takes `client` or `server`.
+http-over-x = { git = "https://github.com/ailoy-co/http-over-x", rev = "266037f82382f1d90a1ae694e73df5ddf50880d8", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 tokio = "1"

@@ -23,31 +23,23 @@ serde = { version = "1", features = ["derive"] }
 # Every body is JSON, and a log entry is read as one before it is told a kind this version knows.
 serde_json = "1"
 
-# HTTP over TCP for the client. The same reqwest 0.13 and rustls the `virtx` crate uses.
+# The wire: HTTP/2 over TCP or over a child's stdio, a refusal, a job's log as an event stream
+# and a WebSocket, both ends of it. A log's entry is always built; the client's end is `client`,
+# the server's `server`.
+http-over-x = { workspace = true }
+# The server's release archive, fetched when this host has none, and signing in from the
+# `virtx` command. The same reqwest 0.13 and rustls the `virtx` crate uses.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
-# HTTP/2 over stdio for both ends, and the server's end of either transport.
-hyper = { version = "1", optional = true }
-hyper-util = { version = "0.1", features = ["tokio"], optional = true }
-# The requests and responses both transports carry, and a method's `Extensions`.
+# The requests and responses the wire carries, and the server's end of a request.
 bytes = { version = "1", optional = true }
 http = { version = "1", optional = true }
 http-body = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
-# A job's log is a `text/event-stream`, read and written as SSE.
+# A job's log answered with its exec, read as SSE.
 sse-stream = { version = "0.2", optional = true }
-# Which member of a request's body did not read, for the server's refusal of it.
-serde_path_to_error = { version = "0.1", optional = true }
 # `Stream`, which a job's log is, and the macro that writes one.
-futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "sink"], optional = true }
 async-stream = { version = "0.3", optional = true }
-# The framing of a port's WebSocket, whose handshake the HTTP client sends: no TLS or
-# connecting of its own.
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"], optional = true }
-# The files endpoint is WebDAV: a `PROPFIND` answers XML, its dates are HTTP dates, and each
-# segment of a path is percent-encoded.
-roxmltree = { version = "0.21", optional = true }
-httpdate = { version = "1", optional = true }
-percent-encoding = { version = "2", optional = true }
 # A session brings its own runtime, since C calls in without one. `rt-multi-thread` so the
 # session's tasks run between C calls, not only inside one.
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"], optional = true }
@@ -72,9 +64,8 @@ libc = { version = "0.2", optional = true }
 cbindgen = { version = "0.29", default-features = false }
 
 [dev-dependencies]
-# What serves the transport tests' routers, over HTTP and as the hyper service stdio serves.
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
-hyper-util = { version = "0.1", features = ["service"] }
+# What serves the transport tests' routers, over HTTP/2 and in the test's own process.
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio", "ws"] }
 # Names no two of the ensure tests' scratch directories alike.
 uuid = { version = "1", features = ["v4"] }
 # A test of how long a request is sent again for runs on a clock it moves on itself.
@@ -90,43 +81,26 @@ virtx-core = { path = ".", features = ["server"] }
 # through `virtx_cli_main`.
 default = ["ffi", "cli"]
 client = [
+    "http-over-x/client",
+    "http-over-x/webdav",
     "dep:reqwest",
-    "dep:hyper",
-    "hyper/client",
-    "hyper/http2",
-    "dep:hyper-util",
     "dep:bytes",
     "dep:http",
+    "dep:http-body",
     "dep:http-body-util",
     "dep:sse-stream",
     "dep:futures-util",
     "dep:async-stream",
     "dep:tokio",
-    "dep:tokio-tungstenite",
     "dep:tar",
     "dep:flate2",
     "dep:sha2",
-    "dep:roxmltree",
-    "dep:httpdate",
-    "dep:percent-encoding",
 ]
-server = [
-    "dep:hyper",
-    "hyper/server",
-    "hyper/http2",
-    "dep:hyper-util",
-    "dep:bytes",
-    "dep:http",
-    "dep:http-body",
-    "dep:tokio",
-    "dep:serde_path_to_error",
-    "dep:futures-util",
-]
+server = ["http-over-x/server"]
 ffi = ["client"]
-# For other crates' tests alone: `Client::over_stream`, a client over an in-memory pipe to a server
-# served in the test's own process. Taken only as a dev-dependency's feature, it is in no build
-# but a test's.
-test-util = ["client"]
+# For other crates' tests alone: `Client::embed`, a client of a server served in the test's own
+# process. Taken only as a dev-dependency's feature, it is in no build but a test's.
+test-util = ["client", "http-over-x/server"]
 cli = [
     "client",
     "dep:clap",

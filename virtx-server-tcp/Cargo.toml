@@ -13,6 +13,9 @@ build = "../virtx-server-stdio/build.rs"
 gpu = ["virtx-uvm/gpu"]
 
 [dependencies]
+# The servers' end of the wire: a request's body read as its args, a job's log as an event
+# stream, and stdio served.
+http-over-x = { workspace = true, features = ["server"] }
 anyhow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }

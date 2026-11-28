@@ -110,7 +110,7 @@ pub fn local(&self) -> &str
 
 Why the last connection through the forwarder that failed did: its WebSocket refused, closed before the port sent a byte, or its target not reached, with the server's reason if it gave one. The message names the port, and `status` is the server's when it refused the WebSocket. It is none until a connection fails, and none again once a later connection reaches the port. Each failure is also logged as a warning.
 
-A server on this machine reaches the port itself, not through the forwarder, so a port in the sandbox at the server's own address, and a port on local over stdio, have no `last_error`.
+A port in the sandbox reached at a server's own address, its `url`, goes through no forwarder, so it has no `last_error`.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">

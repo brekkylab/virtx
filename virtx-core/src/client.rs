@@ -1,17 +1,23 @@
-//! The typed client: each request the protocol lists, as a call over a [`TransportClient`], made by
-//! the module of what it names: [`project`](crate::project), [`image`](crate::image),
+//! The typed client: the server's endpoints over [`http_over_x::Client`], which only opening
+//! tells apart, and the project every request names on it; and each request the protocol lists,
+//! as a call made by the module of what it names: [`project`](crate::project), [`image`](crate::image),
 //! [`volume`](crate::volume) and [`sandbox`](crate::sandbox), and the files of a volume or a
 //! sandbox over WebDAV.
 
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::PathBuf,
+    sync::{PoisonError, RwLock},
+};
 
 use bytes::Bytes;
 use futures_util::Stream;
-use http::HeaderMap;
+use http::{HeaderMap, HeaderName, HeaderValue};
 use tokio::process::Command;
 
 use crate::{
-    Auth, Error, LogEntry,
+    Auth, Error, LogEntry, PROJECT_HEADER,
+    files::{DirEntry, FileRoot, Metadata},
     image::{
         self, Event, ImageBuildArgs, ImageDownloadOutput, ImageJob, ImageJobEntry,
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
@@ -25,7 +31,6 @@ use crate::{
         self, Sandbox, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxJob,
         SandboxJobEntry, SandboxResizeArgs, SandboxResources, SandboxSignalArgs, SandboxStdinArgs,
     },
-    transport::{DirEntry, FileRoot, Metadata, TransportClient, webdav},
     volume::{
         self, MountSource, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
         VolumeMountListOutputItem,
@@ -34,38 +39,45 @@ use crate::{
 
 /// A client of one server, over stdio or HTTP.
 pub struct Client {
-    pub(crate) inner: TransportClient,
+    wire: http_over_x::Client,
+    /// The project every request names, over either transport: the user's own project while
+    /// there is none.
+    project: RwLock<Option<HeaderValue>>,
 }
 
 impl Client {
-    /// Start `command` as the server, and talk to it over its stdin and stdout. Must be called
-    /// inside a tokio runtime.
-    pub fn spawn(command: impl Into<Command>) -> io::Result<Client> {
-        let inner = TransportClient::spawn(command)?;
-        Ok(Client { inner })
-    }
-
-    /// Talk to the server at the other end of `io`, one HTTP/2 connection as over a server's
-    /// stdio. Under the `test-util` feature, for tests alone: a server served in the test's own
-    /// process with [`serve_stdio`](crate::serve_stdio), over an in-memory pipe. Must be called
-    /// inside a tokio runtime.
-    #[cfg(feature = "test-util")]
-    pub fn over_stream<T>(io: T) -> Client
-    where
-        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
-    {
+    fn new(wire: http_over_x::Client) -> Client {
         Client {
-            inner: TransportClient::over(io),
+            wire,
+            project: RwLock::new(None),
         }
     }
 
+    /// Start `command`, a [`std::process::Command`] or a tokio one, as the server, and talk to
+    /// it over its stdin and stdout: whatever `command` set for those two is replaced, and it
+    /// runs in a process group of its own, out of reach of the terminal's Ctrl-C. The rest of it
+    /// (arguments, environment, directory, stderr) is the caller's. Must be called inside a
+    /// tokio runtime.
+    pub fn spawn(command: impl Into<Command>) -> io::Result<Client> {
+        http_over_x::Client::spawn(command).map(Client::new)
+    }
+
+    /// Talk to the server `wire` reaches, as over a server's stdio. Under the `test-util`
+    /// feature, or in this crate's tests: a server served in the test's own process with
+    /// [`http_over_x::Client::embed`].
+    #[cfg(any(feature = "test-util", all(test, feature = "server")))]
+    pub fn over(wire: http_over_x::Client) -> Client {
+        Client::new(wire)
+    }
+
     /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
-    /// credentials it wants, and `headers`, whatever else it asks of each request, with every
-    /// request. `Authorization` is `auth`'s, over one given as a header. Refused when a token
-    /// would go in the clear: over `http` to any host but this machine.
-    pub fn connect(url: &str, auth: Auth, headers: HeaderMap) -> Result<Client, Error> {
-        let inner = TransportClient::connect(url, auth, headers)?;
-        Ok(Client { inner })
+    /// credentials it wants, with every request. Nothing is sent until the first request.
+    /// Refused when a token would go in the clear: over `http` to any host but this machine.
+    pub fn connect(url: &str, auth: Auth) -> Result<Client, Error> {
+        Ok(Client::new(http_over_x::Client::connect(
+            url,
+            auth_sent(auth),
+        )?))
     }
 
     /// Send `auth` with every request from now on, in place of what was given at
@@ -73,28 +85,57 @@ impl Client {
     /// already open sends it with its next connection. Over stdio, where none is sent, nothing
     /// changes. Refused as at `connect`, the auth unchanged.
     pub fn set_auth(&self, auth: Auth) -> Result<(), Error> {
-        self.inner.set_auth(auth)
-    }
-
-    /// Send `headers` with every request from now on, in place of those given at
-    /// [`connect`](Self::connect). A forwarder already open sends them with its next
-    /// connection. Over stdio, where none are sent, nothing changes.
-    pub fn set_headers(&self, headers: HeaderMap) {
-        self.inner.set_headers(headers);
+        Ok(self.wire.set_auth(auth_sent(auth))?)
     }
 
     /// Name `project` in every request from now on, over either transport -- a project of the
-    /// user's by name, or any by its id -- in place of a `virtx-project` among the headers given.
-    /// With `None`, that header names it where there is one, and otherwise none is named, for
-    /// the user's own project, [`DEFAULT_PROJECT`](crate::DEFAULT_PROJECT). Refused for a name no
-    /// header carries, the project unchanged.
+    /// user's by name, or any by its id. With `None`, none is named, for the user's own project,
+    /// [`DEFAULT_PROJECT`](crate::DEFAULT_PROJECT). Refused for a name no header carries, the
+    /// project unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
-        self.inner.set_project(project)
+        let project = project
+            .map(HeaderValue::from_str)
+            .transpose()
+            .map_err(|_| Error::Client(format!("{project:?} is no project's name")))?;
+        *self.project.write().unwrap_or_else(PoisonError::into_inner) = project;
+        Ok(())
+    }
+
+    /// What every request carries beside its own: the project, where one is set.
+    pub(crate) fn headers(&self) -> HeaderMap {
+        let project = self.project.read().unwrap_or_else(PoisonError::into_inner);
+        let name = HeaderName::from_static(PROJECT_HEADER);
+        HeaderMap::from_iter(project.clone().map(|project| (name, project)))
+    }
+
+    /// Send `request` to whichever endpoint its URI, a path under the server's base, names,
+    /// naming the project set, as [`http_over_x::Client::send`] sends it.
+    pub(crate) async fn send(
+        &self,
+        mut request: http::Request<http_over_x::Body>,
+    ) -> Result<http::Response<http_over_x::Body>, Error> {
+        request.headers_mut().extend(self.headers());
+        Ok(self.wire.send(request).await?)
+    }
+
+    /// The client the requests go by, for what it speaks itself: JSON, a log, a WebSocket.
+    pub(crate) fn wire(&self) -> &http_over_x::Client {
+        &self.wire
+    }
+
+    /// The files of `root`, over WebDAV, naming the project set.
+    fn files(&self, root: &FileRoot) -> http_over_x::webdav::Files<'_> {
+        let (kind, name) = match root {
+            FileRoot::Volume(name) => ("volumes", name),
+            FileRoot::Sandbox(id) => ("sandboxes", id),
+        };
+        let base = format!("/{kind}/{}/files", http_over_x::segment(name));
+        self.wire.webdav(&base, self.headers())
     }
 
     /// Every project the client has a role in, with the role.
     pub async fn list_project(&self) -> Result<Vec<ProjectListOutputItem>, Error> {
-        project::client::list(&self.inner).await
+        project::client::list(self).await
     }
 
     /// Make the project `name`, the client its owner.
@@ -103,19 +144,19 @@ impl Client {
         name: impl Into<String>,
     ) -> Result<ProjectListOutputItem, Error> {
         let args = ProjectCreateArgs { name: name.into() };
-        project::client::create(&self.inner, &args).await
+        project::client::create(self, &args).await
     }
 
     /// The project `name` names -- a project of the user's by name, or any by its id -- with the
     /// client's role in it.
     pub async fn get_project(&self, name: impl AsRef<str>) -> Result<ProjectListOutputItem, Error> {
-        project::client::get(&self.inner, name.as_ref()).await
+        project::client::get(self, name.as_ref()).await
     }
 
     /// Delete the project `name` names, as [`get_project`](Self::get_project) reads it, and
     /// everything in it.
     pub async fn remove_project(&self, name: impl AsRef<str>) -> Result<(), Error> {
-        project::client::remove(&self.inner, name.as_ref()).await
+        project::client::remove(self, name.as_ref()).await
     }
 
     /// The members of `project`, with their roles.
@@ -123,7 +164,7 @@ impl Client {
         &self,
         project: impl AsRef<str>,
     ) -> Result<Vec<ProjectMemberListOutputItem>, Error> {
-        project::client::list_member(&self.inner, project.as_ref()).await
+        project::client::list_member(self, project.as_ref()).await
     }
 
     /// Give `user` `role` in `project`, adding them if they are no member.
@@ -134,7 +175,7 @@ impl Client {
         role: Role,
     ) -> Result<ProjectMemberListOutputItem, Error> {
         let args = ProjectMemberSetArgs { role };
-        project::client::set_member(&self.inner, project.as_ref(), user.as_ref(), &args).await
+        project::client::set_member(self, project.as_ref(), user.as_ref(), &args).await
     }
 
     /// Take `user`'s role in `project` away.
@@ -143,7 +184,7 @@ impl Client {
         project: impl AsRef<str>,
         user: impl AsRef<str>,
     ) -> Result<(), Error> {
-        project::client::remove_member(&self.inner, project.as_ref(), user.as_ref()).await
+        project::client::remove_member(self, project.as_ref(), user.as_ref()).await
     }
 
     /// Start building `recipe`, to point `reference` at what it builds. Its log is
@@ -157,7 +198,7 @@ impl Client {
             recipe,
             reference: reference.into(),
         };
-        image::client::build(&self.inner, &args).await
+        image::client::build(self, &args).await
     }
 
     /// Start pulling `reference` from its registry, to point it at what it pulls; without
@@ -171,7 +212,7 @@ impl Client {
             reference: reference.into(),
             auth,
         };
-        image::client::pull(&self.inner, &args).await
+        image::client::pull(self, &args).await
     }
 
     /// Start pushing the image `reference` points at to the registry `reference` names;
@@ -186,22 +227,22 @@ impl Client {
             reference: reference.into(),
             auth,
         };
-        image::client::push(&self.inner, &args).await
+        image::client::push(self, &args).await
     }
 
     /// Every image job the server holds.
     pub async fn list_image_job(&self) -> Result<Vec<ImageJob>, Error> {
-        image::client::list_job(&self.inner).await
+        image::client::list_job(self).await
     }
 
     /// The image job `id`.
     pub async fn get_image_job(&self, id: impl AsRef<str>) -> Result<ImageJob, Error> {
-        image::client::get_job(&self.inner, id.as_ref()).await
+        image::client::get_job(self, id.as_ref()).await
     }
 
     /// Cancel the image job `id` if it runs, and forget it.
     pub async fn remove_image_job(&self, id: impl AsRef<str>) -> Result<(), Error> {
-        image::client::remove_job(&self.inner, id.as_ref()).await
+        image::client::remove_job(self, id.as_ref()).await
     }
 
     /// The log of the image job `id`, from its start or after its `after`th entry, until its
@@ -212,12 +253,12 @@ impl Client {
         id: &str,
         after: Option<u64>,
     ) -> impl Stream<Item = Result<LogEntry<ImageJobEntry>, Error>> + Unpin + Send + use<'_> {
-        Box::pin(image::client::job_log(&self.inner, id, after))
+        Box::pin(image::client::job_log(self, id, after))
     }
 
     /// Every tag on the server's images, as `name:tag`, with the digest it points at.
     pub async fn list_image(&self) -> Result<Vec<ImageListOutputItem>, Error> {
-        oci::list(&self.inner).await
+        oci::list(self).await
     }
 
     /// Point the tag `target` (`name:tag`) at the image `source` names (`name:tag` or
@@ -227,19 +268,19 @@ impl Client {
         source: impl AsRef<str>,
         target: impl AsRef<str>,
     ) -> Result<(), Error> {
-        oci::tag(&self.inner, source.as_ref(), target.as_ref()).await
+        oci::tag(self, source.as_ref(), target.as_ref()).await
     }
 
     /// Remove the tag `reference` (`name:tag`), leaving the image it points at. The last tag of
     /// an image a sandbox or a build uses is refused `409`, and kept.
     pub async fn untag_image(&self, reference: impl AsRef<str>) -> Result<(), Error> {
-        oci::untag(&self.inner, reference.as_ref()).await
+        oci::untag(self, reference.as_ref()).await
     }
 
     /// Remove the image `reference` names (`name:tag` or `name@algorithm:hex`), and every tag on
     /// it in that name. An image a sandbox or a build uses is refused `409`, with nothing removed.
     pub async fn remove_image(&self, reference: impl AsRef<str>) -> Result<(), Error> {
-        oci::remove(&self.inner, reference.as_ref()).await
+        oci::remove(self, reference.as_ref()).await
     }
 
     /// Write the image `reference` names to `path`, as an OCI image layout in a tar archive,
@@ -252,7 +293,7 @@ impl Client {
         path: impl Into<PathBuf>,
     ) -> impl Stream<Item = Result<Event<ImageDownloadOutput, String>, Error>> + Unpin + Send + '_
     {
-        Box::pin(oci::download(&self.inner, reference.into(), path.into()))
+        Box::pin(oci::download(self, reference.into(), path.into()))
     }
 
     /// Upload the image in the archive at `path`, an OCI image layout in a tar archive, and
@@ -266,17 +307,17 @@ impl Client {
         reference: impl Into<String>,
     ) -> impl Stream<Item = Result<Event<ImageUploadOutput, String>, Error>> + Unpin + Send + '_
     {
-        Box::pin(oci::upload(&self.inner, path.into(), reference.into()))
+        Box::pin(oci::upload(self, path.into(), reference.into()))
     }
 
     /// Delete each image no tag points at and no sandbox uses, and what only such images held.
     pub async fn prune_image(&self) -> Result<ImagePruneOutput, Error> {
-        image::client::prune(&self.inner).await
+        image::client::prune(self).await
     }
 
     /// Every volume the server holds.
     pub async fn list_volume(&self) -> Result<Vec<VolumeListOutputItem>, Error> {
-        volume::client::list(&self.inner).await
+        volume::client::list(self).await
     }
 
     /// Keep a new, empty volume under `name`; without one the server picks it.
@@ -287,17 +328,17 @@ impl Client {
         let args = VolumeCreateArgs {
             name: name.map(Into::into),
         };
-        volume::client::create(&self.inner, &args).await
+        volume::client::create(self, &args).await
     }
 
     /// The volume `name`.
     pub async fn get_volume(&self, name: impl AsRef<str>) -> Result<VolumeListOutputItem, Error> {
-        volume::client::get(&self.inner, name.as_ref()).await
+        volume::client::get(self, name.as_ref()).await
     }
 
     /// Delete the volume `name` and everything in it.
     pub async fn remove_volume(&self, name: impl AsRef<str>) -> Result<(), Error> {
-        volume::client::remove(&self.inner, name.as_ref()).await
+        volume::client::remove(self, name.as_ref()).await
     }
 
     /// The mounts in `volume`, without their credentials.
@@ -305,7 +346,7 @@ impl Client {
         &self,
         volume: impl AsRef<str>,
     ) -> Result<Vec<VolumeMountListOutputItem>, Error> {
-        volume::client::list_mount(&self.inner, volume.as_ref()).await
+        volume::client::list_mount(self, volume.as_ref()).await
     }
 
     /// Mount `source` at `path` in `volume`, a directory the mount creates.
@@ -316,7 +357,7 @@ impl Client {
         source: MountSource,
     ) -> Result<VolumeMountListOutputItem, Error> {
         let args = VolumeMountCreateArgs { source };
-        volume::client::create_mount(&self.inner, volume.as_ref(), path.as_ref(), &args).await
+        volume::client::create_mount(self, volume.as_ref(), path.as_ref(), &args).await
     }
 
     /// Take away the mount at `path` in `volume`, leaving its source as it is.
@@ -325,32 +366,41 @@ impl Client {
         volume: impl AsRef<str>,
         path: impl AsRef<str>,
     ) -> Result<(), Error> {
-        volume::client::remove_mount(&self.inner, volume.as_ref(), path.as_ref()).await
+        volume::client::remove_mount(self, volume.as_ref(), path.as_ref()).await
     }
 
     /// What is at `path` in `root`.
     pub async fn stat_file(&self, root: &FileRoot, path: &str) -> Result<Metadata, Error> {
-        webdav::client::stat(&self.inner, root, path).await
+        Ok(self.files(root).stat(path).await?.into())
     }
 
     /// Whether anything is at `path` in `root`.
     pub async fn exists(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
-        webdav::client::exists(&self.inner, root, path).await
+        Ok(self.files(root).exists(path).await?)
     }
 
     /// Whether a file is at `path` in `root`.
     pub async fn is_file(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
-        webdav::client::is_file(&self.inner, root, path).await
+        Ok(self.files(root).is_file(path).await?)
     }
 
     /// Whether a directory is at `path` in `root`.
     pub async fn is_dir(&self, root: &FileRoot, path: &str) -> Result<bool, Error> {
-        webdav::client::is_dir(&self.inner, root, path).await
+        Ok(self.files(root).is_dir(path).await?)
     }
 
     /// The entries of the directory at `path` in `root`.
     pub async fn read_dir(&self, root: &FileRoot, path: &str) -> Result<Vec<DirEntry>, Error> {
-        webdav::client::read_dir(&self.inner, root, path).await
+        Ok(self
+            .files(root)
+            .read_dir(path)
+            .await?
+            .into_iter()
+            .map(|entry| DirEntry {
+                name: entry.name,
+                metadata: entry.meta.into(),
+            })
+            .collect())
     }
 
     /// The file at `path` in `root`, from `offset`, `length` bytes of it or all that is left.
@@ -361,12 +411,12 @@ impl Client {
         offset: u64,
         length: Option<u64>,
     ) -> Result<Bytes, Error> {
-        webdav::client::read(&self.inner, root, path, offset, length).await
+        Ok(self.files(root).read(path, offset, length).await?)
     }
 
     /// The whole file at `path` in `root` as text, which it has to be: UTF-8.
     pub async fn read_text(&self, root: &FileRoot, path: &str) -> Result<String, Error> {
-        webdav::client::read_text(&self.inner, root, path).await
+        Ok(self.files(root).read_text(path).await?)
     }
 
     /// Write `content` as the whole file at `path` in `root`, creating it if it does not
@@ -380,19 +430,19 @@ impl Client {
         content: impl Into<Bytes>,
         if_match: Option<&str>,
     ) -> Result<(), Error> {
-        webdav::client::write(&self.inner, root, path, content, if_match).await
+        Ok(self.files(root).write(path, content, if_match).await?)
     }
 
     /// Create the directory at `path` in `root`, whose parent must exist.
     pub async fn create_dir(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
-        webdav::client::create_dir(&self.inner, root, path).await
+        Ok(self.files(root).create_dir(path).await?)
     }
 
     /// Have the directory at `path` in `root`, as `mkdir -p`: its parents are created as
     /// needed, and one there already is left as it is. Refused with a `405` when a file is at
     /// `path`.
     pub async fn create_dir_all(&self, root: &FileRoot, path: &str) -> Result<(), Error> {
-        webdav::client::create_dir_all(&self.inner, root, path).await
+        Ok(self.files(root).create_dir_all(path).await?)
     }
 
     /// Remove what is at `path` in `root`: a directory with everything in it. With
@@ -403,7 +453,7 @@ impl Client {
         path: &str,
         missing_ok: bool,
     ) -> Result<(), Error> {
-        webdav::client::remove(&self.inner, root, path, missing_ok).await
+        Ok(self.files(root).remove(path, missing_ok).await?)
     }
 
     /// Move what is at `from` in `root` to `to` in it, replacing what is at `to` if
@@ -415,7 +465,7 @@ impl Client {
         to: &str,
         overwrite: bool,
     ) -> Result<(), Error> {
-        webdav::client::rename(&self.inner, root, from, to, overwrite).await
+        Ok(self.files(root).rename(from, to, overwrite).await?)
     }
 
     /// Copy what is at `from` in `root` to `to` in it, a directory with everything in it, as
@@ -427,12 +477,12 @@ impl Client {
         to: &str,
         overwrite: bool,
     ) -> Result<(), Error> {
-        webdav::client::copy(&self.inner, root, from, to, overwrite).await
+        Ok(self.files(root).copy(from, to, overwrite).await?)
     }
 
     /// Every sandbox the server holds.
     pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
-        sandbox::client::list(&self.inner).await
+        sandbox::client::list(self).await
     }
 
     /// Make a sandbox as `args` says; see [`SandboxCreateArgs::new`].
@@ -440,17 +490,17 @@ impl Client {
     /// The image has to be on the server already, pulled or built: this does not pull it, and a
     /// tag the server has no image by is refused with `404`.
     pub async fn create_sandbox(&self, args: &SandboxCreateArgs) -> Result<Sandbox, Error> {
-        sandbox::client::create(&self.inner, args).await
+        sandbox::client::create(self, args).await
     }
 
     /// The sandbox `id`.
     pub async fn get_sandbox(&self, id: impl AsRef<str>) -> Result<Sandbox, Error> {
-        sandbox::client::get(&self.inner, id.as_ref()).await
+        sandbox::client::get(self, id.as_ref()).await
     }
 
     /// The sandbox named `name`, if one is.
     pub async fn find_sandbox(&self, name: impl AsRef<str>) -> Result<Option<Sandbox>, Error> {
-        sandbox::client::find(&self.inner, name.as_ref()).await
+        sandbox::client::find(self, name.as_ref()).await
     }
 
     /// Resize the sandbox `id` as `args` says: its vCPUs and memory from its VM's next boot on,
@@ -461,18 +511,18 @@ impl Client {
         id: impl AsRef<str>,
         args: &SandboxResizeArgs,
     ) -> Result<SandboxResources, Error> {
-        sandbox::client::resize(&self.inner, id.as_ref(), args).await
+        sandbox::client::resize(self, id.as_ref(), args).await
     }
 
     /// Stop the sandbox `id`, end its jobs, and forget it, with everything it wrote outside
     /// its volumes.
     pub async fn remove_sandbox(&self, id: impl AsRef<str>) -> Result<(), Error> {
-        sandbox::client::remove(&self.inner, id.as_ref()).await
+        sandbox::client::remove(self, id.as_ref()).await
     }
 
     /// Every job in the sandbox `id`.
     pub async fn list_sandbox_job(&self, id: impl AsRef<str>) -> Result<Vec<SandboxJob>, Error> {
-        sandbox::client::list_job(&self.inner, id.as_ref()).await
+        sandbox::client::list_job(self, id.as_ref()).await
     }
 
     /// Start a process in the sandbox `id` as `args` says; see [`SandboxExecArgs::new`]. Its
@@ -482,7 +532,7 @@ impl Client {
         id: impl AsRef<str>,
         args: &SandboxExecArgs,
     ) -> Result<SandboxJob, Error> {
-        sandbox::client::exec(&self.inner, id.as_ref(), args).await
+        sandbox::client::exec(self, id.as_ref(), args).await
     }
 
     /// Start a process in the sandbox `id` as `args` says, and read its log: its job, once,
@@ -493,7 +543,7 @@ impl Client {
         id: &str,
         args: &SandboxExecArgs,
     ) -> impl Stream<Item = Result<SandboxExecItem, Error>> + Unpin + Send + use<'_> {
-        Box::pin(sandbox::client::exec_log(&self.inner, id, args))
+        Box::pin(sandbox::client::exec_log(self, id, args))
     }
 
     /// The job `job` in the sandbox `id`.
@@ -502,7 +552,7 @@ impl Client {
         id: impl AsRef<str>,
         job: impl AsRef<str>,
     ) -> Result<SandboxJob, Error> {
-        sandbox::client::get_job(&self.inner, id.as_ref(), job.as_ref()).await
+        sandbox::client::get_job(self, id.as_ref(), job.as_ref()).await
     }
 
     /// Cancel the job `job` in the sandbox `id` if it runs, killing its process, and forget it.
@@ -511,7 +561,7 @@ impl Client {
         id: impl AsRef<str>,
         job: impl AsRef<str>,
     ) -> Result<(), Error> {
-        sandbox::client::remove_job(&self.inner, id.as_ref(), job.as_ref()).await
+        sandbox::client::remove_job(self, id.as_ref(), job.as_ref()).await
     }
 
     /// Send `signal`, such as `SIGTERM`, to the process of the job `job` in the sandbox `id`
@@ -525,7 +575,7 @@ impl Client {
         let args = SandboxSignalArgs {
             signal: signal.into(),
         };
-        sandbox::client::signal_job(&self.inner, id.as_ref(), job.as_ref(), &args).await
+        sandbox::client::signal_job(self, id.as_ref(), job.as_ref(), &args).await
     }
 
     /// Write `data` to the stdin of the process of the job `job` in the sandbox `id`, then
@@ -542,7 +592,7 @@ impl Client {
             data: data.map(Into::into),
             eof,
         };
-        sandbox::client::write_job_stdin(&self.inner, id.as_ref(), job.as_ref(), &args).await
+        sandbox::client::write_job_stdin(self, id.as_ref(), job.as_ref(), &args).await
     }
 
     /// The log of the job `job` in the sandbox `id`, its process's output, from its start or
@@ -553,7 +603,7 @@ impl Client {
         job: &str,
         after: Option<u64>,
     ) -> impl Stream<Item = Result<LogEntry<SandboxJobEntry>, Error>> + Unpin + Send + use<'_> {
-        Box::pin(sandbox::client::job_log(&self.inner, id, job, after))
+        Box::pin(sandbox::client::job_log(self, id, job, after))
     }
 
     /// Forward the port `args` names, on either side of its sandbox: the forwarder, and what
@@ -566,15 +616,24 @@ impl Client {
         crate::PortForwarder,
         impl std::future::Future<Output = ()> + Send + use<'_>,
     ) {
-        crate::PortForwarder::open(&self.inner, args)
+        crate::PortForwarder::open(self, args)
     }
 
-    /// End the session; see [`TransportClient::close`].
+    /// End the session. Over stdio, close the server's stdin and kill it if it has not exited
+    /// within five seconds; over HTTP there is nothing to end.
     pub async fn close(self) {
-        self.inner.close().await;
+        self.wire.close().await;
     }
 }
 
+/// `auth` as the wire sends it.
+fn auth_sent(auth: Auth) -> http_over_x::Auth {
+    match auth {
+        Auth::None => http_over_x::Auth::None,
+        Auth::Bearer { token } => http_over_x::Auth::bearer(token),
+        Auth::Command { program, args } => http_over_x::Auth::command(program, args),
+    }
+}
 #[cfg(feature = "ffi")]
 pub(crate) mod ffi {
     //! [`Client`] behind the C ABI: opening one, sharing it by reference count, and its methods,
@@ -587,7 +646,7 @@ pub(crate) mod ffi {
 
     use bytes::Bytes;
     use futures_util::StreamExt;
-    use http::{HeaderMap, HeaderName, HeaderValue};
+
     use serde::Deserialize;
     use tokio::process::Command;
 
@@ -598,13 +657,13 @@ pub(crate) mod ffi {
             Runtime, VIRTX_OK, VirtxBytes, VirtxFuture, VirtxStream, done, encode, failure, json,
             release, retain, share, start_on_thread, write,
         },
+        files::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         image::{
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
         project::{ProjectCreateArgs, Role},
         sandbox::{SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs},
-        transport::{FileMoveArgs, FilePathArgs, FileReadArgs, FileRemoveArgs, FileWriteArgs},
         volume::{MountSource, VolumeCreateArgs},
     };
 
@@ -760,30 +819,6 @@ pub(crate) mod ffi {
             .map_err(|e| Error::Client(e.to_string()))
     }
 
-    /// The `headers_len` headers in `headers`, each its name then its value, so `2 *
-    /// headers_len` strings.
-    ///
-    /// # Safety
-    ///
-    /// Each of the `2 * headers_len` pointers in `headers` is NUL-terminated UTF-8.
-    unsafe fn header_map(
-        headers: *const *const c_char,
-        headers_len: usize,
-    ) -> Result<HeaderMap, Error> {
-        let mut map = HeaderMap::with_capacity(headers_len);
-        for i in 0..headers_len {
-            let name = unsafe { utf8(*headers.add(2 * i)) }?;
-            let value = unsafe { utf8(*headers.add(2 * i + 1)) }?;
-            map.insert(
-                HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|e| Error::Client(format!("header {name}: {e}")))?,
-                HeaderValue::from_str(value)
-                    .map_err(|e| Error::Client(format!("header {name}: {e}")))?,
-            );
-        }
-        Ok(map)
-    }
-
     /// The `auth_len` bytes at `auth`: `{"type": "bearer", "token": "..."}`, `{"type":
     /// "command", "program": "...", "args": [...]}` for the token a command prints, or null for
     /// none.
@@ -800,33 +835,26 @@ pub(crate) mod ffi {
 
     /// Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
     /// `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-    /// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` or null for none, and
-    /// the `headers_len` headers in `headers` -- each its name
-    /// then its value, so `2 * headers_len` strings -- with every request, and write the
-    /// client, held once, to `client`. The headers are whatever else the server asks of each
-    /// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
-    /// `http` to any host but this machine.
+    /// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` or null for none, with
+    /// every request, and write the client, held once, to `client`. Refused when a token would go
+    /// in the clear: over `http` to any host but this machine.
     ///
     /// # Safety
     ///
-    /// `url` and each of the `2 * headers_len` pointers in `headers` are NUL-terminated UTF-8.
-    /// `auth` is null or `auth_len` readable bytes. `client` is writable. `error` is null or
-    /// writable.
+    /// `url` is NUL-terminated UTF-8. `auth` is null or `auth_len` readable bytes. `client` is
+    /// writable. `error` is null or writable.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn virtx_client_connect(
         url: *const c_char,
         auth: *const u8,
         auth_len: usize,
-        headers: *const *const c_char,
-        headers_len: usize,
         client: *mut *mut VirtxClient,
         error: *mut VirtxBytes,
     ) -> c_int {
         let opened = (|| {
             let url = unsafe { utf8(url) }?;
             let auth = unsafe { self::auth(auth, auth_len) }?;
-            let map = unsafe { header_map(headers, headers_len) }?;
-            Runtime::open(|| Client::connect(url, auth, map))
+            Runtime::open(|| Client::connect(url, auth))
         })();
         unsafe { share(opened.map(VirtxClient), client, error) }
     }
@@ -860,41 +888,8 @@ pub(crate) mod ffi {
         }
     }
 
-    /// Send the `headers_len` headers in `headers`, as `virtx_client_connect` takes them, with
-    /// every request from now on, in place of those sent until now. A forwarder already open
-    /// sends them with its next connection. Over stdio, where none are sent, nothing changes.
-    /// Answers `VIRTX_OK`, or `VIRTX_ERROR` with why a header cannot be sent written to
-    /// `error`, the headers unchanged.
-    ///
-    /// # Safety
-    ///
-    /// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. Each
-    /// of the `2 * headers_len` pointers in `headers` is NUL-terminated UTF-8. `error` is null
-    /// or writable.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn virtx_client_set_headers(
-        client: *mut VirtxClient,
-        headers: *const *const c_char,
-        headers_len: usize,
-        error: *mut VirtxBytes,
-    ) -> c_int {
-        match unsafe { header_map(headers, headers_len) } {
-            Ok(map) => {
-                unsafe { &(*client).0 }.value().set_headers(map);
-                VIRTX_OK
-            }
-            Err(failed) => {
-                let (status, message) = failure(failed);
-                unsafe { write(error, message) };
-                status
-            }
-        }
-    }
-
     /// Name `project`, NUL-terminated UTF-8, in every request from now on, over either
-    /// transport, in place of a `virtx-project` among the headers given. With a null one, that
-    /// header names it where there is one, and otherwise none is named, for the user's own
-    /// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+    /// transport. With a null one, none is named, for the user's own project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
     /// the project unchanged.
     ///
     /// # Safety
@@ -2153,36 +2148,6 @@ pub(crate) mod ffi {
         }
 
         #[test]
-        fn a_header_that_cannot_be_sent_is_refused() {
-            let mut client = ptr::null_mut();
-            let url = c"http://127.0.0.1:9/";
-            let status = unsafe {
-                virtx_client_connect(
-                    url.as_ptr(),
-                    ptr::null(),
-                    0,
-                    ptr::null(),
-                    0,
-                    &mut client,
-                    ptr::null_mut(),
-                )
-            };
-            assert_eq!(status, VIRTX_OK);
-            let mut error = VirtxBytes {
-                data: ptr::null_mut(),
-                len: 0,
-            };
-            let headers = [c"not a name".as_ptr(), c"x".as_ptr()];
-            let status =
-                unsafe { virtx_client_set_headers(client, headers.as_ptr(), 1, &mut error) };
-            assert_eq!(status, crate::ffi::VIRTX_ERROR);
-            let message = unsafe { std::slice::from_raw_parts(error.data, error.len) };
-            assert!(String::from_utf8_lossy(message).contains("not a name"));
-            unsafe { virtx_bytes_free(error) };
-            unsafe { virtx_client_release(client) };
-        }
-
-        #[test]
         fn an_auth_is_taken_as_json_and_refused_as_at_connect() {
             let mut client = ptr::null_mut();
             let url = c"http://127.0.0.1:9/";
@@ -2192,8 +2157,6 @@ pub(crate) mod ffi {
                     url.as_ptr(),
                     bearer.as_ptr(),
                     bearer.len(),
-                    ptr::null(),
-                    0,
                     &mut client,
                     ptr::null_mut(),
                 )
@@ -2222,8 +2185,6 @@ pub(crate) mod ffi {
                     url.as_ptr(),
                     bearer.as_ptr(),
                     bearer.len(),
-                    ptr::null(),
-                    0,
                     &mut client,
                     &mut error,
                 )

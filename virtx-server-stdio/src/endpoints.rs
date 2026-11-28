@@ -16,23 +16,23 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
+use axum::extract::ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection};
 use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
-use futures_util::StreamExt as _;
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::task::{AbortHandle, JoinSet};
 
+use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortSide, ProjectCreateArgs,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, PortSide, ProjectCreateArgs,
     ProjectListOutputItem, Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort,
     SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
-    VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
-    from_body,
+    VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
@@ -284,9 +284,10 @@ pub fn router() -> Router {
                 .patch(sandbox_resize)
                 .delete(sandbox_remove),
         )
+        .route("/sandboxes/{id}/ports/{port}", any(sandbox_port))
         .route(
             "/sandboxes/{id}/client-ports/{port}",
-            get(sandbox_client_port),
+            any(sandbox_client_port),
         )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
@@ -921,59 +922,31 @@ async fn sandbox_remove(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// How long reaching a port on local's target may take before its connection is refused.
-const CLIENT_PORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// `/sandboxes/{id}/ports/{port}`, a WebSocket of `virtx.tcp` to the port in the sandbox, as
+/// [`virtx_uvm::ports::port`] answers it: beside the port's `url`, for a client that carries its
+/// connections over its own connection to this server.
+async fn sandbox_port(
+    Extension(home): Extension<Arc<Home>>,
+    Segments((id, port)): Segments<(String, u16)>,
+    headers: HeaderMap,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Answer {
+    let sandbox = home.sandbox(&id)?;
+    Ok(virtx_uvm::ports::port(&sandbox, port, &headers, upgrade)?)
+}
 
-/// `GET /sandboxes/{id}/client-ports/{port}?target=host:port`: the port taken while the answer
-/// is held, each connection a process makes to it carried to `target` on this machine, the
-/// client's, or `127.0.0.1:{port}` without one, and refused where it is not reached. Answered
-/// `200` with a body that carries nothing and ends once the sandbox is deleted; `400` for a
-/// target that is not `host:port`, and `404` for a port the sandbox was not made with. Let go
-/// of, the connections it carries are closed.
+/// `/sandboxes/{id}/client-ports/{port}`, a WebSocket of `virtx.tcp` that takes the port on
+/// local, as [`virtx_uvm::ports::client_port`] answers it.
 async fn sandbox_client_port(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, port)): Segments<(String, u16)>,
-    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Answer {
-    let target = query
-        .as_deref()
-        .and_then(|query| {
-            form_urlencoded::parse(query.as_bytes())
-                .find(|(key, _)| key == "target")
-                .map(|(_, target)| target.into_owned())
-        })
-        .unwrap_or_else(|| format!("127.0.0.1:{port}"));
-    let named = target
-        .rsplit_once(':')
-        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
-    if !named {
-        return Err(invalid(format!("target: {target:?} is not host:port")));
-    }
     let sandbox = home.sandbox(&id)?;
-    let taker = sandbox.take_client_port(port)?;
-    let taking = async move {
-        let mut carried = JoinSet::new();
-        while let Some(connection) = taker.next().await {
-            while carried.try_join_next().is_some() {}
-            let (target, activity) = (target.clone(), sandbox.activity());
-            carried.spawn(async move {
-                let reaching = TcpStream::connect(&target);
-                // Not reached, dropped: refused, as a port nothing listens on is.
-                let Ok(Ok(mut reached)) =
-                    tokio::time::timeout(CLIENT_PORT_CONNECT_TIMEOUT, reaching).await
-                else {
-                    return;
-                };
-                let _activity = activity;
-                if let Ok(mut carried) = connection.accept().await {
-                    let _ = tokio::io::copy_bidirectional(&mut carried, &mut reached).await;
-                }
-            });
-        }
-    };
-    let body = futures_util::stream::once(taking)
-        .filter_map(|()| std::future::ready(None::<Result<Bytes, std::io::Error>>));
-    Ok(Body::from_stream(body).into_response())
+    Ok(virtx_uvm::ports::client_port(
+        sandbox, port, &headers, upgrade,
+    )?)
 }
 
 async fn sandbox_job_list(

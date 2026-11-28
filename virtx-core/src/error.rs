@@ -144,6 +144,30 @@ impl Error {
     }
 }
 
+/// The wire's error, as this crate's: the members of a refusal this client knows kept.
+#[cfg(feature = "client")]
+impl From<http_over_x::Error> for Error {
+    fn from(error: http_over_x::Error) -> Self {
+        match error {
+            http_over_x::Error::Transport(reason) => Error::Transport(reason),
+            http_over_x::Error::Client(reason) => Error::Client(reason),
+            http_over_x::Error::Status(status, said, members) => {
+                let written = members.get("written").and_then(serde_json::Value::as_u64);
+                Error::Status(status, said, Members { written })
+            }
+            http_over_x::Error::Refusal {
+                status,
+                description,
+                body,
+            } => Error::Refusal {
+                status,
+                description,
+                body,
+            },
+        }
+    }
+}
+
 #[cfg(all(test, feature = "client"))]
 mod tests {
     use super::*;
@@ -176,7 +200,7 @@ mod tests {
         assert_eq!(
             Error::Refusal {
                 status: 503,
-                description: "not a virtx answer".into(),
+                description: "not the server's answer".into(),
                 body: None,
             }
             .status(),

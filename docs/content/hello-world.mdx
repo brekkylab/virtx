@@ -188,7 +188,6 @@ let client = Client::connect(
     "https://cloud.virtx.sh",
     Auth::Bearer { token: std::env::var("VIRTX_API_KEY")? },
     None,
-    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -243,7 +242,6 @@ let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
-    [] as [(&str, &str); 0],
 )?;
 ```
 

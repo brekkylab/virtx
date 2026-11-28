@@ -997,6 +997,18 @@ mod tests {
             send("GET", "sandboxes/", &[], "").await,
             StatusCode::UNAUTHORIZED
         );
+
+        // A grant's token naming a project no one has is refused as one no longer given, and
+        // leaves nothing of that project behind.
+        let nobody_s = ProjectId::new();
+        let answered = reqwest::Client::new()
+            .get(format!("{}sandboxes/", served.url))
+            .bearer_auth(format!("vxg.{nobody_s}.secret"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::UNAUTHORIZED);
+        assert!(!ProjectStore::new(&served.home).path(&nobody_s).exists());
     }
 
     /// What `job` failed with, once it has ended.

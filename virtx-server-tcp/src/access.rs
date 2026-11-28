@@ -236,6 +236,13 @@ impl Access {
             let (_, home) = self.home(headers).await?;
             return Ok((home, None));
         };
+        let known = self.membership.project(&project).await.map_err(|e| {
+            eprintln!("reading project {project}: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        if known.is_none() {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
         let home = self.home_of(&project).await.map_err(|e| {
             eprintln!("making project {project}'s home: {e:#}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -284,6 +291,9 @@ impl Access {
             (named.split_once('.')).and_then(|(project, _)| project.parse::<ProjectId>().ok());
         let (home, who, member) = match by_id {
             Some(project) => {
+                if self.membership.project(&project).await?.is_none() {
+                    return Err(none());
+                }
                 let home = self.home_of(&project).await.map_err(|e| {
                     eprintln!("making project {project}'s home: {e:#}");
                     refusal(StatusCode::INTERNAL_SERVER_ERROR)
@@ -893,6 +903,14 @@ mod tests {
             refused(None, None, &none).await,
             Some(StatusCode::NOT_FOUND)
         );
+        let nobody_s = ProjectId::new();
+        let theirs = format!("{nobody_s}.p1");
+        assert_eq!(
+            refused(None, None, &theirs).await,
+            Some(StatusCode::NOT_FOUND),
+            "no such project"
+        );
+        assert!(!store.path(&nobody_s).exists(), "no such project's home");
         assert_eq!(
             refused(None, None, "app").await,
             unauthorized,

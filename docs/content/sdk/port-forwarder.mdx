@@ -166,7 +166,7 @@ pub fn wait_closed(&self) -> Closed // awaited, or .wait() without a runtime: Er
 
 ## `close`
 
-Stops forwarding; the sandbox keeps its port, and another forwarder can open it again. Closing twice does nothing. In Rust, dropping it does the same.
+Stops forwarding; the sandbox keeps its port, and another forwarder can open it again. Closing twice does nothing. Rust has no `close`: dropping the forwarder stops it.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
@@ -187,7 +187,7 @@ close(): void
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-impl Drop for PortForwarder
+drop(forwarder) // no close method: dropping the PortForwarder stops forwarding
 ```
 
 </TabItem>
@@ -200,7 +200,7 @@ A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws o
 | Error | From | Cause |
 | --- | --- | --- |
 | `404` | `open` with `on="local"` | The sandbox wasn't made with this port on local. Create it with the port in `ports`, on local. |
-| `404` | `wait_closed` | The sandbox of a port on local is gone. |
+| `404` | `wait_closed`, as the value it returns | The sandbox of a port on local is gone. |
 | A connection closes at once, and `last_error` is set | Connections through the forwarder | Nothing listens on the port in the sandbox yet, or, for a port on local, nothing listens at `local`. Start the service first, then connect again. |
 
 Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

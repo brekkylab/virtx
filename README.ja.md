@@ -27,9 +27,20 @@
 
 <br>
 
-virtxは、AIエージェントのためのmicroVMサンドボックスです。自分のコードから使い捨てのLinux VMを立ち上げてタスクを実行でき、VMは手元のマシン、自分で運用するサーバー、またはvirtx cloudで動かせます。
+virtxは、AIエージェントのためのmicroVMサンドボックスです。
+自分のコードからサンドボックスを作り、その上にユーザー向けのアプリを作れます。
 
-手元のマシンには入れたくない重い依存関係が必要な処理や、AIエージェントが自分の判断で実行するコマンドのように、そもそも手元で動かしたくないコードを扱うときに役立ちます。VMの中でインストールしたものや変更した内容はVMを削除すると消え、残るのは保存しておいたボリュームに書き込んだものだけです。
+サンドボックスは使い捨てのLinux VMで、手元のマシン、自分で運用するサーバー、またはvirtx cloudで動かせます。
+AIエージェントが自分の判断で実行するコマンドのように、手元で動かしたくないものをその中で実行します。
+サンドボックスの中でインストールしたものや変更した内容は削除すると消え、残るのは保存しておいたボリュームに書き込んだものだけです。
+
+virtxでアプリを作ると、そのアプリのユーザーもサンドボックスを使えます。
+各ユーザーのサンドボックスの中身をプロジェクトにパッケージとして置いておけば、アプリがそこからユーザーごとに専用のサンドボックスを作ります。
+間に自分で運用するバックエンドは要りません。
+
+<p align="center">
+  <img alt="The developer keeps a package on virtx and makes the app. Each app user makes a sandbox of the package from the app, and uses their own." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/app-user-developer-virtx.svg" width="640">
+</p>
 
 ## クイックスタート
 
@@ -197,7 +208,6 @@ let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
-    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -215,6 +225,7 @@ let client = Client::connect(
   - **クライアント:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **サーバー:** 💻 ローカル (stdio) · 🖥️ リモート (tcp) · ☁️ クラウド
   - **ホスト:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **エージェントをアプリとして配布:** virtxでアプリを作ってユーザーに配布すれば、ユーザーごとに専用のサンドボックスが用意され、運用するバックエンドもいりません。詳しくは[アプリの作り方](https://virtx.sh/docs/tutorials/app-client/)を参照してください。
 - **セットアップはほぼ不要:** パッケージを入れればすぐに使え、Dockerも常駐させるデーモンもいりません。
 - **どのエージェントフレームワークでも:** サンドボックスは他のツールと同じように使えるので、どのフレームワークやコーディングエージェントからでも操作できます。オープンソースのエージェントSDK [Ailoy](https://github.com/brekkylab/ailoy) もその一つです。
 

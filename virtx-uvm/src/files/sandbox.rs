@@ -1,105 +1,165 @@
-//! A sandbox's files as `dav-server` reads and writes them: each request asked of the agent in
+//! A sandbox's files as [`http_over_x::webdav`] serves them: each request asked of the agent in
 //! its machine, over the I/O channel ([`Machine::io`]), as the guest's processes see the files.
 
-use std::io::SeekFrom;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
-use bytes::{Buf, Bytes};
-use dav_server::davpath::DavPath;
-use dav_server::fs::{
-    DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsStream, OpenOptions,
-    ReadDirMeta,
-};
-use futures_util::stream;
+use bytes::Bytes;
+use http_over_x::webdav::{Entry, Filesystem, Meta};
 
-use super::Landing;
-use super::volume::{Meta, written};
 use crate::machine::Machine;
 use crate::machine::wire::{IoFailure, IoMeta, IoReq, IoResp, MAX_DATA};
 
-/// A sandbox's files for one request, with the [`Landing`] of a conditional `PUT`.
-#[derive(Clone)]
-pub(super) struct Fs {
+/// A sandbox's files for one request, and what holds it for a conditional write.
+pub(super) struct Files {
     pub(super) machine: Arc<Machine>,
-    pub(super) landing: Option<Arc<Landing>>,
     /// Each volume the sandbox mounts writable: where in the guest, and its own directory.
     pub(super) mounts: Arc<[(String, PathBuf)]>,
+    /// The sandbox's hold for a conditional write, taken before its volumes'.
+    pub(super) writing: Arc<tokio::sync::Mutex<()>>,
+    /// Each volume it mounts writable, once, in the order of their directories: this process's
+    /// hold on it, and its own directory.
+    pub(super) volumes: Vec<(Arc<tokio::sync::Mutex<()>>, PathBuf)>,
 }
 
-/// A file open for reading, or for writing from its start.
-struct File {
-    machine: Arc<Machine>,
-    path: String,
-    /// Where a whole write goes until it is flushed: a name beside `path`, renamed over it
-    /// then, and removed if this drops first. So nothing is at `path` but what was there
-    /// until all of the write has arrived.
-    saving: Option<String>,
-    /// What a whole write is checked by as it lands, with a condition.
-    landing: Option<Arc<Landing>>,
-    /// The sandbox's writable mounts, as [`Fs`] has them.
-    mounts: Arc<[(String, PathBuf)]>,
-    /// What has arrived and is not yet written, sent a [`MAX_DATA`] at a time.
-    pending: Vec<u8>,
-    offset: u64,
-    meta: Meta,
-}
-
-struct Entry {
-    name: Vec<u8>,
-    meta: Meta,
-}
-
-impl std::fmt::Debug for File {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{} in a sandbox", self.path)
-    }
-}
-
-/// Ask `request` of `machine`'s guest, with `data` to write, off the runtime's threads.
-async fn io(
-    machine: &Arc<Machine>,
-    request: IoReq,
-    data: Vec<u8>,
-) -> Result<(IoResp, Vec<u8>), FsError> {
-    let machine = Arc::clone(machine);
-    let (answer, read) = tokio::task::spawn_blocking(move || machine.io(&request, &data))
-        .await
-        .map_err(|_| FsError::GeneralFailure)?
-        .map_err(|_| FsError::GeneralFailure)?;
-    match answer {
-        IoResp::Failed(failure) => Err(refused(&failure)),
-        answer => Ok((answer, read)),
-    }
-}
-
-/// Ask `request`, which changes something and answers nothing but that it did.
-async fn done(machine: &Arc<Machine>, request: IoReq) -> Result<(), FsError> {
-    io(machine, request, Vec::new()).await.map(drop)
-}
-
-/// What is at `path` now, or nothing: what a conditional write is checked against as it lands.
-/// In a volume the sandbox mounts writable, the volume's own files on this host are asked, not
-/// the guest: the guest may still hold what it saw at the path a moment ago, before a write
-/// through the volume's files or another sandbox's moved another file there. A path those files
-/// do not [answer for](crate::Volume::answers), through a link in the volume, by a name they
-/// refuse or in a mount of the volume's own, is asked of the guest, which sees it.
-async fn there(
-    machine: &Arc<Machine>,
-    mounts: &[(String, PathBuf)],
-    path: &str,
-) -> Result<Option<Meta>, FsError> {
-    if let Some((dir, within)) = mounted(mounts, path) {
-        let volume = crate::Volume::open(&dir).map_err(|_| FsError::GeneralFailure)?;
-        if volume.answers(&within) {
-            return super::volume::there(&volume, &within).await;
+impl Files {
+    /// Ask `request` of the guest, with `data` to write, off the runtime's threads.
+    async fn io(&self, request: IoReq, data: Vec<u8>) -> io::Result<(IoResp, Vec<u8>)> {
+        let machine = Arc::clone(&self.machine);
+        let (answer, read) = tokio::task::spawn_blocking(move || machine.io(&request, &data))
+            .await
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
+        match answer {
+            IoResp::Failed(failure) => Err(failed(failure)),
+            answer => Ok((answer, read)),
         }
     }
-    match stat(machine, path).await {
-        Ok(meta) => Ok(Some(meta)),
-        Err(FsError::NotFound) => Ok(None),
-        Err(e) => Err(e),
+
+    /// Ask `request`, which changes something and answers nothing but that it did.
+    async fn done(&self, request: IoReq) -> io::Result<()> {
+        self.io(request, Vec::new()).await.map(drop)
+    }
+}
+
+impl Filesystem for Files {
+    async fn stat(&self, path: &str) -> io::Result<Meta> {
+        match self.io(IoReq::Stat { path: at(path) }, Vec::new()).await? {
+            (IoResp::Meta(meta), _) => Ok(described(&meta)),
+            _ => Err(io::Error::other(
+                "the agent answered a stat with no metadata",
+            )),
+        }
+    }
+
+    async fn read_dir(&self, path: &str) -> io::Result<Vec<Entry>> {
+        let request = IoReq::ReadDir { path: at(path) };
+        let IoResp::Entries(entries) = self.io(request, Vec::new()).await?.0 else {
+            return Err(io::Error::other(
+                "the agent answered a listing with no entries",
+            ));
+        };
+        Ok(entries
+            .into_iter()
+            .map(|(name, meta)| Entry {
+                name,
+                meta: described(&meta),
+            })
+            .collect())
+    }
+
+    async fn read(&self, path: &str, offset: u64, len: u64) -> io::Result<Bytes> {
+        let request = IoReq::Read {
+            path: at(path),
+            offset,
+            len,
+        };
+        Ok(Bytes::from(self.io(request, Vec::new()).await?.1))
+    }
+
+    async fn create(&self, path: &str) -> io::Result<()> {
+        let request = IoReq::Write {
+            path: at(path),
+            offset: None,
+        };
+        self.done(request).await
+    }
+
+    /// A [`MAX_DATA`] at a time, the most one request to the agent carries.
+    async fn write(&self, path: &str, offset: u64, data: Bytes) -> io::Result<()> {
+        let mut offset = offset;
+        for piece in data.chunks(MAX_DATA) {
+            let request = IoReq::Write {
+                path: at(path),
+                offset: Some(offset),
+            };
+            self.io(request, piece.to_vec()).await?;
+            offset += piece.len() as u64;
+        }
+        Ok(())
+    }
+
+    async fn create_dir(&self, path: &str) -> io::Result<()> {
+        self.done(IoReq::CreateDir { path: at(path) }).await
+    }
+
+    async fn remove_file(&self, path: &str) -> io::Result<()> {
+        self.done(IoReq::Remove { path: at(path) }).await
+    }
+
+    async fn remove_dir(&self, path: &str) -> io::Result<()> {
+        self.done(IoReq::Remove { path: at(path) }).await
+    }
+
+    /// Keeping the mode and owner of a file at `to`: a whole write goes over what was there as
+    /// it was, and a `MOVE` finds nothing there, taken away first.
+    async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let request = IoReq::Rename {
+            from: at(from),
+            to: at(to),
+            keep: true,
+        };
+        self.done(request).await
+    }
+
+    async fn copy(&self, from: &str, to: &str) -> io::Result<()> {
+        let request = IoReq::Copy {
+            from: at(from),
+            to: at(to),
+        };
+        self.done(request).await
+    }
+
+    /// The sandbox, and each volume it mounts writable after it, so a write through a mount and
+    /// one through the volume's own files are held against each other.
+    async fn write_lock(&self) -> io::Result<Box<dyn Send>> {
+        let sandbox = Arc::clone(&self.writing).lock_owned().await;
+        let mut held = Vec::with_capacity(self.volumes.len());
+        for (serial, dir) in &self.volumes {
+            held.push(super::writing(Arc::clone(serial), dir).await?);
+        }
+        Ok(Box::new((sandbox, held)))
+    }
+
+    /// In a volume the sandbox mounts writable, the volume's own files on this host are asked,
+    /// not the guest: the guest may still hold what it saw at the path a moment ago, before a
+    /// write through the volume's files or another sandbox's moved another file there. A path
+    /// those files do not [answer for](crate::Volume::answers), through a link in the volume, by
+    /// a name they refuse or in a mount of the volume's own, is asked of the guest, which sees
+    /// it.
+    async fn stat_latest(&self, path: &str) -> io::Result<Meta> {
+        if let Some((dir, within)) = mounted(&self.mounts, &at(path)) {
+            let volume = crate::Volume::open(&dir).map_err(super::volume::failed)?;
+            if volume.answers(&within) {
+                let stat = volume.stat(&within).await;
+                return stat
+                    .map(|stat| super::volume::meta(&stat))
+                    .map_err(super::volume::failed);
+            }
+        }
+        self.stat(path).await
     }
 }
 
@@ -116,298 +176,32 @@ fn mounted(mounts: &[(String, PathBuf)], path: &str) -> Option<(PathBuf, String)
         .map(|(within, dir)| (dir.clone(), within.to_owned()))
 }
 
-async fn stat(machine: &Arc<Machine>, path: &str) -> Result<Meta, FsError> {
-    let request = IoReq::Stat { path: path.into() };
-    match io(machine, request, Vec::new()).await? {
-        (IoResp::Meta(meta), _) => Ok(described(&meta)),
-        _ => Err(FsError::GeneralFailure),
-    }
-}
-
-impl DavFileSystem for Fs {
-    fn open<'a>(
-        &'a self,
-        path: &'a DavPath,
-        options: OpenOptions,
-    ) -> FsFuture<'a, Box<dyn DavFile>> {
-        Box::pin(async move {
-            let path = at(path);
-            let there = match stat(&self.machine, &path).await {
-                Ok(meta) => Some(meta),
-                Err(FsError::NotFound) => None,
-                Err(e) => return Err(e),
-            };
-            if there.as_ref().is_some_and(|meta| meta.is_dir) {
-                return Err(FsError::Forbidden);
-            }
-            let mut saving = None;
-            let meta = match (options.write, there) {
-                (false, Some(meta)) => meta,
-                (false, None) => return Err(FsError::NotFound),
-                (true, Some(_)) if options.create_new => return Err(FsError::Exists),
-                (true, None) if !options.create => return Err(FsError::NotFound),
-                (true, _) => {
-                    // Made now, beside the path or, written in place, at it: what a `PUT`
-                    // under a missing directory is refused for is told before any of the
-                    // body is read.
-                    if options.truncate {
-                        saving = Some(beside(&path));
-                    }
-                    let request = IoReq::Write {
-                        path: saving.clone().unwrap_or_else(|| path.clone()),
-                        offset: (!options.truncate).then_some(0),
-                    };
-                    done(&self.machine, request).await?;
-                    Meta {
-                        is_dir: false,
-                        len: 0,
-                        modified: Some(SystemTime::now()),
-                    }
-                }
-            };
-            Ok(Box::new(File {
-                machine: Arc::clone(&self.machine),
-                path,
-                landing: saving.as_ref().and(self.landing.clone()),
-                mounts: Arc::clone(&self.mounts),
-                saving,
-                pending: Vec::new(),
-                offset: 0,
-                meta,
-            }) as Box<dyn DavFile>)
-        })
-    }
-
-    fn read_dir<'a>(
-        &'a self,
-        path: &'a DavPath,
-        _: ReadDirMeta,
-    ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
-        Box::pin(async move {
-            let request = IoReq::ReadDir { path: at(path) };
-            let IoResp::Entries(entries) = io(&self.machine, request, Vec::new()).await?.0 else {
-                return Err(FsError::GeneralFailure);
-            };
-            let entries: Vec<_> = entries
-                .into_iter()
-                .map(|(name, meta)| {
-                    Ok(Box::new(Entry {
-                        name: name.into_bytes(),
-                        meta: described(&meta),
-                    }) as Box<dyn DavDirEntry>)
-                })
-                .collect();
-            Ok(Box::pin(stream::iter(entries)) as FsStream<Box<dyn DavDirEntry>>)
-        })
-    }
-
-    /// The same as `metadata`: a link is nothing this root answers.
-    fn symlink_metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
-        self.metadata(path)
-    }
-
-    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
-        Box::pin(async move {
-            Ok(Box::new(stat(&self.machine, &at(path)).await?) as Box<dyn DavMetaData>)
-        })
-    }
-
-    fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.machine, IoReq::CreateDir { path: at(path) }).await })
-    }
-
-    fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.machine, IoReq::Remove { path: at(path) }).await })
-    }
-
-    fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move { done(&self.machine, IoReq::Remove { path: at(path) }).await })
-    }
-
-    /// What was at `to` is gone already: `dav-server` takes it away first, or refuses the
-    /// request when told not to overwrite.
-    fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move {
-            let request = IoReq::Rename {
-                from: at(from),
-                to: at(to),
-                keep: false,
-            };
-            done(&self.machine, request).await
-        })
-    }
-
-    /// One file, as `dav-server` copies a directory file by file.
-    fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
-        Box::pin(async move {
-            let request = IoReq::Copy {
-                from: at(from),
-                to: at(to),
-            };
-            done(&self.machine, request).await
-        })
-    }
-}
-
-impl File {
-    /// Write what is pending, a [`MAX_DATA`] at a time, leaving up to `keep` of it to come.
-    async fn send(&mut self, keep: usize) -> Result<(), FsError> {
-        while self.pending.len() > keep {
-            let rest = self.pending.split_off(self.pending.len().min(MAX_DATA));
-            let data = std::mem::replace(&mut self.pending, rest);
-            let len = data.len() as u64;
-            let request = IoReq::Write {
-                path: self.saving.clone().unwrap_or_else(|| self.path.clone()),
-                offset: Some(self.offset),
-            };
-            io(&self.machine, request, data).await?;
-            self.offset += len;
-        }
-        Ok(())
-    }
-}
-
-impl DavFile for File {
-    fn metadata(&mut self) -> FsFuture<'_, Box<dyn DavMetaData>> {
-        Box::pin(async move { Ok(Box::new(self.meta.clone()) as Box<dyn DavMetaData>) })
-    }
-
-    fn write_buf(&mut self, mut buf: Box<dyn Buf + Send>) -> FsFuture<'_, ()> {
-        let bytes = buf.copy_to_bytes(buf.remaining());
-        self.write_bytes(bytes)
-    }
-
-    /// Held until a [`MAX_DATA`] has arrived, so a body's many small pieces go to the guest as
-    /// few requests.
-    fn write_bytes(&mut self, buf: Bytes) -> FsFuture<'_, ()> {
-        Box::pin(async move {
-            self.pending.extend_from_slice(&buf);
-            self.meta.len = self.meta.len.max(self.offset + self.pending.len() as u64);
-            self.send(MAX_DATA - 1).await
-        })
-    }
-
-    fn read_bytes(&mut self, count: usize) -> FsFuture<'_, Bytes> {
-        Box::pin(async move {
-            let request = IoReq::Read {
-                path: self.path.clone(),
-                offset: self.offset,
-                len: count as u64,
-            };
-            let (_, read) = io(&self.machine, request, Vec::new()).await?;
-            self.offset += read.len() as u64;
-            Ok(Bytes::from(read))
-        })
-    }
-
-    fn seek(&mut self, pos: SeekFrom) -> FsFuture<'_, u64> {
-        Box::pin(async move {
-            self.send(0).await?;
-            let offset = match pos {
-                SeekFrom::Start(n) => Some(n),
-                SeekFrom::End(n) => self.meta.len.checked_add_signed(n),
-                SeekFrom::Current(n) => self.offset.checked_add_signed(n),
-            };
-            self.offset = offset.ok_or(FsError::GeneralFailure)?;
-            Ok(self.offset)
-        })
-    }
-
-    /// A whole write, all here now, goes over the path, as what was there was: with a
-    /// condition, as its [`Landing`] lets it, once all of it is in the guest, so the hold is
-    /// only for the check and the move. Its metadata is the guest's, read then, before it goes
-    /// over the path, as a rename keeps a file's length and modification time, so a `PUT`
-    /// answers the `ETag` of the file it wrote and not of one another write puts at the path
-    /// right after.
-    fn flush(&mut self) -> FsFuture<'_, ()> {
-        Box::pin(async move {
-            self.send(0).await?;
-            let at = self.saving.clone().unwrap_or_else(|| self.path.clone());
-            let read = match stat(&self.machine, &at).await {
-                Ok(meta) => Some(meta),
-                Err(e) => {
-                    log::debug!(
-                        "{self:?}: the written file was not read, so the PUT answers no ETag or \
-                         Last-Modified: {e}"
-                    );
-                    None
-                }
-            };
-            if let Some(saving) = self.saving.clone() {
-                let machine = Arc::clone(&self.machine);
-                let request = IoReq::Rename {
-                    from: saving,
-                    to: self.path.clone(),
-                    keep: true,
-                };
-                let land = async move { done(&machine, request).await };
-                match &self.landing {
-                    None => land.await?,
-                    Some(landing) => {
-                        let (machine, path) = (Arc::clone(&self.machine), self.path.clone());
-                        let mounts = Arc::clone(&self.mounts);
-                        let there = async move { there(&machine, &mounts, &path).await };
-                        landing.land(there, land).await?
-                    }
-                }
-                self.saving = None;
-            }
-            self.meta = written(read, &self.meta);
-            Ok(())
-        })
-    }
-}
-
-impl Drop for File {
-    fn drop(&mut self) {
-        if let Some(saving) = self.saving.take() {
-            let machine = Arc::clone(&self.machine);
-            std::thread::spawn(move || machine.io(&IoReq::Remove { path: saving }, &[]));
-        }
-    }
-}
-
-impl DavDirEntry for Entry {
-    fn name(&self) -> Vec<u8> {
-        self.name.clone()
-    }
-
-    fn metadata(&self) -> FsFuture<'_, Box<dyn DavMetaData>> {
-        Box::pin(async move { Ok(Box::new(self.meta.clone()) as Box<dyn DavMetaData>) })
-    }
-}
-
-/// `path` as the guest spells it: absolute, and the root `/`.
-fn at(path: &DavPath) -> String {
-    format!("/{}", super::volume::at(path))
-}
-
-/// A name beside `path`, in its directory, for a write on its way to `path`: hidden, and not
-/// one a second write to `path` at the same time gets.
-fn beside(path: &str) -> String {
-    let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
-    format!("{dir}/.{name}.{}.saving", uuid::Uuid::new_v4().simple())
+/// `path`, relative to the root, as the guest spells it: absolute, and the root `/`.
+fn at(path: &str) -> String {
+    format!("/{path}")
 }
 
 fn described(meta: &IoMeta) -> Meta {
     Meta {
         is_dir: meta.is_dir,
-        len: meta.len,
+        size: meta.len,
         modified: meta.modified.map(|since| UNIX_EPOCH + since),
+        etag: None,
     }
 }
 
-/// What `dav-server` is told of the guest's failure, which it answers with the status RFC 4918
-/// gives: a parent that is no directory is `NotFound`, which a `PUT` or `MKCOL` turns into
-/// `409`.
-fn refused(failure: &IoFailure) -> FsError {
-    match failure {
-        IoFailure::NotFound | IoFailure::NotADirectory => FsError::NotFound,
-        IoFailure::Exists => FsError::Exists,
-        IoFailure::IsADirectory | IoFailure::Forbidden => FsError::Forbidden,
-        IoFailure::Full => FsError::InsufficientStorage,
-        IoFailure::Other(_) => FsError::GeneralFailure,
-    }
+/// The guest's failure as an [`io::Error`] of the kind WebDAV answers it by.
+fn failed(failure: IoFailure) -> io::Error {
+    let kind = match &failure {
+        IoFailure::NotFound => io::ErrorKind::NotFound,
+        IoFailure::NotADirectory => io::ErrorKind::NotADirectory,
+        IoFailure::Exists => io::ErrorKind::AlreadyExists,
+        IoFailure::IsADirectory => io::ErrorKind::IsADirectory,
+        IoFailure::Forbidden => io::ErrorKind::PermissionDenied,
+        IoFailure::Full => io::ErrorKind::StorageFull,
+        IoFailure::Other(_) => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, format!("{failure:?}"))
 }
 
 #[cfg(test)]

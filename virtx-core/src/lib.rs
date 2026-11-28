@@ -22,11 +22,14 @@ mod ensure;
 mod error;
 #[cfg(feature = "ffi")]
 mod ffi;
+mod files;
 mod image;
 mod log_entry;
+mod package;
+#[cfg(feature = "client")]
+mod port_forward;
 mod project;
 mod sandbox;
-mod transport;
 mod volume;
 #[cfg(feature = "client")]
 mod warning;
@@ -39,9 +42,12 @@ pub use ensure::{cache_root, ensure_virtx};
 pub use error::Source;
 #[cfg(feature = "client")]
 pub use error::{Error, Members};
+pub use files::*;
 pub use image::*;
 pub use log_entry::{LogEntry, UnknownEntry};
+pub use package::*;
+#[cfg(feature = "client")]
+pub use port_forward::{ForwardError, PortForwarder, PortForwarderArgs};
 pub use project::*;
 pub use sandbox::*;
-pub use transport::*;
 pub use volume::*;

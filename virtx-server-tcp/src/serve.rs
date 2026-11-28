@@ -16,7 +16,7 @@ use axum::middleware::Next;
 use axum::response::IntoResponse as _;
 use axum::routing::any;
 use http::{HeaderName, HeaderValue, Method, header};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// What a server's binary is spawned with to be a machine.
 pub const MACHINE_SUBCOMMAND: &str = "vm";
@@ -79,8 +79,9 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
     let images = move |request: axum::extract::Request| {
         let access = Arc::clone(&reading);
         async move {
-            match access.home(request.headers()).await {
-                Ok((_, home)) => home
+            let (method, path) = (request.method().clone(), request.uri().path().to_owned());
+            match access.reach(&method, &path, request.headers()).await {
+                Ok((home, _)) => home
                     .registry()
                     .handle(request)
                     .await
@@ -96,9 +97,14 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
             move |mut request: axum::extract::Request, next: Next| {
                 let checked = Arc::clone(&checked);
                 async move {
-                    match checked.home(request.headers()).await {
-                        Ok((_, home)) => {
+                    let (method, path) =
+                        (request.method().clone(), request.uri().path().to_owned());
+                    match checked.reach(&method, &path, request.headers()).await {
+                        Ok((home, grant)) => {
                             request.extensions_mut().insert(home);
+                            if let Some(grant) = grant {
+                                request.extensions_mut().insert(grant);
+                            }
                             next.run(request).await
                         }
                         Err(status) => endpoints::refusal(status).into_response(),
@@ -106,6 +112,7 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
                 }
             },
         ))
+        .merge(endpoints::package_sandboxes().layer(Extension(Arc::clone(&access))))
         .merge(own)
         .route(&registry, any(images.clone()))
         .route(&format!("{registry}/"), any(images.clone()))
@@ -141,9 +148,11 @@ pub async fn bind(listen: std::net::SocketAddr) -> anyhow::Result<tokio::net::Tc
     Ok(listener)
 }
 
-/// `router` served on `listener` until this process is asked to stop.
+/// `router` served on `listener` until this process is asked to stop, each request knowing the
+/// address it came from.
 pub async fn run(listener: tokio::net::TcpListener, router: axum::Router) -> anyhow::Result<()> {
-    axum::serve(listener, router)
+    let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, service)
         .with_graceful_shutdown(interrupted())
         .await?;
     Ok(())
@@ -189,15 +198,23 @@ async fn interrupted() {
 /// What a browser at one of the config's `origins` may do here: every method the endpoints
 /// take, with the headers they read and the ones a client reads back. A preflight is answered
 /// here, before any check, as a browser sends it without the token; the request it clears is
-/// checked as any other.
+/// checked as any other. A browser at any origin is let send what a package's origins may --
+/// making a sandbox of a package or finding those made, and reaching a sandbox -- which the
+/// server checks against those as the request comes.
 fn cors(origins: &[String]) -> CorsLayer {
     let origins: Vec<HeaderValue> = origins
         .iter()
         .filter_map(|origin| origin.parse().ok())
         .collect();
+    let allowed = AllowOrigin::predicate(move |origin, request| {
+        let path = request.uri.path();
+        origins.contains(origin)
+            || path.starts_with("/sandboxes/")
+            || (path.starts_with("/packages/") && path.ends_with("/sandboxes/"))
+    });
     let method = |name| Method::from_bytes(name).expect("a method name");
     CorsLayer::new()
-        .allow_origin(origins)
+        .allow_origin(allowed)
         .allow_methods([
             Method::GET,
             Method::HEAD,
@@ -359,9 +376,9 @@ mod tests {
 
         /// A client in `demo`.
         fn connect(&self) -> Client {
-            let mut headers = http::HeaderMap::new();
-            headers.insert("virtx-project", "demo".parse().unwrap());
-            Client::connect(&self.url, Auth::None, headers).unwrap()
+            let client = Client::connect(&self.url, Auth::None).unwrap();
+            client.set_project(Some("demo")).unwrap();
+            client
         }
 
         /// The directory of the tester's project `name`.
@@ -781,6 +798,285 @@ mod tests {
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
     }
 
+    /// A package is kept as it is put, refused for an image or a volume the project has none of,
+    /// replaced keeping its id, which names its project, found by that id or its name, and
+    /// removed; while it is kept, its tag is refused its removal, and its volume is not.
+    #[tokio::test]
+    async fn a_project_s_packages_are_kept_and_what_they_name_is_in_use() {
+        let served = Served::spawn("packages").await;
+        let demo = Some("demo");
+        let mounting = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"},
+            "volumes": [{"volume": "data", "path": "/data"}]}, "origins": ["https://app.example"]}"#;
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        served.file_image("app:1").await;
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "no volume: {body}");
+        served
+            .send("POST", "volumes/", demo, r#"{"name": "data"}"#)
+            .await;
+
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let made: Value = serde_json::from_str(&body).unwrap();
+        let id = made["id"].as_str().unwrap().to_owned();
+        let project = served.project("demo").await;
+        let project = project.file_name().unwrap().to_str().unwrap();
+        assert!(id.starts_with(&format!("{project}.")), "{id}");
+        assert_eq!(made["origins"], json!(["https://app.example"]));
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
+        assert_eq!(
+            (status, &serde_json::from_str::<Value>(&body).unwrap()["id"]),
+            (StatusCode::OK, &json!(id))
+        );
+        for named in ["app", id.as_str()] {
+            let (status, body) = served
+                .send("GET", &format!("packages/{named}"), demo, "")
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["name"], "app");
+        }
+        let (_, listed) = served.send("GET", "packages/", demo, "").await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&listed)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let (status, _) = served.send("GET", "packages/app", Some("other"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "another project's");
+
+        // Its sandboxes are found again by its members.
+        let (status, body) = served
+            .send("GET", "packages/app/sandboxes/", demo, "")
+            .await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
+
+        let named = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"}, "name": "dev"}}"#;
+        let (status, body) = served.send("PUT", "packages/named", demo, named).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let (status, _) = served.send("DELETE", "volumes/data", demo, "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = served
+            .send("DELETE", "images/oci/v2/app/manifests/1", demo, "")
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("DENIED"), "{body}");
+
+        let (status, _) = served
+            .send("DELETE", &format!("packages/{id}"), demo, "")
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = served.send("DELETE", "packages/app", demo, "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = served
+            .send("DELETE", "images/oci/v2/app/manifests/1", demo, "")
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    /// One a package's access let in reaches the sandbox they made with a token of the same
+    /// issuer and subject, naming its project by id: the sandbox, up to its largest, and
+    /// everything under it, from the server's origins and the package's. Anything else, another's
+    /// token, another project, or no project named, is refused, and once the sandbox's grant is
+    /// taken away, so is the sandbox. A browser is let send it from any origin, which the request
+    /// is then checked against.
+    #[tokio::test]
+    async fn one_let_in_reaches_the_sandbox_they_made_alone() {
+        use std::time::SystemTime;
+
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        use virtx_core::{PackageAccess, SandboxResizeArgs};
+
+        use crate::grant::{Grant, Grants, Maker};
+        use crate::oidc::tests::{KEY, X, Y};
+
+        let keys = json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256", "use": "sig", "x": X, "y": Y,
+        }]});
+        let keys = axum::Router::new().route(
+            "/keys",
+            axum::routing::get(move || async move { keys.to_string() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let jwks = format!("http://{}/keys", listener.local_addr().unwrap());
+        let keys = tokio::spawn(async move { axum::serve(listener, keys).await });
+
+        let served = Served::spawn_over("let-in", async |home| {
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                vec!["https://allowed.example".to_owned()],
+                Arc::new(TokenIsUser(["alice".to_owned()].into())),
+                Arc::new(TcpMembership::new(home)),
+                store.clone(),
+                Arc::new(store),
+            );
+            let access = Arc::new(access);
+            super::router(Arc::clone(&access), super::projects(&access))
+        })
+        .await;
+        let projects = TcpMembership::new(&served.home);
+        let alice = Principal::new("alice");
+        let demo = projects.create(&alice, "demo").await.unwrap().id;
+        let other = projects.create(&alice, "other").await.unwrap().id;
+        let way = PackageAccess::Jwt {
+            issuer: "https://idp.example".into(),
+            audience: "app".into(),
+            jwks: Some(jwks),
+            claims: Default::default(),
+        };
+        let grants = Grants::new(&ProjectStore::new(&served.home).path(&demo)).unwrap();
+        grants
+            .keep(&Grant {
+                sandbox: "mine".into(),
+                package: format!("{demo}.p"),
+                maker: Maker::LetIn {
+                    way,
+                    subject: "user-1".into(),
+                },
+                max: SandboxResizeArgs::default()
+                    .vcpus(4)
+                    .memory_mib(2048)
+                    .disk_gib(8),
+                origins: vec!["https://app.example".into()],
+            })
+            .unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let signed = |subject: &str| {
+            let mut header = Header::new(Algorithm::ES256);
+            header.kid = Some("k1".into());
+            let claims = json!({
+                "iss": "https://idp.example", "aud": "app", "exp": now.as_secs() + 600,
+                "sub": subject,
+            });
+            let key = EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap();
+            jsonwebtoken::encode(&header, &claims, &key).unwrap()
+        };
+        let (theirs, another) = (signed("user-1"), signed("user-2"));
+        let own = demo.to_string();
+        let send = async |method: &str,
+                          path: &str,
+                          token: &str,
+                          headers: &[(&str, &str)],
+                          body: &'static str| {
+            let method = Method::from_bytes(method.as_bytes()).unwrap();
+            let mut request = reqwest::Client::new()
+                .request(method, format!("{}{path}", served.url))
+                .bearer_auth(token)
+                .body(body);
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request.send().await.unwrap().status()
+        };
+        let in_demo = [("virtx-project", own.as_str())];
+
+        // Its sandbox is none the server holds here: reached, and not found.
+        for (method, path) in [
+            ("GET", "sandboxes/mine"),
+            ("GET", "sandboxes/mine/jobs/"),
+            ("DELETE", "sandboxes/mine"),
+        ] {
+            assert_eq!(
+                send(method, path, &theirs, &in_demo, "").await,
+                StatusCode::NOT_FOUND,
+                "{method} {path}"
+            );
+        }
+        let within = r#"{"vcpus": 4}"#;
+        assert_eq!(
+            send("PATCH", "sandboxes/mine", &theirs, &in_demo, within).await,
+            StatusCode::NOT_FOUND
+        );
+        let past = r#"{"vcpus": 4, "memory_mib": 4096}"#;
+        assert_eq!(
+            send("PATCH", "sandboxes/mine", &theirs, &in_demo, past).await,
+            StatusCode::FORBIDDEN
+        );
+        for (method, path) in [
+            ("GET", "sandboxes/"),
+            ("GET", "sandboxes/theirs"),
+            ("POST", "sandboxes/"),
+            ("GET", "volumes/"),
+            ("GET", "packages/"),
+            ("GET", "images/oci/v2/"),
+            ("GET", "projects/"),
+        ] {
+            assert_eq!(
+                send(method, path, &theirs, &in_demo, "{}").await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+        }
+        let elsewhere = other.to_string();
+        for headers in [
+            &[][..],
+            &[("virtx-project", "demo")],
+            &[("virtx-project", &elsewhere)],
+        ] {
+            assert_eq!(
+                send("GET", "sandboxes/mine", &theirs, headers, "").await,
+                StatusCode::UNAUTHORIZED,
+                "{headers:?}"
+            );
+        }
+        assert_eq!(
+            send("GET", "sandboxes/mine", &another, &in_demo, "").await,
+            StatusCode::UNAUTHORIZED,
+            "another's"
+        );
+        for (origin, answered) in [
+            ("https://app.example", StatusCode::NOT_FOUND),
+            ("https://allowed.example", StatusCode::NOT_FOUND),
+            ("https://evil.example", StatusCode::FORBIDDEN),
+        ] {
+            let headers = [in_demo[0], ("origin", origin)];
+            assert_eq!(
+                send("GET", "sandboxes/mine", &theirs, &headers, "").await,
+                answered,
+                "{origin}"
+            );
+        }
+        let preflight = reqwest::Client::new()
+            .request(
+                Method::OPTIONS,
+                format!("{}sandboxes/mine/jobs/exec/", served.url),
+            )
+            .header("origin", "https://app.example")
+            .header("access-control-request-method", "POST")
+            .header(
+                "access-control-request-headers",
+                "authorization, virtx-project",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            preflight
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "https://app.example"
+        );
+        // A member reaches it as any sandbox of the project.
+        assert_eq!(
+            send("GET", "sandboxes/mine", "alice", &in_demo, "").await,
+            StatusCode::NOT_FOUND
+        );
+
+        grants.take_away("mine").unwrap();
+        assert_eq!(
+            send("GET", "sandboxes/mine", &theirs, &in_demo, "").await,
+            StatusCode::UNAUTHORIZED
+        );
+        keys.abort();
+    }
+
     /// What `job` failed with, once it has ended.
     async fn failed(client: &Client, job: ImageJob) -> String {
         // A guard against a hang, not a measure of anything.
@@ -1098,9 +1394,8 @@ mod tests {
         assert_eq!(pulled.len(), 1);
         assert_eq!(*told.asked.lock().unwrap(), pulled);
 
-        let mut headers = http::HeaderMap::new();
-        headers.insert("virtx-project", "other".parse().unwrap());
-        let other = Client::connect(&served.url, Auth::None, headers).unwrap();
+        let other = Client::connect(&served.url, Auth::None).unwrap();
+        other.set_project(Some("other")).unwrap();
         let job = other
             .build_image(Recipe::new(alpine), "built:1")
             .await
@@ -2139,7 +2434,13 @@ mod tests {
         let registry =
             virtx_uvm::RegistryServer::new(images.clone(), crate::access::REGISTRY_PATH).unwrap();
         let backend = Arc::new(Racing::default());
-        let home = Home::new(images, Arc::new(registry), root).unwrap();
+        let home = Home::new(
+            virtx_uvm::ProjectId::new(),
+            images,
+            Arc::new(registry),
+            root,
+        )
+        .unwrap();
         let home = home.backed_by(Arc::clone(&backend) as Arc<dyn StorageBackend>);
         assert!(home.sandboxes().get("kept").is_some());
 

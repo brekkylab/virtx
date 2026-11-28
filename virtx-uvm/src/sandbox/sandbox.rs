@@ -235,52 +235,16 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// Boot a sandbox as `args` asks, of what `images` and `volumes` hold, writing over its
-    /// image to an upper disk it makes under `root`, by running `vm` as its machine's process
-    /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
-    /// nothing for `park_after`.
-    ///
-    /// It is made under `id` where one is given -- letters, digits, `_` and `-`, the first a
-    /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
-    /// under `root` has, has made or keeps; under an id it picks otherwise.
-    ///
-    /// `kept`, it is kept past this process: its record is written once it has booted, and a
-    /// making cut short before then leaves nothing. Otherwise it goes with this process.
-    ///
-    /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
-    /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
-    /// [made](crate::StorageBackend::made) there before its machine first boots -- and removed
-    /// from there again where its making fails after.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create(
-        images: &ImageStore,
-        root: &Path,
-        volumes: &VolumeStore,
-        args: &SandboxCreateArgs,
-        vm: Vec<OsString>,
-        park_after: Option<Duration>,
-        id: Option<&str>,
-        kept: bool,
-        backing: &Backing,
-    ) -> Result<Arc<Sandbox>, Error> {
-        // What can be refused without starting anything, first.
+    /// Refuse `args` where a sandbox cannot be made of them whatever is here: what
+    /// [`create`](Sandbox::create) refuses before it starts anything, but for its image and
+    /// volumes, which it looks for. `vm` is the program its machines run as, beside which its
+    /// abins are.
+    pub fn check(args: &SandboxCreateArgs, vm: &[OsString]) -> Result<(), Error> {
         if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
             return Err(Error::Invalid(format!(
                 "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
                  starting with '.' or '-', 128 at most"
             )));
-        }
-        if let Some(id) = id {
-            if !is_id(id) {
-                return Err(Error::Invalid(format!(
-                    "id: {id:?} is not a sandbox's id: letters, digits, '_' and '-', the first a \
-                     letter or digit, 64 at most"
-                )));
-            }
-            let dir = root.join(SANDBOX);
-            if dir.join(format!("{id}.ext4")).exists() || Record::path(&dir, id).exists() {
-                return Err(exists(id));
-            }
         }
         let mut given = HashSet::new();
         if let Some(spec) =
@@ -354,6 +318,51 @@ impl Sandbox {
                 )));
             }
         }
+
+        Ok(())
+    }
+
+    /// Boot a sandbox as `args` asks, of what `images` and `volumes` hold, writing over its
+    /// image to an upper disk it makes under `root`, by running `vm` as its machine's process
+    /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
+    /// nothing for `park_after`.
+    ///
+    /// It is made under `id` where one is given -- letters, digits, `_` and `-`, the first a
+    /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
+    /// under `root` has, has made or keeps; under an id it picks otherwise.
+    ///
+    /// `kept`, it is kept past this process: its record is written once it has booted, and a
+    /// making cut short before then leaves nothing. Otherwise it goes with this process.
+    ///
+    /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
+    /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
+    /// [made](crate::StorageBackend::made) there before its machine first boots -- and removed
+    /// from there again where its making fails after.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        args: &SandboxCreateArgs,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        id: Option<&str>,
+        kept: bool,
+        backing: &Backing,
+    ) -> Result<Arc<Sandbox>, Error> {
+        if let Some(id) = id {
+            if !is_id(id) {
+                return Err(Error::Invalid(format!(
+                    "id: {id:?} is not a sandbox's id: letters, digits, '_' and '-', the first a \
+                     letter or digit, 64 at most"
+                )));
+            }
+            let dir = root.join(SANDBOX);
+            if dir.join(format!("{id}.ext4")).exists() || Record::path(&dir, id).exists() {
+                return Err(exists(id));
+            }
+        }
+        Sandbox::check(args, &vm)?;
 
         // Room for its machine before anything of it is made, held for its first boot.
         let room = crate::admit(&machine_spec(args))?;

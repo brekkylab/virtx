@@ -1,22 +1,20 @@
 //! A sandbox's port forwarded by this client, on either side of the sandbox.
 //!
-//! A port in the sandbox is reached at an address on this machine. A server on this machine
-//! answers each such port's loopback address, its `url`, which is reached as it is, or through a
-//! listener of the forwarder's own where another address is asked for. A server over HTTP is
-//! asked for `/sandboxes/{id}/ports/{port}` as a WebSocket of the subprotocol `virtx.tcp`: so
-//! each connection to the forwarder's address is carried in one, its bytes as binary messages,
-//! opened by the same HTTP client the requests go by, with their credentials and project.
+//! A port in the sandbox is reached at an address on this machine. A server on this machine may
+//! answer each such port's loopback address, its `url`, which is reached as it is where no other
+//! address is asked for. Otherwise the forwarder listens at that address, and each connection to
+//! it is carried to the `url` where there is one, and in a WebSocket of the subprotocol
+//! `virtx.tcp` to `/sandboxes/{id}/ports/{port}` where there is none, its bytes as binary
+//! messages: a stream of the same HTTP/2 connection the requests go by, over either transport,
+//! with their credentials and project.
 //!
 //! A port on local is reached by the sandbox's processes at `10.0.2.2`, each of their
-//! connections carried to the forwarder's target on this machine. A server over HTTP is held a
-//! WebSocket of `virtx.tcp` at `/sandboxes/{id}/client-ports/{port}` while the port is taken. A
-//! process's connection to the port is said on it with an empty binary message: the target is
-//! connected to then, and the connection answered with another empty message once it is
-//! reached, or the WebSocket closed when it is not, which refuses it. Each WebSocket carries one
-//! connection, and another is opened to wait for the next as soon as one is said. A server on
-//! this machine, over stdio, reaches the target itself: it is held `GET` of the same path, with
-//! the target in `?target=`, while the port is taken, its answer's body ending once the sandbox
-//! is deleted.
+//! connections carried to the forwarder's target on this machine. The server is held a WebSocket
+//! of `virtx.tcp` at `/sandboxes/{id}/client-ports/{port}` while the port is taken. A process's
+//! connection to the port is said on it with an empty binary message: the target is connected to
+//! then, and the connection answered with another empty message once it is reached, or the
+//! WebSocket closed when it is not, which refuses it. Each WebSocket carries one connection, and
+//! another is opened to wait for the next as soon as one is said.
 //!
 //! A connection that fails -- its WebSocket refused, or closed before the port sent a byte; its
 //! target not reached -- is closed, and what was seen is kept as the forwarder's
@@ -34,20 +32,9 @@ use std::{
     time::Duration,
 };
 
-use super::{
-    Body, Connection, TransportClient,
-    credentials::Credentials,
-    tcp::{Shared, authorized, current},
-};
-use crate::{
-    Error, PROJECT_HEADER, PortSide,
-    transport::{full, http::refused, segment},
-    warning,
-};
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
-use http::{HeaderMap, HeaderValue, StatusCode, header};
-use http_body_util::BodyExt;
+use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
+use http_over_x::{WebSocket, websocket::Message};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -55,14 +42,11 @@ use tokio::{
     sync::watch,
     task::JoinSet,
 };
-use tokio_tungstenite::{
-    WebSocketStream,
-    tungstenite::{
-        self, Message,
-        handshake::{client::generate_key, derive_accept_key},
-        protocol::Role,
-    },
-};
+
+use crate::Client;
+use http_over_x::segment;
+
+use crate::{Error, PortSide, warning};
 
 /// The WebSocket subprotocol a port's TCP is carried in.
 const TCP_SUBPROTOCOL: &str = "virtx.tcp";
@@ -129,17 +113,6 @@ impl Failures {
     /// A connection reached the port: what failed before is no longer the port's state.
     fn reached(&self) {
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    }
-}
-
-/// How long the forwarder waits before accepting again after `error`: not at all where it is
-/// one connection's, reset before it was taken, and a second where it is the process's, such as
-/// running out of descriptors, which taking the next one at once would meet again.
-fn accept_backoff(error: &std::io::Error) -> Option<Duration> {
-    use std::io::ErrorKind::*;
-    match error.kind() {
-        ConnectionAborted | ConnectionRefused | ConnectionReset | Interrupted | WouldBlock => None,
-        _ => Some(Duration::from_secs(1)),
     }
 }
 
@@ -222,18 +195,17 @@ impl PortForwarder {
     /// forwarder, and what forwards, a future that runs on the runtime it is polled in until the
     /// forwarder ends, and stops it when dropped. It is open, or why not, once [`opened`](Self::opened) answers.
     ///
-    /// A port in the sandbox over stdio is reached at the loopback address the server answered
-    /// for it, its `url`, unless another local address is asked for, whose connections are
-    /// carried there; one without its `url` is refused. Over HTTP each connection to the local
-    /// address is carried to `/sandboxes/{id}/ports/{port}` in a WebSocket of `virtx.tcp`, in
-    /// the project `client` names as it is opened. A port on local is taken as the module
-    /// says.
+    /// A port in the sandbox with the `url` a server on this machine answered for it is reached
+    /// there, unless another local address is asked for, whose connections are carried there.
+    /// Without one, each connection to the local address is carried to
+    /// `/sandboxes/{id}/ports/{port}` in a WebSocket of `virtx.tcp`, in the project `client`
+    /// names as it is opened. A port on local is taken as the module says.
     pub fn open<C>(
         client: C,
         args: PortForwarderArgs,
     ) -> (PortForwarder, impl Future<Output = ()> + Send + use<C>)
     where
-        C: Deref<Target = TransportClient> + Send + Sync,
+        C: Deref<Target = Client> + Send + Sync,
     {
         let PortForwarderArgs {
             sandbox,
@@ -247,25 +219,49 @@ impl PortForwarder {
                 target: local.unwrap_or_else(|| format!("127.0.0.1:{port}")),
                 failures: Failures::new(format!("port {port} on local")),
             }),
-            PortSide::Sandbox => match (reach(&client, &sandbox, port, url.as_deref()), local) {
-                (Err(e), _) => Err(e),
-                (Ok(Reached::Address(address)), None) => Ok(Way::Served(address)),
-                (Ok(reached), local) => {
-                    let local = local.as_deref().unwrap_or("127.0.0.1:0");
-                    let opening = |e| Error::Client(format!("listening at {local}: {e}"));
-                    let listener = std::net::TcpListener::bind(local).map_err(opening);
-                    let listener = listener.and_then(|listener| {
-                        listener.set_nonblocking(true).map_err(opening)?;
-                        Ok((listener.local_addr().map_err(opening)?, listener))
-                    });
-                    listener.map(|(address, listener)| Way::Listen {
-                        reached,
-                        listener,
-                        address,
-                        failures: Failures::new(format!("port {port}, forwarded at {address}")),
-                    })
+            PortSide::Sandbox => {
+                // The address a server on this machine answered, as `http://127.0.0.1:54123`.
+                let served_at = |url: &str| {
+                    let parsed = reqwest::Url::parse(url)
+                        .map_err(|e| Error::Client(format!("{url}: {e}")))?;
+                    let (Some(host), Some(port)) =
+                        (parsed.host_str(), parsed.port_or_known_default())
+                    else {
+                        return Err(Error::Client(format!("{url} names no host and port")));
+                    };
+                    (host, port)
+                        .to_socket_addrs()
+                        .map_err(|e| Error::Transport(format!("{url}: {e}")))?
+                        .next()
+                        .ok_or_else(|| Error::Transport(format!("{url} is no address")))
+                };
+                let reached = match url.as_deref() {
+                    Some(url) => served_at(url).map(Reached::Address),
+                    None => Ok(Reached::Tunnel(format!(
+                        "/sandboxes/{}/ports/{port}",
+                        segment(&sandbox)
+                    ))),
+                };
+                match (reached, local) {
+                    (Err(e), _) => Err(e),
+                    (Ok(Reached::Address(address)), None) => Ok(Way::Served(address)),
+                    (Ok(reached), local) => {
+                        let local = local.as_deref().unwrap_or("127.0.0.1:0");
+                        let opening = |e| Error::Client(format!("listening at {local}: {e}"));
+                        let listener = std::net::TcpListener::bind(local).map_err(opening);
+                        let listener = listener.and_then(|listener| {
+                            listener.set_nonblocking(true).map_err(opening)?;
+                            Ok((listener.local_addr().map_err(opening)?, listener))
+                        });
+                        listener.map(|(address, listener)| Way::Listen {
+                            reached,
+                            listener,
+                            address,
+                            failures: Failures::new(format!("port {port}, forwarded at {address}")),
+                        })
+                    }
                 }
-            },
+            }
         };
         let (phase, failures) = match &way {
             Err(e) => (Phase::Ended(e.clone()), None),
@@ -299,6 +295,7 @@ impl PortForwarder {
                 }) => match TcpListener::from_std(listener) {
                     Ok(listener) => {
                         accept(
+                            &client,
                             listener,
                             reached,
                             failures,
@@ -356,9 +353,8 @@ impl PortForwarder {
 
     /// Why the last connection through the forwarder that failed did, since one last reached
     /// the port: `None` while none has, and again once a connection reaches it. It is the last
-    /// failure, not whether the port is reached now. A server on this machine reaches what it
-    /// is itself, with no connection through the forwarder, so for a port in the sandbox at its
-    /// own address, and for a port on local over stdio, it has none.
+    /// failure, not whether the port is reached now. A port in the sandbox reached at a server's
+    /// own address has no connection through the forwarder, so none.
     pub fn last_error(&self) -> Option<ForwardError> {
         let failures = self.failures.as_ref()?;
         failures
@@ -374,50 +370,11 @@ impl PortForwarder {
     }
 }
 
-/// Where the port `port` in the sandbox `sandbox` is reached over `client`: at the address a
-/// server on this machine answered for it, its `url`, or in a WebSocket over HTTP.
-fn reach(
-    client: &TransportClient,
-    sandbox: &str,
-    port: u16,
-    url: Option<&str>,
-) -> Result<Reached, Error> {
-    match &client.connection {
-        Connection::Stdio(_) => match url {
-            None => Err(Error::Client(format!(
-                "port {port} has no url: a server on this machine answers each port's \
-                 address with its sandbox"
-            ))),
-            Some(url) => served_at(url).map(Reached::Address),
-        },
-        Connection::Tcp(tcp) => {
-            let path = format!("sandboxes/{}/ports/{port}", segment(sandbox));
-            let url = (tcp.base.join(&path)).map_err(|e| Error::Client(format!("{path}: {e}")))?;
-            Ok(Reached::Tunnel {
-                http: tcp.http.clone(),
-                credentials: Arc::clone(&tcp.credentials),
-                headers: Arc::clone(&tcp.headers),
-                project: (client.project.read())
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone(),
-                url,
-            })
-        }
-    }
-}
-
 /// Where a port in the sandbox is reached: at a server's own address on this machine, or in a
-/// WebSocket to `url` that `http` opens with the token and `headers` current then, and
-/// `project`.
+/// WebSocket to the path.
 enum Reached {
     Address(SocketAddr),
-    Tunnel {
-        http: reqwest::Client,
-        credentials: Arc<Credentials>,
-        headers: Shared<HeaderMap>,
-        project: Option<HeaderValue>,
-        url: reqwest::Url,
-    },
+    Tunnel(String),
 }
 
 /// How a forwarder reaches its port: a port on local taken, its connections carried to
@@ -437,29 +394,16 @@ enum Way {
     },
 }
 
-/// The address a server on this machine answered for a port, as `http://127.0.0.1:54123`.
-fn served_at(url: &str) -> Result<SocketAddr, Error> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| Error::Client(format!("{url}: {e}")))?;
-    let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
-        return Err(Error::Client(format!("{url} names no host and port")));
-    };
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|e| Error::Transport(format!("{url}: {e}")))?
-        .next()
-        .ok_or_else(|| Error::Transport(format!("{url} is no address")))
-}
-
-/// Take `listener`'s connections and carry each to where `reached` says, each failure said to
-/// `failures`.
+/// Take `listener`'s connections and carry each to where `reached` says over `client`, each
+/// failure said to `failures`.
 async fn accept(
+    client: &Client,
     listener: TcpListener,
     reached: Reached,
     failures: Arc<Failures>,
     #[cfg(test)] count: Arc<AtomicUsize>,
 ) {
-    let reached = Arc::new(reached);
-    let mut connections = JoinSet::new();
+    let mut connections = FuturesUnordered::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -468,7 +412,16 @@ async fn accept(
                 let accepted = match accepted {
                     Ok((accepted, _)) => accepted,
                     Err(e) => {
-                        if let Some(wait) = accept_backoff(&e) {
+                        use std::io::ErrorKind::*;
+                        // Not at all where it is one connection's, reset before it was taken,
+                        // and a second where it is the process's, such as running out of
+                        // descriptors, which taking the next one at once would meet again.
+                        let wait = match e.kind() {
+                            ConnectionAborted | ConnectionRefused | ConnectionReset
+                            | Interrupted | WouldBlock => None,
+                            _ => Some(Duration::from_secs(1)),
+                        };
+                        if let Some(wait) = wait {
                             warning::warn(format!(
                                 "{}: accepting a connection failed, trying again in {}s: {e}",
                                 failures.port,
@@ -479,23 +432,24 @@ async fn accept(
                         continue;
                     }
                 };
-                let (reached, failures) = (Arc::clone(&reached), Arc::clone(&failures));
-                connections.spawn(async move {
+                let (reached, failures) = (&reached, &failures);
+                connections.push(async move {
                     // Failed, the connection closes: as a port nothing listens on does.
-                    if let Err(failure) = forward(accepted, &reached, &failures).await {
+                    if let Err(failure) = forward(client, accepted, reached, failures).await {
                         failures.fail(failure);
                     }
                 });
             }
-            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            Some(()) = connections.next(), if !connections.is_empty() => {}
         }
         #[cfg(test)]
         count.store(connections.len(), SeqCst);
     }
 }
 
-/// Carry `accepted` to where `reached` says, until either ends.
+/// Carry `accepted` to where `reached` says over `client`, until either ends.
 async fn forward(
+    client: &Client,
     mut accepted: TcpStream,
     reached: &Reached,
     failures: &Failures,
@@ -520,110 +474,29 @@ async fn forward(
             let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
             Ok(())
         }
-        Reached::Tunnel {
-            http,
-            credentials,
-            headers,
-            project,
-            url,
-        } => {
-            let mut headers = current(headers);
-            if let Some(project) = project {
-                headers.insert(PROJECT_HEADER, project.clone());
-            }
-            let token = credentials
-                .token()
+        Reached::Tunnel(path) => {
+            let socket = (client.wire())
+                .websocket(path, client.headers(), Some(TCP_SUBPROTOCOL))
                 .await
-                .map_err(|e| ForwardError::new(format!("no token to reach the server: {e}")))?;
-            match open(http, token.as_deref(), headers, url.clone()).await {
-                Ok(socket) => carry(accepted, socket, failures).await,
-                Err(refused) => {
-                    if refused.status == Some(StatusCode::UNAUTHORIZED.as_u16()) {
-                        credentials.refused();
-                    }
-                    Err(refused)
-                }
-            }
+                .map_err(refusal)?;
+            carry(accepted, socket, failures).await
         }
     }
 }
 
-/// The protocol's code `refusal` said, as `not_found` of `not_found: ...`, where it said one.
-fn code(refusal: &Error) -> Option<String> {
-    let Error::Status(_, said, _) = refusal else {
-        return None;
-    };
-    let (code, _) = said.split_once(": ")?;
-    let protocol = !code.is_empty()
-        && code
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    protocol.then(|| code.to_owned())
-}
-
-/// `error` and each error under it, as `a: b: c`.
-fn chain(error: &dyn std::error::Error) -> String {
-    let mut said = error.to_string();
-    let mut under = error.source();
-    while let Some(error) = under {
-        said.push_str(&format!(": {error}"));
-        under = error.source();
+/// Why a WebSocket of `virtx.tcp` did not open: the server's refusal, with its status and code,
+/// or the server not reached.
+fn refusal(error: http_over_x::Error) -> ForwardError {
+    let error = Error::from(error);
+    match error.status() {
+        None => ForwardError::new(format!("the server was not reached: {error}")),
+        status => ForwardError {
+            message: format!("its WebSocket was refused: {error}"),
+            source: error.source_kind(),
+            status,
+            code: error.code().map(str::to_owned),
+        },
     }
-    said
-}
-
-/// A WebSocket of `virtx.tcp` to `url`, its handshake an HTTP/1.1 upgrade `http` sends with
-/// `token` and `headers`. Refused, why, with the status the server answered if it answered.
-async fn open(
-    http: &reqwest::Client,
-    token: Option<&str>,
-    headers: HeaderMap,
-    url: reqwest::Url,
-) -> Result<WebSocketStream<reqwest::Upgraded>, ForwardError> {
-    let key = generate_key();
-    let response = authorized(http.get(url), headers, token)
-        .header(header::CONNECTION, "Upgrade")
-        .header(header::UPGRADE, "websocket")
-        .header(header::SEC_WEBSOCKET_VERSION, "13")
-        .header(header::SEC_WEBSOCKET_KEY, &key)
-        .header(header::SEC_WEBSOCKET_PROTOCOL, TCP_SUBPROTOCOL)
-        .send()
-        .await
-        // Without the URL, which is secret.
-        .map_err(|e| {
-            ForwardError::new(format!(
-                "the server was not reached: {}",
-                chain(&e.without_url())
-            ))
-        })?;
-    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-        let response: http::Response<reqwest::Body> = response.into();
-        let refusal =
-            refused(response.map(|body| -> Body { body.map_err(std::io::Error::other).boxed() }))
-                .await;
-        return Err(ForwardError {
-            message: format!("its WebSocket was refused: {refusal}"),
-            source: refusal.source_kind(),
-            status: refusal.status(),
-            code: code(&refusal),
-        });
-    }
-    let accepted = response
-        .headers()
-        .get(header::SEC_WEBSOCKET_ACCEPT)
-        .is_some_and(|accept| accept.as_bytes() == derive_accept_key(key.as_bytes()).as_bytes());
-    if !accepted {
-        return Err(ForwardError::new(
-            "the server upgraded to a WebSocket without the key it was sent",
-        ));
-    }
-    let upgraded = response.upgrade().await.map_err(|e| {
-        ForwardError::new(format!(
-            "its WebSocket failed to open: {}",
-            chain(&e.without_url())
-        ))
-    })?;
-    Ok(WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await)
 }
 
 /// How a carried connection ended.
@@ -636,24 +509,12 @@ enum End {
     Failed(String),
 }
 
-impl End {
-    /// The WebSocket's sending failing: closed if the server closed it.
-    fn sending(error: tungstenite::Error) -> End {
-        match error {
-            tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
-                End::Closed(None)
-            }
-            error => End::Failed(error.to_string()),
-        }
-    }
-}
-
 /// Carry bytes between `tcp` and `socket` until either ends: what is read from `tcp` as binary
 /// messages, and the binary messages to `tcp`. The port's first byte is said to `failures` as
 /// reached. Ended by the server before the port sent a byte, what was seen.
 async fn carry(
     mut tcp: TcpStream,
-    socket: WebSocketStream<reqwest::Upgraded>,
+    socket: WebSocket,
     failures: &Failures,
 ) -> Result<(), ForwardError> {
     let (mut sink, mut messages) = socket.split();
@@ -665,8 +526,17 @@ async fn carry(
             read = from.read(&mut buffer) => match read {
                 Ok(0) | Err(_) => break End::Client,
                 Ok(n) => {
-                    if let Err(e) = sink.send(Message::binary(buffer[..n].to_vec())).await {
-                        break End::sending(e);
+                    let message = Message::Binary(Bytes::copy_from_slice(&buffer[..n]));
+                    if let Err(e) = sink.send(message).await {
+                        // Closed where the server's close is read soon after.
+                        let closing = tokio::time::timeout(Duration::from_secs(1), messages.next());
+                        break match closing.await {
+                            Ok(Some(Ok(Message::Close(close)))) => {
+                                End::Closed(close.map(|close| close.reason).filter(|r| !r.is_empty()))
+                            }
+                            Ok(None) => End::Closed(None),
+                            _ => End::Failed(e.to_string()),
+                        };
                     }
                 }
             },
@@ -680,16 +550,11 @@ async fn carry(
                         break End::Client;
                     }
                 }
-                // Answered by the socket itself.
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                // Anything else is the end.
-                Some(Ok(Message::Close(frame))) => {
-                    break End::Closed(
-                        frame.map(|frame| frame.reason.to_string()).filter(|r| !r.is_empty()),
-                    );
+                Some(Ok(Message::Close(close))) => {
+                    break End::Closed(close.map(|close| close.reason).filter(|r| !r.is_empty()));
                 }
                 Some(Ok(Message::Text(_))) => break End::Failed("it sent text, which no TCP is".into()),
-                Some(Err(e)) => break End::sending(e),
+                Some(Err(e)) => break End::Failed(e.to_string()),
                 None => break End::Closed(None),
             },
         }
@@ -723,57 +588,25 @@ const MOST_WAIT: Duration = Duration::from_secs(8);
 /// that can pass, `401`, `429`, a `5xx` or no answer, is taken again after a wait; any other, such
 /// as `403`, ends it. Dropped, the port is let go of, and the connections it carries closed.
 async fn take_local(
-    client: &TransportClient,
+    client: &Client,
     sandbox: &str,
     port: u16,
     target: &str,
     failures: &Arc<Failures>,
     said: &watch::Sender<Phase>,
 ) -> Result<Infallible, Error> {
-    let path = format!("sandboxes/{}/client-ports/{port}", segment(sandbox));
-    let Connection::Tcp(tcp) = &client.connection else {
-        let request = http::Request::get(format!("/{path}?target={}", segment(target)))
-            .body(full(Bytes::new()))
-            .map_err(|e| Error::Client(format!("not a request: {e}")))?;
-        let response = client.send(request).await?;
-        if !response.status().is_success() {
-            return Err(refused(response).await);
-        }
-        said.send_replace(Phase::Open(target.to_owned()));
-        let mut held = response.into_body();
-        while let Some(frame) = held.frame().await {
-            frame.map_err(|e| Error::Transport(format!("port {port} on local: {e}")))?;
-        }
-        return Err(Error::Status(
-            StatusCode::NOT_FOUND.as_u16(),
-            format!("not_found: sandbox {sandbox} is gone"),
-            Default::default(),
-        ));
-    };
-    let url = (tcp.base.join(&path)).map_err(|e| Error::Client(format!("{path}: {e}")))?;
+    let path = format!("/sandboxes/{}/client-ports/{port}", segment(sandbox));
     let mut carried = JoinSet::new();
     let (mut opened, mut failed) = (false, 0u32);
     loop {
         while carried.try_join_next().is_some() {}
-        let mut sent = current(&tcp.headers);
-        let project = (client.project.read())
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(project) = project {
-            sent.insert(PROJECT_HEADER, project);
-        }
-        let waiting = match tcp.credentials.token().await {
-            Ok(token) => open(&tcp.http, token.as_deref(), sent, url.clone()).await,
-            Err(e) => Err(ForwardError::new(format!(
-                "no token to reach the server: {e}"
-            ))),
-        };
+        let waiting = (client.wire())
+            .websocket(&path, client.headers(), Some(TCP_SUBPROTOCOL))
+            .await
+            .map_err(refusal);
         let mut waiting = match waiting {
             Ok(waiting) => waiting,
             Err(refused) => {
-                if refused.status == Some(StatusCode::UNAUTHORIZED.as_u16()) {
-                    tcp.credentials.refused();
-                }
                 // Taken again only past what can pass: a token renewed, a server that is
                 // busy or down.
                 let passing = match refused.status {
@@ -805,13 +638,10 @@ async fn take_local(
             said.send_replace(Phase::Open(target.to_owned()));
         }
         // Until a connection is said on it, or it ends.
-        let connected = loop {
-            match waiting.next().await {
-                Some(Ok(Message::Binary(bytes))) if bytes.is_empty() => break true,
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                _ => break false,
-            }
-        };
+        let connected = matches!(
+            waiting.next().await,
+            Some(Ok(Message::Binary(bytes))) if bytes.is_empty()
+        );
         if connected {
             carried.spawn(reach_target(
                 waiting,
@@ -824,11 +654,7 @@ async fn take_local(
 
 /// Reach `target` for the connection said on `socket`, and carry the one to the other; or, not
 /// reached, close `socket`, which refuses it, and say why to `failures`.
-async fn reach_target(
-    mut socket: WebSocketStream<reqwest::Upgraded>,
-    target: String,
-    failures: Arc<Failures>,
-) {
+async fn reach_target(mut socket: WebSocket, target: String, failures: Arc<Failures>) {
     let reached = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)).await;
     let reached = match reached {
         Ok(Ok(reached)) => reached,
@@ -840,13 +666,13 @@ async fn reach_target(
             failures.fail(ForwardError::new(format!(
                 "{target} was not reached: {why}"
             )));
-            let _ = socket.close(None).await;
+            let _ = socket.close().await;
             return;
         }
     };
     failures.reached();
     let _ = reached.set_nodelay(true);
-    if socket.send(Message::binary(Vec::new())).await.is_ok() {
+    if socket.send(Message::Binary(Bytes::new())).await.is_ok() {
         carry_halves(reached, socket).await;
     }
 }
@@ -855,7 +681,7 @@ async fn reach_target(
 /// `tcp` as binary messages, and its end as an empty one; the binary messages to `tcp`, and an
 /// empty one as the other end's, `tcp`'s writing shut. A half-close so reaches each end, and an
 /// answer to it still comes back. Ended at once by a failure, or a close.
-async fn carry_halves(mut tcp: TcpStream, socket: WebSocketStream<reqwest::Upgraded>) {
+async fn carry_halves(mut tcp: TcpStream, socket: WebSocket) {
     let (mut sink, mut messages) = socket.split();
     let (mut from, mut to) = tcp.split();
     let mut buffer = vec![0u8; CHUNK];
@@ -865,7 +691,8 @@ async fn carry_halves(mut tcp: TcpStream, socket: WebSocketStream<reqwest::Upgra
             read = from.read(&mut buffer), if !read_all => match read {
                 Ok(n) => {
                     read_all = n == 0;
-                    if sink.send(Message::binary(buffer[..n].to_vec())).await.is_err() {
+                    let message = Message::Binary(Bytes::copy_from_slice(&buffer[..n]));
+                    if sink.send(message).await.is_err() {
                         break;
                     }
                 }
@@ -881,8 +708,6 @@ async fn carry_halves(mut tcp: TcpStream, socket: WebSocketStream<reqwest::Upgra
                         break;
                     }
                 }
-                // Answered by the socket itself.
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
                 _ => break,
             },
         }
@@ -903,16 +728,17 @@ mod tests {
         },
         response::IntoResponse,
     };
+    use http::{HeaderMap, StatusCode, header};
 
-    /// A server under the base path `/virtx/`, whose port `open` echoes what it is sent, whose
-    /// port `deaf` closes its WebSocket at once, `gone` closes it saying why, `late` closes its
-    /// first connection at once and echoes every later one, and whose every other port is
-    /// refused. Given `token`, it wants it as a bearer token.
-    async fn serve(token: Option<&'static str>) -> String {
+    /// A server's ports under the path `base`: its port `open` echoes what it is sent, its port
+    /// `deaf` closes its WebSocket at once, `gone` closes it saying why, `late` closes its first
+    /// connection at once and echoes every later one, and every other port is refused. Given
+    /// `token`, it wants it as a bearer token.
+    fn ports(base: &str, token: Option<&'static str>) -> axum::Router {
         let late = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new().route(
-            "/virtx/sandboxes/{sandbox}/ports/{port}",
-            axum::routing::get(
+        axum::Router::new().route(
+            &format!("{base}/sandboxes/{{sandbox}}/ports/{{port}}"),
+            axum::routing::any(
                 move |Path((sandbox, _port)): Path<(String, u16)>,
                       headers: HeaderMap,
                       upgrade: WebSocketUpgrade| async move {
@@ -967,7 +793,12 @@ mod tests {
                         })
                 },
             ),
-        );
+        )
+    }
+
+    /// [`ports`] under the base path `/virtx/` over HTTP, and its base URL.
+    async fn serve(token: Option<&'static str>) -> String {
+        let app = ports("/virtx", token);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}/virtx/", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
@@ -976,8 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_connection_is_carried_in_a_websocket_to_the_url_under_the_base() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let client = Client::connect(&serve(None).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("open", 7000));
@@ -1020,8 +850,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_connection_the_server_refuses_is_closed_and_says_why() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let client = Client::connect(&serve(None).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("shut", 7000));
@@ -1046,8 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_websocket_closed_before_the_port_sent_a_byte_says_so() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let client = Client::connect(&serve(None).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("deaf", 7000));
@@ -1078,8 +906,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_websocket_closed_with_a_reason_says_the_servers_reason() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let client = Client::connect(&serve(None).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("gone", 7000));
@@ -1100,8 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_connection_that_reaches_the_port_clears_the_last_error() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let client = Client::connect(&serve(None).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("late", 7000));
@@ -1119,44 +945,31 @@ mod tests {
         assert_eq!(forward.last_error(), None, "the port was reached");
     }
 
-    #[test]
-    fn an_accept_error_of_one_connection_is_taken_again_at_once_and_the_processs_after_a_wait() {
-        use std::io::{Error, ErrorKind};
-        assert_eq!(
-            accept_backoff(&Error::from(ErrorKind::ConnectionAborted)),
-            None
-        );
-        assert_eq!(
-            accept_backoff(&Error::from(ErrorKind::ConnectionReset)),
-            None
-        );
-        // EMFILE, as the process running out of descriptors answers.
-        assert_eq!(
-            accept_backoff(&Error::from_raw_os_error(24)),
-            Some(Duration::from_secs(1))
-        );
-    }
-
-    /// Over stdio the server on this machine answers each port's address, and a port without
-    /// it is refused.
+    /// Over stdio, a port without the address a server may answer for it is carried in a
+    /// WebSocket, as over HTTP.
     #[tokio::test]
-    async fn a_port_over_stdio_without_its_address_is_refused() {
-        let (ours, _theirs) = tokio::io::duplex(64);
-        let client = TransportClient::over(ours);
-        let (forward, _forwarding) =
-            PortForwarder::open(&client, PortForwarderArgs::new("s", 5173));
-        let refused = forward.opened().await.unwrap_err();
-        assert!(
-            refused.to_string().contains("port 5173 has no url"),
-            "{refused}"
-        );
+    async fn a_port_over_stdio_is_carried_in_a_websocket() {
+        let client = Client::over(http_over_x::Client::embed(ports("", None)));
+        let (forward, forwarding) =
+            PortForwarder::open(&client, PortForwarderArgs::new("open", 7000));
+        let carried = async {
+            let address = forward.opened().await.unwrap();
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            stream.write_all(b"one").await.unwrap();
+            let mut echoed = [0u8; 3];
+            stream.read_exact(&mut echoed).await.unwrap();
+            echoed
+        };
+        tokio::select! {
+            echoed = carried => assert_eq!(&echoed, b"one"),
+            () = forwarding => panic!("ended"),
+        }
+        assert_eq!(forward.last_error(), None);
     }
 
     #[tokio::test]
     async fn a_connection_goes_with_the_auth_current_when_it_is_made() {
-        let client =
-            TransportClient::connect(&serve(Some("later")).await, Auth::None, HeaderMap::new())
-                .unwrap();
+        let client = Client::connect(&serve(Some("later")).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("open", 7000));
@@ -1184,8 +997,9 @@ mod tests {
     async fn a_port_over_stdio_at_another_address_is_carried_to_the_servers() {
         let served = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", served.local_addr().unwrap());
-        let (ours, _theirs) = tokio::io::duplex(64);
-        let client = Arc::new(TransportClient::over(ours));
+        let client = Arc::new(Client::over(
+            http_over_x::Client::embed(axum::Router::new()),
+        ));
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let local = free.local_addr().unwrap().to_string();
         drop(free);
@@ -1204,16 +1018,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_loopback_address_is_reached_as_it_is() {
-        let address = served_at("http://127.0.0.1:54123").unwrap();
-        assert_eq!(address, "127.0.0.1:54123".parse().unwrap());
-        assert!(served_at("ports/abc").is_err());
-    }
-
-    #[tokio::test]
     async fn completed_connection_tasks_are_reaped() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let client = Client::connect(&serve(None).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("open", 7000));
@@ -1240,8 +1046,7 @@ mod tests {
 
     #[tokio::test]
     async fn refused_connection_tasks_are_reaped() {
-        let client =
-            TransportClient::connect(&serve(None).await, Auth::None, HeaderMap::new()).unwrap();
+        let client = Client::connect(&serve(None).await, Auth::None).unwrap();
         let client = Arc::new(client);
         let (forward, forwarding) =
             PortForwarder::open(Arc::clone(&client), PortForwarderArgs::new("shut", 7000));
@@ -1277,23 +1082,20 @@ mod tests {
                 ws::{Message as WsMessage, WebSocketUpgrade},
             },
             response::IntoResponse,
-            routing::get,
+            routing::any,
         };
         use tokio::sync::mpsc;
 
         use super::*;
 
-        /// A server over HTTP whose sandbox `s` has the port 9222 on local: each WebSocket to it is
-        /// said one connection at once, and once that is answered it is sent `hi`, and what comes
-        /// back is sent to `answered`. Every WebSocket opened is counted in `opened`; another port, or
+        /// A server whose sandbox `s` has the port 9222 on local: each WebSocket to it is said one
+        /// connection at once, and once that is answered it is sent `hi`, and what comes back is
+        /// sent to `answered`. Every WebSocket opened is counted in `opened`; another port, or
         /// another sandbox, is `404`.
-        async fn serve(
-            opened: Arc<AtomicUsize>,
-            answered: mpsc::UnboundedSender<Vec<u8>>,
-        ) -> String {
-            let app = Router::new().route(
+        fn app(opened: Arc<AtomicUsize>, answered: mpsc::UnboundedSender<Vec<u8>>) -> Router {
+            Router::new().route(
                 "/sandboxes/{id}/client-ports/{port}",
-                get(
+                any(
                     move |Path((id, port)): Path<(String, u16)>, upgrade: WebSocketUpgrade| {
                         let (opened, answered) = (Arc::clone(&opened), answered.clone());
                         async move {
@@ -1323,7 +1125,15 @@ mod tests {
                         }
                     },
                 ),
-            );
+            )
+        }
+
+        /// [`app`] over HTTP, and its base URL.
+        async fn serve(
+            opened: Arc<AtomicUsize>,
+            answered: mpsc::UnboundedSender<Vec<u8>>,
+        ) -> String {
+            let app = app(opened, answered);
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}/", listener.local_addr().unwrap());
             tokio::spawn(async move { axum::serve(listener, app).await });
@@ -1331,37 +1141,48 @@ mod tests {
         }
 
         /// Each connection said is carried between its WebSocket and the target, and another
-        /// WebSocket waits for the next; the forwarder answers the target as its local end.
+        /// WebSocket waits for the next, over HTTP and over stdio alike; the forwarder answers the
+        /// target as its local end.
         #[tokio::test]
         async fn each_connection_said_is_carried_to_the_target() {
-            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let at = target.local_addr().unwrap().to_string();
-            let (answered, mut answers) = mpsc::unbounded_channel();
-            let opened = Arc::new(AtomicUsize::new(0));
-            let base = serve(Arc::clone(&opened), answered).await;
-            let client = TransportClient::connect(&base, Auth::None, HeaderMap::new()).unwrap();
-            let args = PortForwarderArgs::new("s", 9222)
-                .on(PortSide::Local)
-                .local(&at);
-            let (forward, forwarding) = PortForwarder::open(&client, args);
-            let carried = async {
-                assert_eq!(forward.opened().await.unwrap(), at);
-                let (mut reached, _) = target.accept().await.unwrap();
-                let mut said = [0u8; 2];
-                reached.read_exact(&mut said).await.unwrap();
-                assert_eq!(&said, b"hi");
-                reached.write_all(b"back").await.unwrap();
-                answers.recv().await.unwrap()
-            };
-            tokio::select! {
-                answer = carried => assert_eq!(answer, b"back"),
-                () = forwarding => panic!("ended"),
+            for over_stdio in [false, true] {
+                let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let at = target.local_addr().unwrap().to_string();
+                let (answered, mut answers) = mpsc::unbounded_channel();
+                let opened = Arc::new(AtomicUsize::new(0));
+                let client = match over_stdio {
+                    true => Client::over(http_over_x::Client::embed(app(
+                        Arc::clone(&opened),
+                        answered,
+                    ))),
+                    false => {
+                        let base = serve(Arc::clone(&opened), answered).await;
+                        Client::connect(&base, Auth::None).unwrap()
+                    }
+                };
+                let args = PortForwarderArgs::new("s", 9222)
+                    .on(PortSide::Local)
+                    .local(&at);
+                let (forward, forwarding) = PortForwarder::open(&client, args);
+                let carried = async {
+                    assert_eq!(forward.opened().await.unwrap(), at);
+                    let (mut reached, _) = target.accept().await.unwrap();
+                    let mut said = [0u8; 2];
+                    reached.read_exact(&mut said).await.unwrap();
+                    assert_eq!(&said, b"hi");
+                    reached.write_all(b"back").await.unwrap();
+                    answers.recv().await.unwrap()
+                };
+                tokio::select! {
+                    answer = carried => assert_eq!(answer, b"back"),
+                    () = forwarding => panic!("ended"),
+                }
+                assert!(
+                    opened.load(SeqCst) >= 2,
+                    "no other WebSocket waits for the next"
+                );
+                assert_eq!(forward.last_error(), None);
             }
-            assert!(
-                opened.load(SeqCst) >= 2,
-                "no other WebSocket waits for the next"
-            );
-            assert_eq!(forward.last_error(), None);
         }
 
         /// A connection whose target is not reached has its WebSocket closed, which refuses it,
@@ -1373,7 +1194,7 @@ mod tests {
             drop(unreached);
             let (answered, mut answers) = mpsc::unbounded_channel();
             let base = serve(Arc::default(), answered).await;
-            let client = TransportClient::connect(&base, Auth::None, HeaderMap::new()).unwrap();
+            let client = Client::connect(&base, Auth::None).unwrap();
             let args = PortForwarderArgs::new("s", 9222)
                 .on(PortSide::Local)
                 .local(&at);
@@ -1406,7 +1227,7 @@ mod tests {
         async fn a_port_the_server_has_not_is_refused() {
             let (answered, _answers) = mpsc::unbounded_channel();
             let base = serve(Arc::default(), answered).await;
-            let client = TransportClient::connect(&base, Auth::None, HeaderMap::new()).unwrap();
+            let client = Client::connect(&base, Auth::None).unwrap();
             let args = PortForwarderArgs::new("s", 5037).on(PortSide::Local);
             let (forward, forwarding) = PortForwarder::open(&client, args);
             forwarding.await;
@@ -1422,7 +1243,7 @@ mod tests {
             let counted = Arc::clone(&taken);
             let app = Router::new().route(
                 "/sandboxes/{id}/client-ports/{port}",
-                get(move |upgrade: WebSocketUpgrade| {
+                any(move |upgrade: WebSocketUpgrade| {
                     let taken = Arc::clone(&counted);
                     async move {
                         if taken.fetch_add(1, SeqCst) > 0 {
@@ -1440,7 +1261,7 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}/", listener.local_addr().unwrap());
             tokio::spawn(async move { axum::serve(listener, app).await });
-            let client = TransportClient::connect(&base, Auth::None, HeaderMap::new()).unwrap();
+            let client = Client::connect(&base, Auth::None).unwrap();
             let args = PortForwarderArgs::new("s", 9222)
                 .on(PortSide::Local)
                 .local("127.0.0.1:9");
@@ -1459,12 +1280,7 @@ mod ffi {
     //! [`PortForwarder`] behind the C ABI: opened over a client, forwarding on its runtime, and
     //! freed.
 
-    use std::{
-        ffi::c_int,
-        ops::Deref,
-        ptr,
-        sync::{Arc, Mutex},
-    };
+    use std::{ffi::c_int, ptr, sync::Mutex};
 
     use serde::Serialize;
     use tokio::{
@@ -1474,22 +1290,9 @@ mod ffi {
 
     use super::{PortForwarder, PortForwarderArgs};
     use crate::{
-        Client,
         client::ffi::VirtxClient,
         ffi::{VIRTX_ERROR, VIRTX_OK, VirtxBytes, VirtxFuture, failure, json, start, write},
-        transport::TransportClient,
     };
-
-    /// A client held by what forwards, for as long as it forwards.
-    struct Held(Arc<Client>);
-
-    impl Deref for Held {
-        type Target = TransportClient;
-
-        fn deref(&self) -> &TransportClient {
-            &self.0.inner
-        }
-    }
 
     /// Where a forwarder is, as `host:port`.
     #[derive(Serialize)]
@@ -1517,9 +1320,8 @@ mod ffi {
     /// "local"?: "host:port"}`: write the forwarder to `forwarder`, and hand C the future that
     /// answers once it is open, as `{"local": "host:port"}`, or why it did not open.
     ///
-    /// A port in the sandbox is reached at `local`, a free port on `127.0.0.1` without it; over
-    /// stdio, at the port's `url`, as the server answered it, without it, and one without its
-    /// `url` is refused. A port on local, one the sandbox was made with `"on": "local"`, is
+    /// A port in the sandbox is reached at `local`, a free port on `127.0.0.1` without it; at its
+    /// `url`, where the server answered one, without it. A port on local, one the sandbox was made with `"on": "local"`, is
     /// reached by its processes at `10.0.2.2:{port}`, each connection carried to `local` on this
     /// machine, `127.0.0.1:{port}` without it, and refused when that is not reached; its opening
     /// is refused `404` for a port the sandbox was not made with. What fails on the way is
@@ -1550,7 +1352,7 @@ mod ffi {
         };
         let mut opened = None;
         let forwarding = held.spawn(|client| {
-            let (made, forwarding) = PortForwarder::open(Held(client), args);
+            let (made, forwarding) = PortForwarder::open(client, args);
             opened = Some(made);
             forwarding
         });
@@ -1647,15 +1449,7 @@ mod ffi {
             // Nothing listens there: each connection to the forwarder is closed.
             let url = c"http://127.0.0.1:9/";
             let status = unsafe {
-                virtx_client_connect(
-                    url.as_ptr(),
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                    0,
-                    &mut client,
-                    &mut out,
-                )
+                virtx_client_connect(url.as_ptr(), std::ptr::null(), 0, &mut client, &mut out)
             };
             assert_eq!(status, crate::ffi::VIRTX_OK);
 

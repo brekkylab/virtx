@@ -16,6 +16,7 @@ use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -60,7 +61,23 @@ pub struct RegistryServer {
     host_paths: HostPaths,
     /// Where its images are kept beyond this machine, once its home is given that.
     backing: Backing,
+    /// What keeps a tag from being taken away, once its embedder says ([`RegistryServer::keeping`]).
+    kept: OnceLock<Kept>,
 }
+
+/// [`KeptTags`], said of in a debug print by whether there are any.
+#[derive(Clone)]
+struct Kept(KeptTags);
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Kept")
+    }
+}
+
+/// Why a tag is kept from being taken away, if it is: asked of each tag a manifest's `DELETE`
+/// would take away, as it is about to.
+pub type KeptTags = Arc<dyn Fn(&Reference) -> Option<String> + Send + Sync>;
 
 impl Drop for RegistryServer {
     fn drop(&mut self) {
@@ -138,7 +155,15 @@ impl RegistryServer {
             uploads,
             host_paths: HostPaths::Hidden,
             backing: Backing::default(),
+            kept: OnceLock::new(),
         })
+    }
+
+    /// Refuse, from now on, a manifest's `DELETE` that would take away a tag `kept` says why it
+    /// keeps -- its untagging, or the removal of the image it points at -- with `409` `DENIED`,
+    /// taking nothing away. Said once: `false`, and nothing changed, where it was said before.
+    pub fn keeping(&self, kept: KeptTags) -> bool {
+        self.kept.set(Kept(kept)).is_ok()
     }
 
     /// This registry, naming this host's paths as `host_paths` says.
@@ -586,6 +611,7 @@ impl RegistryServer {
     /// the digest's image only once that is held is left, as pushed after.
     async fn delete_manifest(&self, name: &str, reference: &str) -> Result<Response<Body>> {
         let (store, backing) = (self.store.clone(), self.backing.clone());
+        let kept = self.kept.get().cloned();
         let (name, reference) = (name.to_owned(), reference.to_owned());
         tokio::spawn(async move {
             // A removal waits for the store's change under way: blocking work.
@@ -597,7 +623,8 @@ impl RegistryServer {
             let taken = {
                 let (store, name, reference) = (store.clone(), name.clone(), reference.clone());
                 tokio::task::spawn_blocking(move || {
-                    delete_here(&store, &name, &reference, |tag| locked.holds(tag))
+                    let kept = |tag: &Reference| kept.as_ref().and_then(|kept| (kept.0)(tag));
+                    delete_here(&store, &name, &reference, |tag| locked.holds(tag), kept)
                         .map(|taken| (taken, locked))
                 })
                 .await??
@@ -1091,12 +1118,23 @@ fn named_by(store: &Store, name: &str, reference: &str) -> Result<Vec<Reference>
 
 /// What a manifest's `DELETE` of `reference` in repository `name` takes away in `store`, as
 /// [`RegistryServer::delete_manifest`] says: of a digest's tags, only those `held` picks.
+/// Refused, nothing taken, where it would take away one `kept` says why it keeps.
 fn delete_here(
     store: &Store,
     name: &str,
     reference: &str,
     held: impl Fn(&Reference) -> bool,
+    kept: impl Fn(&Reference) -> Option<String>,
 ) -> Result<Taken> {
+    let keeps = |tag: &Reference| {
+        kept(tag).map(|why| {
+            refusal(
+                StatusCode::CONFLICT,
+                "DENIED",
+                format!("{tag} is kept: {why}"),
+            )
+        })
+    };
     let unknown = || refusal(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN", reference);
     let in_use = |image: &Digest| {
         refusal(
@@ -1107,6 +1145,9 @@ fn delete_here(
     };
     if !reference.contains(':') {
         let tag = tagged(name, reference)?;
+        if let Some(refused) = keeps(&tag) {
+            return Err(refused);
+        }
         return match store.remove_tag(&tag) {
             Ok(image) => Ok(Taken {
                 here: image.is_some(),
@@ -1140,6 +1181,12 @@ fn delete_here(
             tags: Vec::new(),
             image: None,
         });
+    }
+    if let Some(refused) = (tags_here.iter())
+        .filter(|(tag, _)| held(tag))
+        .find_map(|(tag, _)| keeps(tag))
+    {
+        return Err(refused);
     }
     let taken = match tags_here.is_empty() {
         // Named by no tag: removed now, as there is none to remove anywhere else first.
@@ -1603,6 +1650,52 @@ mod tests {
         let (status, _, _) = send(server, Method::DELETE, &by_digest, b"").await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert!(store.get_image(&image).unwrap().is_none());
+    }
+
+    /// A tag its embedder keeps is not taken away, by its untagging or by its image's digest,
+    /// and nothing of the image is; another tag of it is, and the kept one is once let go of.
+    #[tokio::test]
+    async fn a_tag_kept_is_not_taken_away() {
+        let scratch = Scratch::new("kept");
+        let (store, server) = (&scratch.0, &scratch.1);
+        let layer = store.insert_layer(&FsTree::new()).unwrap();
+        let image = store
+            .insert_image(&ImageConfiguration::default(), &[layer])
+            .unwrap();
+        for tag in ["app:1", "app:copy"] {
+            store.insert_tag(&tag.parse().unwrap(), &image).unwrap();
+        }
+        let keeping = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let kept = Arc::clone(&keeping);
+        let app1: Reference = "app:1".parse().unwrap();
+        assert!(server.keeping(Arc::new(move |tag: &Reference| {
+            (kept.load(Ordering::SeqCst) && *tag == app1).then(|| "package app names it".into())
+        })));
+
+        for path in [
+            "/images/v2/app/manifests/1".to_owned(),
+            format!("/images/v2/app/manifests/{image}"),
+        ] {
+            let (status, _, body) = send(server, Method::DELETE, &path, b"").await;
+            assert_eq!(status, StatusCode::CONFLICT, "{path}");
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["errors"][0]["code"], "DENIED", "{body}");
+            assert!(
+                body["errors"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("package app")
+            );
+            assert_eq!(store.tags().unwrap().len(), 2, "every tag kept");
+        }
+        let (status, _, _) =
+            send(server, Method::DELETE, "/images/v2/app/manifests/copy", b"").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        keeping.store(false, Ordering::SeqCst);
+        let (status, _, _) = send(server, Method::DELETE, "/images/v2/app/manifests/1", b"").await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(store.tags().unwrap().is_empty());
     }
 
     #[tokio::test]

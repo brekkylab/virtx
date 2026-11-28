@@ -8,14 +8,14 @@ use super::{
 };
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
-use crate::{Error, Members, image::ImageListOutputItem, transport::TransportClient};
+use crate::{Client, Error, Members, image::ImageListOutputItem};
 
 /// How many of a listing's requests are in flight at once: one a tag, which over a remote
 /// server would otherwise each wait out a round trip in turn.
 const AT_ONCE: usize = 16;
 
 /// Every tag in every repository, with the digest it points at, sorted by reference.
-pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutputItem>, Error> {
+pub(crate) async fn list(client: &Client) -> Result<Vec<ImageListOutputItem>, Error> {
     let registry = &Registry::new(client);
     // The catalog, a repository's tags and a tag's manifest are three requests, and another
     // client may remove a repository or a tag between them: what is gone is left out.
@@ -45,7 +45,7 @@ pub(crate) async fn list(client: &TransportClient) -> Result<Vec<ImageListOutput
 
 /// Point the tag `target` at the image `source` names. Into another repository, everything
 /// the image names is mounted there from `source`'s first.
-pub(crate) async fn tag(client: &TransportClient, source: &str, target: &str) -> Result<(), Error> {
+pub(crate) async fn tag(client: &Client, source: &str, target: &str) -> Result<(), Error> {
     let named = source;
     let source = Reference::parse(source)?;
     let (name, tag) = Reference::parse_tag(target)?;
@@ -93,7 +93,7 @@ async fn copy(
 }
 
 /// Remove the tag `reference`, leaving the image it points at.
-pub(crate) async fn untag(client: &TransportClient, reference: &str) -> Result<(), Error> {
+pub(crate) async fn untag(client: &Client, reference: &str) -> Result<(), Error> {
     let (name, tag) = Reference::parse_tag(reference)?;
     held(
         reference,
@@ -102,7 +102,7 @@ pub(crate) async fn untag(client: &TransportClient, reference: &str) -> Result<(
 }
 
 /// Remove the image `reference` names from its repository, and every tag there on it.
-pub(crate) async fn remove(client: &TransportClient, reference: &str) -> Result<(), Error> {
+pub(crate) async fn remove(client: &Client, reference: &str) -> Result<(), Error> {
     let named = reference;
     let reference = Reference::parse(reference)?;
     let registry = Registry::new(client);
@@ -144,7 +144,6 @@ mod tests {
     use axum::extract::Request;
 
     use super::{list, remove, tag, untag};
-    use crate::transport::testing::piped;
 
     #[tokio::test]
     async fn a_list_leaves_out_what_was_removed_meanwhile() {
@@ -184,7 +183,7 @@ mod tests {
                 "/images/oci/v2/kept/manifests/lost",
                 head(move || async move { unknown("MANIFEST_UNKNOWN") }),
             );
-        let client = piped(router);
+        let client = crate::Client::over(http_over_x::Client::embed(router));
         let listed = list(&client).await.unwrap();
         assert_eq!(
             listed
@@ -234,7 +233,7 @@ mod tests {
             .route("/images/oci/v2/one/manifests/a", manifest("sha256:aa"))
             .route("/images/oci/v2/one/manifests/b", manifest("sha256:bb"))
             .route("/images/oci/v2/two/manifests/c", manifest("sha256:cc"));
-        let client = piped(router);
+        let client = crate::Client::over(http_over_x::Client::embed(router));
         let listed = tokio::time::timeout(std::time::Duration::from_secs(60), list(&client))
             .await
             .expect("each stage's requests were asked for at once")
@@ -271,7 +270,8 @@ mod tests {
                 )
             }
         };
-        let client = piped(Router::new().fallback(unknown));
+        let client =
+            crate::Client::over(http_over_x::Client::embed(Router::new().fallback(unknown)));
         let sent = || std::mem::take(&mut *asked.lock().unwrap());
         let digest = format!("sha256:{}", "0".repeat(64));
         let by_digest = format!("nope@{digest}");
@@ -326,7 +326,8 @@ mod tests {
     #[tokio::test]
     async fn a_registry_failure_other_than_404_is_left_as_it_came() {
         let failing = || async { (StatusCode::INTERNAL_SERVER_ERROR, "") };
-        let client = piped(Router::new().fallback(failing));
+        let client =
+            crate::Client::over(http_over_x::Client::embed(Router::new().fallback(failing)));
         let refused = untag(&client, "app:1").await.unwrap_err();
         assert_eq!(refused.status(), Some(500), "{refused:?}");
         assert_eq!(

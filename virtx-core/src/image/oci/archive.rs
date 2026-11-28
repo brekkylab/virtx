@@ -14,8 +14,8 @@ use std::{
 
 use bytes::Bytes;
 use futures_util::Stream;
+use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
-use hyper::body::Frame;
 use serde::Deserialize;
 use serde_json::{Map, json};
 use tokio::{
@@ -29,11 +29,11 @@ use super::{
     reference::{Reference, Target},
 };
 use crate::{
-    Error,
+    Client, Error,
     image::{Event, Progress},
     image::{ImageDownloadOutput, ImageUploadOutput},
-    transport::{Body, TransportClient},
 };
+use http_over_x::Body;
 
 /// The annotation containerd and Docker name a manifest in an archive by, as a full reference.
 const IMAGE_NAME: &str = "io.containerd.image.name";
@@ -63,7 +63,7 @@ fn line(n: u64, line: String) -> Progress<String> {
 /// Write the image `reference` names to an archive at `path`, replacing what is there once the
 /// whole image is written.
 pub(crate) fn download(
-    client: &TransportClient,
+    client: &Client,
     reference: String,
     path: PathBuf,
 ) -> impl Stream<Item = Result<Event<ImageDownloadOutput, String>, Error>> + Send + '_ {
@@ -118,7 +118,7 @@ pub(crate) fn download(
 /// Upload the image in the archive at `path`, and point the tag `reference` at it: the
 /// archive's only image, or the one it names by that tag.
 pub(crate) fn upload(
-    client: &TransportClient,
+    client: &Client,
     path: PathBuf,
     reference: String,
 ) -> impl Stream<Item = Result<Event<ImageUploadOutput, String>, Error>> + Send + '_ {
@@ -457,7 +457,9 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::{image::oci::manifest::sha256, transport::full};
+    use http_over_x::full;
+
+    use crate::image::oci::manifest::sha256;
 
     const IMAGE: &str = "application/vnd.oci.image.manifest.v1+json";
 

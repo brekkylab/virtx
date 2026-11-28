@@ -1,0 +1,249 @@
+---
+title: "Letting your users in"
+description: "Let people who are not members of your project make a sandbox of a package, each reaching the one they made and nothing else."
+---
+
+import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
+
+A [package](/docs/tutorials/packages/) is made by the members of its project alone, until you say who else may make one.
+Its **access** says who: whoever brings a token from an issuer you name, such as the provider your app signs its users in with.
+
+Each of them makes a sandbox of the package as a member does, and the server keeps its **grant**: the sandbox, given to them.
+From then on the same tokens reach that sandbox, and the others they made of the package, and nothing else.
+They never become members of the project, and never see its other sandboxes, images or volumes.
+
+## Before you start
+
+Access is kept by every server, but only a server reached over HTTP, one that takes credentials, lets anyone in by it.
+A server started by `Client.spawn()` has one user, you, and lets no one else in.
+
+Keep the package in the project your app's users will make sandboxes in, on the server they will reach.
+
+## Let your users in by their tokens
+
+`JwtAccess` lets in a request whose bearer token is a JSON Web Token signed by an issuer you name.
+The usual issuer is the OpenID Connect provider your app already signs its users in with, and the token is the ID token it gives your app:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+from virtx import JwtAccess
+
+package = await client.put_package(
+    "workspace",
+    "app:latest",
+    ports=[8000],
+    access=[JwtAccess(issuer="https://auth.example", audience="my-app")],
+)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const pkg = await client.putPackage('workspace', 'app:latest', {
+  ports: [8000],
+  access: [{ type: 'jwt', issuer: 'https://auth.example', audience: 'my-app' }],
+})
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use virtx::{PackageAccess, PackagePutArgs, SandboxCreateArgs};
+
+let args = PackagePutArgs::new(SandboxCreateArgs::new("app:latest").port(8000)).access(
+    PackageAccess::Jwt {
+        issuer: "https://auth.example".into(),
+        audience: "my-app".into(),
+        jwks: None,
+        claims: Default::default(),
+    },
+);
+let package = client.put_package("workspace", &args).await?;
+```
+
+</TabItem>
+</Tabs>
+
+The server lets a token in when:
+
+- Its `iss` is `issuer`, and its `aud` is or holds `audience`, such as your app's client ID at the provider.
+- It has not expired.
+- It is signed with one of the issuer's keys, by an asymmetric algorithm such as `RS256`, `ES256` or `EdDSA`. A token signed with an HMAC algorithm, or not signed, is refused.
+
+Each one who comes in is a **subject**, the token's `sub` of its issuer: one user, however many devices they come from.
+[Limits](#limit-how-many) count by it, and the sandboxes they made are found again by it.
+
+The server finds the issuer's keys through its OpenID Connect discovery document, at `{issuer}/.well-known/openid-configuration`.
+For an issuer with none, give its JWK Set's URL as `jwks`.
+`issuer` and `jwks` are `https` URLs.
+
+### Narrow an issuer with claims
+
+Some issuers give tokens to far more than your users.
+`claims` lets in only the tokens that carry each claim it names, with the value given.
+
+GitHub Actions, for example, gives every workflow run a token, and its `repository` claim names the repository the run is in.
+This package lets in the runs of one repository, and no one else's:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+JwtAccess(
+    issuer="https://token.actions.githubusercontent.com",
+    audience="virtx",
+    claims={"repository": "owner/app"},
+)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+{
+  type: 'jwt',
+  issuer: 'https://token.actions.githubusercontent.com',
+  audience: 'virtx',
+  claims: { repository: 'owner/app' },
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+PackageAccess::Jwt {
+    issuer: "https://token.actions.githubusercontent.com".into(),
+    audience: "virtx".into(),
+    jwks: None,
+    claims: [("repository".to_owned(), "owner/app".into())].into_iter().collect(),
+}
+```
+
+</TabItem>
+</Tabs>
+
+### More than one way in
+
+`access` is a list, and any one way in it lets a request in: your app's users and your CI's runs, say, each by their own issuer.
+A token the server takes from its own users, as [Running your own server](/docs/tutorials/self-hosting/) describes, is a member's whatever `access` says, and makes the sandbox as a member.
+
+## Limit how many
+
+`limits` is how many sandboxes made of the package by those `access` lets in may live at once:
+
+- **`sandboxes`:** all of theirs together.
+- **`per_subject`:** each subject's.
+
+A sandbox made past either is refused with `429`, `quota`, until one of theirs is removed.
+Without `limits`, the server sets its own.
+Sandboxes the project's members make do not count.
+
+Anyone your issuer signs in can make sandboxes of the package, and the project pays for them: give it `limits`, and the smallest size and `max` it needs.
+A sandbox lives until it is removed, so an app that does not remove its sandbox when it is done keeps using up its user's share.
+See [Remove the sandbox](/docs/tutorials/app-client/#remove-the-sandbox).
+
+## What a grant reaches
+
+The sandbox made of a package is granted to the one who made it: their issuer and subject, and the way in that let them in.
+They reach it with that way's tokens, each request naming the sandbox's project by its id, which [Building an app on a package](/docs/tutorials/app-client/) shows the client doing for you.
+A token they get later, once the first has expired, reaches it just the same: it is who they are that the grant names, not one token.
+
+Their tokens reach the sandbox, and all of it:
+
+- Its commands, its files and its ports.
+- Resizing it, up to the package's [`max`](/docs/tutorials/packages/#size) as it was when the sandbox was made.
+- Removing it.
+
+Every other request with them is refused, `401` or `403`.
+Once the sandbox is removed, by the one who made it, a member or the server, its grant is gone with it.
+
+Replacing or removing the package changes no sandbox made of it, nor its grant.
+To take back a sandbox someone made, a member removes it.
+
+## Let web pages in
+
+A web page that reaches the server itself, from your users' browser, is held to the server's [`Origin`](/docs/reference/protocol/#origin) check.
+`origins` lists the pages that may make a sandbox of the package, and reach it, beside those the server allows:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+package = await client.put_package(
+    "workspace",
+    "app:latest",
+    access=[JwtAccess(issuer="https://auth.example", audience="my-app")],
+    origins=["https://app.example"],
+)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const pkg = await client.putPackage('workspace', 'app:latest', {
+  access: [{ type: 'jwt', issuer: 'https://auth.example', audience: 'my-app' }],
+  origins: ['https://app.example'],
+})
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+let args = PackagePutArgs::new(SandboxCreateArgs::new("app:latest"))
+    .access(PackageAccess::Jwt {
+        issuer: "https://auth.example".into(),
+        audience: "my-app".into(),
+        jwks: None,
+        claims: Default::default(),
+    })
+    .origin("https://app.example");
+```
+
+</TabItem>
+</Tabs>
+
+Each origin is a scheme, host and port, as a browser sends it.
+The clients run in Python, Node.js and Rust, not in a browser: a web page speaks the protocol itself, as [Packages](/docs/reference/protocol/#packages) and [Grants](/docs/reference/protocol/#grants) in the protocol describe.
+
+## Troubleshooting
+
+1. **`401`, `unauthorized`, making a sandbox of a package**
+
+   **Cause:** No credentials, or a token the server takes from no one: expired, of another issuer or audience, or signed with a key the issuer does not have.
+
+   **Fix:** Send a fresh token of the issuer and audience the package names.
+
+2. **`403`, `forbidden`, making a sandbox of a package**
+
+   **Cause:** A token the server takes, but none of the package's ways in lets it in, such as one that lacks a claim the package names.
+
+   **Fix:** Check the token's claims against the package's `access`.
+
+3. **`429`, `quota`, making a sandbox of a package**
+
+   **Cause:** As many sandboxes of the package live as its `limits` allow, all of them or this subject's.
+
+   **Fix:** Remove a sandbox made of it, or raise its `limits`.
+
+4. **`400`, `invalid`, from `put_package` with `access`**
+
+   **Cause:** An `issuer` or `jwks` that is not an `https` URL.
+
+   **Fix:** Use the issuer exactly as its tokens' `iss` has it.
+
+5. **`401` or `403`, reaching a sandbox made of a package**
+
+   **Cause:** A request its grant does not reach: another sandbox, one removed, a resize past the package's `max`, a token of another subject, or no `virtx-project` naming the sandbox's project by its id.
+
+   **Fix:** Keep to the sandboxes the user made, with their own token, through `AppClient`, which names the project for you. For one removed, make another sandbox of the package.
+
+## Next
+
+- [Building an app on a package](/docs/tutorials/app-client/): make a sandbox of a package from your app, and use it as your user.

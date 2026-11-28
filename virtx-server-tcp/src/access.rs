@@ -13,16 +13,17 @@ use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
-use http::{HeaderMap, StatusCode, header};
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
+use http::{HeaderMap, Method, StatusCode, header};
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Package, PackageAccess, Role};
 use virtx_uvm::{
     ImageStore, ProjectError, ProjectId, ProjectStore, PublicImages, PublicRegistries,
     RegistryProxy, RegistryServer, Sandbox,
 };
 
 use crate::config::Config;
-use crate::endpoints::Home;
-use crate::oidc::Oidc;
+use crate::endpoints::{Home, Refused, refusal, refused};
+use crate::grant::{self, Grant, Maker};
+use crate::oidc::{Issuer, Oidc};
 use crate::project::{Membership, TcpMembership};
 
 /// Where a home's images are served as a registry.
@@ -72,11 +73,15 @@ impl Homes for ProjectStore {
             let dir = self.path(id);
             let images = ImageStore::new(dir.join("images"))?;
             let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
-            let made = move || Home::new(images, registry, &dir);
+            let project = *id;
+            let made = move || Home::new(project, images, registry, &dir);
             Ok(Some(tokio::task::spawn_blocking(made).await??))
         })
     }
 }
+
+/// An issuer, and where its keys are where it is said.
+type IssuerKeys = (String, Option<String>);
 
 pub struct Access {
     /// The `Origin`s a browser may call from.
@@ -97,6 +102,9 @@ pub struct Access {
     mirror: Option<Arc<str>>,
     /// Where the homes' anonymous pulls are shared, in place of what each home was made with.
     public: Option<Arc<dyn PublicImages>>,
+    /// The issuers packages' access names, by issuer and where its keys are, each made as a
+    /// token is first checked against it.
+    issuers: Mutex<HashMap<IssuerKeys, Arc<Issuer>>>,
 }
 
 impl Access {
@@ -122,6 +130,7 @@ impl Access {
             registries: Arc::new(PublicRegistries::default()),
             mirror: None,
             public: None,
+            issuers: Mutex::default(),
         }
     }
 
@@ -197,15 +206,173 @@ impl Access {
 
     /// `403` for a request with `headers` from an `Origin` not let in.
     pub fn origin(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        self.origin_among(headers, &[])
+    }
+
+    /// `403` for a request with `headers` from an `Origin` neither the server lets in nor one
+    /// of `also`.
+    fn origin_among(&self, headers: &HeaderMap, also: &[String]) -> Result<(), StatusCode> {
         if let Some(origin) = headers.get(header::ORIGIN)
-            && !self
-                .origins
-                .iter()
+            && !(self.origins.iter().chain(also))
                 .any(|allowed| allowed.as_bytes() == origin.as_bytes())
         {
             return Err(StatusCode::FORBIDDEN);
         }
         Ok(())
+    }
+
+    /// The home a request to `path` with `method` and `headers` reaches: a member's, as
+    /// [`home`](Access::home) says; otherwise, to a sandbox made of a package by one its access
+    /// let in, theirs, with its [`Grant`], where the request names the sandbox's project by its
+    /// id and carries a token the same way in lets in, of the same subject, from an origin the
+    /// server or the package lets in. Refused as a member's request is, otherwise: `401` for a
+    /// token that is no one's here.
+    pub async fn reach(
+        &self,
+        method: &Method,
+        path: &str,
+        headers: &HeaderMap,
+    ) -> Result<(Arc<Home>, Option<Grant>), StatusCode> {
+        let refused = match self.home(headers).await {
+            Ok((_, home)) => return Ok((home, None)),
+            Err(refused) => refused,
+        };
+        let (Some(token), Some(id)) = (bearer(headers), grant::sandbox_of(method, path)) else {
+            return Err(refused);
+        };
+        let named = headers
+            .get(PROJECT_HEADER)
+            .and_then(|named| named.to_str().ok());
+        let Some(project) = named.and_then(|named| named.parse::<ProjectId>().ok()) else {
+            return Err(refused);
+        };
+        let known = self.membership.project(&project).await.map_err(|e| {
+            eprintln!("reading project {project}: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        if known.is_none() {
+            return Err(refused);
+        }
+        let home = self.home_of(&project).await.map_err(|e| {
+            eprintln!("making project {project}'s home: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        let Some(home) = home else {
+            return Err(refused);
+        };
+        let Some(grant) = home.grant(id).await.map_err(|refused| refused.status())? else {
+            return Err(refused);
+        };
+        let Maker::LetIn { way, subject } = &grant.maker else {
+            return Err(refused);
+        };
+        if self.let_in_by(way, token).await.as_ref() != Some(subject) {
+            return Err(refused);
+        }
+        self.origin_among(headers, &grant.origins)?;
+        Ok((home, Some(grant)))
+    }
+
+    /// The home of the package `named` names, the package, and who makes a sandbox of it, or
+    /// finds those they made, with `headers`: a member of its project, with their token, or one
+    /// its access lets in. Named by its id, or by its name in the project the request names by
+    /// its id, it is reached with no member's token; by its name in a project named by its name,
+    /// by members alone. Refused `404` for no such package,
+    /// `401` for no credentials or a token no one's, `403` for one that is someone's but not
+    /// one the package takes, and from an origin neither the server nor the package lets in.
+    pub(crate) async fn maker(
+        &self,
+        headers: &HeaderMap,
+        named: &str,
+    ) -> Result<(Arc<Home>, Package, Maker), Refused> {
+        let token = bearer(headers);
+        let none = || {
+            refused(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("no package here is {named}"),
+            )
+        };
+        let by_id =
+            (named.split_once('.')).and_then(|(project, _)| project.parse::<ProjectId>().ok());
+        let named_project = (headers.get(PROJECT_HEADER))
+            .and_then(|named| named.to_str().ok())
+            .and_then(|named| named.parse::<ProjectId>().ok());
+        let (home, who, member) = match by_id.or(named_project) {
+            Some(project) => {
+                if self.membership.project(&project).await?.is_none() {
+                    return Err(none());
+                }
+                let home = self.home_of(&project).await.map_err(|e| {
+                    eprintln!("making project {project}'s home: {e:#}");
+                    refusal(StatusCode::INTERNAL_SERVER_ERROR)
+                })?;
+                let home = home.ok_or_else(none)?;
+                let who = self.identity.identify(token).await;
+                let member = match &who {
+                    Some(who) => self.membership.role(&project, who).await?.is_some(),
+                    None => false,
+                };
+                (home, who, member)
+            }
+            None => {
+                let (who, home) = self.home(headers).await.map_err(refusal)?;
+                (home, Some(who), true)
+            }
+        };
+        let package = home.package(named).await?;
+        self.origin_among(headers, &package.origins)
+            .map_err(refusal)?;
+        if member && let Some(who) = who {
+            return Ok((home, package, Maker::Member { user: who.user }));
+        }
+        let mut someone_s = who.is_some();
+        if let Some(token) = token {
+            for way in &package.access {
+                let PackageAccess::Jwt {
+                    issuer,
+                    audience,
+                    jwks,
+                    ..
+                } = way;
+                let issuer = self.issuer(issuer, jwks.as_deref());
+                let Some(carried) = issuer.claims(token, audience).await else {
+                    continue;
+                };
+                someone_s = true;
+                if let Some(subject) = subject_of(way, &carried) {
+                    let way = way.clone();
+                    return Ok((home, package, Maker::LetIn { way, subject }));
+                }
+            }
+        }
+        Err(refusal(match someone_s {
+            true => StatusCode::FORBIDDEN,
+            false => StatusCode::UNAUTHORIZED,
+        }))
+    }
+
+    /// The subject `token` is to `way`, where `way` lets it in.
+    async fn let_in_by(&self, way: &PackageAccess, token: &str) -> Option<String> {
+        let PackageAccess::Jwt {
+            issuer,
+            audience,
+            jwks,
+            ..
+        } = way;
+        let issuer = self.issuer(issuer, jwks.as_deref());
+        subject_of(way, &issuer.claims(token, audience).await?)
+    }
+
+    /// The issuer `issuer`, its keys at `jwks` where it says, made as it is first asked for.
+    fn issuer(&self, issuer: &str, jwks: Option<&str>) -> Arc<Issuer> {
+        let key = (issuer.to_owned(), jwks.map(str::to_owned));
+        let mut issuers = self.issuers.lock().unwrap();
+        Arc::clone(
+            issuers.entry(key).or_insert_with(|| {
+                Arc::new(Issuer::new(issuer.to_owned(), jwks.map(str::to_owned)))
+            }),
+        )
     }
 
     /// Who a request with `headers` is from: `403` from an `Origin` not let in, and `401` for a
@@ -328,6 +495,19 @@ impl Access {
     pub fn release(&self, id: &ProjectId) {
         self.homes.lock().unwrap().remove(id);
     }
+}
+
+/// The subject of a token carrying `carried`, where it carries each of `way`'s claims: its `sub`.
+fn subject_of(
+    way: &PackageAccess,
+    carried: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let PackageAccess::Jwt { claims, .. } = way;
+    let theirs = claims
+        .iter()
+        .all(|(name, value)| carried.get(name) == Some(value));
+    let subject = carried.get("sub").and_then(|sub| sub.as_str());
+    subject.filter(|_| theirs).map(str::to_owned)
 }
 
 /// The bearer token `headers` carry, if any.
@@ -599,6 +779,336 @@ mod tests {
         let in_home = crate::endpoints::router().layer(axum::Extension(home));
         let Ok(refused) = tower::ServiceExt::oneshot(in_home, pull).await;
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Who makes a sandbox of a package named by its id, or by its name in the project named by its
+    /// id: a member of its project with their token, or one its access lets in -- a token of its issuer's for its audience carrying its claims,
+    /// its subject the token's -- from the server's origins or the package's. Refused `401` with
+    /// no token or one no one's, `403` with someone's the package does not take, and `404` for
+    /// no such package. One let in names no sandbox, and is held to the package's limits.
+    #[tokio::test]
+    async fn a_package_s_sandbox_is_made_by_its_members_and_whom_its_access_lets_in() {
+        use std::time::SystemTime;
+
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        use virtx_core::{
+            PackageAccess, PackageLimits, PackagePutArgs, PackageSandboxCreateArgs,
+            SandboxCreateArgs, SandboxResizeArgs,
+        };
+        use virtx_uvm::PackageStore;
+
+        use crate::grant::{Grant, Grants, Maker};
+        use crate::oidc::tests::{KEY, X, Y};
+
+        let keys = json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256", "use": "sig", "x": X, "y": Y,
+        }]});
+        let served = axum::Router::new().route(
+            "/keys",
+            axum::routing::get(move || async move { keys.to_string() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let jwks = format!("http://{}/keys", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, served).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let demo = projects
+            .create(&Principal::new("alice"), "demo")
+            .await
+            .unwrap()
+            .id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            vec!["https://allowed.example".to_owned()],
+            Arc::new(TokenIsUser(["alice".to_owned(), "bob".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(store.clone()),
+        );
+        let home = access.home_of(&demo).await.unwrap().unwrap();
+        let mut claims = serde_json::Map::new();
+        claims.insert("repository".into(), json!("owner/app"));
+        let way = PackageAccess::Jwt {
+            issuer: "https://idp.example".into(),
+            audience: "app".into(),
+            jwks: Some(jwks),
+            claims,
+        };
+        let args = PackagePutArgs::new(SandboxCreateArgs::new("app:1"))
+            .access(way.clone())
+            .origin("https://app.example")
+            .limits(PackageLimits {
+                sandboxes: Some(2),
+                per_subject: Some(1),
+            });
+        let packages = PackageStore::new(&store.path(&demo)).unwrap();
+        let (package, _) = packages
+            .put("app", args, &[], || format!("{demo}.p1"))
+            .unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let signed = |audience: &str, repository: &str| {
+            let mut header = Header::new(Algorithm::ES256);
+            header.kid = Some("k1".into());
+            let claims = json!({
+                "iss": "https://idp.example", "aud": audience, "exp": now.as_secs() + 600,
+                "sub": "user-1", "repository": repository,
+            });
+            let key = EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap();
+            jsonwebtoken::encode(&header, &claims, &key).unwrap()
+        };
+        let maker = async |token: Option<&str>, project, origin, named: &str| {
+            let headers = headers(token, project, origin);
+            let made = access.maker(&headers, named).await;
+            made.map(|(_, _, maker)| maker)
+                .map_err(|refused| refused.status())
+        };
+        let id = package.id.as_str();
+        let let_in = |subject: &str| Maker::LetIn {
+            way: way.clone(),
+            subject: subject.into(),
+        };
+        let member = Ok(Maker::Member {
+            user: "alice".into(),
+        });
+
+        assert_eq!(maker(Some("alice"), None, None, id).await, member);
+        assert_eq!(
+            maker(Some("alice"), Some("demo"), None, "app").await,
+            member
+        );
+        let good = signed("app", "owner/app");
+        assert_eq!(
+            maker(Some(&good), None, None, id).await,
+            Ok(let_in("user-1"))
+        );
+        for origin in ["https://app.example", "https://allowed.example"] {
+            assert_eq!(
+                maker(Some(&good), None, Some(origin), id).await,
+                Ok(let_in("user-1")),
+                "{origin}"
+            );
+        }
+
+        let refused = async |token, origin, named| maker(token, None, origin, named).await.err();
+        let forbidden = Some(StatusCode::FORBIDDEN);
+        assert_eq!(
+            refused(Some("bob"), None, id).await,
+            forbidden,
+            "someone's, no member"
+        );
+        let other = signed("app", "owner/other");
+        assert_eq!(
+            refused(Some(&other), None, id).await,
+            forbidden,
+            "not its claims"
+        );
+        assert_eq!(
+            refused(Some(&good), Some("https://evil.example"), id).await,
+            forbidden
+        );
+        let unauthorized = Some(StatusCode::UNAUTHORIZED);
+        assert_eq!(refused(None, None, id).await, unauthorized, "no one");
+        assert_eq!(refused(Some("mallory"), None, id).await, unauthorized);
+        let elsewhere = signed("another", "owner/app");
+        assert_eq!(
+            refused(Some(&elsewhere), None, id).await,
+            unauthorized,
+            "not its audience"
+        );
+        let none = format!("{demo}.none");
+        assert_eq!(
+            refused(None, None, &none).await,
+            Some(StatusCode::NOT_FOUND)
+        );
+        let nobody_s = ProjectId::new();
+        let theirs = format!("{nobody_s}.p1");
+        assert_eq!(
+            refused(None, None, &theirs).await,
+            Some(StatusCode::NOT_FOUND),
+            "no such project"
+        );
+        assert!(!store.path(&nobody_s).exists(), "no such project's home");
+        let by_id = demo.to_string();
+        assert_eq!(
+            maker(Some(&good), Some(&by_id), None, "app").await,
+            Ok(let_in("user-1")),
+            "by name in the project named by its id"
+        );
+        assert_eq!(
+            maker(Some(&good), Some("demo"), None, "app").await.err(),
+            unauthorized,
+            "by name in the project named by its name, members alone"
+        );
+        assert_eq!(
+            refused(Some(&good), None, "app").await,
+            unauthorized,
+            "by name in no project named, members alone"
+        );
+
+        // One let in names no sandbox, and makes none past the package's limits, with those
+        // granted: a member's counted toward none.
+        let make = async |subject: &str, name: Option<&str>| {
+            let args = PackageSandboxCreateArgs {
+                name: name.map(str::to_owned),
+                ports: Vec::new(),
+            };
+            let made = home.make_of(&package, let_in(subject), args).await;
+            made.err().map(|refused| refused.status())
+        };
+        assert_eq!(make("a", Some("dev")).await, Some(StatusCode::BAD_REQUEST));
+        let grants = Grants::new(&store.path(&demo)).unwrap();
+        let given = |sandbox: &str, maker| Grant {
+            sandbox: sandbox.into(),
+            package: package.id.clone(),
+            maker,
+            max: SandboxResizeArgs::default(),
+            origins: Vec::new(),
+        };
+        let alice = Maker::Member {
+            user: "alice".into(),
+        };
+        grants.keep(&given("of-alice", alice)).unwrap();
+        grants.keep(&given("of-a", let_in("a"))).unwrap();
+        let quota = Some(StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(make("a", None).await, quota, "its own");
+        grants.keep(&given("of-c", let_in("c"))).unwrap();
+        assert_eq!(make("b", None).await, quota, "all of theirs");
+        task.abort();
+    }
+
+    /// The sandboxes made of a package are found again by who made them: one let in finds those
+    /// of their issuer and subject alone, whichever way in let them in, and a member every one.
+    #[tokio::test]
+    async fn a_package_s_sandbox_is_found_again_by_who_made_it_alone() {
+        use virtx_core::{
+            PackageAccess, PackageLimits, PackagePutArgs, PackageSandboxCreateArgs,
+            SandboxCreateArgs, SandboxResizeArgs,
+        };
+        use virtx_uvm::PackageStore;
+
+        use crate::grant::{Grant, Grants, Maker};
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let demo = projects
+            .create(&Principal::new("alice"), "demo")
+            .await
+            .unwrap()
+            .id;
+        let store = ProjectStore::new(dir.path());
+        // Sandboxes held as the home is made, each answered as one not known again.
+        let held = store.path(&demo).join("sandbox");
+        std::fs::create_dir_all(&held).unwrap();
+        for id in [
+            "of-a",
+            "of-a2",
+            "of-a-by-ci",
+            "of-a-elsewhere",
+            "of-b",
+            "of-alice",
+        ] {
+            std::fs::write(held.join(format!("{id}.ext4")), b"").unwrap();
+            std::fs::write(held.join(format!("{id}.json")), "not json").unwrap();
+        }
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(store.clone()),
+        );
+        let home = access.home_of(&demo).await.unwrap().unwrap();
+        let packages = PackageStore::new(&store.path(&demo)).unwrap();
+        let limited = PackagePutArgs::new(SandboxCreateArgs::new("app:1")).limits(PackageLimits {
+            sandboxes: None,
+            per_subject: Some(4),
+        });
+        let (package, _) = packages
+            .put("app", limited, &[], || format!("{demo}.p1"))
+            .unwrap();
+        let other = PackagePutArgs::new(SandboxCreateArgs::new("app:1"));
+        let (other, _) = packages
+            .put("other", other, &[], || format!("{demo}.p2"))
+            .unwrap();
+        let way = |issuer: &str, audience: &str| PackageAccess::Jwt {
+            issuer: issuer.into(),
+            audience: audience.into(),
+            jwks: None,
+            claims: Default::default(),
+        };
+        let let_in = |way: &PackageAccess, subject: &str| Maker::LetIn {
+            way: way.clone(),
+            subject: subject.into(),
+        };
+        let (app, ci) = (
+            way("https://idp.example", "app"),
+            way("https://idp.example", "ci"),
+        );
+        let elsewhere = way("https://other.example", "app");
+        let grants = Grants::new(&store.path(&demo)).unwrap();
+        let alice = Maker::Member {
+            user: "alice".into(),
+        };
+        for (sandbox, maker) in [
+            ("of-a", let_in(&app, "a")),
+            ("of-a2", let_in(&app, "a")),
+            ("of-a-by-ci", let_in(&ci, "a")),
+            ("of-a-elsewhere", let_in(&elsewhere, "a")),
+            ("of-b", let_in(&app, "b")),
+            ("of-alice", alice.clone()),
+        ] {
+            let grant = Grant {
+                sandbox: sandbox.into(),
+                package: package.id.clone(),
+                maker,
+                max: SandboxResizeArgs::default().vcpus(2),
+                origins: vec!["https://app.example".into()],
+            };
+            grants.keep(&grant).unwrap();
+        }
+
+        let found = async |maker: Maker| {
+            let found = home.made_of(&package, &maker).await.ok().unwrap();
+            found
+                .into_iter()
+                .map(|sandbox| sandbox.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found(let_in(&app, "a")).await,
+            ["of-a", "of-a-by-ci", "of-a2"],
+            "of the same issuer and subject, by any way in"
+        );
+        assert_eq!(found(let_in(&elsewhere, "a")).await, ["of-a-elsewhere"]);
+        assert_eq!(found(let_in(&app, "b")).await, ["of-b"]);
+        assert!(
+            found(let_in(&app, "alice")).await.is_empty(),
+            "a member's is no subject's"
+        );
+        assert_eq!(
+            found(alice).await,
+            [
+                "of-a",
+                "of-a-by-ci",
+                "of-a-elsewhere",
+                "of-a2",
+                "of-alice",
+                "of-b"
+            ]
+        );
+        let others = home.made_of(&other, &let_in(&app, "a")).await.ok().unwrap();
+        assert!(others.is_empty(), "another package's");
+
+        // "a" of this issuer has three sandboxes: under four, one more is not refused its room,
+        // and one of the other issuer's is counted apart.
+        let args = PackageSandboxCreateArgs::default();
+        let made = home.make_of(&package, let_in(&app, "a"), args).await;
+        let status = made.err().map(|refused| refused.status());
+        assert_ne!(status, Some(StatusCode::TOO_MANY_REQUESTS));
     }
 
     /// Homes made only for the projects listed, none for any other.

@@ -12,7 +12,7 @@ use anyhow::{Context as _, bail};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::access::Principal;
@@ -64,18 +64,24 @@ impl Keys {
     }
 }
 
-pub struct Oidc {
-    config: Config,
+/// An issuer of JSON Web Tokens, and the keys it signs them with, fetched as a token needs
+/// them: from its discovery document, or from where it is said they are.
+pub struct Issuer {
+    issuer: String,
+    jwks_uri: Option<String>,
     http: reqwest::Client,
     keys: RwLock<Keys>,
     /// Held while the keys are fetched, so one fetch runs at a time.
     fetching: Mutex<()>,
 }
 
-impl Oidc {
-    pub fn new(config: Config) -> Oidc {
-        Oidc {
-            config,
+impl Issuer {
+    /// `issuer`, its keys at `jwks_uri` where it is given, and otherwise where its discovery
+    /// document says.
+    pub fn new(issuer: String, jwks_uri: Option<String>) -> Issuer {
+        Issuer {
+            issuer,
+            jwks_uri,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -88,11 +94,11 @@ impl Oidc {
         }
     }
 
-    /// Who `token` is from, and what it carries, if the provider signed it for the client and
-    /// it is current.
-    pub async fn principal(&self, token: &str) -> Option<Principal> {
+    /// The claims of `token`, if this issuer signed it with a key pair for `audience`, and it
+    /// is current.
+    pub async fn claims(&self, token: &str, audience: &str) -> Option<Map<String, Value>> {
         let header = jsonwebtoken::decode_header(token).ok()?;
-        // Signed with a key pair only: a shared secret is no provider's signature.
+        // Signed with a key pair only: a shared secret is no issuer's signature.
         if matches!(
             header.alg,
             Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512
@@ -101,21 +107,15 @@ impl Oidc {
         }
         let key = self.key(&header.kid?).await?;
         let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[&self.config.issuer]);
-        validation.set_audience(&[&self.config.client_id]);
-        let claims = jsonwebtoken::decode::<Value>(token, &key, &validation)
+        validation.set_issuer(&[&self.issuer]);
+        validation.set_audience(&[audience]);
+        match jsonwebtoken::decode::<Value>(token, &key, &validation)
             .ok()?
-            .claims;
-        let claim = &self.config.username_claim;
-        // An address the provider does not say it verified is whatever its holder typed.
-        if claim == "email" && claims.get("email_verified") != Some(&Value::Bool(true)) {
-            return None;
+            .claims
+        {
+            Value::Object(claims) => Some(claims),
+            _ => None,
         }
-        let user = claims.get(claim)?.as_str()?.to_owned();
-        let Value::Object(claims) = claims else {
-            return None;
-        };
-        Some(Principal { user, claims })
     }
 
     async fn key(&self, kid: &str) -> Option<DecodingKey> {
@@ -141,7 +141,7 @@ impl Oidc {
                 keys.due = Instant::now() + REFETCH_AFTER;
             }
             Err(e) => {
-                eprintln!("fetching the keys of {}: {e:#}", self.config.issuer);
+                eprintln!("fetching the keys of {}: {e:#}", self.issuer);
                 keys.due = Instant::now() + RETRY_AFTER;
             }
         }
@@ -149,13 +149,13 @@ impl Oidc {
     }
 
     async fn fetch(&self) -> anyhow::Result<JwkSet> {
-        if let Some(keys) = &self.config.jwks_uri {
+        if let Some(keys) = &self.jwks_uri {
             return self.get(keys).await.context("its keys");
         }
-        let issuer = self.config.issuer.trim_end_matches('/');
+        let issuer = self.issuer.trim_end_matches('/');
         let url = format!("{issuer}/.well-known/openid-configuration");
         let discovery: Discovery = self.get(&url).await.context("its discovery document")?;
-        if discovery.issuer != self.config.issuer {
+        if discovery.issuer != self.issuer {
             bail!("its discovery document is of {}", discovery.issuer);
         }
         self.get(&discovery.jwks_uri).await.context("its keys")
@@ -167,8 +167,34 @@ impl Oidc {
     }
 }
 
+/// The users of the config's issuer: each token it signs for the config's client names one.
+pub struct Oidc {
+    config: Config,
+    issuer: Issuer,
+}
+
+impl Oidc {
+    pub fn new(config: Config) -> Oidc {
+        let issuer = Issuer::new(config.issuer.clone(), config.jwks_uri.clone());
+        Oidc { config, issuer }
+    }
+
+    /// Who `token` is from, and what it carries, if the provider signed it for the client and
+    /// it is current.
+    pub async fn principal(&self, token: &str) -> Option<Principal> {
+        let claims = self.issuer.claims(token, &self.config.client_id).await?;
+        let claim = &self.config.username_claim;
+        // An address the provider does not say it verified is whatever its holder typed.
+        if claim == "email" && claims.get("email_verified") != Some(&Value::Bool(true)) {
+            return None;
+        }
+        let user = claims.get(claim)?.as_str()?.to_owned();
+        Some(Principal { user, claims })
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::SystemTime;
 
     use jsonwebtoken::{EncodingKey, Header};
@@ -177,14 +203,14 @@ mod tests {
     use super::*;
 
     /// A P-256 key, and its public half as a JWK's `x` and `y`.
-    const KEY: &str = "-----BEGIN PRIVATE KEY-----
+    pub(crate) const KEY: &str = "-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTFNNLGR4z9BOxmmG
 kWTAwIsXQv7M5AnnFYbw7KqIAduhRANCAARm+2fsK24SWK8QJjqyNzhrBvlhw8UG
 rABUOPQZw+SIzclThn/7Vcn7i0rAcmmlVj8sdMeJsFeMZ3CehtnTDGVK
 -----END PRIVATE KEY-----
 ";
-    const X: &str = "Zvtn7CtuElivECY6sjc4awb5YcPFBqwAVDj0GcPkiM0";
-    const Y: &str = "yVOGf_tVyfuLSsByaaVWPyx0x4mwV4xncJ6G2dMMZUo";
+    pub(crate) const X: &str = "Zvtn7CtuElivECY6sjc4awb5YcPFBqwAVDj0GcPkiM0";
+    pub(crate) const Y: &str = "yVOGf_tVyfuLSsByaaVWPyx0x4mwV4xncJ6G2dMMZUo";
 
     #[tokio::test]
     async fn an_issuer_with_no_discovery_document_is_taken_at_its_keys() {

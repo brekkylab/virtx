@@ -7,11 +7,10 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
 ## What VirtX is
 
-VirtX runs commands in Linux microVMs that your Python, Node.js or Rust code creates and controls.
-Use it to run code you don't want to run on your own machine, such as code an AI agent wrote, or jobs with dependencies you don't want to install there.
+VirtX runs Linux microVMs on your machine or in the cloud, and lets you ship them as a service.
 
-Your code creates a sandbox from an image, runs commands in it, reads and writes its files, and removes it when the work is done.
-Files that need to outlive the sandbox go in a volume.
+Run code in a sandbox that you don't want to run on your own machine, such as code an AI agent wrote.
+When you build an app on VirtX, each of its users gets a sandbox of their own.
 
 ## How the pieces fit
 
@@ -24,6 +23,7 @@ Files that need to outlive the sandbox go in a volume.
 | **Job** | A command running in a sandbox, or an image build, pull or push. A job keeps running if your program stops reading it, and its output is kept in a log you can read again. |
 | **Volume** | Storage that exists apart from any sandbox. Mount it into sandboxes to keep files after they are removed, or to share files between them. |
 | **Project** | A group of sandboxes, images and volumes on a server. You can share a project with teammates. |
+| **Package** | A sandbox kept under a name in a project, which members, and anyone else it lets in, make as many sandboxes of as they need. Each who is let in reaches only the sandbox they made. |
 
 The server can run in three places. Your code is the same in each; only the line that creates the client changes.
 
@@ -46,7 +46,7 @@ To run sandboxes on your own machine, it must also meet the [requirements](/docs
   <LinkCard title="Run your first sandbox" href="/docs/hello-world/" description="Install the client and print Hello, world! from a sandbox in a few minutes." />
   <LinkCard title="Give VirtX to a coding agent" href="/docs/guides/using-virtx-in-coding-agents/" description="Install the VirtX skill for Claude Code or Codex." />
   <LinkCard title="Run VirtX for your team" href="/docs/tutorials/self-hosting/" description="Set up virtx-server-tcp on a machine you control." />
-  <LinkCard title="Look up a call" href="/docs/sdk/" description="Every method of the Python, Node.js and Rust clients." />
+  <LinkCard title="Ship it as a service" href="/docs/tutorials/projects/" description="Give each user of your app a sandbox of their own." />
 </CardGrid>
 
 ## Tutorials
@@ -59,10 +59,13 @@ Each tutorial covers one feature of VirtX in depth:
 - [Reading and writing files](/docs/tutorials/reading-writing-files/): move files in and out without running a command.
 - [Networks and ports](/docs/tutorials/networks-ports/): control outbound access and reach services in a sandbox.
 - [Mounting volumes](/docs/tutorials/mounting-volumes/): keep files after a sandbox is removed, and mount Notion, Google Drive or OneDrive.
-- [Managing projects](/docs/tutorials/projects/): organize resources and share them with your team.
-- [Running your own server](/docs/tutorials/self-hosting/): serve VirtX to your team, with users signed in through your OpenID Connect provider.
 - [Using GPUs](/docs/tutorials/using-gpus/): give a sandbox the host's GPU through Vulkan.
 - [Using built-in programs](/docs/tutorials/built-in-programs/): give a sandbox VirtX's built-in programs at `/abin`, which run on any image.
+- [Managing projects](/docs/tutorials/projects/): organize resources and share them with your team.
+- [Running your own server](/docs/tutorials/self-hosting/): serve VirtX to your team, with users signed in through your OpenID Connect provider.
+- [Making packages](/docs/tutorials/packages/): keep a sandbox under a name, and make as many sandboxes of it as you need.
+- [Letting your users in](/docs/tutorials/package-access/): let people who are not members make a sandbox of a package, each reaching only their own.
+- [Building an app on a package](/docs/tutorials/app-client/): make a sandbox of a package from your app with `AppClient`, use it as your user, and come back to it later.
 
 ## Guides
 

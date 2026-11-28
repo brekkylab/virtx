@@ -13,6 +13,9 @@ build = "../virtx-server-stdio/build.rs"
 gpu = ["virtx-uvm/gpu"]
 
 [dependencies]
+# The servers' end of the wire: a request's body read as its args, a job's log as an event
+# stream, and stdio served.
+http-over-x = { workspace = true, features = ["server"] }
 anyhow = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio", "ws"] }
 clap = { version = "4", features = ["derive"] }
@@ -34,7 +37,7 @@ percent-encoding = "2"
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # What a browser at one of the config's origins may ask: the preflights of the WebDAV methods.
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
-# A token's randomness.
+# A package's id.
 uuid = { version = "1", features = ["v4"] }
 # What the endpoints take and answer.
 virtx-core = { workspace = true, features = ["server"] }
@@ -44,10 +47,10 @@ virtx-uvm = { workspace = true }
 [dev-dependencies]
 # Tokens signed as an issuer signs them.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
-# A blob's digest, as a registry's client computes it.
-sha2 = "0.10"
 # A test's own root, removed when it is done.
 tempfile = "3"
+# A blob's digest, as a registry names it.
+sha2 = "0.10"
 # A request sent to a router as the server would.
 tower = { version = "0.5", default-features = false, features = ["util"] }
 # The wire, spoken by hand, and by virtx-core's client with the project given at connect.

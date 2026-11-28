@@ -17,16 +17,16 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
-    ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
-    RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs,
-    SandboxResources, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
-    VolumeMountListOutputItem,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, Package as PackageInfo, PackagePutArgs,
+    PackageSandboxCreateArgs, ProjectCreateArgs, ProjectListOutputItem as ProjectInfo,
+    ProjectMemberListOutputItem as ProjectMemberInfo, Recipe, RegistryAuth, Role,
+    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs, SandboxResources,
+    VolumeCreateArgs, VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error, ImageJob, Project, Sandbox, SandboxJob, Volume,
+    Error, ImageJob, Package, Project, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -143,22 +143,17 @@ impl Client {
     }
 
     /// Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the
-    /// credentials it wants, `project`, the project every request is in (the user's own without
-    /// one), and `headers`, each a name and a value, whatever else it asks of each
-    /// request, with every request. `Authorization` is `auth`'s, and `virtx-project` names
-    /// `project`, over one given as a header. Refused when a token would go in the clear: over
+    /// credentials it wants, and `project`, the project every request is in (the user's own
+    /// without one), with every request. Refused when a token would go in the clear: over
     /// `http` to any host but this machine. Blocks until the client is made.
     pub fn connect(
         url: impl AsRef<str>,
         auth: Auth,
         project: Option<&str>,
-        headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
     ) -> Result<Client, Error> {
         let api = api()?;
         let url = c_string(url.as_ref())?;
         let auth = serde_json::to_vec(&auth).expect("an auth encodes");
-        let strings = header_strings(headers)?;
-        let pointers: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
         let mut raw = ptr::null_mut();
         let mut error = VirtxBytes::empty();
         let status = unsafe {
@@ -166,8 +161,6 @@ impl Client {
                 url.as_ptr(),
                 auth.as_ptr(),
                 auth.len(),
-                pointers.as_ptr(),
-                strings.len() / 2,
                 &mut raw,
                 &mut error,
             )
@@ -193,34 +186,9 @@ impl Client {
         unsafe { take(self.api, status, error) }
     }
 
-    /// Send `headers` with every request from now on, in place of those given at
-    /// [`connect`](Self::connect). A forwarder already open sends them with its next
-    /// connection. Over stdio, where none are sent, nothing changes. A header that cannot be
-    /// sent is refused, the headers unchanged.
-    pub fn set_headers(
-        &self,
-        headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
-    ) -> Result<(), Error> {
-        let strings = header_strings(headers)?;
-        let pointers: Vec<_> = strings.iter().map(|s| s.as_ptr()).collect();
-        let mut error = VirtxBytes::empty();
-        let status = unsafe {
-            (self.api.virtx_client_set_headers)(
-                self.raw,
-                pointers.as_ptr(),
-                strings.len() / 2,
-                &mut error,
-            )
-        };
-        if status == VIRTX_OK {
-            return Ok(());
-        }
-        unsafe { take(self.api, status, error) }
-    }
-
     /// Name `project` in every request from now on, over either transport, or with `None`
-    /// none, for the user's own project. It is sent in place of a `virtx-project` among the
-    /// headers given. Refused for a name no header carries, the project unchanged.
+    /// none, for the user's own project. Refused for a name no header carries, the project
+    /// unchanged.
     pub fn set_project(&self, project: Option<&str>) -> Result<(), Error> {
         let project = project.map(c_string).transpose()?;
         let pointer = project.as_ref().map_or(ptr::null(), |name| name.as_ptr());
@@ -714,6 +682,73 @@ impl Client {
         self.call(self.api.virtx_client_copy_file, args)
     }
 
+    /// Every package in the project.
+    pub fn list_package(&self) -> Call<Vec<Package>> {
+        let client = self.clone();
+        let call: Call<Vec<PackageInfo>> = Call::new(self.api, unsafe {
+            (self.api.virtx_client_list_package)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Package::new(client.clone(), info))
+                .collect()
+        })
+    }
+
+    /// Keep `args` as the package `name`, made or replaced in whole; see [`PackagePutArgs::new`].
+    /// Its image and volumes have to be on the server already.
+    pub fn put_package(&self, name: impl AsRef<str>, args: &PackagePutArgs) -> Call<Package> {
+        let args = json!({ "name": name.as_ref(), "args": args });
+        let client = self.clone();
+        let call: Call<PackageInfo> = self.call(self.api.virtx_client_put_package, args);
+        call.map(move |info| Package::new(client.clone(), info))
+    }
+
+    /// The package `package` names: by its id, or its name in the project.
+    pub fn get_package(&self, package: impl AsRef<str>) -> Call<Package> {
+        let args = json!({ "package": package.as_ref() });
+        let client = self.clone();
+        let call: Call<PackageInfo> = self.call(self.api.virtx_client_get_package, args);
+        call.map(move |info| Package::new(client.clone(), info))
+    }
+
+    /// Remove the package `package` names.
+    pub(crate) fn remove_package(&self, package: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "package": package.as_ref() });
+        self.call(self.api.virtx_client_remove_package, args)
+    }
+
+    /// Make a sandbox of the package `package` names, by its id or its name, as `args` says: a
+    /// name, and its ports on local.
+    pub fn create_package_sandbox(
+        &self,
+        package: impl AsRef<str>,
+        args: &PackageSandboxCreateArgs,
+    ) -> Call<Sandbox> {
+        let mut args = serde_json::to_value(args).expect("a sandbox's args serialize");
+        args["package"] = json!(package.as_ref());
+        let client = self.clone();
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_package_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
+    }
+
+    /// The sandboxes made of the package `package` names that this client's credentials made: a
+    /// member's, every one; one its access let in, those of the same issuer and subject. A
+    /// server over stdio answers none of this.
+    pub fn list_package_sandbox(&self, package: impl AsRef<str>) -> Call<Vec<Sandbox>> {
+        let args = json!({ "package": package.as_ref() });
+        let client = self.clone();
+        let call: Call<Vec<SandboxInfo>> =
+            self.call(self.api.virtx_client_list_package_sandbox, args);
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Sandbox::new(client.clone(), info))
+                .collect()
+        })
+    }
+
     /// Every sandbox the server holds.
     pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
         let client = self.clone();
@@ -930,7 +965,7 @@ impl Client {
         unsafe { request(self.raw, bytes.as_ptr(), bytes.len()) }
     }
 
-    fn call<T: DeserializeOwned + 'static>(
+    pub(crate) fn call<T: DeserializeOwned + 'static>(
         &self,
         request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
         args: impl Serialize,
@@ -957,18 +992,6 @@ impl Drop for Client {
         })
         .wait();
     }
-}
-
-/// `headers`, each name then its value, as `virtx_client_connect` takes them.
-fn header_strings(
-    headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
-) -> Result<Vec<CString>, Error> {
-    let mut strings = Vec::new();
-    for (name, value) in headers {
-        strings.push(c_string(name.as_ref())?);
-        strings.push(c_string(value.as_ref())?);
-    }
-    Ok(strings)
 }
 
 fn c_string(s: &str) -> Result<CString, Error> {

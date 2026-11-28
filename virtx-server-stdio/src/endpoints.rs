@@ -16,23 +16,23 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
+use axum::extract::ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection};
 use axum::extract::{Extension, FromRequest, FromRequestParts, RawQuery, Request};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
-use futures_util::StreamExt as _;
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt as _;
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::task::{AbortHandle, JoinSet};
 
+use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream};
 use virtx_core::{
-    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Log, PortSide, ProjectCreateArgs,
-    ProjectListOutputItem, Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort,
-    SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
-    VolumeMountCreateArgs, VolumeMountListOutputItem, accepts_event_stream, described_type,
-    from_body,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, PackagePutArgs, PackageSandboxCreateArgs,
+    PortSide, ProjectCreateArgs, ProjectListOutputItem, Role, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxPort, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
@@ -41,6 +41,7 @@ use virtx_uvm::{
     Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
     based_on, build_step, park_after, signal_number,
 };
+use virtx_uvm::{PackageStore, ProjectId};
 
 use crate::Host;
 
@@ -54,11 +55,14 @@ const PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// What the endpoints answer from, for one project: the stores, and the sandboxes and jobs made
 /// from them.
 pub struct Home {
+    /// The project it is the home of.
+    project: ProjectId,
     images: ImageStore,
     registry: Arc<RegistryServer>,
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     root: PathBuf,
     volumes: VolumeStore,
+    packages: PackageStore,
     /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
@@ -74,16 +78,28 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, which `registry` answers for, and the volumes and the sandboxes'
-    /// upper disks under `root`.
+    /// Project `project`'s home: the images in `images`, which `registry` answers for, and the
+    /// volumes, the packages and the sandboxes' upper disks under `root`.
     pub fn new(
+        project: ProjectId,
         images: ImageStore,
         registry: Arc<RegistryServer>,
         root: &Path,
     ) -> anyhow::Result<Home> {
         Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
+        let packages = PackageStore::new(root)?;
+        let naming = packages.clone();
+        registry.keeping(Arc::new(move |tag| {
+            let named = naming.steady().naming_tag(tag);
+            named
+                .ok()
+                .flatten()
+                .map(|name| format!("package {name} names it"))
+        }));
         Ok(Home {
+            project,
+            packages,
             images,
             registry,
             files: Files::new(volumes.clone()).with_host_paths(HostPaths::Named),
@@ -157,6 +173,99 @@ impl Home {
             ));
         }
         Ok(Naming(self, Some(name.to_owned())))
+    }
+
+    /// A sandbox made of `args`, each of its ports in the sandbox on this host's loopback, which
+    /// only this machine reaches, taken to the sandbox's machine while it runs; each on local as
+    /// it was asked for.
+    async fn create(&self, args: SandboxCreateArgs) -> Result<virtx_core::Sandbox, Refused> {
+        let _naming = self.naming(args.name.as_deref())?;
+        let mut opened = Vec::new();
+        let mut listeners = Vec::new();
+        for spec in &args.ports {
+            let port = spec.port;
+            if spec.on == PortSide::Local {
+                opened.push(SandboxPort {
+                    port,
+                    on: PortSide::Local,
+                    url: None,
+                    label: spec.label.clone(),
+                });
+                continue;
+            }
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(|e| internal(format!("opening port {port}: {e}")))?;
+            let at = listener
+                .local_addr()
+                .map_err(|e| internal(format!("opening port {port}: {e}")))?;
+            opened.push(SandboxPort {
+                port,
+                on: PortSide::Sandbox,
+                url: Some(format!("http://{at}")),
+                label: spec.label.clone(),
+            });
+            listeners.push((port, listener));
+        }
+
+        let sandbox = Sandbox::create(
+            &self.images,
+            &self.root,
+            &self.volumes,
+            &args,
+            self.vm.clone(),
+            park_after(),
+            None,
+            false,
+            &Backing::default(),
+        )
+        .await?;
+        let mut listening = JoinSet::new();
+        for (port, listener) in listeners {
+            let sandbox = Arc::clone(&sandbox);
+            listening.spawn(async move {
+                while let Ok((mut accepted, _)) = listener.accept().await {
+                    let activity = sandbox.activity();
+                    tokio::spawn(async move {
+                        // Closed at once when the machine has ended, as a port nothing listens on is.
+                        if let Ok(mut reached) = activity.sandbox().connect(port).await {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
+                        }
+                    });
+                }
+            });
+        }
+        let id = sandbox.id().to_owned();
+        let held = Held {
+            sandbox: Arc::clone(&sandbox),
+            ports: opened,
+            _listening: listening,
+        };
+        let answer = held.answer();
+        let closed = {
+            let mut sandboxes = self.sandboxes.lock().unwrap();
+            let closed = self.closed.load(Ordering::SeqCst);
+            if !closed {
+                sandboxes.insert(id.clone(), held);
+            }
+            closed
+        };
+        if closed {
+            tokio::task::spawn_blocking(move || sandbox.close()).await?;
+            return Err(forbidden("this project is being removed"));
+        }
+        Ok(answer)
+    }
+
+    /// Remove sandbox `id`: `404` for an id no sandbox here has. Blocks until its machine has
+    /// stopped.
+    pub async fn remove_sandbox(&self, id: &str) -> Result<(), Refused> {
+        let removed = self.sandboxes.lock().unwrap().remove(id);
+        let removed =
+            removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
+        tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
+        Ok(())
     }
 
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
@@ -284,9 +393,10 @@ pub fn router() -> Router {
                 .patch(sandbox_resize)
                 .delete(sandbox_remove),
         )
+        .route("/sandboxes/{id}/ports/{port}", any(sandbox_port))
         .route(
             "/sandboxes/{id}/client-ports/{port}",
-            get(sandbox_client_port),
+            any(sandbox_client_port),
         )
         .route("/sandboxes/{id}/jobs/", get(sandbox_job_list))
         .route("/sandboxes/{id}/jobs/exec/", post(sandbox_exec))
@@ -300,6 +410,11 @@ pub fn router() -> Router {
         )
         .route("/sandboxes/{id}/jobs/{job}/stdin", post(sandbox_job_stdin))
         .route("/sandboxes/{id}/jobs/{job}/events", get(sandbox_job_events))
+        .route("/packages/", get(package_list))
+        .route(
+            "/packages/{package}",
+            get(package_get).put(package_put).delete(package_remove),
+        )
         .method_not_allowed_fallback(async || {
             refused(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -311,6 +426,15 @@ pub fn router() -> Router {
 }
 
 /// The projects, each the client's, answered from the [`Host`] in each request's extensions.
+/// Making a sandbox of a package, answered from the [`Host`] in its extensions: in the project
+/// its id names, or by its name in the one the request names.
+pub fn package_sandboxes() -> Router {
+    Router::new().route(
+        "/packages/{package}/sandboxes/",
+        post(package_sandbox_create),
+    )
+}
+
 pub fn projects() -> Router {
     Router::new()
         .route("/projects/", get(project_list).post(project_create))
@@ -807,85 +931,95 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
 
 async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): Whole) -> Answer {
     let args: SandboxCreateArgs = body(&request)?;
-    let _naming = home.naming(args.name.as_deref())?;
+    let answer = home.create(args).await?;
+    Ok(created(format!("/sandboxes/{}", answer.id), &answer))
+}
 
-    // Each port in the sandbox on this host's loopback, which only this machine reaches, taken
-    // to the sandbox's machine while it runs; each on local as it was asked for.
-    let mut opened = Vec::new();
-    let mut listeners = Vec::new();
-    for spec in &args.ports {
-        let port = spec.port;
-        if spec.on == PortSide::Local {
-            opened.push(SandboxPort {
-                port,
-                on: PortSide::Local,
-                url: None,
-                label: spec.label.clone(),
-            });
-            continue;
-        }
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|e| internal(format!("opening port {port}: {e}")))?;
-        let at = listener
-            .local_addr()
-            .map_err(|e| internal(format!("opening port {port}: {e}")))?;
-        opened.push(SandboxPort {
-            port,
-            on: PortSide::Sandbox,
-            url: Some(format!("http://{at}")),
-            label: spec.label.clone(),
-        });
-        listeners.push((port, listener));
-    }
+async fn package_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+    Ok(json(&home.packages.list()?))
+}
 
-    let sandbox = Sandbox::create(
-        &home.images,
-        &home.root,
-        &home.volumes,
-        &args,
-        home.vm.clone(),
-        park_after(),
-        None,
-        false,
-        &Backing::default(),
-    )
-    .await?;
-    let mut listening = JoinSet::new();
-    for (port, listener) in listeners {
-        let sandbox = Arc::clone(&sandbox);
-        listening.spawn(async move {
-            while let Ok((mut accepted, _)) = listener.accept().await {
-                let activity = sandbox.activity();
-                tokio::spawn(async move {
-                    // Closed at once when the machine has ended, as a port nothing listens on is.
-                    if let Ok(mut reached) = activity.sandbox().connect(port).await {
-                        let _ = tokio::io::copy_bidirectional(&mut accepted, &mut reached).await;
-                    }
-                });
-            }
-        });
-    }
-    let id = sandbox.id().to_owned();
-    let held = Held {
-        sandbox: Arc::clone(&sandbox),
-        ports: opened,
-        _listening: listening,
-    };
-    let answer = held.answer();
-    let closed = {
-        let mut sandboxes = home.sandboxes.lock().unwrap();
-        let closed = home.closed.load(Ordering::SeqCst);
-        if !closed {
-            sandboxes.insert(id.clone(), held);
+async fn package_get(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(named): Segments<String>,
+) -> Answer {
+    let package = home.packages.get(&named)?;
+    Ok(json(&package.ok_or_else(|| {
+        not_found(format!("no package here is {named}"))
+    })?))
+}
+
+/// `PUT /packages/{name}`: refused for an image or a volume not here, as a sandbox's `POST` is,
+/// before it is kept.
+async fn package_put(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(name): Segments<String>,
+    Whole(request): Whole,
+) -> Answer {
+    let args: PackagePutArgs = body(&request)?;
+    let here = match &args.sandbox.image {
+        ImageName::Tag { tag } => {
+            let reference: Reference = tag
+                .parse()
+                .map_err(|e| invalid(format!("sandbox: image: {tag}: {e}")))?;
+            home.images.get_tag(&reference)?.is_some()
         }
-        closed
+        ImageName::Digest { digest } => {
+            let digest: Digest = digest
+                .parse()
+                .map_err(|e| invalid(format!("sandbox: image: {digest}: {e}")))?;
+            let digest = home.images.get_image_origin(&digest)?.unwrap_or(digest);
+            home.images.get_image(&digest)?.is_some()
+        }
     };
-    if closed {
-        tokio::task::spawn_blocking(move || sandbox.close()).await?;
-        return Err(forbidden("this project is being removed"));
+    if !here {
+        return Err(not_found("no image here is the package's: pull it first"));
     }
-    Ok(created(format!("/sandboxes/{id}"), &answer))
+    for asked in &args.sandbox.volumes {
+        home.volumes.open(&asked.volume)?;
+    }
+    let project = home.project;
+    let (package, made) = home.packages.put(&name, args, &home.vm, || {
+        format!("{project}.{}", uuid::Uuid::new_v4().simple())
+    })?;
+    Ok(match made {
+        true => created(format!("/packages/{}", package.id), &package),
+        false => json(&package),
+    })
+}
+
+async fn package_remove(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(named): Segments<String>,
+) -> Answer {
+    match home.packages.remove(&named)? {
+        true => Ok(StatusCode::NO_CONTENT.into_response()),
+        false => Err(not_found(format!("no package here is {named}"))),
+    }
+}
+
+/// `POST /packages/{package}/sandboxes/`: the sandbox, made as the package says, by the one client
+/// stdio has.
+async fn package_sandbox_create(
+    Extension(host): Extension<Arc<Host>>,
+    Segments(named): Segments<String>,
+    headers: HeaderMap,
+    Whole(request): Whole,
+) -> Answer {
+    let by_id = (named.split_once('.')).and_then(|(project, _)| project.parse::<ProjectId>().ok());
+    let home = match by_id {
+        Some(project) => host
+            .home_of(&project)
+            .map_err(|e| internal(format!("making project {project}'s home: {e:#}")))?
+            .ok_or_else(|| not_found(format!("no package here is {named}")))?,
+        None => host.home(&headers).await?,
+    };
+    let package = home.packages.get(&named)?;
+    let package = package.ok_or_else(|| not_found(format!("no package here is {named}")))?;
+    let args: PackageSandboxCreateArgs = body(&request)?;
+    let made = virtx_uvm::package_sandbox_args(&package, args)?;
+    let sandbox = home.create(made).await?;
+    Ok(created(format!("/sandboxes/{}", sandbox.id), &sandbox))
 }
 
 async fn sandbox_get(
@@ -915,65 +1049,35 @@ async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    let removed = home.sandboxes.lock().unwrap().remove(&id);
-    let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
-    tokio::task::spawn_blocking(move || removed.sandbox.close()).await?;
+    home.remove_sandbox(&id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// How long reaching a port on local's target may take before its connection is refused.
-const CLIENT_PORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// `/sandboxes/{id}/ports/{port}`, a WebSocket of `virtx.tcp` to the port in the sandbox, as
+/// [`virtx_uvm::ports::port`] answers it: beside the port's `url`, for a client that carries its
+/// connections over its own connection to this server.
+async fn sandbox_port(
+    Extension(home): Extension<Arc<Home>>,
+    Segments((id, port)): Segments<(String, u16)>,
+    headers: HeaderMap,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Answer {
+    let sandbox = home.sandbox(&id)?;
+    Ok(virtx_uvm::ports::port(&sandbox, port, &headers, upgrade)?)
+}
 
-/// `GET /sandboxes/{id}/client-ports/{port}?target=host:port`: the port taken while the answer
-/// is held, each connection a process makes to it carried to `target` on this machine, the
-/// client's, or `127.0.0.1:{port}` without one, and refused where it is not reached. Answered
-/// `200` with a body that carries nothing and ends once the sandbox is deleted; `400` for a
-/// target that is not `host:port`, and `404` for a port the sandbox was not made with. Let go
-/// of, the connections it carries are closed.
+/// `/sandboxes/{id}/client-ports/{port}`, a WebSocket of `virtx.tcp` that takes the port on
+/// local, as [`virtx_uvm::ports::client_port`] answers it.
 async fn sandbox_client_port(
     Extension(home): Extension<Arc<Home>>,
     Segments((id, port)): Segments<(String, u16)>,
-    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Answer {
-    let target = query
-        .as_deref()
-        .and_then(|query| {
-            form_urlencoded::parse(query.as_bytes())
-                .find(|(key, _)| key == "target")
-                .map(|(_, target)| target.into_owned())
-        })
-        .unwrap_or_else(|| format!("127.0.0.1:{port}"));
-    let named = target
-        .rsplit_once(':')
-        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
-    if !named {
-        return Err(invalid(format!("target: {target:?} is not host:port")));
-    }
     let sandbox = home.sandbox(&id)?;
-    let taker = sandbox.take_client_port(port)?;
-    let taking = async move {
-        let mut carried = JoinSet::new();
-        while let Some(connection) = taker.next().await {
-            while carried.try_join_next().is_some() {}
-            let (target, activity) = (target.clone(), sandbox.activity());
-            carried.spawn(async move {
-                let reaching = TcpStream::connect(&target);
-                // Not reached, dropped: refused, as a port nothing listens on is.
-                let Ok(Ok(mut reached)) =
-                    tokio::time::timeout(CLIENT_PORT_CONNECT_TIMEOUT, reaching).await
-                else {
-                    return;
-                };
-                let _activity = activity;
-                if let Ok(mut carried) = connection.accept().await {
-                    let _ = tokio::io::copy_bidirectional(&mut carried, &mut reached).await;
-                }
-            });
-        }
-    };
-    let body = futures_util::stream::once(taking)
-        .filter_map(|()| std::future::ready(None::<Result<Bytes, std::io::Error>>));
-    Ok(Body::from_stream(body).into_response())
+    Ok(virtx_uvm::ports::client_port(
+        sandbox, port, &headers, upgrade,
+    )?)
 }
 
 async fn sandbox_job_list(

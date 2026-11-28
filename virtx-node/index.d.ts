@@ -434,6 +434,110 @@ export interface SandboxCreateOptions {
   abins?: string[]
 }
 
+/** A way in to make a sandbox of a package, and reach it after, for one who is no member of its project: whoever sends a JSON Web Token `issuer` signed for `audience` carrying each of `claims`, their subject its `sub` of that issuer, its keys at `jwks` where given and otherwise where the issuer's discovery document says. Each request they send carries such a token. */
+export type PackageAccess = {
+  type: 'jwt'
+  issuer: string
+  audience: string
+  jwks?: string
+  claims?: Record<string, unknown>
+}
+
+/** How many sandboxes made of a package by those its access lets in may live at once: all of theirs, and each subject's. */
+export interface PackageLimits {
+  sandboxes?: number
+  perSubject?: number
+}
+
+/** What a package is beside the sandbox it makes. */
+export interface PackageOptions extends Omit<SandboxCreateOptions, 'name'> {
+  /** How large one its access let in may resize a sandbox they made of it. */
+  max?: SandboxResizeOptions
+  /** Who beside the project's members may make one. */
+  access?: PackageAccess[]
+  /** The web pages they may do so from, and reach it from, as `https://app.example`. */
+  origins?: string[]
+  limits?: PackageLimits
+}
+
+/** What the server answers about a package. */
+export interface PackageInfo {
+  /** The id the server gave it, which names its project with it: what an app names it by. */
+  id: string
+  name: string
+  /** What each sandbox made of it is made with, as the wire has it. */
+  sandbox: Record<string, unknown>
+  max?: SandboxResizeOptions
+  access: PackageAccess[]
+  origins: string[]
+  limits?: PackageLimits
+}
+
+/** A package the server keeps, and the client that reaches it: what makes sandboxes of it. Dropping it leaves the package; `remove` removes it. */
+export class Package implements PackageInfo {
+  private constructor()
+  id: string
+  name: string
+  sandbox: Record<string, unknown>
+  max?: SandboxResizeOptions
+  access: PackageAccess[]
+  origins: string[]
+  limits?: PackageLimits
+  /** A sandbox made of it, named `name` where one is given. */
+  createSandbox(options?: PackageSandboxOptions): Promise<Sandbox>
+  /** The sandboxes made of it that the client's credentials made. */
+  listSandbox(): Promise<Sandbox[]>
+  /** Remove it. The sandboxes made of it stay, each reached by who made it. */
+  remove(): Promise<void>
+}
+
+/** What making a sandbox of a package takes beside it. */
+export interface PackageSandboxOptions {
+  /** A name to find it again by, which a member alone may give. */
+  name?: string
+  /** Its ports on local, each `on: 'local'`, beside those the package gives it in the sandbox. */
+  ports?: PortSpec[]
+}
+
+/**
+ * One sandbox, made of a package for whom its access lets in, and reached as they are: what an
+ * app's user runs processes in, reads and writes the files of, and forwards the ports of, as
+ * `sandbox`. Every request carries the token it was made with, which reaches the sandboxes that
+ * user made of the package and nothing else.
+ *
+ * The sandbox lives until it is deleted, with `remove`: closed, or left by `await using`, this
+ * leaves it, to be come back to with `open` by its id.
+ */
+export class AppClient {
+  private constructor()
+  /**
+   * Make a sandbox of the package named `pkg` in the project `project`, by the project's id, on
+   * the server at `url`, as `auth` lets in -- a bearer token of the issuer its access names, sent
+   * with every request from then on -- with `ports` on local beside those the package gives it in
+   * the sandbox. Refused as the server refuses making it: `401` or `403` for one the package does
+   * not let in, and `429` past its limits.
+   */
+  static create(
+    url: string,
+    project: string,
+    pkg: string,
+    auth?: Auth | null,
+    options?: { ports?: PortSpec[] },
+  ): Promise<AppClient>
+  /**
+   * Reach again the sandbox `sandbox` in the project `project`, each by its id, one made of a
+   * package as `auth` lets in, such as `Client.listPackageSandbox` finds: refused `401` or `403`
+   * for one they did not make, or one deleted.
+   */
+  static open(url: string, project: string, auth: Auth, sandbox: string): Promise<AppClient>
+  readonly sandbox: Sandbox
+  /** Close the client, leaving its sandbox as it is. */
+  close(): Promise<void>
+  /** Delete its sandbox, and close the client. */
+  remove(): Promise<void>
+  [Symbol.asyncDispose](): Promise<void>
+}
+
 export interface SandboxExecOptions {
   /** Keep its stdin open for the job's `writeStdin`. */
   stdin?: boolean
@@ -560,17 +664,11 @@ export class Client {
   static spawn(program?: string | null, args?: string[]): Client
   /**
    * Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
-   * it wants, `project`, the project every request is in (the user's own without one),
-   * and `headers`, whatever else it asks of each request, with every request. `Authorization`
-   * is `auth`'s, and `virtx-project` names `project`, over one given as a header. Refused when a
-   * token would go in the clear: over `http` to any host but this machine.
+   * it wants, and `project`, the project every request is in (the user's own without one), with
+   * every request. Refused when a token would go in the clear: over `http` to any host but this
+   * machine.
    */
-  static connect(
-    url: string,
-    auth?: Auth | null,
-    project?: string | null,
-    headers?: Record<string, string>,
-  ): Client
+  static connect(url: string, auth?: Auth | null, project?: string | null): Client
   /**
    * Send `auth` with every request from now on, in place of what was given at `connect`: a new
    * token, when the server's are short-lived. A forwarder already open sends it with its next
@@ -579,16 +677,8 @@ export class Client {
    */
   setAuth(auth: Auth | null): void
   /**
-   * Send `headers` with every request from now on, in place of those given at `connect`. A
-   * forwarder already open sends them with its next connection. Over stdio, where none are
-   * sent, nothing changes. A header that cannot be sent throws, the headers unchanged.
-   */
-  setHeaders(headers: Record<string, string>): void
-  /**
-   * Name `project` in every request from now on, over either transport, in place of a
-   * `virtx-project` among the headers given. With null, that header names it where there is one,
-   * and otherwise none is named, for the user's own project. A name no header carries throws,
-   * the project unchanged.
+   * Name `project` in every request from now on, over either transport. With null, none is
+   * named, for the user's own project. A name no header carries throws, the project unchanged.
    */
   setProject(project: string | null): void
   /** Take over one hold of the `VirtxClient*` `raw`, made by the library this process opened. */
@@ -640,6 +730,16 @@ export class Client {
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>
   getVolume(name: string): Promise<Volume>
+  /** Every package in the project. */
+  listPackage(): Promise<Package[]>
+  /** Keep the package `name`, made or replaced in whole: each sandbox made of it made of `image` as `createSandbox` makes one. Its image and volumes have to be on the server already. */
+  putPackage(name: string, image: string | ImageName, options?: PackageOptions): Promise<Package>
+  /** The package `package` names: by its id, or its name in the project. */
+  getPackage(pkg: string): Promise<Package>
+  /** Make a sandbox of the package `pkg` names, by its id or its name, named `name` where one is given. */
+  createPackageSandbox(pkg: string, options?: PackageSandboxOptions): Promise<Sandbox>
+  /** The sandboxes made of the package `pkg` names that this client's credentials made: a member's, every one; one its access let in, those of the same issuer and subject. A server over stdio answers none of this. */
+  listPackageSandbox(pkg: string): Promise<Sandbox[]>
   /** Every sandbox the server holds. */
   listSandbox(): Promise<Sandbox[]>
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */

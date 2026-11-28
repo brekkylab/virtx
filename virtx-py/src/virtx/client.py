@@ -24,11 +24,11 @@ from .image import (
     ImageUploadOutput,
     Recipe,
     RegistryAuth,
-    image_name,
 )
 from .job import StartedJob
+from .package import Package, PackageAccess, PackageLimits
 from .project import Project
-from .sandbox import PortSpec, Sandbox, SandboxVolume
+from .sandbox import PortSpec, Sandbox, SandboxVolume, create_args
 from .volume import Volume
 
 T = TypeVar("T")
@@ -62,14 +62,6 @@ def _event(item: Mapping[str, Any], output: Callable[[Any], T]) -> Event[T, Any]
     return Output(output(item["output"]))
 
 
-# Every client not yet closed, closed at exit: a hold left to the interpreter's teardown would
-# end its session after the waker's callbacks can still run.
-def _header_array(headers: Mapping[str, str] | None) -> ctypes.Array[ctypes.c_char_p]:
-    """``headers`` as ``virtx_client_connect`` takes them: each name then its value."""
-    strings = [s.encode() for name, value in (headers or {}).items() for s in (name, value)]
-    return (ctypes.c_char_p * len(strings))(*strings)
-
-
 @dataclass(frozen=True)
 class CommandAuth:
     """The token ``program`` with ``args`` prints, sent as ``Authorization: Bearer <token>``:
@@ -94,6 +86,8 @@ def _auth_bytes(auth: Auth | None) -> bytes:
     return b"" if auth is None else json.dumps(auth.to_dict()).encode()
 
 
+# Every client not yet closed, closed at exit: a hold left to the interpreter's teardown would
+# end its session after the waker's callbacks can still run.
 _open: weakref.WeakSet[Client] = weakref.WeakSet()
 
 
@@ -158,25 +152,19 @@ class Client:
         url: str,
         auth: Auth | None = None,
         project: str | None = None,
-        headers: Mapping[str, str] | None = None,
     ) -> Client:
         """Reach the server at ``url``, its base ``http`` or ``https`` URL, sending ``auth``, the
-        credentials it wants, ``project``, the project every request is in (the user's own
-        without one), and ``headers``, whatever else it asks of each request, with
-        every request. ``Authorization`` is ``auth``'s, and ``virtx-project`` names ``project``,
-        over one given as a header. Refused when a token would go in the clear: over ``http`` to
-        any host but this machine."""
+        credentials it wants, and ``project``, the project every request is in (the user's own
+        without one), with every request. Refused when a token would go in the clear: over
+        ``http`` to any host but this machine."""
         lib = library()
         auth_json = _auth_bytes(auth)
-        array = _header_array(headers)
         raw = ctypes.c_void_p()
         error = _Bytes()
         status = lib.virtx_client_connect(
             url.encode(),
             auth_json,
             len(auth_json),
-            array,
-            len(array) // 2,
             ctypes.byref(raw),
             ctypes.byref(error),
         )
@@ -201,24 +189,10 @@ class Client:
         if status != OK:
             self._lib.take(status, error)
 
-    def set_headers(self, headers: Mapping[str, str]) -> None:
-        """Send ``headers`` with every request from now on, in place of those given at
-        ``connect``. A forwarder already open sends them with its next connection. Over stdio,
-        where none are sent, nothing changes. A header that cannot be sent raises, the headers
-        unchanged."""
-        array = _header_array(headers)
-        error = _Bytes()
-        status = self._lib.virtx_client_set_headers(
-            self._held(), array, len(array) // 2, ctypes.byref(error)
-        )
-        if status != OK:
-            self._lib.take(status, error)
-
     def set_project(self, project: str | None) -> None:
-        """Name ``project`` in every request from now on, over either transport, in place of a
-        ``virtx-project`` among the headers given. With ``None``, that header names it where
-        there is one, and otherwise none is named, for the user's own project. A name no header
-        carries raises, the project unchanged."""
+        """Name ``project`` in every request from now on, over either transport. With ``None``,
+        none is named, for the user's own project. A name no header carries raises, the project
+        unchanged."""
         error = _Bytes()
         status = self._lib.virtx_client_set_project(
             self._held(), None if project is None else project.encode(), ctypes.byref(error)
@@ -442,6 +416,81 @@ class Client:
         output = await self._call("virtx_client_get_volume", _args(name=name))
         return Volume.from_dict(self, output)
 
+    async def list_package(self) -> list[Package]:
+        """Every package in the project."""
+        items = await self._call("virtx_client_list_package")
+        return [Package.from_dict(self, item) for item in items]
+
+    async def put_package(
+        self,
+        name: str,
+        image: str | ImageName,
+        *,
+        network: bool = True,
+        ports: Iterable[int | PortSpec] = (),
+        vcpus: int | None = None,
+        memory_mib: int | None = None,
+        disk_gib: int | None = None,
+        gpu: bool | None = None,
+        gpu_memory_mib: int | None = None,
+        volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
+        abins: Iterable[str] = (),
+        max: Mapping[str, int] | None = None,
+        access: Iterable[PackageAccess] = (),
+        origins: Iterable[str] = (),
+        limits: PackageLimits | None = None,
+    ) -> Package:
+        """Keep the package ``name``, made or replaced in whole: each sandbox made of it made of
+        ``image`` as ``create_sandbox`` makes one with the rest, but a name, which each is given
+        as it is made. ``max`` is how large one its access let in may resize theirs, as
+        ``{"vcpus": n, "memory_mib": n, "disk_gib": n}``; ``access`` who beside the project's
+        members may make one, each a ``JwtAccess``; ``origins`` the web pages they may do so
+        from, and reach it from; and ``limits`` how many of theirs may live at once. The image
+        and the volumes have to be on the server already."""
+        sandbox = create_args(
+            image,
+            network=network,
+            ports=ports,
+            vcpus=vcpus,
+            memory_mib=memory_mib,
+            disk_gib=disk_gib,
+            gpu=gpu,
+            gpu_memory_mib=gpu_memory_mib,
+            volumes=volumes,
+            abins=abins,
+        )
+        package = {
+            "sandbox": sandbox,
+            "max": dict(max) if max is not None else None,
+            "access": [way.to_dict() for way in access],
+            "origins": list(origins),
+            "limits": limits.to_dict() if limits is not None else None,
+        }
+        request = _args(name=name, args={k: v for k, v in package.items() if v is not None})
+        return Package.from_dict(self, await self._call("virtx_client_put_package", request))
+
+    async def get_package(self, package: str) -> Package:
+        """The package ``package`` names: by its id, or its name in the project."""
+        output = await self._call("virtx_client_get_package", _args(package=package))
+        return Package.from_dict(self, output)
+
+    async def create_package_sandbox(
+        self, package: str, *, name: str | None = None, ports: Iterable[PortSpec] = ()
+    ) -> Sandbox:
+        """Make a sandbox of the package ``package`` names, by its id or its name, named ``name``
+        where one is given, with ``ports`` on local, each ``on="local"``, beside those the
+        package gives it in the sandbox."""
+        request = _args(package=package, name=name, ports=[p.to_dict() for p in ports] or None)
+        output = await self._call("virtx_client_create_package_sandbox", request)
+        return Sandbox.from_dict(self, output)
+
+    async def list_package_sandbox(self, package: str) -> list[Sandbox]:
+        """The sandboxes made of the package ``package`` names that this client's credentials
+        made: a member's, every one; one its access let in, those of the same issuer and subject.
+        A server over stdio answers none of this."""
+        items = await self._call("virtx_client_list_package_sandbox", _args(package=package))
+        return [Sandbox.from_dict(self, item) for item in items]
+
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds."""
         items = await self._call("virtx_client_list_sandbox")
@@ -476,20 +525,21 @@ class Client:
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
-        request = _args(
-            image=image_name(image).to_dict(),
+        request = create_args(
+            image,
             name=name,
             network=network,
-            ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
+            ports=ports,
             vcpus=vcpus,
             memory_mib=memory_mib,
             disk_gib=disk_gib,
             gpu=gpu,
             gpu_memory_mib=gpu_memory_mib,
-            volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
-            abins=list(abins),
+            volumes=volumes,
+            abins=abins,
         )
-        return Sandbox.from_dict(self, await self._call("virtx_client_create_sandbox", request))
+        output = await self._call("virtx_client_create_sandbox", json.dumps(request).encode())
+        return Sandbox.from_dict(self, output)
 
     async def get_sandbox(self, id: str) -> Sandbox:
         """The sandbox ``id``."""

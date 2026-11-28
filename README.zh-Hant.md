@@ -27,11 +27,18 @@
 
 <br>
 
-virtx 是為 AI 代理打造的 microVM 沙箱。你可以直接在自己的程式碼裡，用拋棄式的 Linux 虛擬機器執行任務，虛擬機器可以跑在本機、你自己執行的伺服器，或 virtx cloud 上。
+virtx 是為 AI 代理打造的 microVM 沙箱：你可以在自己的程式碼裡建立沙箱，並在其上為你的使用者打造應用程式。
 
-有些工作需要一大堆相依套件，你不想裝在自己的電腦上；有些程式碼你根本不想在自己的電腦上執行，例如 AI 代理自行決定要跑的指令。
-這些都很適合交給 virtx。
-虛擬機器裡安裝或修改過的東西，在移除它之後都會消失，只有寫進你保留下來的磁碟區的內容才會留下。
+沙箱是拋棄式的 Linux 虛擬機器，可以跑在本機、你自己執行的伺服器，或 virtx cloud 上。
+不想在自己電腦上執行的東西就放進沙箱裡跑，例如 AI 代理自行決定要跑的指令。
+沙箱裡安裝或修改過的東西，在移除它之後都會消失，只有寫進你保留下來的磁碟區的內容才會留下。
+
+用 virtx 打造應用程式時，應用程式的使用者也能用上沙箱。
+你把每位使用者的沙箱由什麼組成作為套件放在你的專案裡，應用程式就會據此為每位使用者建立專屬的沙箱，中間不需要你自己執行後端。
+
+<p align="center">
+  <img alt="The developer keeps a package on virtx and makes the app. Each app user makes a sandbox of the package from the app, and uses their own." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/app-user-developer-virtx.svg" width="640">
+</p>
 
 ## 快速入門
 
@@ -199,7 +206,6 @@ let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
-    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -217,6 +223,7 @@ let client = Client::connect(
   - **用戶端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **伺服器：** 💻 本機 (stdio) · 🖥️ 遠端 (tcp) · ☁️ 雲端
   - **主機：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **把代理當成應用程式發布：** 用 virtx 打造應用程式並交給使用者，每位使用者都有自己的沙箱，也不必維運後端。詳見[打造應用程式](https://virtx.sh/docs/tutorials/app-client/)。
 - **幾乎不用設定：** 裝好套件就能直接執行，不需要 Docker，也不用另外架設常駐程式。
 - **適用於任何代理框架：** 沙箱跟其他工具一樣，任何框架或程式碼代理都能呼叫。開源代理 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 

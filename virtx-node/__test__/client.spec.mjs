@@ -145,3 +145,99 @@ test('setProject changes the project a request reaches', async () => {
     await alice.close()
   }
 })
+
+test('a package is kept, makes a sandbox, and is removed', async () => {
+  const client = Client.spawn(fixture().stdio)
+  try {
+    await alpine(client)
+    const name = unique('package')
+    const access = [
+      { type: 'jwt', issuer: 'https://idp.example', audience: 'app', claims: { repo_name: 'a' } },
+    ]
+    const pkg = await client.putPackage(name, ALPINE, {
+      max: { vcpus: 8 },
+      access,
+      origins: ['https://app.example'],
+      limits: { perSubject: 1 },
+    })
+    assert.ok(pkg instanceof virtx.Package)
+    assert.equal(pkg.name, name)
+    assert.deepEqual(pkg.sandbox.image, { type: 'tag', tag: ALPINE })
+    assert.deepEqual(pkg.access, access, 'its claims as they were given')
+    assert.deepEqual(pkg.limits, { perSubject: 1 })
+    assert.equal((await client.getPackage(pkg.id)).name, name)
+    assert.ok((await client.listPackage()).some((kept) => kept.id === pkg.id))
+
+    const made = await pkg.createSandbox({ name: unique('of-package') })
+    assert.ok(made instanceof virtx.Sandbox)
+    await made.remove()
+    await pkg.remove()
+    await assert.rejects(client.getPackage(pkg.id), { status: 404 })
+  } finally {
+    await client.close()
+  }
+})
+
+test('an app client reaches the sandbox a package lets it make', async () => {
+  const { url, token, project, users } = fixture()
+  const client = Client.connect(url, { type: 'bearer', token }, project)
+  try {
+    await alpine(client)
+    const members = await client.putPackage(unique('members'), ALPINE)
+    // An app names its package's project by the project's id.
+    const { id: projectId } = await client.getProject(project)
+    await assert.rejects(virtx.AppClient.create(url, projectId, members.name), { status: 401 })
+    await members.remove()
+
+    // The fixture's own issuer lets bob in, a member of another project.
+    const { oidc } = await (await fetch(`${url}auth`)).json()
+    const pkg = await client.putPackage(unique('jwt'), ALPINE, {
+      access: [
+        { type: 'jwt', issuer: oidc.issuer, audience: oidc.client_id, jwks: `${oidc.issuer}/keys` },
+      ],
+    })
+    const bob = { type: 'bearer', token: JSON.parse(users).bob }
+    const app = await virtx.AppClient.create(url, projectId, pkg.name, bob)
+    const { id } = app.sandbox
+    try {
+      assert.equal(await app.sandbox.exec(['true']).complete(), 0)
+    } finally {
+      await app.close()
+    }
+    assert.equal((await client.getSandbox(id)).id, id, 'closed, it stays')
+
+    const resumed = await virtx.AppClient.open(url, projectId, bob, id)
+    assert.equal(resumed.sandbox.id, id)
+    await resumed.remove()
+    await assert.rejects(client.getSandbox(id), { status: 404 })
+    await assert.rejects(virtx.AppClient.open(url, projectId, bob, id), { status: 403 })
+    await pkg.remove()
+  } finally {
+    await client.close()
+  }
+})
+
+test("a member finds a package's sandboxes", async () => {
+  const { url, token, project } = fixture()
+  const client = Client.connect(url, { type: 'bearer', token }, project)
+  try {
+    await alpine(client)
+    const pkg = await client.putPackage(unique('found'), ALPINE)
+    const made = await pkg.createSandbox()
+    const found = await pkg.listSandbox()
+    assert.deepEqual(
+      found.map((sandbox) => sandbox.id),
+      [made.id],
+    )
+    assert.ok(found.every((sandbox) => sandbox instanceof virtx.Sandbox))
+    const byName = await client.listPackageSandbox(pkg.name)
+    assert.deepEqual(
+      byName.map((sandbox) => sandbox.id),
+      [made.id],
+    )
+    await made.remove()
+    await pkg.remove()
+  } finally {
+    await client.close()
+  }
+})

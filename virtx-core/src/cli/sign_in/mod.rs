@@ -19,7 +19,7 @@
 //! and a provider that replaces the refresh token with each refresh takes one presented twice
 //! for stolen. So `virtx token` holds a lock while it reads, refreshes and keeps, and gives
 //! the ID token it last got for as long as that has more than `FRESH_FOR` left: one refresh
-//! serves them all. Run with `VIRTX_TOKEN_REFUSED` set, as an SDK runs it once a server
+//! serves them all. Run with `TOKEN_REFUSED` set, as an SDK runs it once a server
 //! refused the token it had, it refreshes whatever it has.
 //!
 //! `command.rs` is the commands and how each runs, `provider.rs` the provider, and `session.rs`

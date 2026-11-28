@@ -109,23 +109,17 @@ struct VirtxFuture *virtx_ensure_virtx(void);
 
 // Reach the server at `url`, its base `http` or `https` URL (every endpoint is under it), sending
 // `auth`, the credentials it wants as the `auth_len` bytes of `{"type": "bearer", "token":
-// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` or null for none, and
-// the `headers_len` headers in `headers` -- each its name
-// then its value, so `2 * headers_len` strings -- with every request, and write the
-// client, held once, to `client`. The headers are whatever else the server asks of each
-// request; `Authorization` is `auth`'s. Refused when a token would go in the clear: over
-// `http` to any host but this machine.
+// "..."}`, of `{"type": "command", "program": "...", "args": [...]}` or null for none, with
+// every request, and write the client, held once, to `client`. Refused when a token would go
+// in the clear: over `http` to any host but this machine.
 //
 // # Safety
 //
-// `url` and each of the `2 * headers_len` pointers in `headers` are NUL-terminated UTF-8.
-// `auth` is null or `auth_len` readable bytes. `client` is writable. `error` is null or
-// writable.
+// `url` is NUL-terminated UTF-8. `auth` is null or `auth_len` readable bytes. `client` is
+// writable. `error` is null or writable.
 int virtx_client_connect(const char *url,
                          const uint8_t *auth,
                          size_t auth_len,
-                         const char *const *headers,
-                         size_t headers_len,
                          struct VirtxClient **client,
                          struct VirtxBytes *error);
 
@@ -144,26 +138,8 @@ int virtx_client_set_auth(struct VirtxClient *client,
                           size_t auth_len,
                           struct VirtxBytes *error);
 
-// Send the `headers_len` headers in `headers`, as `virtx_client_connect` takes them, with
-// every request from now on, in place of those sent until now. A forwarder already open
-// sends them with its next connection. Over stdio, where none are sent, nothing changes.
-// Answers `VIRTX_OK`, or `VIRTX_ERROR` with why a header cannot be sent written to
-// `error`, the headers unchanged.
-//
-// # Safety
-//
-// `client` is one `virtx_client_spawn` or `virtx_client_connect` wrote, still held. Each
-// of the `2 * headers_len` pointers in `headers` is NUL-terminated UTF-8. `error` is null
-// or writable.
-int virtx_client_set_headers(struct VirtxClient *client,
-                             const char *const *headers,
-                             size_t headers_len,
-                             struct VirtxBytes *error);
-
 // Name `project`, NUL-terminated UTF-8, in every request from now on, over either
-// transport, in place of a `virtx-project` among the headers given. With a null one, that
-// header names it where there is one, and otherwise none is named, for the user's own
-// project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
+// transport. With a null one, none is named, for the user's own project. Answers `VIRTX_OK`, or `VIRTX_ERROR` with why it is refused written to `error`,
 // the project unchanged.
 //
 // # Safety
@@ -662,6 +638,71 @@ struct VirtxFuture *virtx_client_create_sandbox(struct VirtxClient *client,
                                                 const uint8_t *args,
                                                 size_t args_len);
 
+// Answers with each package in the project, as `[{"id": "...", "name": "...", "sandbox":
+// {...}, "max": {...}, "access": [...], "origins": ["..."], "limits": {...}}, ...]`,
+// `sandbox` as `virtx_client_create_sandbox` takes it and `max` and `limits` only where set.
+//
+// # Safety
+//
+// `client` is as in `virtx_client_list_volume`.
+struct VirtxFuture *virtx_client_list_package(struct VirtxClient *client);
+
+// Keeps the package `name`, made or replaced in whole, given `{"name": "...", "args":
+// {"sandbox": {...}, "max": {"vcpus": n, "memory_mib": n, "disk_gib": n}, "access":
+// [{"type": "jwt", "issuer": "...", "audience": "...", "jwks": "...", "claims": {...}}],
+// "origins": ["..."], "limits": {"sandboxes": n, "per_subject": n}}}`,
+// all of `args` but `sandbox` optional. Answers with the package, as
+// `virtx_client_list_package` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_put_package(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Answers with the package `package` names, by its id or its name, given
+// `{"package": "..."}`, as `virtx_client_list_package` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_get_package(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
+
+// Removes the package `package` names, given `{"package": "..."}`. Answers with `null`.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_remove_package(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
+
+// Makes a sandbox of the package `package` names, given `{"package": "...", "name": "...",
+// "ports": [{"port": n, "on": "local", "label": "..."}]}`, `name` optional and a member's
+// alone to give, and `ports` its ports on local beside the package's in the sandbox. Answers
+// with the sandbox, as `virtx_client_list_sandbox` answers each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_create_package_sandbox(struct VirtxClient *client,
+                                                        const uint8_t *args,
+                                                        size_t args_len);
+
+// Answers with the sandboxes made of the package `package` names that the client's
+// credentials made, given `{"package": "..."}`, as `virtx_client_list_sandbox` answers
+// each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_package_sandbox(struct VirtxClient *client,
+                                                      const uint8_t *args,
+                                                      size_t args_len);
+
 // Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
 // answers each.
 //
@@ -859,9 +900,8 @@ void virtx_stream_free(struct VirtxStream *stream);
 // "local"?: "host:port"}`: write the forwarder to `forwarder`, and hand C the future that
 // answers once it is open, as `{"local": "host:port"}`, or why it did not open.
 //
-// A port in the sandbox is reached at `local`, a free port on `127.0.0.1` without it; over
-// stdio, at the port's `url`, as the server answered it, without it, and one without its
-// `url` is refused. A port on local, one the sandbox was made with `"on": "local"`, is
+// A port in the sandbox is reached at `local`, a free port on `127.0.0.1` without it; at its
+// `url`, where the server answered one, without it. A port on local, one the sandbox was made with `"on": "local"`, is
 // reached by its processes at `10.0.2.2:{port}`, each connection carried to `local` on this
 // machine, `127.0.0.1:{port}` without it, and refused when that is not reached; its opening
 // is refused `404` for a port the sandbox was not made with. What fails on the way is

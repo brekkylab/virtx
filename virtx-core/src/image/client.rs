@@ -6,10 +6,9 @@ use super::{
     ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs,
 };
-use crate::{
-    Error, LogEntry,
-    transport::{TransportClient, http, segment, sse},
-};
+use http_over_x::segment;
+
+use crate::{Client, Error, LogEntry};
 
 /// The path of the image job `id`.
 fn job(id: &str) -> String {
@@ -17,52 +16,52 @@ fn job(id: &str) -> String {
 }
 
 /// Every image job the server holds.
-pub(crate) async fn list_job(client: &TransportClient) -> Result<Vec<ImageJob>, Error> {
-    http::get(client, "/images/jobs/").await
+pub(crate) async fn list_job(client: &Client) -> Result<Vec<ImageJob>, Error> {
+    Ok(client.wire().get("/images/jobs/", client.headers()).await?)
 }
 
 /// Start a pull as `args` says.
-pub(crate) async fn pull(
-    client: &TransportClient,
-    args: &ImagePullArgs,
-) -> Result<ImageJob, Error> {
-    http::post(client, "/images/jobs/pull/", args).await
+pub(crate) async fn pull(client: &Client, args: &ImagePullArgs) -> Result<ImageJob, Error> {
+    Ok(client
+        .wire()
+        .post("/images/jobs/pull/", client.headers(), args)
+        .await?)
 }
 
 /// Start a push as `args` says.
-pub(crate) async fn push(
-    client: &TransportClient,
-    args: &ImagePushArgs,
-) -> Result<ImageJob, Error> {
-    http::post(client, "/images/jobs/push/", args).await
+pub(crate) async fn push(client: &Client, args: &ImagePushArgs) -> Result<ImageJob, Error> {
+    Ok(client
+        .wire()
+        .post("/images/jobs/push/", client.headers(), args)
+        .await?)
 }
 
 /// Start a build as `args` says.
-pub(crate) async fn build(
-    client: &TransportClient,
-    args: &ImageBuildArgs,
-) -> Result<ImageJob, Error> {
-    http::post(client, "/images/jobs/build/", args).await
+pub(crate) async fn build(client: &Client, args: &ImageBuildArgs) -> Result<ImageJob, Error> {
+    Ok(client
+        .wire()
+        .post("/images/jobs/build/", client.headers(), args)
+        .await?)
 }
 
 /// The image job `id`.
-pub(crate) async fn get_job(client: &TransportClient, id: &str) -> Result<ImageJob, Error> {
-    http::get(client, &job(id)).await
+pub(crate) async fn get_job(client: &Client, id: &str) -> Result<ImageJob, Error> {
+    Ok(client.wire().get(&job(id), client.headers()).await?)
 }
 
 /// Cancel the image job `id` if it runs, and forget it.
-pub(crate) async fn remove_job(client: &TransportClient, id: &str) -> Result<(), Error> {
-    http::delete(client, &job(id)).await
+pub(crate) async fn remove_job(client: &Client, id: &str) -> Result<(), Error> {
+    Ok(client.wire().delete(&job(id), client.headers()).await?)
 }
 
 /// The log of the image job `id`, after its `after`th entry if given, until its end: an
 /// `end` entry if it succeeded, [`Error::Job`] in its place if it failed.
 pub(crate) fn job_log<'a>(
-    client: &'a TransportClient,
+    client: &'a Client,
     id: &str,
     after: Option<u64>,
 ) -> impl Stream<Item = Result<LogEntry<ImageJobEntry>, Error>> + Send + use<'a> {
-    sse::client::log(client, format!("{}/events", job(id)), after).map(failed)
+    crate::log_entry::log(client, job(id), after).map(failed)
 }
 
 /// `entry`, or the error a failed job's `end` entry gives.
@@ -80,8 +79,11 @@ fn failed(entry: Result<LogEntry<ImageJobEntry>, Error>) -> Result<LogEntry<Imag
 }
 
 /// Delete each image no tag points at and no sandbox uses, and what only such images held.
-pub(crate) async fn prune(client: &TransportClient) -> Result<ImagePruneOutput, Error> {
-    http::post(client, "/images/prune", &serde_json::json!({})).await
+pub(crate) async fn prune(client: &Client) -> Result<ImagePruneOutput, Error> {
+    Ok(client
+        .wire()
+        .post("/images/prune", client.headers(), &serde_json::json!({}))
+        .await?)
 }
 
 #[cfg(test)]

@@ -24,6 +24,9 @@ known by its id or name is had with ``get_sandbox``, ``find_sandbox``, ``get_vol
 ``get_image_job`` or ``Sandbox.job``. The two with files read and write them as ``Files``:
 ``await volume.read_file("a.txt")``.
 
+A package is answered as a ``Package``, which makes sandboxes of it; an app's user reaches the
+sandboxes they made with an ``AppClient``, by the token that let them in.
+
 A project is answered as a ``Project``, carrying its client the same way: its members, and its
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.
 
@@ -56,6 +59,13 @@ from .image import (
     image_name,
 )
 from .job import LogEntry, StartedJob, Truncated
+from .package import (
+    AppClient,
+    JwtAccess,
+    Package,
+    PackageAccess,
+    PackageLimits,
+)
 from .port_forward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
@@ -85,6 +95,7 @@ from .volume import (
 
 __all__ = [
     "LIBRARY_ENV",
+    "AppClient",
     "Auth",
     "BasicAuth",
     "BearerAuth",
@@ -105,6 +116,7 @@ __all__ = [
     "ImagePruneOutput",
     "ImageTag",
     "ImageUploadOutput",
+    "JwtAccess",
     "Log",
     "LogEntry",
     "Metadata",
@@ -113,6 +125,9 @@ __all__ = [
     "NotionSource",
     "OnedriveSource",
     "Output",
+    "Package",
+    "PackageAccess",
+    "PackageLimits",
     "PortForwarder",
     "PortSide",
     "PortSpec",

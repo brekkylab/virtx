@@ -143,11 +143,11 @@ mod tests {
         assert_eq!(
             written(Error::Refusal {
                 status: 503,
-                description: "not a virtx answer (text/html, 51 bytes)".into(),
+                description: "not the server's answer (text/html, 51 bytes)".into(),
                 body: Some("<html>503</html>".into()),
             }),
             json!({
-                "message": "the server answered 503 Service Unavailable; not a virtx answer (text/html, 51 bytes)",
+                "message": "the server answered 503 Service Unavailable; not the server's answer (text/html, 51 bytes)",
                 "source": "server",
                 "status": 503,
                 "body": "<html>503</html>",

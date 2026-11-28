@@ -101,7 +101,7 @@ pub fn tcp_client() -> Client {
     let token = Auth::Bearer {
         token: token.clone(),
     };
-    Client::connect(url, token, Some(project), [] as [(&str, &str); 0]).unwrap()
+    Client::connect(url, token, Some(project)).unwrap()
 }
 
 /// What `cmd` wrote in `sandbox`, a line at a time, stdout and stderr alike, and its exit code.

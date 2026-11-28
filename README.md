@@ -27,10 +27,18 @@
 
 <br>
 
-virtx is a microVM sandbox for AI agents. From your own code, it runs tasks in a disposable Linux VM on your machine, on a server you run, or on virtx cloud.
+virtx is a microVM sandbox for AI agents: make sandboxes from your own code, and build apps on them for your users.
 
-It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
-Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
+A sandbox is a disposable Linux VM, on your machine, on a server you run, or on virtx cloud.
+Run in it what you'd rather not run on your own machine, such as the commands an AI agent decides to run.
+Whatever it installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
+
+When you build an app on virtx, its users get sandboxes too.
+You keep what each user's sandbox is made of as a package in your project, and your app makes each user a sandbox of their own from it, with no backend of yours in between.
+
+<p align="center">
+  <img alt="The developer keeps a package on virtx and makes the app. Each app user makes a sandbox of the package from the app, and uses their own." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/app-user-developer-virtx.svg" width="640">
+</p>
 
 ## Quickstart
 
@@ -198,7 +206,6 @@ let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
-    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -216,6 +223,7 @@ let client = Client::connect(
   - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **Servers:** 💻 local (stdio) · 🖥️ remote (tcp) · ☁️ cloud
   - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **Ship your agent as an app:** build an app on virtx and give it to your users, and each of them gets a sandbox of their own, with no backend to run. See [building an app](https://virtx.sh/docs/tutorials/app-client/).
 - **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
 - **Works with any agent framework:** a sandbox is a tool like any other, so any framework or coding agent can drive it. [Ailoy](https://github.com/brekkylab/ailoy), an open-source agent SDK, is one that does.
 

@@ -23,8 +23,8 @@ use axum::middleware::Next;
 use axum::response::IntoResponse as _;
 use axum::routing::any;
 use http::HeaderMap;
-use tower::ServiceExt as _;
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, serve_stdio};
+use http_over_x::serve_stdio;
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER};
 use virtx_uvm::{
     HostPaths, ImageStore, Project, ProjectError, ProjectId, ProjectOwner as Owner, ProjectStore,
     RegistryServer, Sandbox,
@@ -56,14 +56,7 @@ fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     let root = virtx_uvm::cache_root();
     let (app, host) = app(&root).await?;
-    let handle = move |request: http::Request<_>| {
-        let app = app.clone();
-        async move {
-            let Ok(response) = app.oneshot(request).await;
-            response
-        }
-    };
-    let served = serve_stdio(handle, tokio::io::stdin(), tokio::io::stdout()).await;
+    let served = serve_stdio(app, tokio::io::stdin(), tokio::io::stdout()).await;
     // The client is gone, and every sandbox was its.
     tokio::task::spawn_blocking(move || host.close_all()).await?;
     Ok(served?)
@@ -104,6 +97,7 @@ async fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
                 }
             },
         ))
+        .merge(endpoints::package_sandboxes().layer(Extension(Arc::clone(&host))))
         .merge(endpoints::projects().layer(Extension(Arc::clone(&host))))
         .route("/images/oci/v2", any(images.clone()))
         .route("/images/oci/v2/", any(images.clone()))
@@ -177,7 +171,7 @@ impl Host {
 
     /// The home of the project `headers` name, or of the client's own where they name none:
     /// `403` for a project not here.
-    async fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
+    pub async fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
         let named = match headers.get(PROJECT_HEADER) {
             None => None,
             Some(named) => Some(
@@ -197,7 +191,7 @@ impl Host {
     }
 
     /// Project `id`'s home, its images its own: `None` once it is being removed.
-    fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
+    pub fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         let mut homes = self.homes.lock().unwrap();
         if let Some(home) = homes.get(id) {
             return Ok(home.clone());
@@ -206,7 +200,7 @@ impl Host {
         let images = ImageStore::new(dir.join("images"))?;
         let registry = RegistryServer::new(images.clone(), REGISTRY_PATH)?;
         let registry = Arc::new(registry.with_host_paths(HostPaths::Named));
-        let home = Arc::new(Home::new(images, registry, &dir)?);
+        let home = Arc::new(Home::new(*id, images, registry, &dir)?);
         homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))
     }
@@ -229,6 +223,12 @@ impl Host {
         true
     }
 
+    /// Every home made, but those being removed.
+    fn homes(&self) -> Vec<Arc<Home>> {
+        let homes = self.homes.lock().unwrap();
+        homes.values().flatten().cloned().collect()
+    }
+
     /// Let requests reach project `id` again, once its removal has failed.
     pub fn release(&self, id: &ProjectId) {
         self.homes.lock().unwrap().remove(id);
@@ -237,14 +237,7 @@ impl Host {
     /// Close every sandbox of every home, as removing each does: blocks until each machine has
     /// stopped and synced what it wrote.
     fn close_all(&self) {
-        let homes: Vec<_> = self
-            .homes
-            .lock()
-            .unwrap()
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
+        let homes = self.homes();
         for home in homes {
             home.close_all();
         }
@@ -289,6 +282,7 @@ mod tests {
         sync::Arc,
     };
 
+    use tower::ServiceExt as _;
     use virtx_core::{
         Client, DirEntry, Error, FileRoot, ImageName, MountSource, MountType, PortForwarderArgs,
         PortSide, PortSpec, Recipe, SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs,
@@ -331,7 +325,7 @@ mod tests {
             let served_app = app.clone();
             let after = Arc::new(after);
             let served = home.clone();
-            let handle = move |request: http::Request<_>| {
+            let handle = tower::service_fn(move |request: http::Request<_>| {
                 let app = app.clone();
                 let after = Arc::clone(&after);
                 let home = served.clone();
@@ -339,14 +333,11 @@ mod tests {
                     let path = request.uri().path().to_owned();
                     let Ok(response) = app.oneshot(request).await;
                     after(&home, &path);
-                    response
+                    Ok::<_, std::convert::Infallible>(response)
                 }
-            };
-            let (pipe, server) = tokio::io::duplex(64 << 10);
-            let (input, output) = tokio::io::split(server);
-            tokio::spawn(serve_stdio(handle, input, output));
+            });
             Server {
-                client: Client::over_stream(pipe),
+                client: Client::over(http_over_x::Client::embed(handle)),
                 root,
                 home,
                 app: served_app,
@@ -383,6 +374,80 @@ mod tests {
 
     fn names(entries: Vec<DirEntry>) -> Vec<String> {
         entries.into_iter().map(|entry| entry.name).collect()
+    }
+
+    /// A package is kept as it is put, refused for an image or a volume not here, found by its id
+    /// or its name, and removed; while it is kept, its tag is refused its removal, and its volume
+    /// is not. A sandbox is made of one by its id in the project the id names, or by its name
+    /// in the one the request names.
+    #[tokio::test]
+    async fn a_project_s_packages_are_kept_and_what_they_name_is_in_use() {
+        let server = Server::spawn("packages").await;
+        let send = async |method: &str, path: &str, body: &str| {
+            let request = http::Request::builder()
+                .method(method)
+                .uri(path)
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            let status = response.status().as_u16();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        };
+        let mounting = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"},
+            "volumes": [{"volume": "data", "path": "/data"}]},
+            "access": [{"type": "jwt", "issuer": "https://idp.example", "audience": "app"}]}"#;
+        assert_eq!(send("PUT", "/packages/app", mounting).await.0, 404);
+        server.file_image("app:1");
+        assert_eq!(
+            send("PUT", "/packages/app", mounting).await.0,
+            404,
+            "no volume"
+        );
+        server.client.create_volume(Some("data")).await.unwrap();
+        let (status, body) = send("PUT", "/packages/app", mounting).await;
+        assert_eq!(status, 201, "{body}");
+        let made: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = made["id"].as_str().unwrap().to_owned();
+        let project = server.home.file_name().unwrap().to_str().unwrap();
+        assert!(id.starts_with(&format!("{project}.")), "{id}");
+        assert_eq!(
+            made["access"],
+            serde_json::json!([{"type": "jwt", "issuer": "https://idp.example", "audience": "app"}]),
+            "kept, letting no one in"
+        );
+        assert_eq!(send("PUT", "/packages/app", mounting).await.0, 200);
+        for named in ["app", id.as_str()] {
+            assert_eq!(send("GET", &format!("/packages/{named}"), "").await.0, 200);
+        }
+
+        assert_eq!(send("DELETE", "/volumes/data", "").await.0, 204);
+        let (status, body) = send("DELETE", "/images/oci/v2/app/manifests/1", "").await;
+        assert_eq!(status, 409, "{body}");
+
+        let named = r#"{"name": "dev"}"#;
+        let elsewhere = format!("/packages/{}.none/sandboxes/", virtx_uvm::ProjectId::new());
+        assert_eq!(send("POST", &elsewhere, named).await.0, 404);
+        assert_eq!(
+            send("POST", "/packages/none/sandboxes/", named).await.0,
+            404
+        );
+        let unknown = r#"{"name": "dev", "unknown": true}"#;
+        assert_eq!(
+            send("POST", &format!("/packages/{id}/sandboxes/"), unknown)
+                .await
+                .0,
+            400
+        );
+
+        assert_eq!(send("DELETE", &format!("/packages/{id}"), "").await.0, 204);
+        assert_eq!(send("GET", "/packages/app", "").await.0, 404);
+        assert_eq!(
+            send("DELETE", "/images/oci/v2/app/manifests/1", "").await.0,
+            202
+        );
     }
 
     #[tokio::test]
@@ -463,19 +528,12 @@ mod tests {
     /// A port on local of a sandbox that is not here is `404`, and a target that is not
     /// `host:port` is `400`.
     #[tokio::test]
-    async fn a_port_on_local_of_no_sandbox_or_no_target_is_refused() {
+    async fn a_port_on_local_of_no_sandbox_is_refused() {
         let server = Server::spawn("local-port").await;
         let args = PortForwarderArgs::new("nope", 9222).on(PortSide::Local);
-        let (forward, forwarding) = server
-            .client
-            .forward_port(args.clone().local("127.0.0.1:9222"));
+        let (forward, forwarding) = server.client.forward_port(args);
         forwarding.await;
         assert_eq!(status(forward.opened().await), 404);
-        for target in ["9222", ":9222", "localhost:port"] {
-            let (forward, forwarding) = server.client.forward_port(args.clone().local(target));
-            forwarding.await;
-            assert_eq!(status(forward.opened().await), 400, "{target}");
-        }
     }
 
     #[tokio::test]

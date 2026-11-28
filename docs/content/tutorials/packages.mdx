@@ -1,0 +1,268 @@
+---
+title: "Making packages"
+description: "Say once what a sandbox is made of and keep it under a name, then make as many sandboxes of it as you need."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A **package** is a sandbox said once and kept under a name: its image, its size, its ports and volumes.
+Anyone it lets in makes a sandbox of it with one call, as many times as they ask, each sandbox the same.
+
+Use packages to:
+
+- Give every user of your app a sandbox of the same image and size, made from the app itself, with no server of your own in between.
+- Let teammates make the sandbox a task needs without repeating its options.
+- Change what the next sandboxes are made of in one place.
+
+This page keeps a package and makes sandboxes of it as a member of its project.
+[Letting your users in](/docs/tutorials/package-access/) lets others make them too, and [Building an app on a package](/docs/tutorials/app-client/) is the app's side.
+
+## Before you start
+
+A package lives in a [project](/docs/tutorials/projects/), as everything on a server does, and names an image that project already has.
+Build the image, or pull it, on the server the package will be on, as [Working with images](/docs/tutorials/images/) shows.
+An image you built on your own machine goes to a remote server with [`upload_image`](/docs/tutorials/images/#copy-a-local-image-to-a-remote-server).
+
+`Client.spawn()` keeps packages too, so you can try one on your own machine first.
+Only a server reached over HTTP lets anyone but you make a sandbox of it.
+
+## Keep a package
+
+`put_package` takes a name, an image, and the options `create_sandbox` takes, as [Setting up sandboxes](/docs/tutorials/setting-sandboxes/) describes them:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+package = await client.put_package(
+    "workspace",
+    "app:latest",
+    vcpus=2,
+    memory_mib=2048,
+    ports=[8000],
+)
+print(package.id)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const pkg = await client.putPackage('workspace', 'app:latest', {
+  vcpus: 2,
+  memoryMib: 2048,
+  ports: [8000],
+})
+console.log(pkg.id)
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use virtx::{PackagePutArgs, SandboxCreateArgs};
+
+let sandbox = SandboxCreateArgs::new("app:latest").vcpus(2).memory_mib(2048).port(8000);
+let package = client.put_package("workspace", &PackagePutArgs::new(sandbox)).await?;
+println!("{}", package.id());
+```
+
+</TabItem>
+</Tabs>
+
+Every sandbox made of `workspace` is then made of `app:latest`, with 2 vCPUs, 2048 MiB and port 8000 open in it.
+Two options are left to each sandbox, and a package that sets them is refused with `400`:
+
+- **`name`:** each sandbox is named as it is made, if at all.
+- **A port on local:** it reaches the machine of whoever makes the sandbox, so they ask for it as they make one.
+
+A package name is letters, digits, `.`, `_` and `-`, as a sandbox's.
+The server also gives the package an `id`.
+An app names the package by its name, and its project by the project's `id`, since its users are in no project.
+
+### The image
+
+A tag is read as each sandbox is made, not as the package is kept.
+A package of `app:latest` makes the next sandbox of whatever image `app:latest` points at then, so pushing a new image under the tag updates every sandbox made from then on.
+To make every sandbox of one image, name it by its digest.
+
+While a package names a tag, deleting the tag, or the image it points at, is refused with `409`.
+Moving the tag to another image is not.
+
+### Volumes
+
+Every sandbox made of a package mounts the volumes it names, the same volumes.
+Mount a volume for data every sandbox reads, read-only; what one sandbox should keep for itself goes in its own disk, which goes with it.
+A package does not hold its volumes: removing one is not refused, and a sandbox of the package is then refused, `404`, until the volume is made again or the package names another.
+
+### Size
+
+`max` is how large one the package's [access](/docs/tutorials/package-access/) lets in may [resize](/docs/tutorials/setting-sandboxes/) a sandbox they made of it:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+package = await client.put_package(
+    "workspace",
+    "app:latest",
+    vcpus=2,
+    memory_mib=2048,
+    ports=[8000],
+    max={"vcpus": 4, "memory_mib": 8192},
+)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const pkg = await client.putPackage('workspace', 'app:latest', {
+  vcpus: 2,
+  memoryMib: 2048,
+  ports: [8000],
+  max: { vcpus: 4, memoryMib: 8192 },
+})
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use virtx::{PackagePutArgs, SandboxCreateArgs, SandboxResizeArgs};
+
+let sandbox = SandboxCreateArgs::new("app:latest").vcpus(2).memory_mib(2048).port(8000);
+let args = PackagePutArgs::new(sandbox).max(SandboxResizeArgs::default().vcpus(4).memory_mib(8192));
+let package = client.put_package("workspace", &args).await?;
+```
+
+</TabItem>
+</Tabs>
+
+Each value is no less than what the package makes a sandbox with, or the package is refused with `400`.
+A value left out, or no `max` at all, holds the sandbox to the size it was made with.
+A member of the project resizes it as any sandbox, with no `max`.
+
+## Make a sandbox of it
+
+`create_sandbox` on the package makes one, and answers it:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+sandbox = await package.create_sandbox(name="task-42")
+await sandbox.exec(["uname", "-a"]).complete(print=True)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const sandbox = await pkg.createSandbox({ name: 'task-42' })
+await sandbox.exec(['uname', '-a']).complete({ print: true })
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use virtx::{PackageSandboxCreateArgs, SandboxExecArgs};
+
+let sandbox = package.create_sandbox(&PackageSandboxCreateArgs::default().name("task-42")).await?;
+sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).complete(true).await?;
+```
+
+</TabItem>
+</Tabs>
+
+The sandbox is a sandbox like any other: run commands in it, read its files, forward its ports, and remove it when the work is done.
+It knows nothing of the package: replacing or removing the package changes no sandbox made of it.
+
+- **`name`** finds it again with `find_sandbox`. Only a member of the project may name one, since names are the project's.
+- **`ports`** are its ports on local, each `on="local"`, beside the ports in the sandbox the package gives it. A port in the sandbox is the package's to give, and is refused with `400`. See [A port on local](/docs/tutorials/networks-ports/#a-port-on-local).
+
+`client.create_package_sandbox` does the same with the package's `id` or name, for a package you have not looked up.
+
+## Find, replace and remove a package
+
+- `list_package` lists the project's packages, and `get_package` finds one by its `id` or its name.
+- `put_package` with a name the project already has replaces that package in whole. Its name and `id` stay the same, so an app that names it keeps working, and the sandboxes made of it stay as they were.
+- `remove` removes the package. The sandboxes made of it stay, each reached by who made it, until they are removed.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+for package in await client.list_package():
+    print(package.id, package.name)
+
+package = await client.get_package("workspace")
+await package.remove()
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+for (const pkg of await client.listPackage()) {
+  console.log(pkg.id, pkg.name)
+}
+
+const pkg = await client.getPackage('workspace')
+await pkg.remove()
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+for package in client.list_package().await? {
+    println!("{} {}", package.id(), package.name());
+}
+
+let package = client.get_package("workspace").await?;
+package.remove().await?;
+```
+
+</TabItem>
+</Tabs>
+
+For every call and what each returns, see [Packages](/docs/sdk/packages/) in the SDK reference.
+
+## Troubleshooting
+
+1. **`400`, `invalid`, from `put_package`**
+
+   **Cause:** A package name with another character, a port on local, or a `max` smaller than the size the package makes a sandbox with.
+
+   **Fix:** Give ports on local as each sandbox is made, and a `max` no smaller than the package's own size.
+
+2. **`404`, from `put_package`**
+
+   **Cause:** The project has no image by that tag, or no volume by that name.
+
+   **Fix:** Build, pull or upload the image to that server and project first, and create the volume.
+
+3. **`404`, `not_found`, `no package here is …`**
+
+   **Cause:** No package has that `id`, or that name in the client's project.
+
+   **Fix:** Check the client's project, or name the package by its `id`.
+
+4. **`409`, deleting an image or a tag**
+
+   **Cause:** A package names it.
+
+   **Fix:** Point the package at another one with `put_package`, or remove the package first.
+
+5. **`400`, `invalid`, from `create_sandbox` on a package**
+
+   **Cause:** A port in the sandbox given as it is made, or a `name` given by someone who is not a member of the project.
+
+   **Fix:** Give ports in the sandbox in the package, and leave out `name`.
+
+## Next
+
+- [Letting your users in](/docs/tutorials/package-access/): let people who are not members of the project make a sandbox of a package.
+- [Building an app on a package](/docs/tutorials/app-client/): what your app runs to make a sandbox of a package and use it.

@@ -4,6 +4,23 @@ description: "Group what you keep on a server into projects, share them with you
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
+import appUserDeveloperVirtx from "../../images/app-user-developer-virtx.svg";
+
+Until now there were two sides: a client, your code, and a server it makes sandboxes on.
+Everything the server ran, it ran for you.
+
+A product built on VirtX has a third: the users of your app.
+They make sandboxes too, from your app, on the server your project is on, with no server of yours in between.
+
+<img src={appUserDeveloperVirtx.src} width={appUserDeveloperVirtx.width} height={appUserDeveloperVirtx.height} alt="The developer keeps a package on VirtX with put_package, and makes the app. Each app user makes a sandbox of the package from the app with AppClient, and uses their own." />
+
+- **VirtX** keeps your project: its images, volumes and packages, and every sandbox made in it.
+- **You, the developer,** are a member of the project. You build your app's image, keep it as a [package](/docs/tutorials/packages/) that says what each user's sandbox is made of, and [say who may make one](/docs/tutorials/package-access/).
+- **Your app's users** are no members of the project. Your app makes them a sandbox of the package with the token they signed in to your app with, which reaches the sandboxes they made and nothing else in the project. See [Building an app on a package](/docs/tutorials/app-client/).
+
+The tutorials from here go through it in that order, starting from the project everything lives in, and the server it is on.
+
+## Projects
 
 A **project** is how you organize what you keep on a server.
 Everything you create there belongs to a project.
@@ -76,7 +93,7 @@ const volume = await client.createVolume('data') // a volume in "demo"
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-let client = Client::connect("https://virtx.example", auth, Some("demo"), [] as [(&str, &str); 0])?;
+let client = Client::connect("https://virtx.example", auth, Some("demo"))?;
 
 let volume = client.create_volume(Some("data")).await?; // a volume in "demo"
 ```
@@ -226,3 +243,4 @@ For every call and what each returns, see [Projects](/docs/sdk/projects/) in the
 
 - [Running your own server](/docs/tutorials/self-hosting/): serve VirtX to the team you share projects with.
 - [Mounting volumes](/docs/tutorials/mounting-volumes/): the volumes a project keeps.
+- [Making packages](/docs/tutorials/packages/): keep a sandbox in a project for its members, and others, to make.

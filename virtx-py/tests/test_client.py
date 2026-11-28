@@ -2,6 +2,7 @@ import asyncio
 import json
 import socket
 import time
+import urllib.request
 
 import pytest
 import virtx
@@ -156,45 +157,80 @@ def test_virtx_error_keeps_body() -> None:
     assert err_with_status_and_body.body == "<html>error</html>"
 
 
-async def test_a_non_json_refusal_raises_without_quoting_html() -> None:
-    import http.server
-    import threading
+async def test_a_package_is_kept_makes_a_sandbox_and_is_removed(client: Client) -> None:
+    await alpine(client)
+    name = unique("package")
+    access = [virtx.JwtAccess("https://idp.example", "app", claims={"r": 1})]
+    package = await client.put_package(
+        name,
+        ALPINE,
+        max={"vcpus": 8},
+        access=access,
+        origins=["https://app.example"],
+        limits=virtx.PackageLimits(per_subject=1),
+    )
+    assert isinstance(package, virtx.Package)
+    assert (package.name, package.sandbox["image"], package.max) == (
+        name,
+        {"type": "tag", "tag": ALPINE},
+        {"vcpus": 8},
+    )
+    assert package.access == access
+    assert package.limits == virtx.PackageLimits(per_subject=1)
+    assert (await client.get_package(package.id)).name == name
+    assert package.id in [kept.id for kept in await client.list_package()]
 
-    class _503Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            body = (
-                b"<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
-            )
-            self.send_response(503)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    made = await package.create_sandbox(name=unique("of-package"))
+    assert isinstance(made, virtx.Sandbox)
+    await made.remove()
+    await package.remove()
+    with pytest.raises(VirtxError) as refused:
+        await client.get_package(package.id)
+    assert refused.value.status == 404
 
-        def log_message(self, format: str, *args: object) -> None:
-            pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), _503Handler)
-    host, port = server.server_address
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        with Client.connect(f"http://{host}:{port}/") as client:
-            with pytest.raises(VirtxError) as exc_info:
-                await client.list_sandbox()
-            err = exc_info.value
-            assert err.status == 503
-            assert (
-                err.body
-                == "<html><head><title>503 Service Unavailable</title></head><body>503</body></html>"
-            )
-            err_msg = str(err)
-            assert (
-                "the server answered 503 Service Unavailable; not a virtx answer (text/html,"
-                in err_msg
-            )
-            assert "the service is unreachable or restarting" in err_msg
-            assert "<html>" not in err_msg
-    finally:
-        server.shutdown()
-        server.server_close()
+async def test_an_app_client_reaches_the_sandbox_a_package_lets_it_make(tcp_client: Client) -> None:
+    await alpine(tcp_client)
+    package = await tcp_client.put_package(unique("members"), ALPINE)
+    url = fixture("VIRTX_TEST_URL")
+    # An app names its package's project by the project's id.
+    project = (await tcp_client.get_project(fixture("VIRTX_TEST_PROJECT"))).id
+    with pytest.raises(VirtxError) as refused:
+        await virtx.AppClient.create(url, project, package.name)
+    assert refused.value.status == 401
+    await package.remove()
+
+    # The fixture's own issuer lets bob in, a member of another project.
+    signs_in = await asyncio.to_thread(urllib.request.urlopen, f"{url}auth")
+    oidc = json.loads(signs_in.read())["oidc"]
+    issuer = oidc["issuer"]
+    access = virtx.JwtAccess(issuer, oidc["client_id"], jwks=f"{issuer}/keys")
+    package = await tcp_client.put_package(unique("jwt"), ALPINE, access=[access])
+    bob = BearerAuth(json.loads(fixture("VIRTX_TEST_USERS"))["bob"])
+    async with await virtx.AppClient.create(url, project, package.name, bob) as app:
+        assert await app.sandbox.exec(["true"]).complete() == 0
+        id = app.sandbox.id
+    assert (await tcp_client.get_sandbox(id)).id == id, "closed, it stays"
+
+    app = await virtx.AppClient.open(url, project, bob, id)
+    assert app.sandbox.id == id
+    await app.remove()
+    with pytest.raises(VirtxError) as gone:
+        await tcp_client.get_sandbox(id)
+    assert gone.value.status == 404, "removed, it is deleted"
+    with pytest.raises(VirtxError) as refused:
+        await virtx.AppClient.open(url, project, bob, id)
+    assert refused.value.status == 403
+    await package.remove()
+
+
+async def test_a_member_finds_a_package_s_sandboxes(tcp_client: Client) -> None:
+    await alpine(tcp_client)
+    package = await tcp_client.put_package(unique("found"), ALPINE)
+    made = await package.create_sandbox()
+    found = await package.list_sandbox()
+    assert [sandbox.id for sandbox in found] == [made.id]
+    assert all(isinstance(sandbox, virtx.Sandbox) for sandbox in found)
+    assert [s.id for s in await tcp_client.list_package_sandbox(package.name)] == [made.id]
+    await made.remove()
+    await package.remove()

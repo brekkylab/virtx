@@ -1,0 +1,399 @@
+---
+title: "Packages"
+description: "Reference for packages, which keep a sandbox under a name to be made by members and whom its access lets in, and AppClient, which reaches the sandbox an app's user made as them and comes back to it."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A package is a sandbox kept under a name, made as many times as it is asked for, by the members of its project and by whom its access lets in.
+A `Package` has its `id`, its `name`, the `sandbox` it makes, `max`, `access`, `origins` and `limits` (in Rust, `id()`, `name()` and `info()`).
+See [Making packages](/docs/tutorials/packages/), [Letting your users in](/docs/tutorials/package-access/) and [Building an app on a package](/docs/tutorials/app-client/).
+
+| Member | Does |
+| --- | --- |
+| [`put_package`](#put_package) | Keeps a package under `name`, made or replaced in whole. |
+| [`list_package`](#list_package) | The project's packages, or the one an `id` or name names. |
+| [`create_sandbox`](#create_sandbox) | Makes a sandbox of a package. |
+| [`list_sandbox`](#list_sandbox) | The sandboxes made of a package that the client's credentials made. |
+| [`remove`](#remove) | Removes the package; the sandboxes made of it stay. |
+| [`AppClient.create`](#appclientcreate) | Makes a sandbox of a package as an app's user, and reaches it as them. |
+| [`AppClient.open`](#appclientopen) | Reaches again a sandbox the user made, as them. |
+| [`AppClient.close`](#appclientclose) | Closes the client, leaving its sandbox. |
+| [`AppClient.remove`](#appclientremove) | Removes its sandbox, and closes the client. |
+
+## `put_package`
+
+Keeps the package `name`, made or replaced in whole: each sandbox made of it is made of `image` as [`create_sandbox`](/docs/sdk/sandboxes/#create_sandbox) makes one with the same options, but `name` and a port on local, which each sandbox is given as it is made.
+Its image and volumes have to be in the project already.
+Replacing a package keeps its `id`, and changes no sandbox made of it.
+
+- `max` is how large one its access let in may resize a sandbox they made of it, each no less than what the package makes it with. One left out holds them to the size the sandbox was made with.
+- `access` is who beside the project's members may make one, each a `JwtAccess`: whoever sends a JSON Web Token `issuer` signed for `audience` and carrying each of `claims`, which they then reach the sandbox with.
+- `origins` are the web pages they may make one from, and reach it from, each as `https://app.example`.
+- `limits` is how many sandboxes made of it by those `access` lets in may live at once: `sandboxes`, all of theirs, and `per_subject`, each one's.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def put_package(
+    name: str, image: str | ImageName, *,
+    # ... every option of create_sandbox but name ...
+    max: Mapping[str, int] | None = None,
+    access: Iterable[JwtAccess] = (),
+    origins: Iterable[str] = (),
+    limits: PackageLimits | None = None,
+) -> Package
+
+@dataclass(frozen=True)
+class JwtAccess:
+    issuer: str
+    audience: str
+    jwks: str | None = None
+    claims: Mapping[str, Any] = {}
+
+@dataclass(frozen=True)
+class PackageLimits:
+    sandboxes: int | None = None
+    per_subject: int | None = None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+putPackage(name: string, image: string | ImageName, options?: PackageOptions): Promise<Package>
+
+interface PackageOptions extends Omit<SandboxCreateOptions, 'name'> {
+  max?: SandboxResizeOptions
+  access?: PackageAccess[]
+  origins?: string[]
+  limits?: { sandboxes?: number; perSubject?: number }
+}
+
+type PackageAccess = {
+  type: 'jwt'
+  issuer: string
+  audience: string
+  jwks?: string
+  claims?: Record<string, unknown>
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn put_package(&self, name: impl AsRef<str>, args: &PackagePutArgs) -> Call<Package>
+
+impl PackagePutArgs {
+    pub fn new(sandbox: SandboxCreateArgs) -> Self
+    pub fn max(self, max: SandboxResizeArgs) -> Self
+    pub fn access(self, access: PackageAccess) -> Self
+    pub fn origin(self, origin: impl Into<String>) -> Self
+    pub fn limits(self, limits: PackageLimits) -> Self
+}
+
+pub enum PackageAccess {
+    Jwt { issuer: String, audience: String, jwks: Option<String>, claims: Map<String, Value> },
+}
+
+pub struct PackageLimits { pub sandboxes: Option<u32>, pub per_subject: Option<u32> }
+```
+
+</TabItem>
+</Tabs>
+
+## `list_package`
+
+The project's packages, or the one `package` names: by its `id`, or by its name in the client's project.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def list_package() -> list[Package]
+async def get_package(package: str) -> Package
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+listPackage(): Promise<Package[]>
+getPackage(pkg: string): Promise<Package>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn list_package(&self) -> Call<Vec<Package>>
+pub fn get_package(&self, package: impl AsRef<str>) -> Call<Package>
+```
+
+</TabItem>
+</Tabs>
+
+## `create_sandbox`
+
+Makes a sandbox of the package, answered as a `Sandbox`.
+`create_package_sandbox` on the client does the same for a package by its `id` or name.
+
+- `name` finds it again with `find_sandbox`. Only a member of the project may give one; anyone else is refused with `400`.
+- `ports` are its ports on local, each `on="local"`, beside the ports in the sandbox the package gives it. A port in the sandbox is refused with `400`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+# Package
+async def create_sandbox(*, name: str | None = None, ports: Iterable[PortSpec] = ()) -> Sandbox
+# Client
+async def create_package_sandbox(
+    package: str, *, name: str | None = None, ports: Iterable[PortSpec] = ()
+) -> Sandbox
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+// Package
+createSandbox(options?: { name?: string; ports?: PortSpec[] }): Promise<Sandbox>
+// Client
+createPackageSandbox(pkg: string, options?: { name?: string; ports?: PortSpec[] }): Promise<Sandbox>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+// Package
+pub fn create_sandbox(&self, args: &PackageSandboxCreateArgs) -> Call<Sandbox>
+// Client
+pub fn create_package_sandbox(&self, package: impl AsRef<str>, args: &PackageSandboxCreateArgs) -> Call<Sandbox>
+
+impl PackageSandboxCreateArgs {
+    pub fn name(self, name: impl Into<String>) -> Self
+    pub fn port(self, port: PortSpec) -> Self
+}
+```
+
+</TabItem>
+</Tabs>
+
+## `list_sandbox`
+
+The sandboxes made of the package that the client's credentials made: to a member of the project, every one; to one its access lets in, those made with the same issuer and subject, as it lets them in now.
+A request with no credentials is refused with `401`.
+`list_package_sandbox` on the client does the same for a package by its `id` or name.
+A server that takes no credentials answers none of this.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+# Package
+async def list_sandbox() -> list[Sandbox]
+# Client
+async def list_package_sandbox(package: str) -> list[Sandbox]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+// Package
+listSandbox(): Promise<Sandbox[]>
+// Client
+listPackageSandbox(pkg: string): Promise<Sandbox[]>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+// Package
+pub fn list_sandbox(&self) -> Call<Vec<Sandbox>>
+// Client
+pub fn list_package_sandbox(&self, package: impl AsRef<str>) -> Call<Vec<Sandbox>>
+```
+
+</TabItem>
+</Tabs>
+
+## `remove`
+
+Removes the package, and what its access lets in from then on.
+The sandboxes made of it stay, each reached by who made it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+remove(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn remove(&self) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `AppClient.create`
+
+Makes a sandbox of the package named `package` in the project `project`, by the project's id, on the server at `url`, as `auth` lets in: a bearer token of the issuer its access names, such as the ID token your app's user signed in with.
+`ports` are its ports on local, each `on="local"`, beside those the package gives it in the sandbox.
+From then on the client sends `auth` with every request, and its `sandbox` reaches that sandbox: `auth` reaches the sandboxes the user made of the package, and nothing else.
+Keep the sandbox's `id` to come back to it with [`open`](#appclientopen).
+
+It is refused as making the sandbox is: `401` or `403` for one the package does not let in, `429` past its limits, and `400` for a port in the sandbox.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@classmethod
+async def create(
+    url: str,
+    project: str,
+    package: str,
+    auth: Auth | None = None,
+    *,
+    ports: Iterable[PortSpec] = (),
+) -> AppClient
+
+sandbox: Sandbox
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+static create(
+  url: string,
+  project: string,
+  pkg: string,
+  auth?: Auth | null,
+  options?: { ports?: PortSpec[] },
+): Promise<AppClient>
+
+readonly sandbox: Sandbox
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub async fn create(
+    url: &str,
+    project: &str,
+    package: &str,
+    auth: Auth,
+    ports: impl IntoIterator<Item = PortSpec>,
+) -> Result<AppClient, Error>
+
+pub fn sandbox(&self) -> &Sandbox
+```
+
+</TabItem>
+</Tabs>
+
+## `AppClient.open`
+
+Reaches again the sandbox `sandbox` in the project `project`, each by its id, one the user made of a package as `auth` lets in, such as [`list_sandbox`](#list_sandbox) finds.
+It is refused with `401` or `403` for a sandbox they did not make, or one removed.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@classmethod
+async def open(url: str, project: str, auth: Auth, sandbox: str) -> AppClient
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+static open(url: string, project: string, auth: Auth, sandbox: string): Promise<AppClient>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub async fn open(url: &str, project: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `AppClient.close`
+
+Closes the client and leaves its sandbox as it is, to come back to.
+`async with` closes it in Python, `await using` in Node.js where the runtime has it, and dropping it in Rust.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def close() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+close(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub async fn close(self) -> Result<(), Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `AppClient.remove`
+
+Removes its sandbox, and closes the client.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+remove(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub async fn remove(self) -> Result<(), Error>
+```
+
+</TabItem>
+</Tabs>

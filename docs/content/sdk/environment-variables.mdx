@@ -12,7 +12,7 @@ These are the variables you set for the clients, the `virtx` CLI and the server.
 | `VIRTX_STDIO_VERSION` | `spawn`, CLI | Another version of `virtx-stdio` to fetch. |
 | `VIRTX_DIST_URL` | `spawn`, CLI | Where releases are fetched from. |
 | `VIRTX_HOME` | `spawn`, CLI, servers | Where VirtX keeps what it fetches on this machine. |
-| `VIRTX_TOKEN_REFUSED` | A `CommandAuth` command | Set when the command is run again because the server refused its last token, so a command that keeps its tokens gives a new one. |
+| `TOKEN_REFUSED` | A `CommandAuth` command | Set when the command is run again because the server refused its last token, so a command that keeps its tokens gives a new one. |
 | `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP when neither `--host` nor `--server` is given. |
 | `VIRTX_TOKEN` | CLI | The bearer token sent to the server reached over HTTP, at `--host` or `VIRTX_HOST`. |
 | `VIRTX_PROJECT` | CLI | The project requests go to, when `--project` isn't given. |

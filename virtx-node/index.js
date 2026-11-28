@@ -86,18 +86,9 @@ const SIGNATURES = {
   ],
   virtx_client_connect: [
     'int',
-    [
-      'const char *',
-      'uint8_t *',
-      'size_t',
-      'const char **',
-      'size_t',
-      koffi.out(koffi.pointer('uintptr_t')),
-      Out,
-    ],
+    ['const char *', 'uint8_t *', 'size_t', koffi.out(koffi.pointer('uintptr_t')), Out],
   ],
   virtx_client_set_auth: ['int', ['uintptr_t', 'uint8_t *', 'size_t', Out]],
-  virtx_client_set_headers: ['int', ['uintptr_t', 'const char **', 'size_t', Out]],
   virtx_client_set_project: ['int', ['uintptr_t', 'const char *', Out]],
   virtx_client_retain: ['void', ['uintptr_t']],
   virtx_client_release: ['uintptr_t', ['uintptr_t']],
@@ -142,6 +133,12 @@ const SIGNATURES = {
   virtx_client_remove_file: WITH_ARGS,
   virtx_client_rename_file: WITH_ARGS,
   virtx_client_copy_file: WITH_ARGS,
+  virtx_client_list_package: PLAIN,
+  virtx_client_put_package: WITH_ARGS,
+  virtx_client_get_package: WITH_ARGS,
+  virtx_client_remove_package: WITH_ARGS,
+  virtx_client_create_package_sandbox: WITH_ARGS,
+  virtx_client_list_package_sandbox: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
@@ -344,13 +341,18 @@ function library() {
   return opened
 }
 
+// The members whose value is the caller's own, its keys sent and answered as they are: a JSON
+// Web Token's claims, which a package's access names.
+const VERBATIM = new Set(['claims'])
+
 // camelCase keys to the wire's snake_case, and back, through plain objects and arrays.
 function rekey(value, key) {
   if (Array.isArray(value)) return value.map((item) => rekey(item, key))
   if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return value
   const rekeyed = {}
   for (const [name, item] of Object.entries(value)) {
-    if (item !== undefined && item !== null) rekeyed[key(name)] = rekey(item, key)
+    if (item === undefined || item === null) continue
+    rekeyed[key(name)] = VERBATIM.has(name) ? item : rekey(item, key)
   }
   return rekeyed
 }
@@ -527,26 +529,15 @@ class Client {
   }
 
   // Reach the server at `url`, its base `http` or `https` URL, sending `auth`, the credentials
-  // it wants as `{ type: 'bearer', token }` or null for none, `project`, the project every
-  // request is in (the user's own without one), and `headers`, a name to a value,
-  // whatever else it asks of each request, with every request. `Authorization` is `auth`'s, and
-  // `virtx-project` names `project`, over one given as a header. Refused when a token would go
-  // in the clear: over `http` to any host but this machine.
-  static connect(url, auth = null, project = null, headers = {}) {
+  // it wants as `{ type: 'bearer', token }` or null for none, and `project`, the project every
+  // request is in (the user's own without one), with every request. Refused when a token would
+  // go in the clear: over `http` to any host but this machine.
+  static connect(url, auth = null, project = null) {
     const lib = library()
     const bytes = authBytes(auth)
-    const strings = Object.entries(headers).flat()
     const raw = [0]
     const error = {}
-    const status = lib.virtx_client_connect(
-      url,
-      bytes,
-      bytes.length,
-      strings,
-      strings.length / 2,
-      raw,
-      error,
-    )
+    const status = lib.virtx_client_connect(url, bytes, bytes.length, raw, error)
     const client = opening(lib, status, raw, error)
     try {
       client.setProject(project)
@@ -568,26 +559,8 @@ class Client {
     if (status !== OK) this._lib.take(status, error)
   }
 
-  // Send `headers`, a name to a value, with every request from now on, in place of those given
-  // at `connect`. A forwarder already open sends them with its next connection. Over stdio,
-  // where none are sent, nothing changes. A header that cannot be sent throws, the headers
-  // unchanged.
-  setHeaders(headers) {
-    const strings = Object.entries(headers).flat()
-    const error = {}
-    const status = this._lib.virtx_client_set_headers(
-      this._held(),
-      strings,
-      strings.length / 2,
-      error,
-    )
-    if (status !== OK) this._lib.take(status, error)
-  }
-
-  // Name `project` in every request from now on, over either transport, in place of a
-  // `virtx-project` among the headers given. With null, that header names it where there is one,
-  // and otherwise none is named, for the user's own project. A name no header carries throws,
-  // the project unchanged.
+  // Name `project` in every request from now on, over either transport. With null, none is
+  // named, for the user's own project. A name no header carries throws, the project unchanged.
   setProject(project) {
     const error = {}
     const status = this._lib.virtx_client_set_project(this._held(), project, error)
@@ -752,17 +725,39 @@ class Client {
     return infos.map((info) => new Sandbox(this, info))
   }
 
-  // Each of `volumes`' `volume` is a handle or its name.
   async createSandbox(image, options = {}) {
-    const { volumes } = options
-    const info = await this._call('virtx_client_create_sandbox', {
-      ...options,
-      image: imageName(image),
-      volumes: volumes?.map((v) =>
-        v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v,
-      ),
-    })
+    const info = await this._call('virtx_client_create_sandbox', sandboxArgs(image, options))
     return new Sandbox(this, info)
+  }
+
+  async listPackage() {
+    const infos = await this._call('virtx_client_list_package')
+    return infos.map((info) => new Package(this, info))
+  }
+
+  // Each sandbox made of it is made of `image` as `createSandbox` makes one with the rest of
+  // `options`; `max`, `access`, `origins` and `limits` are the package's own.
+  async putPackage(name, image, options = {}) {
+    const { max, access, origins, limits, ...sandbox } = options
+    const args = { sandbox: sandboxArgs(image, sandbox), max, access, origins, limits }
+    return new Package(this, await this._call('virtx_client_put_package', { name, args }))
+  }
+
+  async getPackage(pkg) {
+    return new Package(this, await this._call('virtx_client_get_package', { package: pkg }))
+  }
+
+  // `ports` are its ports on local, each `on: 'local'`, beside those the package gives it.
+  async createPackageSandbox(pkg, { name, ports } = {}) {
+    const args = { package: pkg, name, ports }
+    return new Sandbox(this, await this._call('virtx_client_create_package_sandbox', args))
+  }
+
+  // Those made of the package `pkg` names that this client's credentials made: a member's,
+  // every one; one its access let in, those of the same issuer and subject.
+  async listPackageSandbox(pkg) {
+    const infos = await this._call('virtx_client_list_package_sandbox', { package: pkg })
+    return infos.map((info) => new Sandbox(this, info))
   }
 
   async getSandbox(id) {
@@ -778,6 +773,19 @@ class Client {
 
 // `await using`, where the runtime has it.
 if (Symbol.asyncDispose) Client.prototype[Symbol.asyncDispose] = Client.prototype.close
+
+// What making a sandbox of `image` as `options` say takes, as the wire has it: each of
+// `volumes`' `volume` a handle or its name.
+function sandboxArgs(image, options) {
+  const { volumes } = options
+  return {
+    ...options,
+    image: imageName(image),
+    volumes: volumes?.map((v) =>
+      v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v,
+    ),
+  }
+}
 
 // Each forwarder not closed, freed when it is collected.
 const forwarders = new FinalizationRegistry(({ lib, raw }) => {
@@ -1138,6 +1146,82 @@ class Sandbox extends Files {
 
 // A process run in a sandbox (`id`, `kind`, `pid`, `cmd`, `running`, `code`), and the client and
 // sandbox, `sandboxId`, that reach it. Dropping it leaves the job; `remove` removes it.
+// A package the server keeps, as keeping it or asking for it answered, and the client that
+// reaches it: what makes sandboxes of it. Dropping it leaves the package; `remove` removes it.
+class Package {
+  constructor(client, info) {
+    held(this, client, info)
+  }
+
+  // A sandbox made of it, named `name` where one is given.
+  createSandbox({ name, ports } = {}) {
+    return this.client.createPackageSandbox(this.id, { name, ports })
+  }
+
+  // The sandboxes made of it that the client's credentials made.
+  listSandbox() {
+    return this.client.listPackageSandbox(this.id)
+  }
+
+  // The sandboxes made of it stay, each reached by who made it.
+  async remove() {
+    await this.client._call('virtx_client_remove_package', { package: this.id })
+  }
+}
+
+// One sandbox, made of a package for whom its access lets in, and reached as they are: what an
+// app's user runs processes in, reads and writes the files of, and forwards the ports of, as
+// `sandbox`. Every request carries the token it was made with, which reaches the sandboxes that
+// user made of the package and nothing else. The sandbox lives until `remove`: closed, this
+// leaves it, to be come back to with `open` by its id.
+class AppClient {
+  constructor(sandbox) {
+    this.sandbox = sandbox
+  }
+
+  // Make a sandbox of the package named `pkg` in the project `project`, by the project's id, on
+  // the server at `url`, as `auth` lets in -- `{ type: 'bearer', token }` of the issuer its
+  // access names, sent with every request from then on.
+  static create(url, project, pkg, auth = null, { ports } = {}) {
+    const args = { package: pkg, ports }
+    return AppClient._open(url, project, auth, 'virtx_client_create_package_sandbox', args)
+  }
+
+  // Reach again `sandbox` in the project `project`, each by its id, one made of a package as
+  // `auth` lets in.
+  static open(url, project, auth, sandbox) {
+    return AppClient._open(url, project, auth, 'virtx_client_get_sandbox', { id: sandbox })
+  }
+
+  // A client of the project `project` on the server at `url` with `auth`, made one of a
+  // sandbox's by the library's `request`, which answers the sandbox: closed where it fails.
+  static async _open(url, project, auth, request, args) {
+    const client = Client.connect(url, auth, project)
+    try {
+      return new AppClient(new Sandbox(client, await client._call(request, args)))
+    } catch (e) {
+      await client.close()
+      throw e
+    }
+  }
+
+  // Close the client, leaving its sandbox as it is.
+  async close() {
+    await this.sandbox.client.close()
+  }
+
+  // Delete its sandbox, and close the client.
+  async remove() {
+    try {
+      await this.sandbox.remove()
+    } finally {
+      await this.sandbox.client.close()
+    }
+  }
+}
+
+if (Symbol.asyncDispose) AppClient.prototype[Symbol.asyncDispose] = AppClient.prototype.close
+
 class SandboxJob {
   constructor(client, sandbox, info) {
     Object.defineProperty(this, 'sandboxId', { value: sandbox })
@@ -1203,11 +1287,13 @@ class SandboxJob {
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
 module.exports = {
+  AppClient,
   Client,
   Files,
   ImageJob,
   LIBRARY_ENV,
   PortForwarder,
+  Package,
   Project,
   Recipe,
   Sandbox,

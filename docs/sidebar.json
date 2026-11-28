@@ -16,10 +16,13 @@
       { "slug": "tutorials/reading-writing-files" },
       { "slug": "tutorials/networks-ports" },
       { "slug": "tutorials/mounting-volumes" },
+      { "slug": "tutorials/using-gpus" },
+      { "slug": "tutorials/built-in-programs" },
       { "slug": "tutorials/projects" },
       { "slug": "tutorials/self-hosting" },
-      { "slug": "tutorials/using-gpus" },
-      { "slug": "tutorials/built-in-programs" }
+      { "slug": "tutorials/packages" },
+      { "slug": "tutorials/package-access" },
+      { "slug": "tutorials/app-client" }
     ]
   },
   {
@@ -58,6 +61,7 @@
       { "slug": "sdk/images" },
       { "slug": "sdk/volumes" },
       { "slug": "sdk/projects" },
+      { "slug": "sdk/packages" },
       { "slug": "sdk/port-forwarder" },
       { "slug": "sdk/errors" }
     ]

@@ -27,10 +27,20 @@
 
 <br>
 
-virtx는 AI 에이전트를 위한 microVM 샌드박스입니다. 내 코드에서 일회용 Linux VM을 띄워 작업을 실행할 수 있고, VM은 내 컴퓨터, 직접 운영하는 서버, 또는 virtx cloud에서 돌릴 수 있습니다.
+virtx는 AI 에이전트를 위한 microVM 샌드박스입니다.
+내 코드에서 샌드박스를 만들고, 그 위에 사용자에게 줄 앱을 만들 수 있습니다.
 
-내 컴퓨터에 굳이 설치하고 싶지 않은 무거운 의존성이 필요한 작업이나, AI 에이전트가 스스로 판단해 실행하는 명령처럼 아예 내 컴퓨터에서 돌리고 싶지 않은 코드에 특히 유용합니다.
-VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 남겨 둔 볼륨에 기록한 것만 그대로 남습니다.
+샌드박스는 일회용 Linux VM으로, 내 컴퓨터, 직접 운영하는 서버, 또는 virtx cloud에서 돌릴 수 있습니다.
+AI 에이전트가 스스로 판단해 실행하는 명령처럼 내 컴퓨터에서 돌리고 싶지 않은 것을 그 안에서 실행합니다.
+샌드박스 안에서 설치하거나 바꾼 것은 샌드박스를 지우면 모두 사라지고, 남겨 둔 볼륨에 기록한 것만 그대로 남습니다.
+
+virtx로 앱을 만들면 그 앱의 사용자도 샌드박스를 씁니다.
+각 사용자의 샌드박스를 무엇으로 만들지 내 프로젝트에 패키지로 두면, 앱이 그 패키지로 사용자마다 자기만의 샌드박스를 만들어 줍니다.
+그 사이에 내가 운영할 백엔드는 없습니다.
+
+<p align="center">
+  <img alt="The developer keeps a package on virtx and makes the app. Each app user makes a sandbox of the package from the app, and uses their own." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/app-user-developer-virtx.svg" width="640">
+</p>
 
 ## 빠르게 시작하기
 
@@ -198,7 +208,6 @@ let client = Client::connect(
     "https://virtx.example",
     Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
-    [] as [(&str, &str); 0],
 )?;
 ```
 
@@ -216,6 +225,7 @@ let client = Client::connect(
   - **클라이언트:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **서버:** 💻 로컬 (stdio) · 🖥️ 원격 (tcp) · ☁️ 클라우드
   - **호스트:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **에이전트를 앱으로 배포:** virtx로 앱을 만들어 사용자에게 배포하면, 사용자마다 자기만의 샌드박스를 받고, 따로 운영할 백엔드도 필요 없습니다. 자세한 내용은 [앱 만들기](https://virtx.sh/docs/tutorials/app-client/)를 참고하세요.
 - **설정은 최소한으로:** 패키지만 설치하면 바로 실행할 수 있고, Docker도 따로 띄워 둘 데몬도 필요 없습니다.
 - **어떤 에이전트 프레임워크와도:** 샌드박스는 여느 도구와 같아서 어떤 프레임워크나 코딩 에이전트에서든 쓸 수 있습니다. 오픈소스 에이전트 SDK인 [Ailoy](https://github.com/brekkylab/ailoy)도 그중 하나입니다.
 

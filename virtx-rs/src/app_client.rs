@@ -1,8 +1,10 @@
 //! A client of one sandbox an app's user makes of a package.
 
-use virtx_core::{Auth, PackageSandboxCreateArgs, PortSpec};
+use serde_json::json;
+use virtx_core::{Auth, PortSpec};
 
-use crate::{Client, Error, PackageSandbox, Sandbox};
+use crate::library::Opaque;
+use crate::{Client, Error, Sandbox};
 
 /// One sandbox, made of a package for whom its access lets in and reached with its grant alone:
 /// what an app's user runs processes in, reads and writes the files of, and forwards the ports
@@ -30,31 +32,20 @@ impl AppClient {
         auth: Auth,
         ports: impl IntoIterator<Item = PortSpec>,
     ) -> Result<AppClient, Error> {
+        let ports: Vec<_> = ports.into_iter().collect();
+        let args = json!({ "package": package, "ports": ports });
         let client = Client::connect(url, auth, None)?;
-        let args = PackageSandboxCreateArgs {
-            name: None,
-            ports: ports.into_iter().collect(),
-        };
-        let made = client.create_package_sandbox(package, &args).await?;
-        AppClient::reaching(client, made).await
+        let request = client.api.virtx_client_app_create;
+        AppClient::reach(client, request, args).await
     }
 
     /// Reach again the sandbox `grant` reaches, on the server at `url`: refused `401` once the
     /// sandbox is deleted.
     pub async fn resume(url: &str, grant: &str) -> Result<AppClient, Error> {
-        let token = grant.to_owned();
-        let client = Client::connect(url, Auth::Bearer { token }, None)?;
-        // A grant's listing is its own sandbox alone.
-        let Some(sandbox) = client.list_sandbox().await?.pop() else {
-            return Err(Error::Call(
-                virtx_core::Source::Server,
-                "the server answered no sandbox to the grant".into(),
-            ));
-        };
-        Ok(AppClient {
-            sandbox,
-            grant: grant.to_owned(),
-        })
+        let args = json!({ "grant": grant });
+        let client = Client::connect(url, Auth::None, None)?;
+        let request = client.api.virtx_client_app_resume;
+        AppClient::reach(client, request, args).await
     }
 
     /// Reach again the sandbox `sandbox`, one made of the package `package` with `auth`, as
@@ -67,32 +58,30 @@ impl AppClient {
         auth: Auth,
         sandbox: &str,
     ) -> Result<AppClient, Error> {
+        let args = json!({ "package": package, "sandbox": sandbox });
         let client = Client::connect(url, auth, None)?;
-        let made = client.grant_package_sandbox(package, sandbox).await?;
-        AppClient::reaching(client, made).await
+        let request = client.api.virtx_client_app_resume_as;
+        AppClient::reach(client, request, args).await
     }
 
-    /// `made`, reached through `client` with its grant alone from now on.
-    async fn reaching(client: Client, made: PackageSandbox) -> Result<AppClient, Error> {
-        let Some(token) = made.grant else {
-            // Nothing reaches it once this client is gone: it goes too.
-            let removed = made.sandbox.remove().await;
-            drop(made.sandbox);
-            client.close().await?;
-            removed?;
-            return Err(Error::Call(
-                virtx_core::Source::Server,
-                "the server gave the sandbox no grant to reach it with".into(),
-            ));
-        };
-        // From here on, the grant alone: what made it reaches nothing more through this client.
-        client.set_auth(Auth::Bearer {
-            token: token.clone(),
-        })?;
-        Ok(AppClient {
-            sandbox: made.sandbox,
-            grant: token,
-        })
+    /// `client`, made one of a sandbox's by the library's `request`, which answers the sandbox
+    /// and its grant: closed where it fails.
+    async fn reach(
+        client: Client,
+        request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
+        args: serde_json::Value,
+    ) -> Result<AppClient, Error> {
+        let call: crate::Call<virtx_core::PackageSandbox> = client.call(request, args);
+        match call.await {
+            Ok(made) => Ok(AppClient {
+                sandbox: Sandbox::new(client, made.sandbox),
+                grant: made.grant.unwrap_or_default(),
+            }),
+            Err(failed) => {
+                client.close().await?;
+                Err(failed)
+            }
+        }
     }
 
     /// Its sandbox, and the client with its grant that reaches it.

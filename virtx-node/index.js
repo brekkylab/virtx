@@ -140,6 +140,9 @@ const SIGNATURES = {
   virtx_client_create_package_sandbox: WITH_ARGS,
   virtx_client_list_package_sandbox: WITH_ARGS,
   virtx_client_grant_package_sandbox: WITH_ARGS,
+  virtx_client_app_create: WITH_ARGS,
+  virtx_client_app_resume: WITH_ARGS,
+  virtx_client_app_resume_as: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
@@ -1198,44 +1201,29 @@ class AppClient {
   // Make a sandbox of the package `pkg`, by its id, on the server at `url`, as `auth` lets in
   // -- null where the package is public, or `{ type: 'bearer', token }` of the issuer its access
   // names -- and reach it with its grant from then on.
-  static async connect(url, pkg, auth = null, { ports } = {}) {
-    const client = Client.connect(url, auth)
-    return AppClient._reaching(client, () => client.createPackageSandbox(pkg, { ports }))
+  static connect(url, pkg, auth = null, { ports } = {}) {
+    return AppClient._open(url, auth, 'virtx_client_app_create', { package: pkg, ports })
   }
 
   // Reach again the sandbox `grant` reaches: refused `401` once the sandbox is deleted.
-  static async resume(url, grant) {
-    const client = Client.connect(url, { type: 'bearer', token: grant })
-    try {
-      // A grant's listing is its own sandbox alone.
-      const [sandbox] = await client.listSandbox()
-      if (!sandbox) throw new VirtxError('the server answered no sandbox to the grant')
-      return new AppClient(sandbox, grant)
-    } catch (e) {
-      await client.close()
-      throw e
-    }
+  static resume(url, grant) {
+    return AppClient._open(url, null, 'virtx_client_app_resume', { grant })
   }
 
   // Reach again `sandbox`, one made of the package `pkg` with `auth`, with a new grant: for one
   // who kept no grant, let in by who they are.
-  static async resumeAs(url, pkg, auth, sandbox) {
-    const client = Client.connect(url, auth)
-    return AppClient._reaching(client, () => client.grantPackageSandbox(pkg, sandbox))
+  static resumeAs(url, pkg, auth, sandbox) {
+    const args = { package: pkg, sandbox }
+    return AppClient._open(url, auth, 'virtx_client_app_resume_as', args)
   }
 
-  // What `making` answers, reached through `client` with its grant alone from then on.
-  static async _reaching(client, making) {
+  // A client of the server at `url` with `auth`, made one of a sandbox's by the library's
+  // `request`, which answers the sandbox and its grant: closed where it fails.
+  static async _open(url, auth, request, args) {
+    const client = Client.connect(url, auth)
     try {
-      const made = await making()
-      if (!made.grant) {
-        // Nothing reaches it once this client is gone: it goes too.
-        await made.sandbox.remove()
-        throw new VirtxError('the server gave the sandbox no grant to reach it with')
-      }
-      // From here on, the grant alone: what made it reaches nothing more through this client.
-      client.setAuth({ type: 'bearer', token: made.grant })
-      return new AppClient(made.sandbox, made.grant)
+      const made = await client._call(request, args)
+      return new AppClient(new Sandbox(client, made.sandbox), made.grant)
     } catch (e) {
       await client.close()
       throw e

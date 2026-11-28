@@ -988,7 +988,7 @@ impl Client {
         unsafe { request(self.raw, bytes.as_ptr(), bytes.len()) }
     }
 
-    fn call<T: DeserializeOwned + 'static>(
+    pub(crate) fn call<T: DeserializeOwned + 'static>(
         &self,
         request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
         args: impl Serialize,

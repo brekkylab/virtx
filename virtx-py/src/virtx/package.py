@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Self
 
 from ._library import args
-from .image import BearerAuth
 from .sandbox import PortSpec, Sandbox
 
 if TYPE_CHECKING:
@@ -166,32 +165,14 @@ class AppClient:
         those the package gives it in the sandbox, and reach it with its grant from then on.
         Refused as the server refuses making it: ``401`` or ``403`` for one the package does not
         let in, and ``429`` past its limits. One client does both."""
-        from .client import Client
-
-        client = Client.connect(url, auth)
-        try:
-            made = await client.create_package_sandbox(package, ports=ports)
-        except BaseException:
-            await client.aclose()
-            raise
-        return await cls._reaching(client, made)
+        request = args(package=package, ports=[p.to_dict() for p in ports] or None)
+        return await cls._open(url, auth, "virtx_client_app_create", request)
 
     @classmethod
     async def resume(cls, url: str, grant: str) -> AppClient:
         """Reach again the sandbox ``grant`` reaches, on the server at ``url``: refused ``401``
         once the sandbox is deleted."""
-        from .client import Client
-
-        client = Client.connect(url, BearerAuth(grant))
-        try:
-            # A grant's listing is its own sandbox alone.
-            listed = await client.list_sandbox()
-            if not listed:
-                raise ValueError("the server answered no sandbox to the grant")
-        except BaseException:
-            await client.aclose()
-            raise
-        return cls(listed[0], grant)
+        return await cls._open(url, None, "virtx_client_app_resume", args(grant=grant))
 
     @classmethod
     async def resume_as(cls, url: str, package: str, auth: Auth, sandbox: str) -> AppClient:
@@ -199,29 +180,22 @@ class AppClient:
         ``auth``, as ``Client.list_package_sandbox`` finds it, with a new grant: for one who kept
         no grant, let in by who they are. Refused ``401`` with no credentials, and ``404`` for
         a sandbox they did not make."""
+        request = args(package=package, sandbox=sandbox)
+        return await cls._open(url, auth, "virtx_client_app_resume_as", request)
+
+    @classmethod
+    async def _open(cls, url: str, auth: Auth | None, request: str, arguments: bytes) -> AppClient:
+        """A client of the server at ``url`` with ``auth``, made one of a sandbox's by the
+        library's ``request``, which answers the sandbox and its grant: closed where it fails."""
         from .client import Client
 
         client = Client.connect(url, auth)
         try:
-            made = await client.grant_package_sandbox(package, sandbox)
+            made = PackageSandbox.from_dict(client, await client._call(request, arguments))
         except BaseException:
             await client.aclose()
             raise
-        return await cls._reaching(client, made)
-
-    @classmethod
-    async def _reaching(cls, client: Client, made: PackageSandbox) -> AppClient:
-        """``made``, reached through ``client`` with its grant alone from now on."""
-        try:
-            if made.grant is None:
-                # Nothing reaches it once this client is gone: it goes too.
-                await made.sandbox.remove()
-                raise ValueError("the server gave the sandbox no grant to reach it with")
-            # From here on, the grant alone: what made it reaches nothing more through this client.
-            client.set_auth(BearerAuth(made.grant))
-        except BaseException:
-            await client.aclose()
-            raise
+        assert made.grant is not None, "the library answers an app's sandbox with its grant"
         return cls(made.sandbox, made.grant)
 
     async def close(self) -> None:

@@ -723,7 +723,7 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
-        package::{PackagePutArgs, PackageSandboxCreateArgs},
+        package::{AppClient, PackagePutArgs, PackageSandbox, PackageSandboxCreateArgs},
         project::{ProjectCreateArgs, Role},
         sandbox::{SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs},
         volume::{MountSource, VolumeCreateArgs},
@@ -777,6 +777,22 @@ pub(crate) mod ffi {
         name: Option<String>,
         #[serde(default)]
         ports: Vec<crate::PortSpec>,
+    }
+
+    /// What an app client is made with: `{"package": "...", "ports": [...]}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AppCreate {
+        package: String,
+        #[serde(default)]
+        ports: Vec<crate::PortSpec>,
+    }
+
+    /// A grant: `{"grant": "..."}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Granted {
+        grant: String,
     }
 
     /// A sandbox made of a package: `{"package": "...", "sandbox": "..."}`.
@@ -2052,6 +2068,69 @@ pub(crate) mod ffi {
         unsafe { &(*client).0 }.future(|client| async move {
             let PackageSandboxNamed { package, sandbox } = args?;
             client.grant_package_sandbox(package, sandbox).await
+        })
+    }
+
+    /// Makes a sandbox of the package `package`, by its id, as what `client` is connected with
+    /// lets in, given `{"package": "...", "ports": [{"port": n, "on": "local", "label": "..."}]}`,
+    /// `ports` optional; and from then on sends its grant alone. Answers as
+    /// `virtx_client_create_package_sandbox` does, always with a `grant`: a sandbox the server
+    /// gives none is removed, and refused.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_app_create(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<AppCreate>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let AppCreate { package, ports } = args?;
+            let app = AppClient::create(client, &package, ports).await?;
+            Ok(PackageSandbox::from(app))
+        })
+    }
+
+    /// Sends the grant `grant` alone from now on, and answers with the sandbox it reaches, given
+    /// `{"grant": "..."}`, as `virtx_client_app_create` answers.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_app_resume(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<Granted>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let app = AppClient::resume(client, args?.grant).await?;
+            Ok(PackageSandbox::from(app))
+        })
+    }
+
+    /// Gives out a new grant to the sandbox `sandbox`, one made of the package `package` with
+    /// what `client` is connected with, and sends it alone from then on, given
+    /// `{"package": "...", "sandbox": "..."}`. Answers as `virtx_client_app_create` does.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_app_resume_as(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<PackageSandboxNamed>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let PackageSandboxNamed { package, sandbox } = args?;
+            let app = AppClient::resume_as(client, &package, &sandbox).await?;
+            Ok(PackageSandbox::from(app))
         })
     }
 

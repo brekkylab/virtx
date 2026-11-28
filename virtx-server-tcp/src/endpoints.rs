@@ -6,7 +6,7 @@
 //! A home keeps its project's data in its own stores, and beyond this machine too where it is
 //! given a [`StorageBackend`] ([`Home::backed_by`]), whose cache its stores are then.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -588,15 +588,17 @@ impl Home {
         let given = tokio::task::spawn_blocking(move || grants.list())
             .await?
             .map_err(|e| internal(format!("reading the grants: {e}")))?;
-        let mut making = self.making.lock().unwrap();
-        let of = (given.iter())
+        // A sandbox counts once, however many grants it has.
+        let made: HashMap<&str, &str> = (given.iter())
             .filter(|grant| !grant.member && grant.package == package.id)
-            .map(|grant| grant.subject.as_str())
-            .chain(
-                (making.iter())
-                    .filter(|(of, _)| *of == package.id)
-                    .map(|(_, subject)| subject.as_str()),
-            );
+            .map(|grant| (grant.sandbox.as_str(), grant.subject.as_str()))
+            .collect();
+        let mut making = self.making.lock().unwrap();
+        let of = (made.into_values()).chain(
+            (making.iter())
+                .filter(|(of, _)| *of == package.id)
+                .map(|(_, subject)| subject.as_str()),
+        );
         let (all, theirs) = of.fold((0, 0), |(all, theirs), of| {
             (all + 1, theirs + u32::from(of == subject))
         });
@@ -617,6 +619,75 @@ impl Home {
         let held = (package.id.clone(), subject.to_owned());
         making.push(held.clone());
         Ok(Reserved(self, held))
+    }
+
+    /// The sandboxes made of `package` that `maker` made, as `GET /sandboxes/` answers each:
+    /// for one its access let in, those of the same subject; for a member, every one.
+    pub(crate) async fn made_of(
+        &self,
+        package: &Package,
+        maker: &Maker,
+    ) -> Result<Vec<virtx_core::Sandbox>, Refused> {
+        let theirs = self.grants_of(package, maker).await?;
+        let sandboxes = self.sandboxes.lock().unwrap();
+        let unknown = self.unknown.lock().unwrap();
+        let answer = |id: &String| match sandboxes.get(id) {
+            Some(held) => Some(held.answer()),
+            None => unknown.get(id).map(UnknownSandbox::answer),
+        };
+        Ok(theirs.keys().filter_map(answer).collect())
+    }
+
+    /// A new grant to sandbox `id`, one of those made of `package` that `maker` made, as its
+    /// first was given: `404` for any other.
+    pub(crate) async fn grant_again(
+        &self,
+        package: &Package,
+        maker: &Maker,
+        id: &str,
+    ) -> Result<PackageSandbox, Refused> {
+        let none = || {
+            not_found(format!(
+                "no sandbox of package {} you made is {id}",
+                package.name
+            ))
+        };
+        let grant = (self.grants_of(package, maker).await?)
+            .remove(id)
+            .ok_or_else(none)?;
+        let sandbox = match self.unknown.lock().unwrap().get(id) {
+            Some(unknown) => unknown.answer(),
+            None => self.sandbox(id).map_err(|_| none())?.answer(),
+        };
+        let (grants, project) = (self.grants.clone(), self.project);
+        let token = tokio::task::spawn_blocking(move || grants.give(&project, &grant))
+            .await?
+            .map_err(|e| internal(format!("giving out the sandbox's grant: {e}")))?;
+        Ok(PackageSandbox {
+            sandbox,
+            grant: Some(token),
+        })
+    }
+
+    /// One grant of each sandbox made of `package` that `maker` made, by the sandbox's id.
+    async fn grants_of(
+        &self,
+        package: &Package,
+        maker: &Maker,
+    ) -> Result<BTreeMap<String, Grant>, Refused> {
+        let grants = self.grants.clone();
+        let given = tokio::task::spawn_blocking(move || grants.list())
+            .await?
+            .map_err(|e| internal(format!("reading the grants: {e}")))?;
+        let theirs = |grant: &Grant| match maker {
+            Maker::Member(_) => true,
+            Maker::LetIn(subject) => !grant.member && grant.subject == *subject,
+        };
+        Ok(given
+            .into_iter()
+            .filter(|grant| grant.package == package.id && theirs(grant))
+            .map(|grant| (grant.sandbox.clone(), grant))
+            .collect())
     }
 
     /// The grant `token` is, if it is one of this home's.
@@ -861,10 +932,15 @@ pub fn router() -> Router {
 /// [`Access`] in its extensions, which reaches the package's home by its id with no member's
 /// token.
 pub fn package_sandboxes() -> Router {
-    Router::new().route(
-        "/packages/{package}/sandboxes/",
-        post(package_sandbox_create),
-    )
+    Router::new()
+        .route(
+            "/packages/{package}/sandboxes/",
+            post(package_sandbox_create).get(package_sandbox_list),
+        )
+        .route(
+            "/packages/{package}/sandboxes/{id}/grant",
+            post(package_sandbox_grant),
+        )
 }
 
 /// The projects, and their members, each request answered as its sender, from the [`Access`] in
@@ -1938,6 +2014,46 @@ async fn package_sandbox_create(
         format!("/sandboxes/{}", answer.sandbox.id),
         &answer,
     ))
+}
+
+/// `GET /packages/{package}/sandboxes/`: those its sender made, let in as [`found_by`] says.
+async fn package_sandbox_list(
+    Extension(access): Extension<Arc<Access>>,
+    Segments(named): Segments<String>,
+    headers: HeaderMap,
+) -> Answer {
+    let (home, package, maker) = found_by(&access, &headers, &named).await?;
+    Ok(json(&home.made_of(&package, &maker).await?))
+}
+
+/// `POST /packages/{package}/sandboxes/{id}/grant`: a new grant to one its sender made, let
+/// in as [`found_by`] says.
+async fn package_sandbox_grant(
+    Extension(access): Extension<Arc<Access>>,
+    Segments((named, id)): Segments<(String, String)>,
+    headers: HeaderMap,
+) -> Answer {
+    let (home, package, maker) = found_by(&access, &headers, &named).await?;
+    let answer = home.grant_again(&package, &maker, &id).await?;
+    Ok(created(format!("/sandboxes/{id}"), &answer))
+}
+
+/// Who finds the sandboxes made of the package `named` names, let in as a sandbox's making is:
+/// refused `401` for one let in with no credentials, whose subject is an address many share.
+async fn found_by(
+    access: &Access,
+    headers: &HeaderMap,
+    named: &str,
+) -> Result<(Arc<Home>, Package, Maker), Refused> {
+    let found = access.maker(headers, named, None).await?;
+    if matches!(found.2, Maker::LetIn(_)) && crate::access::bearer(headers).is_none() {
+        return Err(refused(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "a sandbox made with no credentials is reached with its grant alone",
+        ));
+    }
+    Ok(found)
 }
 
 fn pick(taken: impl Fn(&str) -> bool) -> String {

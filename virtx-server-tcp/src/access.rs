@@ -948,6 +948,122 @@ mod tests {
         task.abort();
     }
 
+    /// The sandboxes made of a package are found again by who made them: one let in finds those
+    /// of their subject alone, and a member every one; a new grant is given to one of those
+    /// alone, as its first was, and the first still reaches it. A sandbox counts once toward
+    /// the package's limits, however many grants it has.
+    #[tokio::test]
+    async fn a_package_s_sandbox_is_found_again_by_who_made_it_alone() {
+        use virtx_core::{
+            PackageLimits, PackagePutArgs, PackageSandboxCreateArgs, SandboxCreateArgs,
+            SandboxResizeArgs,
+        };
+        use virtx_uvm::PackageStore;
+
+        use crate::endpoints::Maker;
+        use crate::grant::{Grant, Grants};
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let demo = projects
+            .create(&Principal::new("alice"), "demo")
+            .await
+            .unwrap()
+            .id;
+        let store = ProjectStore::new(dir.path());
+        // Sandboxes held as the home is made, each answered as one not known again.
+        let held = store.path(&demo).join("sandbox");
+        std::fs::create_dir_all(&held).unwrap();
+        for id in ["of-a", "of-a2", "of-b", "of-alice"] {
+            std::fs::write(held.join(format!("{id}.ext4")), b"").unwrap();
+            std::fs::write(held.join(format!("{id}.json")), "not json").unwrap();
+        }
+        let access = Access::new(
+            Vec::new(),
+            Arc::new(TokenIsUser(["alice".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(store.clone()),
+        );
+        let home = access.home_of(&demo).await.unwrap().unwrap();
+        let packages = PackageStore::new(&store.path(&demo)).unwrap();
+        let limited = PackagePutArgs::new(SandboxCreateArgs::new("app:1")).limits(PackageLimits {
+            sandboxes: None,
+            per_subject: Some(3),
+        });
+        let (package, _) = packages
+            .put("app", limited, &[], || format!("{demo}.p1"))
+            .unwrap();
+        let other = PackagePutArgs::new(SandboxCreateArgs::new("app:1"));
+        let (other, _) = packages
+            .put("other", other, &[], || format!("{demo}.p2"))
+            .unwrap();
+        let grants = Grants::new(&store.path(&demo)).unwrap();
+        let given = |sandbox: &str, subject: &str, member| Grant {
+            sandbox: sandbox.into(),
+            package: package.id.clone(),
+            subject: subject.into(),
+            member,
+            max: SandboxResizeArgs::default().vcpus(2),
+            origins: vec!["https://app.example".into()],
+        };
+        let first = grants.give(&demo, &given("of-a", "a", false)).unwrap();
+        grants.give(&demo, &given("of-a2", "a", false)).unwrap();
+        grants.give(&demo, &given("of-b", "b", false)).unwrap();
+        grants
+            .give(&demo, &given("of-alice", "alice", true))
+            .unwrap();
+
+        let let_in = |subject: &str| Maker::LetIn(subject.into());
+        let found = async |maker: Maker| {
+            let found = home.made_of(&package, &maker).await.ok().unwrap();
+            found
+                .into_iter()
+                .map(|sandbox| sandbox.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found(let_in("a")).await, ["of-a", "of-a2"]);
+        assert_eq!(found(let_in("b")).await, ["of-b"]);
+        assert!(
+            found(let_in("alice")).await.is_empty(),
+            "a member's is no subject's"
+        );
+        assert_eq!(
+            found(Maker::Member("alice".into())).await,
+            ["of-a", "of-a2", "of-alice", "of-b"]
+        );
+        let others = home.made_of(&other, &let_in("a")).await.ok().unwrap();
+        assert!(others.is_empty(), "another package's");
+
+        let again = async |package, maker: Maker, id: &str| {
+            let made = home.grant_again(package, &maker, id).await;
+            made.map_err(|refused| refused.status())
+        };
+        let not_found = Some(StatusCode::NOT_FOUND);
+        assert_eq!(again(&package, let_in("b"), "of-a").await.err(), not_found);
+        assert_eq!(again(&other, let_in("a"), "of-a").await.err(), not_found);
+        assert_eq!(again(&package, let_in("a"), "none").await.err(), not_found);
+        let made = again(&package, let_in("a"), "of-a").await.unwrap();
+        assert_eq!(made.sandbox.id, "of-a");
+        let token = made.grant.unwrap();
+        assert_ne!(token, first);
+        let as_first = Some(given("of-a", "a", false));
+        assert_eq!(grants.find(&token).unwrap(), as_first);
+        assert_eq!(
+            grants.find(&first).unwrap(),
+            as_first,
+            "the first still reaches it"
+        );
+        let made = again(&package, Maker::Member("alice".into()), "of-b").await;
+        assert_eq!(made.unwrap().sandbox.id, "of-b", "a member's, any of them");
+
+        // "a" has two sandboxes and three grants: under three, one more is not refused its room.
+        let args = PackageSandboxCreateArgs::default();
+        let made = home.make_of(&package, let_in("a"), args).await;
+        let status = made.err().map(|refused| refused.status());
+        assert_ne!(status, Some(StatusCode::TOO_MANY_REQUESTS));
+    }
+
     /// Homes made only for the projects listed, none for any other.
     struct Only(ProjectStore, Vec<ProjectId>);
 

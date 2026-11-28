@@ -199,7 +199,7 @@ async fn interrupted() {
 /// take, with the headers they read and the ones a client reads back. A preflight is answered
 /// here, before any check, as a browser sends it without the token; the request it clears is
 /// checked as any other. A browser at any origin is let send what a package's origins or a
-/// grant's may -- making a sandbox of a package, and reaching a sandbox -- which the server
+/// grant's may -- making a sandbox of a package or finding one again, and reaching a sandbox -- which the server
 /// checks against those as the request comes.
 fn cors(origins: &[String]) -> CorsLayer {
     let origins: Vec<HeaderValue> = origins
@@ -210,7 +210,8 @@ fn cors(origins: &[String]) -> CorsLayer {
         let path = request.uri.path();
         origins.contains(origin)
             || path.starts_with("/sandboxes/")
-            || (path.starts_with("/packages/") && path.ends_with("/sandboxes/"))
+            || (path.starts_with("/packages/")
+                && (path.ends_with("/sandboxes/") || path.ends_with("/grant")))
     });
     let method = |name| Method::from_bytes(name).expect("a method name");
     CorsLayer::new()
@@ -848,6 +849,16 @@ mod tests {
         let (status, _) = served.send("GET", "packages/app", Some("other"), "").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "another project's");
 
+        // Its sandboxes are found again by its members.
+        let (status, body) = served
+            .send("GET", "packages/app/sandboxes/", demo, "")
+            .await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
+        let (status, _) = served
+            .send("POST", "packages/app/sandboxes/none/grant", demo, "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
         let named = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"}, "name": "dev"}}"#;
         let (status, body) = served.send("PUT", "packages/named", demo, named).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -876,6 +887,61 @@ mod tests {
             .send("DELETE", "images/oci/v2/app/manifests/1", demo, "")
             .await;
         assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    /// A public package's sandboxes are found again with credentials alone: with none, the
+    /// subject is an address many share, and each is reached with its grant instead.
+    #[tokio::test]
+    async fn a_public_package_s_sandboxes_are_found_again_with_credentials_alone() {
+        let served = Served::spawn_over("public", async |home| {
+            let store = ProjectStore::new(home);
+            let access = Access::new(
+                Vec::new(),
+                Arc::new(TokenIsUser(["alice".to_owned()].into())),
+                Arc::new(TcpMembership::new(home)),
+                store.clone(),
+                Arc::new(store),
+            );
+            let access = Arc::new(access);
+            super::router(Arc::clone(&access), super::projects(&access))
+        })
+        .await;
+        let projects = TcpMembership::new(&served.home);
+        let demo = projects
+            .create(&Principal::new("alice"), "demo")
+            .await
+            .unwrap()
+            .id;
+        let packages = virtx_uvm::PackageStore::new(&ProjectStore::new(&served.home).path(&demo));
+        let public = virtx_core::PackagePutArgs::new(virtx_core::SandboxCreateArgs::new("app:1"))
+            .access(virtx_core::PackageAccess::Public);
+        let (package, _) = (packages.unwrap())
+            .put("app", public, &[], || format!("{demo}.p1"))
+            .unwrap();
+
+        let send = async |method: &str, path: &str, token: Option<&str>| {
+            let method = Method::from_bytes(method.as_bytes()).unwrap();
+            let mut request =
+                reqwest::Client::new().request(method, format!("{}{path}", served.url));
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            let answered = request.send().await.unwrap();
+            (answered.status(), answered.text().await.unwrap())
+        };
+        let listing = format!("packages/{}/sandboxes/", package.id);
+        let granting = format!("packages/{}/sandboxes/none/grant", package.id);
+        for (method, path) in [("GET", &listing), ("POST", &granting)] {
+            let (status, body) = send(method, path, None).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+            assert!(body.contains("with its grant alone"), "{body}");
+        }
+        assert_eq!(
+            send("GET", &listing, Some("alice")).await,
+            (StatusCode::OK, "[]".to_owned())
+        );
+        let (status, _) = send("POST", &granting, Some("alice")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     /// A grant reaches its project with no project named, and there the listing of the

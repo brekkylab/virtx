@@ -38,13 +38,20 @@ pub(in crate::machine::net) struct Gateway {
 }
 
 impl Gateway {
+    /// With the embedder's [`Outward`](crate::outward::Outward), where it set one, asked of
+    /// each flow to the internet with `given`.
     pub(in crate::machine::net) fn new(
         link: Link,
         egress: bool,
+        given: serde_json::Value,
         published: Vec<(u16, TcpListener)>,
         client: Option<ClientRelay>,
     ) -> io::Result<Self> {
-        Self::with_egress(link, Egress::new(egress, client), published)
+        let mut decided = Egress::new(egress, client);
+        if let Some(outward) = crate::outward::outward() {
+            decided = decided.with_outward(outward, given);
+        }
+        Self::with_egress(link, decided, published)
     }
 
     fn with_egress(
@@ -420,6 +427,7 @@ mod tests {
             enabled: true,
             resolver: Some(at),
             client: None,
+            outward: None,
         }
     }
 
@@ -586,6 +594,7 @@ mod tests {
                 ports: vec![9222],
                 key: "k".repeat(64),
             }),
+            outward: None,
         }
     }
 
@@ -794,6 +803,7 @@ mod tests {
             enabled: false,
             resolver: None,
             client: None,
+            outward: None,
         };
         let mut guest = Guest::new(none, vec![(8080, listener)]);
         let buffer = || tcp::SocketBuffer::new(vec![0; 1 << 16]);

@@ -109,9 +109,11 @@ impl GuestNetwork {
 /// The guest's virtio-net device, its stack started at the other end: out to what the internet
 /// routes if `egress`, and to its client's ports through `client`; and in through `published`,
 /// the listeners on this host whose connections reach a port in the guest -- each bound by the
-/// caller, which is the end that knows where it is and says so.
+/// caller, which is the end that knows where it is and says so. Each flow to the internet is
+/// put to the embedder's [`Outward`](crate::outward::Outward) too, with `given`.
 pub(crate) fn device(
     egress: bool,
+    given: serde_json::Value,
     published: Vec<(u16, TcpListener)>,
     client: Option<ClientRelay>,
 ) -> Result<NetDevice> {
@@ -143,7 +145,7 @@ pub(crate) fn device(
     std::thread::Builder::new()
         .name("net".into())
         .spawn(move || {
-            let run = || Gateway::new(pending.connect()?, egress, published, client)?.run();
+            let run = || Gateway::new(pending.connect()?, egress, given, published, client)?.run();
             if let Err(e) = run() {
                 log::error!("the guest's network stopped: {e}");
             }

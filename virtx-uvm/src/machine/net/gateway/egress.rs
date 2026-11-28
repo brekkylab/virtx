@@ -9,13 +9,18 @@
 //! Its client's ports, at the gateway's address, it reaches with or without a network, through
 //! the sandbox's relay: a connection there opens with the relay's greeting.
 //!
+//! Each flow to the internet is also put to the embedder's [`Outward`], where it set one, with
+//! what the server gave this machine: one it refuses goes nowhere.
+//!
 //! What goes nowhere: a SYN is reset, as a port nothing listens on is, and a datagram is
 //! dropped.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
 use super::{LAN, resolver};
 use crate::machine::ClientRelay;
+use crate::outward::Outward;
 
 /// The DNS port, the one the nameserver answers on.
 const DNS_PORT: u16 = 53;
@@ -27,6 +32,9 @@ pub(super) struct Egress {
     pub(super) resolver: Option<SocketAddr>,
     /// Where a connection to one of its client's ports goes.
     pub(super) client: Option<ClientRelay>,
+    /// The embedder's say on each flow to the internet, and what it was given for this
+    /// machine.
+    pub(super) outward: Option<(Arc<dyn Outward>, serde_json::Value)>,
 }
 
 /// Where a guest's TCP connection goes on this host, and what is sent there first.
@@ -48,7 +56,18 @@ impl Egress {
             enabled,
             resolver: resolver.map(|ip| SocketAddr::new(ip.into(), DNS_PORT)),
             client,
+            outward: None,
         }
+    }
+
+    /// Each flow to the internet put to `outward` too, with `given`.
+    pub(super) fn with_outward(
+        mut self,
+        outward: Arc<dyn Outward>,
+        given: serde_json::Value,
+    ) -> Egress {
+        self.outward = Some((outward, given));
+        self
     }
 
     /// Where a TCP connection the guest opened to `to` goes on this host, or `None` for
@@ -76,7 +95,9 @@ impl Egress {
         if to.ip() == LAN.nameserver || to.ip() == LAN.nameserver_v6 {
             return self.resolver.filter(|_| to.port() == DNS_PORT);
         }
-        routed(to.ip()).then_some(to)
+        let outward =
+            || (self.outward.as_ref()).is_none_or(|(outward, given)| outward.outward(given, to));
+        (routed(to.ip()) && outward()).then_some(to)
     }
 }
 
@@ -148,6 +169,7 @@ mod tests {
             enabled: true,
             resolver: Some(SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 53)),
             client: None,
+            outward: None,
         }
     }
 
@@ -280,5 +302,57 @@ mod tests {
         ] {
             assert_eq!(routed(ip.parse().unwrap()), is, "{ip}");
         }
+    }
+
+    /// What an embedder's `Outward` was asked: what it was given, and where to.
+    struct Asked(std::sync::Mutex<Vec<(serde_json::Value, SocketAddr)>>);
+
+    impl Outward for Asked {
+        fn outward(&self, given: &serde_json::Value, to: SocketAddr) -> bool {
+            self.0.lock().unwrap().push((given.clone(), to));
+            to.port() != 25
+        }
+    }
+
+    /// With a network, the embedder says whether each flow to the internet goes, with what it
+    /// was given; the nameserver's DNS and what the internet does not route are not put to it,
+    /// nor anything without a network.
+    #[test]
+    fn the_embedder_decides_each_flow_to_the_internet_and_nothing_else() {
+        let asked = Arc::new(Asked(std::sync::Mutex::new(Vec::new())));
+        let given = serde_json::json!({ "sandbox": "a" });
+        let egress = on().with_outward(asked.clone(), given.clone());
+        let smtp = SocketAddr::new(Ipv4Addr::new(142, 250, 0, 26).into(), 25);
+        assert_eq!(egress.route(PUBLIC), Some(PUBLIC));
+        assert_eq!(egress.route(smtp), None);
+        assert!(
+            egress
+                .route(SocketAddr::new(LAN.nameserver.into(), 53))
+                .is_some()
+        );
+        assert_eq!(
+            egress.route(SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 80)),
+            None
+        );
+        assert_eq!(
+            egress.route(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080)),
+            None
+        );
+        assert_eq!(
+            *asked.0.lock().unwrap(),
+            [(given.clone(), PUBLIC), (given.clone(), smtp)]
+        );
+
+        let off = Egress {
+            enabled: false,
+            ..on()
+        }
+        .with_outward(asked.clone(), given);
+        assert_eq!(off.route(PUBLIC), None);
+        assert_eq!(
+            asked.0.lock().unwrap().len(),
+            2,
+            "not asked without a network"
+        );
     }
 }

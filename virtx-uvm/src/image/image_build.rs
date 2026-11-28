@@ -298,6 +298,7 @@ mod tests {
             gpu: false,
             gpu_memory_mib: None,
             network: false,
+            outward: None,
         };
         let steps = [
             Step::Workdir("/app".into()),
@@ -357,6 +358,7 @@ mod tests {
             gpu: false,
             gpu_memory_mib: None,
             network: false,
+            outward: None,
         };
         let steps = [Step::env("TZ", "UTC"), Step::workdir("/app")];
         let layer: Digest = format!("sha256:{}", "a".repeat(64)).parse().unwrap();

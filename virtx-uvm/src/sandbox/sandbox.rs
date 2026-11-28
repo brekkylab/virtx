@@ -1058,6 +1058,7 @@ impl Sandbox {
             let (source, held) = served.unzip();
             *booting.served.lock().unwrap() = Some(source.is_some());
             config.sandbox_disk = Some(SandboxDisk { source });
+            config.spec.outward = crate::outward::given(&booting.root);
             Ok::<_, Error>((Machine::start(config, &vm)?, held))
         });
         let (machine, held) = machine.await??;
@@ -1259,6 +1260,7 @@ impl Sandbox {
                         let _ = told.send(());
                     }
                 }
+                CtrlResp::Told(message) => crate::outward::told(&self.id, &self.root, message),
                 CtrlResp::Ready(_) | CtrlResp::Log { .. } | CtrlResp::Pong => {}
             }
         }
@@ -1744,6 +1746,8 @@ fn machine_spec(args: &SandboxCreateArgs) -> MachineSpec {
         gpu: args.gpu.unwrap_or(false),
         gpu_memory_mib: args.gpu_memory_mib,
         network: args.network,
+        // The embedder's, asked as each of its machines boots ([`Sandbox::wake`]).
+        outward: None,
     }
 }
 

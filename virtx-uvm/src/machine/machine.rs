@@ -229,6 +229,11 @@ pub struct MachineSpec {
     /// own published ports either way.
     #[serde(default)]
     pub network: bool,
+
+    /// What the embedder's [`Outward`](crate::outward::Outward) is given in this machine's
+    /// process, with a [`network`](MachineSpec::network).
+    #[serde(default)]
+    pub outward: Option<serde_json::Value>,
 }
 
 /// A volume shown in the guest. Pointed at rather than carried, so its mounts' credentials stay
@@ -981,6 +986,7 @@ mod tests {
                 gpu: false,
                 gpu_memory_mib: None,
                 network: true,
+                outward: None,
             },
             volumes: vec![VolumeMount {
                 path: PathBuf::from("/store/volume/data"),

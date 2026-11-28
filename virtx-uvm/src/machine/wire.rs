@@ -156,6 +156,9 @@ pub enum CtrlResp {
     },
     /// The agent's answer to a [`Ping`](CtrlReq::Ping), which the machine's process keeps.
     Pong,
+    /// What the embedder's code in the machine's process told its server: said by the
+    /// machine's process, never by the agent.
+    Told(serde_json::Value),
 }
 
 /// What became of a [`Stdin`](CtrlReq::Stdin) write, in its [`Written`](CtrlResp::Written).

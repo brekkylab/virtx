@@ -29,6 +29,7 @@ use virtx_core::{
 };
 use virtx_uvm::backend::{Backing, Held, Refusal, Stored, Wanted};
 use virtx_uvm::disks::{Disks, DynStorage, Held as DiskHeld, MachineDisk, set_disks};
+use virtx_uvm::outward::{self, Outward};
 use virtx_uvm::runs::{self, Ran};
 use virtx_uvm::{
     Admission, DEFAULT_DISK_GIB, Files, ImageStore, Machine, MachineConfig, MachineError,
@@ -2082,6 +2083,50 @@ async fn a_sandbox_without_a_network_reaches_nothing_off_its_machine(home: Home)
     }
 }
 
+/// Each flow a sandbox opens to the internet is put to the embedder's `Outward` in its machine's
+/// process, with what the server gave it: a flow refused there is refused in the guest, and what
+/// it tells reaches the server with the sandbox it came from.
+async fn the_embedder_decides_and_hears_of_each_flow_to_the_internet(home: Home) {
+    let root = home.root.clone();
+    outward::set_given(move |at| {
+        (at == root).then(|| serde_json::json!({ "refuse": ["1.1.1.1"] }))
+    });
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&heard);
+    outward::set_told(move |sandbox, root, message| {
+        kept.lock()
+            .unwrap()
+            .push((sandbox.to_owned(), root.to_owned(), message));
+    });
+    let sandbox = home.sandbox(&small(), None).await;
+    let script = "nc -z -w 5 8.8.8.8 443; echo $?; nc -z -w 5 1.1.1.1 443; echo $?; \
+        nslookup -timeout=1 example.com 8.8.8.8 >/dev/null 2>&1; true";
+    let (lines, _) = run(&sandbox, &["sh", "-c", script], None).await.unwrap();
+    assert_eq!(lines[0], "0", "a flow let through is reached: {lines:?}");
+    assert_ne!(lines[1], "0", "a flow refused is refused: {lines:?}");
+    let id = sandbox.id().to_owned();
+    close(sandbox).await;
+
+    let told: Vec<_> = (heard.lock().unwrap().iter())
+        .filter(|(_, root, _)| *root == home.root)
+        .inspect(|(sandbox, _, _)| assert_eq!(*sandbox, id))
+        .map(|(_, _, message)| message.clone())
+        .collect();
+    assert_eq!(
+        told[..2],
+        [
+            serde_json::json!({ "to": "8.8.8.8:443", "refused": false }),
+            serde_json::json!({ "to": "1.1.1.1:443", "refused": true }),
+        ]
+    );
+    assert!(
+        told[2..]
+            .iter()
+            .any(|m| m == &serde_json::json!({ "to": "8.8.8.8:53", "refused": false })),
+        "a datagram's destination is put to it too: {told:?}"
+    );
+}
+
 /// Each way through a port, the guest's listener on its loopback alone for the way in.
 async fn a_sandbox_s_published_ports_carry_megabytes_each_way(home: Home) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -2381,6 +2426,7 @@ async fn a_machine_that_did_not_start_tells_why_without_this_host_s_paths(home: 
             gpu: false,
             gpu_memory_mib: None,
             network: false,
+            outward: None,
         },
         volumes: vec![VolumeMount {
             path: volume.path().to_path_buf(),
@@ -3118,9 +3164,26 @@ fn at_once() -> usize {
         .max(1)
 }
 
+/// What decides each flow to the internet in a machine's process here: the addresses its
+/// sandbox was given to refuse are refused, and each flow of a sandbox given anything is told.
+struct Refusing;
+
+impl Outward for Refusing {
+    fn outward(&self, given: &serde_json::Value, to: std::net::SocketAddr) -> bool {
+        if given.is_null() {
+            return true;
+        }
+        let ip = to.ip().to_string();
+        let refused = (given["refuse"].as_array().into_iter().flatten()).any(|r| r == ip.as_str());
+        outward::tell(serde_json::json!({ "to": to.to_string(), "refused": refused }));
+        !refused
+    }
+}
+
 fn main() -> ExitCode {
     // In this process and each machine's, before either does anything with a disk.
     assert!(set_disks(Arc::new(Embedded)), "said first");
+    assert!(outward::set_outward(Arc::new(Refusing)), "said first");
     // Before any runtime: this process is about to become a machine and never come back.
     if env::args_os().nth(1).is_some_and(|arg| arg == MACHINE) {
         let Err(_) = virtx_uvm::enter_machine();
@@ -3226,6 +3289,7 @@ fn main() -> ExitCode {
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,
         a_sandbox_s_published_ports_carry_megabytes_each_way,
         a_sandbox_s_port_on_local_is_reached_while_it_is_taken,
+        the_embedder_decides_and_hears_of_each_flow_to_the_internet,
         a_sandbox_of_an_image_on_glibc_runs_its_programs_under_its_config,
         a_sandbox_s_machine_has_the_cpus_and_memory_asked_for,
         a_guest_whose_memory_reaches_past_4_gib_sets_aside_no_bounce_buffer,

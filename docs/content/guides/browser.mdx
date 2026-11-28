@@ -16,7 +16,7 @@ The commands share one browser, with its tabs and sign-ins, until `browser close
 `snapshot -i` lists what on the page can be clicked or typed into, each with a ref such as `@e2` for the next command to act on.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 sandbox = await client.create_sandbox("alpine:latest", abins=["browser"])
@@ -32,7 +32,7 @@ await browser("close")
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const sandbox = await client.createSandbox('alpine:latest', { abins: ['browser'] })
@@ -47,7 +47,7 @@ await browser('close')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest").abin("browser");
@@ -84,7 +84,7 @@ Pages outside the sandbox need its `network` on, as it is by default.
 This opens Wikipedia in a window and searches it for meerkats:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import PortForwarder, Stdout
@@ -115,7 +115,7 @@ with await PortForwarder.open(sandbox, 5900) as forwarder:
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const readline = require('node:readline/promises')
@@ -150,7 +150,7 @@ forwarder.close()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest")

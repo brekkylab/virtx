@@ -7,26 +7,26 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 ## Create a sandbox
 
-`create_sandbox` takes an image and these options, named here as in Python. Whatever is left out, the server picks.
+`create_sandbox` takes an image and the options below. The table uses the Python names; see [Names](/docs/sdk/#names) for Node.js and Rust. An option you leave out gets the default shown.
 
-The image has to be on the server already, pulled or built as [Images](/docs/tutorials/images/) shows: a create does not pull it, and refuses a tag the server has no image by with `404`.
+The image must already be on the server. `create_sandbox` doesn't pull it, and fails with `404` for a tag the server doesn't have. Pull or build the image first, as [Working with images](/docs/tutorials/images/) shows.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `name` | none | A name to find it again by, with `find_sandbox`, rather than keeping its id: letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128. One another sandbox has is refused with `409`, `exists`, until that one is removed. |
-| `vcpus` | 4 | Its CPUs. |
-| `memory_mib` | 4096 | Its memory, in MiB. |
-| `disk_gib` | 2 | How much it may write over its image, in GiB, at most 1024. What it writes there goes when it is removed. |
-| `network` | `True` | `False` blocks its outbound connections and name lookups. With it on, it reaches public addresses, not this host's loopback or private ones. |
-| `ports` | none | Ports in it to reach from outside, even with `network` off: numbers, or specs with a `label`; see [Networks and ports](/docs/tutorials/networks-ports/). |
-| `volumes` | none | Volumes mounted at paths in it, read-only if asked; see [Mounting volumes](/docs/tutorials/mounting-volumes/). |
-| `gpu`, `gpu_memory_mib` | none | A GPU and the memory it may hold; see [Using GPUs](/docs/tutorials/using-gpus/). |
-| `abins` | none | virtx's own programs, by name, such as `index`, `docread`, `display` and `browser`, at `/abin` and first on its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. The sandbox answers them as `abins`; see [Using built-in programs](/docs/tutorials/built-in-programs/). |
+| `name` | none | A name to find the sandbox by later with `find_sandbox`, instead of storing its id. Up to 128 letters, digits, `.`, `_` and `-`, not starting with `.` or `-`; otherwise the call fails with `400`. If another sandbox already has the name, the call fails with `409`, `exists`. |
+| `vcpus` | 4 | Number of virtual CPUs. |
+| `memory_mib` | 4096 | Memory, in MiB. |
+| `disk_gib` | 2 | Space the sandbox can write on top of its image, in GiB, up to 1024. This data is deleted when the sandbox is removed. |
+| `network` | `True` | Outbound network access. `False` blocks outbound connections and DNS lookups. With `True`, the sandbox reaches public addresses, but not the host's loopback or private addresses. |
+| `ports` | none | Ports in the sandbox that you can reach from outside, even with `network` off. Pass port numbers, or port specs with a `label`. See [Networks and ports](/docs/tutorials/networks-ports/). |
+| `volumes` | none | Volumes to mount at paths in the sandbox, optionally read-only. See [Mounting volumes](/docs/tutorials/mounting-volumes/). |
+| `gpu`, `gpu_memory_mib` | none | Attach the host's GPU, and set how much GPU memory it may use. See [Using GPUs](/docs/tutorials/using-gpus/). |
+| `abins` | none | VirtX's built-in programs to install, by name, such as `index`, `docread`, `display` and `browser`. They go in `/abin`, which is first on the sandbox's `PATH`, and each has a `SKILL.md` at `/abin/skills/{name}/`. The sandbox's `abins` field lists them. See [Using built-in programs](/docs/tutorials/built-in-programs/). |
 
-This makes a sandbox with 2 vCPUs, 2 GiB of memory, and no way out:
+This example creates a sandbox with 2 vCPUs, 2 GiB of memory, and no outbound network access:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 sandbox = await client.create_sandbox(
@@ -35,7 +35,7 @@ sandbox = await client.create_sandbox(
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const sandbox = await client.createSandbox('alpine:latest', {
@@ -46,7 +46,7 @@ const sandbox = await client.createSandbox('alpine:latest', {
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest")
@@ -61,15 +61,15 @@ let sandbox = client.create_sandbox(&args).await?;
 
 ## Resize a sandbox
 
-`resize` changes a sandbox's `vcpus`, `memory_mib` and `disk_gib` after it is made, each held to what `create_sandbox` holds it to; whatever is left out stays as it is. It answers the sandbox's size as it is to be, and `up`, whether its VM is up now.
+`resize` changes a sandbox's `vcpus`, `memory_mib` and `disk_gib` after you create it. Each has the same limits as in `create_sandbox`, and anything you leave out stays as it is. It returns the sandbox's new size, and `up`, whether its VM is running now.
 
-- A VM is the size it booted with, so `vcpus` and `memory_mib` take effect at its next boot. A sandbox in which nothing runs has its VM stopped at once, and boots with its new size for its next command; one with a command running, or its files or ports in use, is refused with `409` and keeps its size.
-- `disk_gib` only grows, keeping what the sandbox wrote; one smaller than the disk the VM last booted with is refused with `400`, and one down to it takes back a grow not yet made. The disk grows at the VM's next boot too, but a resize of the disk alone stops nothing and is never refused for the sandbox being in use: it answers at once, `up` still `true` for a VM that is up, which keeps its old size until it is next stopped and boots again. A grow that cannot be made boots the VM on its disk as it was, and is tried again at each boot.
+- **CPUs and memory** take effect at the VM's next boot, because a VM keeps the size it booted with. If nothing is running in the sandbox, the server stops its VM at once, and it boots with the new size for its next command. If a command is running, or its files or ports are in use, `resize` fails with `409` and the size doesn't change.
+- **Disk** can only grow, and the sandbox keeps what it wrote. A size smaller than the disk the VM last booted with fails with `400`; a size equal to it cancels a grow that hasn't happened yet. The disk also grows at the VM's next boot, but resizing only the disk stops nothing and never fails because the sandbox is in use: it returns at once, and a running VM keeps its old disk until it next stops and boots again. If the disk can't grow, the VM boots with the disk as it was, and the server tries again at each boot.
 
-A [server you run](/docs/tutorials/self-hosting/) keeps the new size across its restart.
+A [server you run](/docs/tutorials/self-hosting/) keeps the new size across a restart.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 resized = await sandbox.resize(vcpus=8, memory_mib=8192, disk_gib=16)
@@ -77,7 +77,7 @@ print(resized.vcpus, resized.memory_mib, resized.disk_gib, resized.up)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const resized = await sandbox.resize({ vcpus: 8, memoryMib: 8192, diskGib: 16 })
@@ -85,7 +85,7 @@ console.log(resized.vcpus, resized.memoryMib, resized.diskGib, resized.up)
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let args = SandboxResizeArgs::default()
@@ -100,12 +100,23 @@ let resized = sandbox.resize(&args).await?;
 
 ## Find sandboxes
 
-`list_sandbox` lists every sandbox on the server, `get_sandbox` finds one by its id, and `find_sandbox` one by the `name` it was made with, answering none when no sandbox has it. Each comes back as a sandbox you can run commands in or remove, with its `id`, its `name`, its `image`, and whether it is `running`. This is how to find one a program left behind.
+Use these calls to find sandboxes, for example ones an earlier run of your program left behind:
 
-A [server you run](/docs/tutorials/self-hosting/) keeps its sandboxes when it is stopped: started again, it lists each with what it wrote, and boots it again for its next command. Their jobs are kept, each that ran then ended with code `137` and `reason` `restarted`, its log only that end. One it cannot start again, such as one whose image was deleted meanwhile, is listed with `running` false and an `error` saying why, and takes nothing but `remove`. The server `Client.spawn()` starts removes its sandboxes as your program ends.
+- `list_sandbox` returns every sandbox on the server.
+- `get_sandbox` returns the sandbox with a given id.
+- `find_sandbox` returns the sandbox with a given `name`, or none if no sandbox has that name.
+
+Each result is a sandbox you can run commands in or remove. It has an `id`, a `name`, an `image`, and `running`, which says whether it can still run commands.
+
+How long sandboxes last depends on the server:
+
+- **Local server (`Client.spawn()`):** removes all its sandboxes when your program ends.
+- **Your own server (`virtx-server-tcp`):** keeps its sandboxes, and their files, when it restarts. A sandbox boots again on its next command. Jobs that were running during the restart end with code `137` and `reason` `restarted`.
+
+If the server can't start a sandbox again after a restart, for example because its image was deleted, the sandbox is listed with `running` set to false and an `error` that says why. The only thing you can do with it is `remove` it.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 for sandbox in await client.list_sandbox():
@@ -116,7 +127,7 @@ sandbox = await client.find_sandbox("task-42")  # None if no sandbox has the nam
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 for (const sandbox of await client.listSandbox()) {
@@ -128,7 +139,7 @@ const named = await client.findSandbox('task-42') // undefined if no sandbox has
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 for sandbox in client.list_sandbox().await? {
@@ -144,10 +155,10 @@ let named = client.find_sandbox("task-42").await?; // None if no sandbox has the
 
 ### Find it or make it
 
-A program that names its sandboxes, such as one per task, looks for the name first and makes the sandbox only when none has it. Two programs doing that at once can both find none: one makes it, and the other is refused with `409` and finds the one just made.
+To reuse one sandbox per task, look it up by name first and create it only if it doesn't exist. If two programs do this at the same time, both may find nothing. One creates the sandbox, and the other gets `409` and looks the sandbox up again:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 sandbox = await client.find_sandbox("task-42")
@@ -161,7 +172,7 @@ if sandbox is None:
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 let sandbox = await client.findSandbox('task-42')
@@ -176,7 +187,7 @@ if (sandbox === undefined) {
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let sandbox = match client.find_sandbox("task-42").await? {
@@ -195,28 +206,28 @@ let sandbox = match client.find_sandbox("task-42").await? {
 </TabItem>
 </Tabs>
 
-A sandbox found so forwards its ports as the one made does; see [Networks and ports](/docs/tutorials/networks-ports/).
+A sandbox returned by `find_sandbox`, `get_sandbox` or `list_sandbox` forwards its ports as the one `create_sandbox` returned does; see [Networks and ports](/docs/tutorials/networks-ports/).
 
 ## Remove a sandbox
 
-`remove` stops a sandbox, ends its jobs, and deletes what it wrote over its image. Its volumes stay, for the next sandbox to use.
+`remove` stops a sandbox, ends its jobs, and deletes everything it wrote outside its volumes. The volumes are kept for other sandboxes to use.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 await sandbox.remove()
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await sandbox.remove()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 sandbox.remove().await?;
@@ -225,3 +236,45 @@ sandbox.remove().await?;
 </TabItem>
 </Tabs>
 
+## Troubleshooting
+
+1. **`404`, `not_found`, from `create_sandbox`**
+
+   **Cause:** The server has no image by that tag. A create does not pull.
+
+   **Fix:** Pull or build the image first, as [Working with images](/docs/tutorials/images/) shows.
+
+2. **`400`, `invalid`, from `create_sandbox`**
+
+   **Cause:** An option is invalid: a bad `name`, `0` for a number, or a port listed twice.
+
+   **Fix:** Fix the option the error message names.
+
+3. **`409`, `exists`**
+
+   **Cause:** Another sandbox has that `name`.
+
+   **Fix:** Find it with `find_sandbox`, or remove it first.
+
+4. **`409`, `ended`, on a sandbox from `list_sandbox`**
+
+   **Cause:** The server could not start it again after a restart, as its `error` says.
+
+   **Fix:** Remove it and create another.
+
+5. **`409`, from `resize`**
+
+   **Cause:** A command is running in the sandbox, or its files or ports are in use, so its VM can't be stopped to change its CPUs or memory.
+
+   **Fix:** Wait until it is idle, then resize again. Growing only the disk is never refused for this.
+
+6. **`400`, from `resize`**
+
+   **Cause:** `disk_gib` is smaller than the disk the VM last booted with. A disk only grows.
+
+   **Fix:** Give a size at least as large as the current disk.
+
+## Next
+
+- [Running commands](/docs/tutorials/running-commands/): run commands in the sandbox and read their output.
+- [Mounting volumes](/docs/tutorials/mounting-volumes/): keep what a sandbox writes after it is removed.

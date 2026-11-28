@@ -1,0 +1,22 @@
+---
+title: "Environment variables"
+description: "The environment variables you set for the clients, the CLI and the server."
+---
+
+These are the variables you set for the clients, the `virtx` CLI and the server. The server also reads a few for its own tuning, which aren't listed here. For the CLI, a command-line flag overrides the matching variable.
+
+| Variable | Read by | What it does |
+| --- | --- | --- |
+| `VIRTX_CORE_LIB` | Clients | The `libvirtx_core` to open, when the program has not loaded one itself. |
+| `VIRTX_STDIO` | `spawn`, CLI | A server to start as it is, in place of the fetched `virtx-stdio`. |
+| `VIRTX_STDIO_VERSION` | `spawn`, CLI | Another version of `virtx-stdio` to fetch. |
+| `VIRTX_DIST_URL` | `spawn`, CLI | Where releases are fetched from. |
+| `VIRTX_HOME` | `spawn`, CLI, servers | Where VirtX keeps what it fetches on this machine. |
+| `VIRTX_TOKEN_REFUSED` | A `CommandAuth` command | Set when the command is run again because the server refused its last token, so a command that keeps its tokens gives a new one. |
+| `VIRTX_HOST` | CLI | A server's base URL, reached over HTTP when neither `--host` nor `--server` is given. |
+| `VIRTX_TOKEN` | CLI | The bearer token sent to the server reached over HTTP, at `--host` or `VIRTX_HOST`. |
+| `VIRTX_PROJECT` | CLI | The project requests go to, when `--project` isn't given. |
+| `VIRTX_OIDC_ISSUER`, `VIRTX_OIDC_CLIENT_ID` | CLI | The provider `virtx login` signs in to and the client it signs in as, when `--issuer` and `--client-id` are not given. See [Signing in](/docs/reference/cli/#signing-in). |
+| `VIRTX_OIDC_CLIENT_SECRET` | CLI | That client's secret, for a provider that gives its public clients one, when `--client-secret` is not given. |
+| `VIRTX_PARK_AFTER_MS` | Server | How long a sandbox can be idle before the server stops its VM, in milliseconds. The VM boots again on the next command. `0` means never. Default: five minutes. |
+| `VIRTX_GUEST_SILENCE` | Server | How long a sandbox's guest can go without responding before the server ends its VM, treating it as powered off, in seconds (minimum 10). This catches a guest that halted, for example with `halt -f`, or hung. `0` means never. Default: one minute. |

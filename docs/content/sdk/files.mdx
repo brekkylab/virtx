@@ -1,0 +1,330 @@
+---
+title: "Files"
+description: "Reference for reading and writing the files of a sandbox or a volume."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A `Sandbox` and a `Volume` share these calls, each on its own files, by a path relative to its root such as `dir/file.txt`; the empty path is the root, and the server refuses one that leads outside.
+In Rust, they come from the `Files` trait, so `use virtx::Files;`.
+See [Reading and writing files](/docs/tutorials/reading-writing-files/).
+
+| Member | Does |
+| --- | --- |
+| [`stat_file`](#stat_file) | What is at `path`: whether it is a directory, its size, its modification time, and its `etag`. |
+| [`exists`](#exists) | Whether anything, a file, or a directory is at `path`. |
+| [`read_dir`](#read_dir) | The entries of a directory, each with its `name` and `metadata`. |
+| [`read_file`](#read_file) | A file's bytes: from `offset`, `length` bytes or all that is left. |
+| [`read_text`](#read_text) | A whole UTF-8 file as text. |
+| [`write_file`](#write_file) | Writes a whole file, created if it does not exist; its parent directory must exist. |
+| [`create_dir`](#create_dir) | Creates a directory whose parent exists; `create_dir_all` creates its parents too, as `mkdir -p`, and is refused with `405` when a file is there. |
+| [`remove_file`](#remove_file) | Removes a file, or a directory with everything in it. |
+| [`rename_file`](#rename_file) | Moves a file or directory; refused onto something that exists unless `overwrite`. |
+| [`copy_file`](#copy_file) | Copies a file or directory with everything in it, replacing as `rename_file` does. |
+
+## `stat_file`
+
+What is at `path`: whether it is a directory, its size, its modification time, and its `etag`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def stat_file(path: str) -> Metadata
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+statFile(path: string): Promise<Metadata>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn stat_file(&self, path: impl Into<String>) -> Call<Metadata>
+```
+
+</TabItem>
+</Tabs>
+
+## `exists`
+
+Whether anything, a file, or a directory is at `path`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def exists(path: str) -> bool
+async def is_file(path: str) -> bool
+async def is_dir(path: str) -> bool
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+exists(path: string): Promise<boolean>
+isFile(path: string): Promise<boolean>
+isDir(path: string): Promise<boolean>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn exists(&self, path: impl Into<String>) -> Call<bool>
+fn is_file(&self, path: impl Into<String>) -> Call<bool>
+fn is_dir(&self, path: impl Into<String>) -> Call<bool>
+```
+
+</TabItem>
+</Tabs>
+
+## `read_dir`
+
+The entries of a directory, each with its `name` and `metadata`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def read_dir(path: str) -> list[DirEntry]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+readDir(path: string): Promise<DirEntry[]>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn read_dir(&self, path: impl Into<String>) -> Call<Vec<DirEntry>>
+```
+
+</TabItem>
+</Tabs>
+
+## `read_file`
+
+A file's bytes: from `offset`, `length` bytes or all that is left.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def read_file(path: str, offset: int = 0, length: int | None = None) -> bytes
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+readFile(path: string, offset?: number, length?: number): Promise<Buffer>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn read_file(&self, path: impl Into<String>, offset: u64, length: Option<u64>) -> Call<Vec<u8>>
+```
+
+</TabItem>
+</Tabs>
+
+## `read_text`
+
+A whole UTF-8 file as text.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def read_text(path: str) -> str
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+readText(path: string): Promise<string>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn read_text(&self, path: impl Into<String>) -> Call<String>
+```
+
+</TabItem>
+</Tabs>
+
+## `write_file`
+
+Writes a whole file, created if it does not exist; its parent directory must exist. With `if_match`, the `etag` a stat gave, only while the file still has it, and refused with `412` otherwise.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def write_file(path: str, content: bytes | str, if_match: str | None = None) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+writeFile(path: string, content: Buffer | Uint8Array | string, ifMatch?: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn write_file(&self, path: impl Into<String>, content: impl AsRef<[u8]>, if_match: Option<&str>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `create_dir`
+
+Creates a directory whose parent exists; `create_dir_all` creates its parents too, as `mkdir -p`, and is refused with `405` when a file is there.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def create_dir(path: str) -> None
+async def create_dir_all(path: str) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+createDir(path: string): Promise<void>
+createDirAll(path: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn create_dir(&self, path: impl Into<String>) -> Call<()>
+fn create_dir_all(&self, path: impl Into<String>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `remove_file`
+
+Removes a file, or a directory with everything in it. With `missing_ok`, nothing being there is fine, as `rm -f`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove_file(path: str, missing_ok: bool = False) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+removeFile(path: string, missingOk?: boolean): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn remove_file(&self, path: impl Into<String>, missing_ok: bool) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `rename_file`
+
+Moves a file or directory; refused onto something that exists unless `overwrite`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def rename_file(from_path: str, to_path: str, overwrite: bool = False) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+renameFile(from: string, to: string, overwrite?: boolean): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn rename_file(&self, from: impl Into<String>, to: impl Into<String>, overwrite: bool) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `copy_file`
+
+Copies a file or directory with everything in it, replacing as `rename_file` does.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def copy_file(from_path: str, to_path: str, overwrite: bool = False) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+copyFile(from: string, to: string, overwrite?: boolean): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+fn copy_file(&self, from: impl Into<String>, to: impl Into<String>, overwrite: bool) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `source` `client` | Any call | The path's `..` leads above the root. The client resolves `.` and `..` itself, so `a/../b` is sent as `b`, and refuses a path that climbs above the root without sending it. |
+| `403` | Writes, `remove_file`, `rename_file` | A write to a volume mounted read-only, or a move or remove of the root itself. |
+| `404` | Any call but `exists`, `is_file` and `is_dir` | Nothing is at that path, or the sandbox or volume doesn't exist. For `remove_file`, pass `missing_ok` to treat it as done. `exists`, `is_file` and `is_dir` answer `false` instead. |
+| `405` | `create_dir_all` | A file is at that path. |
+| `409` | `write_file`, `create_dir` | The parent directory doesn't exist. Create it with `create_dir_all`. |
+| `409`, `ended` | Any call on a sandbox | The sandbox's VM has stopped for good. Create another sandbox. |
+| `412` | `copy_file`, `rename_file` | The destination exists. Pass `overwrite`. |
+| `412` | `write_file` with `if_match` | The file changed since you read its `etag`. Read it again with `stat_file`, then retry. |
+| An error that mentions UTF-8 | `read_text` | The file isn't UTF-8 text. Read its bytes with `read_file`. |
+
+Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

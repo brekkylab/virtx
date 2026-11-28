@@ -19,7 +19,7 @@ Here a sandbox does the finding and an agent the answering:
 Keep the documents and the store in a [volume](/docs/tutorials/mounting-volumes/), so the store outlives the sandbox that builds it and the next one searches it without building it again.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from pathlib import Path
@@ -39,7 +39,7 @@ sandbox = await client.create_sandbox(
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const fs = require('node:fs')
@@ -58,7 +58,7 @@ const sandbox = await client.createSandbox('alpine:latest', {
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use virtx::Files;
@@ -124,7 +124,7 @@ It searches the store, tries other words when it finds too little, and answers f
 Tell it where the store is, and to cite the passages its answer comes from.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from ailoy import AgentBuilder
@@ -148,7 +148,7 @@ async for output in agent.run("What does the warranty cover?"):
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const { AgentBuilder } = require('@brekkylab/ailoy')
@@ -174,7 +174,7 @@ try {
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use ailoy::{

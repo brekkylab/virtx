@@ -5,8 +5,8 @@ description: "Build images from recipes, pull and push them, and manage the serv
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-Every sandbox in virtx boots from an image, the read-only base its root filesystem starts from.
-This page covers how to get images onto a server and manage them there: building them, tagging them, pulling and pushing them, copying them between servers, and pruning the ones left behind.
+Every sandbox boots from an image: the read-only filesystem it starts from.
+This page shows how to get images onto a server and manage them there: build, tag, pull, push, copy them between servers, and prune unused ones.
 
 ## Building images
 
@@ -14,10 +14,10 @@ An image can be built from a recipe in code, or from a Dockerfile.
 
 ### From a recipe
 
-A recipe is a base image plus the steps to run on it: `.run(command)`, `.env(key, value)`, and `.workdir(directory)`, chained in the order they run.
+A recipe is a base image plus the steps to run on it: `.run(command)`, `.env(key, value)`, and `.workdir(directory)`, chained in the order they run. In Rust, each is a `.step(...)`: `Step::run`, `Step::env` and `Step::workdir`.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 recipe = (
@@ -30,7 +30,7 @@ digest = await client.build_image(recipe, "jq:latest").complete(print=True)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const recipe = new Recipe('alpine:latest')
@@ -41,7 +41,7 @@ const digest = await client.buildImage(recipe, 'jq:latest').complete({ print: tr
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let recipe = Recipe::new("alpine:latest")
@@ -56,7 +56,7 @@ let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
 
 ### From a Dockerfile
 
-A Dockerfile is read as a recipe: one stage, with only `FROM`, `RUN`, `ENV`, and `WORKDIR`. Any other instruction is refused at its line.
+VirtX reads a Dockerfile as a recipe, so it supports a subset of Dockerfile syntax: a single stage with only `FROM`, `RUN`, `ENV` (in the `ENV key=value` form) and `WORKDIR`, and no `AS` stage name. Any other instruction fails with an error that names its line.
 
 ```dockerfile
 FROM alpine:latest
@@ -65,7 +65,7 @@ ENV LANG=C.UTF-8
 WORKDIR /work
 ```
 
-The `virtx` command, which the Python and Node.js packages install, builds the Dockerfile in a directory, or the one `-f` names; see [CLI](/docs/reference/cli/):
+The `virtx` command, which the Python and Node.js packages install, builds the Dockerfile in a directory, or the file that `-f` names. See [CLI](/docs/reference/cli/).
 
 ```sh
 virtx build -t jq:latest .
@@ -80,23 +80,32 @@ let digest = client.build_image(recipe, "jq:latest").complete(true).await?;
 
 ### After a build
 
-A build stores its image under the supplied tag. `create_sandbox` boots it by that tag, or by its digest to select exactly that build.
+A build stores the image under the tag you gave. `create_sandbox` can boot it by that tag, or by its digest to use exactly that build.
 
-The image keeps the steps it was built with in its history, which `docker history` shows once it is pushed, and names its base in the labels `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest`. A `RUN` step's command is kept as it was written, so pass a secret to the commands a sandbox runs rather than writing it into a step.
+The image keeps the steps it was built with in its history, which `docker history` shows once you push it. It names its base in the labels `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest`. A `RUN` step's command is kept as written, so don't put a secret in a step: pass it to the commands the sandbox runs instead.
 
-A sandbox takes its image's environment and working directory for every command it runs, and does not run the image's entrypoint or command: start a server the image has with `exec`.
+Every command in the sandbox runs with the image's environment variables and working directory. VirtX doesn't run the image's entrypoint or command. To start a server the image contains, run it with `exec`.
 
-A build, like a pull or a push, is a job.
-`complete` follows it to its end, printing its log with `print`, and answers the digest of what it made; a build that fails raises a `VirtxError` whose `source` is `job`, so complete it before booting from the tag.
-Iterated instead, it yields its log, and raises the same error in place of its `end` entry.
-Awaiting the started value gives the job, whose log can be read again with `job.log()`, as a command's is; see [Running commands](/docs/tutorials/running-commands/#follow-a-job).
+A build, like a pull or a push, is a [job](/docs/tutorials/running-commands/#follow-a-job):
+
+- `complete()` waits for the build to finish, prints its log if you pass `print`, and returns the digest of the new image. Always complete a build before you boot from its tag.
+- If the build fails, `complete()` raises a `VirtxError` whose `source` is `job` (in Rust, a `virtx::Error` whose `source_kind()` is `Source::Job`).
+- If you iterate the build instead, it yields the log and raises the same error in place of the `end` entry.
+- If you await it, you get the job, and can read its log again later with `job.log()` (`job.log(None)` in Rust).
 
 ## Tagging
 
-A tag is a `name:tag` that points at an image. `tag_image` points a new tag at an image, named by a tag or by `name@algorithm:hex`, moving the tag if it already points elsewhere. `untag_image` removes a tag and leaves the image. `list_image` lists every tag and the digest it points at. `remove_image` removes the image a reference names and every tag on it in that name. While a sandbox or a build uses an image, removing it, or its last tag, is refused with `409` and leaves every tag as it was.
+A tag is a `name:tag` that points at an image.
+
+- `tag_image` points a new tag at an image, given by a tag or by `name@algorithm:hex`. If the new tag already points at another image, it moves.
+- `untag_image` removes a tag and keeps the image.
+- `list_image` lists every tag and the digest it points at.
+- `remove_image` removes the image a reference names, and every tag on it under that name.
+
+While a sandbox or a build uses an image, removing the image or its last tag fails with `409`, and no tags change.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 await client.tag_image("jq:latest", "jq:1.7")
@@ -106,7 +115,7 @@ await client.untag_image("jq:1.7")
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await client.tagImage('jq:latest', 'jq:1.7')
@@ -115,7 +124,7 @@ await client.untagImage('jq:1.7')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 client.tag_image("jq:latest", "jq:1.7").await?;
@@ -132,12 +141,12 @@ An untagged image stays on the server until it is [pruned](#prune-the-registry).
 
 ## Pull and push
 
-You don't need to build an image to start. `pull_image` copies any image from a registry such as Docker Hub or `ghcr.io` to the server, ready to boot as it is. `push_image` copies one back to the registry its name points at, so tag it with the registry's name first.
+You don't need to build an image to start. `pull_image` copies an image from a registry, such as Docker Hub or `ghcr.io`, to the server, ready to boot. `push_image` copies an image to the registry in its name, so tag it with the registry's name first.
 
-When the registry wants credentials, pass them as `auth`: a username with a password or an access token, or a bearer token. Without `auth`, both are anonymous. These credentials are for the registry, not for the virtx server.
+If the registry needs credentials, pass them as `auth`: a username with a password or access token, or a bearer token. Without `auth`, pulls and pushes are anonymous. These credentials are for the registry, not for the VirtX server.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 import os
@@ -153,7 +162,7 @@ await client.push_image("ghcr.io/me/jq:1", auth).complete(print=True)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await client.pullImage('python:3.12-slim').complete({ print: true })
@@ -165,7 +174,7 @@ await client.pushImage('ghcr.io/me/jq:1', auth).complete({ print: true })
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 client.pull_image("python:3.12-slim", None).complete(true).await?;
@@ -184,26 +193,31 @@ client.push_image("ghcr.io/me/jq:1", Some(auth)).complete(true).await?;
 </TabItem>
 </Tabs>
 
-A server run over TCP (`virtx-server-tcp`) connects only to registries on public addresses, for a pull, a push and a build's base alike. A job that names a registry on the server's own machine or its private network fails with `is not reachable from this server`. To use such a registry, list it in the server's `server.json` as the reference names it, `host` or `host:port`: `"private_registries": ["registry.internal:5000"]`. A listed registry that sends the job on to another host on a private address, for its token or for a layer, needs that host listed as well. These connections do not go through an `HTTPS_PROXY` set in the server's environment, so a server whose only way to the internet is such a proxy reaches no registry. The local server reaches whatever your machine does.
+### Registries on your own server
 
-Docker Hub limits how often one address may pull without credentials, which a server pulling for many users reaches quickly. Such a server can be given a mirror of Docker Hub in its `server.json`, `"registry_mirror": "mirror.gcr.io"`: a pull of a Docker Hub image without credentials, a build's base included, tries the mirror first and goes to Docker Hub for what the mirror lacks, and the image is tagged with the name the job asked for either way. A tag on the mirror can lag Docker Hub's for a while; a digest names the same image on both. A pull with credentials goes to Docker Hub. A mirror on a private address is listed in `private_registries` too. A server can also share such pulls between its projects, `"share_public_images": true`; see [Share public images](/docs/tutorials/self-hosting/#share-public-images) for what that tells one project of another.
+These settings apply to `virtx-server-tcp`. The local server reaches any registry your machine can reach.
+
+- **Private registries:** `virtx-server-tcp` connects only to registries on public addresses, for pulls, pushes and build base images. A job that names a registry on the server's machine or private network fails with `is not reachable from this server`. To allow one, add it to `server.json` as `host` or `host:port`, exactly as image references name it: `"private_registries": ["registry.internal:5000"]`. If that registry redirects to another private host (for a token or a layer), list that host too.
+- **Proxies:** registry connections don't use an `HTTPS_PROXY` set in the server's environment. A server that can reach the internet only through such a proxy can't reach any registry.
+- **Docker Hub mirror:** Docker Hub limits anonymous pulls per address, and a server that pulls for many users reaches that limit quickly. Set a mirror in `server.json`, for example `"registry_mirror": "mirror.gcr.io"`. Anonymous pulls of Docker Hub images, including build base images, then try the mirror first and fall back to Docker Hub. The image is tagged with the name the job asked for either way. A tag on the mirror can lag behind Docker Hub, but a digest names the same image on both. Pulls with credentials always go to Docker Hub. A mirror on a private address must also be in `private_registries`.
+- **Shared pulls:** with `"share_public_images": true`, projects on the server reuse each other's anonymous pulls. Read [Share public images](/docs/tutorials/self-hosting/#share-public-images) before you turn it on: it lets one project learn what another has pulled.
 
 ## Copy a local image to a remote server
 
-An image built on your machine can go to a server without a registry in between. `download_image` writes it from the local server to an OCI archive, and `upload_image` sends the archive to the remote server and tags it there, uploading only what that server lacks.
+You can move an image you built locally to a remote server without a registry. `download_image` writes the image from the local server to an OCI archive file. `upload_image` sends the archive to the remote server and tags it there, uploading only the layers that server doesn't have yet.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
-from virtx import BearerAuth, Client
+from virtx import Client, CommandAuth
 
 async with Client.spawn() as local:
     async for _ in local.download_image("jq:latest", "jq.tar"):
         pass
 
 async with Client.connect(
-    "https://virtx.example.com", BearerAuth("<token>")
+    "https://virtx.example", CommandAuth("uvx", ("virtx", "token", "--json"))
 ) as remote:
     async for _ in remote.upload_image("jq.tar", "jq:latest"):
         pass
@@ -211,7 +225,7 @@ async with Client.connect(
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const local = Client.spawn()
@@ -219,17 +233,19 @@ for await (const _ of local.downloadImage('jq:latest', 'jq.tar')) {}
 await local.close()
 
 const remote = Client.connect(
-  'https://virtx.example.com',
-  { type: 'bearer', token: '<token>' }
+  'https://virtx.example',
+  { type: 'command', program: 'npx', args: ['-y', '@brekkylab/virtx', 'token', '--json'] }
 )
 for await (const _ of remote.uploadImage('jq.tar', 'jq:latest')) {}
 const sandbox = await remote.createSandbox('jq:latest')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
+use futures::StreamExt; // cargo add futures
+
 let local = Client::spawn_virtx([] as [&str; 0]).await?;
 let mut events = local.download_image("jq:latest", "jq.tar");
 while let Some(event) = events.next().await {
@@ -237,8 +253,8 @@ while let Some(event) = events.next().await {
 }
 
 let remote = Client::connect(
-    "https://virtx.example.com",
-    Auth::Bearer { token: "<token>".into() },
+    "https://virtx.example",
+    Auth::Command { program: "uvx".into(), args: vec!["virtx".into(), "token".into(), "--json".into()] },
     None,
     [] as [(&str, &str); 0],
 )?;
@@ -254,14 +270,14 @@ let sandbox = remote
 </TabItem>
 </Tabs>
 
-The archive is a standard OCI image layout, so it can also come from or go to other tools that read one.
+The archive uses the standard OCI image layout, so other tools that support that layout can read or create it.
 
 ## Prune the registry
 
-Rebuilding a tag, like untagging it, leaves the old image on the server. `prune_image` deletes every image no tag points at and no sandbox uses, and the layers only those images held, and answers what it deleted and how many bytes it freed. An image younger than an hour is kept, so one a build or an upload has just written is not deleted before it is tagged.
+Rebuilding or untagging a tag leaves the old image on the server. `prune_image` deletes every image that no tag points at and no sandbox uses, along with the layers only those images used. It returns the deleted images and the number of bytes freed. Images less than an hour old are kept, so an image a build or upload just wrote isn't deleted before it is tagged.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 pruned = await client.prune_image()
@@ -269,7 +285,7 @@ print(len(pruned.images), "images,", pruned.reclaimed, "bytes")
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const pruned = await client.pruneImage()
@@ -277,7 +293,7 @@ console.log(pruned.images.length, 'images,', pruned.reclaimed, 'bytes')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let pruned = client.prune_image().await?;
@@ -287,4 +303,53 @@ println!("{} images, {} bytes", pruned.images.len(), pruned.reclaimed);
 </TabItem>
 </Tabs>
 
-From a shell, `virtx image prune` does the same. `virtx-server-tcp` also prunes on its own once an hour; the stdio server prunes only when asked.
+From a shell, `virtx image prune` does the same. `virtx-server-tcp` also prunes automatically once an hour. The local server prunes only when you ask it to.
+
+## Troubleshooting
+
+1. **`404`, `not_found`, `no image here is tagged …: pull it first`, from `create_sandbox`**
+
+   **Cause:** The server has no image by that tag. A create does not pull.
+
+   **Fix:** Pull or build the image, and `complete` the job, first.
+
+2. **`… is not reachable from this server: it is not a public address`**
+
+   **Cause:** A `virtx-server-tcp` job named a registry on the server's machine or private network.
+
+   **Fix:** List the registry in `private_registries` in `server.json`.
+
+3. **`409`, `DENIED in use: a sandbox or a build stands on …`**
+
+   **Cause:** The image, or its last tag, is used by a sandbox or a build.
+
+   **Fix:** Remove the sandbox, or let the build finish, then try again.
+
+4. **`Dockerfile:N: … is not one of FROM, RUN, ENV and WORKDIR`**
+
+   **Cause:** The Dockerfile uses another instruction, such as `COPY`, `CMD` or `USER`.
+
+   **Fix:** Drop it. Put files in with [Reading and writing files](/docs/tutorials/reading-writing-files/), and start programs with `exec`.
+
+5. **`Dockerfile:N: ENV with a bare word …`**
+
+   **Cause:** `ENV key value`, the old form.
+
+   **Fix:** Write `ENV key=value`.
+
+6. **`Dockerfile:N: a second FROM …`, or `a named stage …`**
+
+   **Cause:** A multi-stage Dockerfile.
+
+   **Fix:** Use one stage, with one `FROM` and no `AS`.
+
+7. **`the job was removed before it ended`**
+
+   **Cause:** The job was removed while `complete` was waiting for it.
+
+   **Fix:** Start the build or pull again, and leave it until it ends.
+
+## Next
+
+- [Setting up sandboxes](/docs/tutorials/setting-sandboxes/): boot a sandbox from the image.
+- [Mounting volumes](/docs/tutorials/mounting-volumes/): keep data apart from the image, for any sandbox to mount.

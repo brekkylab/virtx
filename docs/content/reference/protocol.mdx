@@ -1,9 +1,11 @@
 ---
 title: "Protocol"
-description: "What a virtx client and server say to each other: the endpoints, the transports, authentication, jobs, images and files."
+description: "What a VirtX client and server say to each other: the endpoints, the transports, authentication, jobs, images and files."
 ---
 
-The virtx protocol is for running virtual machines, either locally or remotely.
+The VirtX protocol is for running virtual machines, either locally or remotely.
+
+The key words MUST, MUST NOT, SHOULD and MAY on this page are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) when, and only when, they appear in all capitals.
 
 A server offers several endpoints, and each speaks its own protocol:
 
@@ -164,7 +166,7 @@ A server MAY turn a request away for now, with `429` or `503` and a `Retry-After
 - `429`, `quota`, has `reason` beside `code` and `message`, naming the limit the request is past. `requests`, the rate of requests, frees up by itself, and a client MAY send the request again after `Retry-After`. Any other `reason`, such as a count of sandboxes, frees up only as the caller closes or deletes something: a client answers it at once rather than waiting.
 - `503`, `capacity`, says nothing was made, so a request that makes something MAY be sent again after `Retry-After`. A `503` with another code or none, such as a proxy's own page, may have come after the request was carried out: a client MAY send it again only where a second sending leaves what the first did -- a `GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE` or `PROPFIND` with no `If-Match` or `If-None-Match` -- and takes a `DELETE` so sent again that is answered `404` as done.
 
-virtx's client sends a request again so for 30 seconds at most, its answers' time and the waits between them together, and then answers the last refusal.
+VirtX's client sends a request again so for 30 seconds at most, its answers' time and the waits between them together, and then answers the last refusal.
 
 ### Jobs
 
@@ -195,7 +197,7 @@ data: {"end": {"code": 0}}
 
 Every reader gets the whole log, from its first entry, as the job writes it.
 A client that sends `Last-Event-ID: n` gets the entries after entry `n` only, so a client whose stream dropped picks up where it left off.
-virtx's client does so by itself over TCP: a stream that breaks, or a `502` to `504` asking for it again, has it asked for after the last entry read, up to five times in a row. A stream that ends before its `end` entry, over either transport, is asked for again at once after the last entry read, where it sent any: a stream cut on the way reads on, and one whose job was removed is answered `404`. One that ends with no entry past where it was asked is asked for again only while the job is `running`, as a broken one is: a job removed is answered `404`, and a log of an ended job asked for after its last entry has nothing more, and ends there.
+VirtX's client does so by itself over TCP: a stream that breaks, or a `502` to `504` asking for it again, has it asked for after the last entry read, up to five times in a row. A stream that ends before its `end` entry, over either transport, is asked for again at once after the last entry read, where it sent any: a stream cut on the way reads on, and one whose job was removed is answered `404`. One that ends with no entry past where it was asked is asked for again only while the job is `running`, as a broken one is: a job removed is answered `404`, and a log of an ended job asked for after its last entry has nothing more, and ends there.
 
 The last entry is `{"end": {...}}`, what the job ended with, and the stream ends after it.
 A job that has ended answers its whole log at once, and ends there.
@@ -315,7 +317,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 - `network` is whether its processes reach a network at all, and is `true` without it.
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
-- `abins` are virtx's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
+- `abins` are VirtX's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM the server stopped, as below, is `true`.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).

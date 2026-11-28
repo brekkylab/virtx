@@ -1,0 +1,207 @@
+---
+title: "Projects"
+description: "Reference for projects and their members."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Everything on a server belongs to a project, which a client names at `connect`, or with `set_project`: a project of the user's by its name, or any by its id.
+A `Project` has its `id`, its `name`, its `owner` (none for one made over stdio) and the client's `role` in it, `owner` or `member`; in Rust, `id()`, `name()`, `owner()`, `role()` and `info()`.
+See [Managing projects](/docs/tutorials/projects/), and [Projects](/docs/reference/protocol/#projects) in the protocol.
+
+| Member | Does |
+| --- | --- |
+| [`create_project`](#create_project) | Makes a project, its maker its owner. |
+| [`list_project`](#list_project) | The projects the client has a role in; `get_project` takes a name of the user's or an id. |
+| [`members`](#members) | Its members, each a `user` and a `role`. |
+| [`set_member`](#set_member) | Gives `user` the role, adding them if they are no member: an owner's to do. |
+| [`remove_member`](#remove_member) | Takes `user`'s role away: an owner's to do, or the user's own, leaving it. |
+| [`remove`](#remove) | Deletes it and everything in it: an owner's to do, refused with `409` while a sandbox lives in it. |
+
+## `create_project`
+
+Makes a project, its maker its owner.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def create_project(name: str) -> Project
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+createProject(name: string): Promise<Project>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn create_project(&self, name: impl Into<String>) -> Call<Project>
+```
+
+</TabItem>
+</Tabs>
+
+## `list_project`
+
+The projects the client has a role in; `get_project` takes a name of the user's or an id.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def list_project() -> list[Project]
+async def get_project(name: str) -> Project
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+listProject(): Promise<Project[]>
+getProject(name: string): Promise<Project>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn list_project(&self) -> Call<Vec<Project>>
+pub fn get_project(&self, name: impl AsRef<str>) -> Call<Project>
+```
+
+</TabItem>
+</Tabs>
+
+## `members`
+
+Its members, each a `user` and a `role`. Over stdio a project has no members, and the member calls are refused with `404`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def members() -> list[ProjectMemberListOutputItem]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+members(): Promise<ProjectMemberInfo[]>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn members(&self) -> Call<Vec<ProjectMemberInfo>>
+```
+
+</TabItem>
+</Tabs>
+
+## `set_member`
+
+Gives `user` the role, adding them if they are no member: an owner's to do.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def set_member(user: str, role: Role) -> ProjectMemberListOutputItem
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+setMember(user: string, role: Role): Promise<ProjectMemberInfo>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn set_member(&self, user: impl AsRef<str>, role: Role) -> Call<ProjectMemberInfo>
+```
+
+</TabItem>
+</Tabs>
+
+## `remove_member`
+
+Takes `user`'s role away: an owner's to do, or the user's own, leaving it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove_member(user: str) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+removeMember(user: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn remove_member(&self, user: impl AsRef<str>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `remove`
+
+Deletes it and everything in it: an owner's to do, refused with `409` while a sandbox lives in it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+remove(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn remove(&self) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `400`, `invalid` | `create_project` | The name is `default`, which everyone already has, or isn't a valid name: use lower-case letters, digits, `.`, `_` and `-`, not starting with `.` or `-`, at most 128. |
+| `409`, `exists` | `create_project` | You already own a project with that name. |
+| `403`, `forbidden` | Any call in a project | You aren't a member, or you named a teammate's project by its name, which finds only your own. Name it by its `id`. |
+| `403`, `forbidden` | `set_member`, `remove_member`, `remove` | Only an owner can do this, except a member removing themself. |
+| `404`, `not_found` | `remove_member` | The user isn't a member. |
+| `409`, `in_use` | `set_member`, `remove_member` | The change takes the owner role from the user whose project it is. That user can't leave the project or step down; remove the project instead. |
+| `409`, `in_use` | `remove` | A sandbox lives in the project. Remove its sandboxes first. |
+| `404`, `not_found` | `members`, `set_member` | The server started by `Client.spawn()` has no users to share with. Use a server of your own. |
+
+Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

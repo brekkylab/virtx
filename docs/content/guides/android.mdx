@@ -32,7 +32,7 @@ Hand the agent an emulator, or a device kept for testing.
 The sandbox is made from an image with `adb` from Alpine's packages, with the port `5037` on local, and is told where the server is with `ADB_SERVER_SOCKET`, so every `adb` command in it reaches the device on your machine.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import PortForwarder, PortSpec, Recipe
@@ -56,7 +56,7 @@ screen = await sandbox.read_file("root/screen.png")
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const { PortForwarder, Recipe } = require('@brekkylab/virtx')
@@ -82,7 +82,7 @@ const screen = await sandbox.readFile('root/screen.png')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let recipe = Recipe::new("alpine:latest").step("apk add -q android-tools");

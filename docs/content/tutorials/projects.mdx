@@ -20,21 +20,21 @@ Until you choose one, everything goes into your own project, `default`.
 ## Create a project
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 project = await client.create_project("demo")
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const project = await client.createProject('demo')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let project = client.create_project("demo").await?;
@@ -52,10 +52,10 @@ To look one up, use `get_project`.
 
 ## Work in a project
 
-Choose the project when you connect, and everything you do through that client happens in it.
+Choose the project when you connect. Everything you do through that client then happens in that project.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 client = Client.connect("https://virtx.example", auth, project="demo")
@@ -64,7 +64,7 @@ volume = await client.create_volume("data")  # a volume in "demo"
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const client = Client.connect('https://virtx.example', auth, 'demo')
@@ -73,7 +73,7 @@ const volume = await client.createVolume('data') // a volume in "demo"
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let client = Client::connect("https://virtx.example", auth, Some("demo"), [] as [(&str, &str); 0])?;
@@ -87,8 +87,7 @@ let volume = client.create_volume(Some("data")).await?; // a volume in "demo"
 To switch projects on a client you already have, use `set_project`.
 In the `virtx` command, use `--project`; see [CLI](/docs/reference/cli/#which-server).
 
-Each project only sees its own resources.
-A volume named `data` in one project and a volume named `data` in another are two different volumes.
+Projects are isolated from each other. A volume named `data` in one project and a volume named `data` in another are two different volumes.
 
 ## Share a project
 
@@ -96,7 +95,7 @@ Add teammates to a project so they can use what is in it.
 Name them as the server knows them, usually by email address.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import Role
@@ -105,14 +104,14 @@ await project.set_member("bob@example.com", Role.MEMBER)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await project.setMember('bob@example.com', 'member')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 use virtx::Role;
@@ -131,33 +130,35 @@ There are two roles:
 `members` lists who is in a project, and `remove_member` takes someone out.
 A member can also leave a project on their own with `remove_member`.
 
-A teammate's project is named by its owner, so your teammates reach a shared project by its `id` rather than its name: `project.id` is what to pass them.
+A project name is unique only for its owner, so two people can each have a project called `demo`. Your teammates must therefore use a shared project's `id`, not its name. Send them `project.id`.
 
-Members are for servers with users, such as [your own server](/docs/tutorials/self-hosting/).
-A server on your own machine, started with `Client.spawn()`, has only you.
-On virtx cloud, you create projects and add members in the console instead.
+Where you can share projects depends on the server:
+
+- **Your own server:** share projects with `set_member`, as above. See [Running your own server](/docs/tutorials/self-hosting/).
+- **Local server (`Client.spawn()`):** has only one user, you, so there is no one to share with.
+- **VirtX cloud:** create projects and add members in the console.
 
 ## Remove a project
 
 When the work is done, remove the project to delete everything in it at once.
-Remove its sandboxes first: a project with a sandbox still in it is not removed.
+Remove its sandboxes first: removing a project that still has a sandbox fails with `409`.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 await project.remove()
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await project.remove()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 project.remove().await?;
@@ -166,7 +167,62 @@ project.remove().await?;
 </TabItem>
 </Tabs>
 
-Removing your `default` project removes it like any other, and you get a new, empty `default` the next time you use it.
-The new one has a new `id` and only you in it, so teammates you shared the old one with need to be added again.
+You can remove your `default` project like any other. The server creates a new, empty `default` the next time you use it.
+The new `default` has a new `id` and only you as a member, so you need to add your teammates again.
 
-For every call and what each returns, see the [API reference](/docs/reference/api/#projects).
+For every call and what each returns, see [Projects](/docs/sdk/projects/) in the SDK reference.
+
+## Troubleshooting
+
+1. **`400`, `invalid`, `"default" is each user's own project, made for them`**
+
+   **Cause:** A project named `default` was created.
+
+   **Fix:** Pick another name: everyone has a `default` already.
+
+2. **`400`, `invalid`, `… is not a project's name`**
+
+   **Cause:** Upper case, another character, more than 128, or a name shaped like an id.
+
+   **Fix:** Use lower-case letters, digits, `.`, `_` and `-`, not starting with `.` or `-`.
+
+3. **`409`, `exists`, `a project named … is already its owner's`**
+
+   **Cause:** You already own a project with that name.
+
+   **Fix:** Use it, or pick another name.
+
+4. **`403`, `not a member of the project, or not from here`**
+
+   **Cause:** A teammate's project named by its name, which finds only your own, or a project you are not in.
+
+   **Fix:** Name it by its `id`, or ask its owner to add you.
+
+5. **`403`, `only an owner …`**
+
+   **Cause:** A member tried what only an owner may do.
+
+   **Fix:** Ask an owner.
+
+6. **`409`, `in_use`, `project … would be left without its owner`**
+
+   **Cause:** The user whose project it is tried to leave it or step down. Other owners can leave or step down freely.
+
+   **Fix:** Remove the project instead.
+
+7. **`409`, `in_use`, `a sandbox lives in project …`**
+
+   **Cause:** The project was removed while it has a sandbox.
+
+   **Fix:** Remove its sandboxes first.
+
+8. **`404`, from `members` or `set_member`**
+
+   **Cause:** The server started by `Client.spawn()` has no users to share with.
+
+   **Fix:** Use a [server of your own](/docs/tutorials/self-hosting/).
+
+## Next
+
+- [Running your own server](/docs/tutorials/self-hosting/): serve VirtX to the team you share projects with.
+- [Mounting volumes](/docs/tutorials/mounting-volumes/): the volumes a project keeps.

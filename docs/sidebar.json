@@ -3,7 +3,8 @@
     "label": "Getting started",
     "items": [
       { "label": "Overview", "link": "/" },
-      { "slug": "hello-world" }
+      { "slug": "hello-world" },
+      { "slug": "installation" }
     ]
   },
   {
@@ -36,9 +37,35 @@
   {
     "label": "Reference",
     "items": [
-      { "slug": "reference/api" },
       { "slug": "reference/cli" },
       { "slug": "reference/protocol" }
+    ]
+  },
+  {
+    "label": "SDK",
+    "items": [
+      { "slug": "sdk" },
+      { "slug": "sdk/environment-variables" }
+    ]
+  },
+  {
+    "label": "SDK reference",
+    "items": [
+      { "slug": "sdk/client" },
+      { "slug": "sdk/sandboxes" },
+      { "slug": "sdk/jobs" },
+      { "slug": "sdk/files" },
+      { "slug": "sdk/images" },
+      { "slug": "sdk/volumes" },
+      { "slug": "sdk/projects" },
+      { "slug": "sdk/port-forwarder" },
+      { "slug": "sdk/errors" }
+    ]
+  },
+  {
+    "label": "Changelog",
+    "items": [
+      { "slug": "changelog" }
     ]
   }
 ]

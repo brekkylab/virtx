@@ -14,7 +14,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const BASE = '/docs/';
-const SITE_PAGES = ['/signin/', '/signup/'];
+const SITE_PAGES = ['/signin/', '/signup/', '/llms.txt', '/llms-full.txt'];
 const LISTED = ['Tutorials', 'Guides'];
 const dist = process.argv[2] ?? 'dist';
 

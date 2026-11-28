@@ -1,0 +1,90 @@
+---
+title: "SDK overview"
+description: "The Python, Node.js and Rust clients: how to install them, how their names map to each other, and how a call returns."
+---
+
+import { CardGrid, LinkCard, Tabs, TabItem } from "@astrojs/starlight/components";
+
+VirtX has one client in three languages: `virtx` for Python, `@brekkylab/virtx` for Node.js and the `virtx` crate for Rust.
+All three make their requests through the same library, `libvirtx_core`, so they send the same requests and return the same values.
+[Installation](/docs/installation/) covers what each needs.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```sh
+pip install virtx
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```sh
+npm install @brekkylab/virtx
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```sh
+cargo add virtx
+cargo add tokio --features macros,rt-multi-thread
+```
+
+</TabItem>
+</Tabs>
+
+## Names
+
+Python's names are the reference's own.
+Node.js uses the same names in camelCase, such as `createSandbox` for `create_sandbox`, and fields in camelCase, such as `memoryMib`.
+Rust uses the same names as Python, and passes a call's options in one struct, such as `SandboxCreateArgs`.
+Each entry in this reference shows all three.
+
+## How a call returns
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+A call is a coroutine: `await` it for its value.
+A call that starts a job returns a `StartedJob`: awaited, it is the job; iterated with `async for`, it yields the job's log, a `LogEntry` at a time; `complete()` follows it to its end.
+`download_image` and `upload_image` are async iterators of `Progress` events, then one `Output`.
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+A call returns a `Promise`.
+A call that starts a job returns a `StartedJob`, a `Promise` of the job that is also an async iterable of its log, read with `for await`; `complete()` follows it to its end.
+`downloadImage` and `uploadImage` are async generators of `{ progress }` events, then one `{ output }`.
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+A call returns a `Call<T>`, a `Future` of `Result<T, Error>` that any async runtime awaits; on a thread without one, `.wait()` blocks for it.
+A call that returns items one by one is an `Events<T>`, a `Stream`, or `.wait_next()` without a runtime.
+A call that starts a job returns a `StartedJob`: awaited, it is the job; `.log()` is its `JobLog`, a `Stream` of log entries; `.complete(print)` is a `JobEnd`, what the job ended with.
+
+</TabItem>
+</Tabs>
+
+When a request is sent differs by language, and in each it is sent once, however its value is used:
+
+- **Python:** the calls are `async def`, so nothing is sent until the value is awaited, or, for a `StartedJob`, first awaited or iterated.
+- **Node.js and Rust:** the request is sent when the method is called.
+
+Calls that fail raise, throw or return the same error in each language: see [Errors](/docs/sdk/errors/).
+
+## The reference
+
+<CardGrid>
+  <LinkCard title="Client" href="/docs/sdk/client/" description="Reaching a server: spawning one, or connecting to one, such as VirtX cloud." />
+  <LinkCard title="Sandboxes" href="/docs/sdk/sandboxes/" description="Making, finding and removing sandboxes, and their ports" />
+  <LinkCard title="Jobs" href="/docs/sdk/jobs/" description="Processes in a sandbox, and image builds, pulls and pushes: their logs, ends and signals" />
+  <LinkCard title="Files" href="/docs/sdk/files/" description="Reading and writing the files of a sandbox or a volume" />
+  <LinkCard title="Images" href="/docs/sdk/images/" description="Building, pulling, pushing, tagging and moving images" />
+  <LinkCard title="Volumes" href="/docs/sdk/volumes/" description="Volumes, and remote stores mounted in them" />
+  <LinkCard title="Projects" href="/docs/sdk/projects/" description="Projects and their members" />
+  <LinkCard title="PortForwarder" href="/docs/sdk/port-forwarder/" description="Forwarding a sandbox's TCP port, in the sandbox or on local." />
+  <LinkCard title="Errors" href="/docs/sdk/errors/" description="What a failed call raises, and telling failures apart" />
+  <LinkCard title="Environment variables" href="/docs/sdk/environment-variables/" description="What the clients, the CLI and the server read" />
+</CardGrid>

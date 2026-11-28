@@ -5,22 +5,22 @@ description: "Create a volume, mount it into sandboxes, and mount remote stores 
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-A **volume** is storage kept apart from any sandbox, under a name.
-It is mounted at a path in a sandbox, read-write or read-only, and stays when the sandbox is removed.
+A **volume** is named storage that exists apart from any sandbox.
+You mount it at a path in a sandbox, read-write or read-only, and it is kept when the sandbox is removed.
 
-A volume differs from what a sandbox writes over its image in three ways:
+Use a volume instead of the sandbox's own disk when:
 
-- It outlives the sandbox, which takes the rest of what it wrote with it when it is removed.
-- Several sandboxes can mount it at once.
-- Its files can be read and written from your code with no sandbox running.
+- Files must survive after the sandbox is removed. Everything else a sandbox writes is deleted with it.
+- Several sandboxes need the same files at the same time.
+- Your code needs to read or write the files while no sandbox is running.
 
 ## Create a volume
 
-`create_volume` makes an empty volume, and the server picks a name when none is given.
-A volume's files are read and written from your code with the same calls as a sandbox's, through the server's files API over WebDAV.
+`create_volume` creates an empty volume. If you don't give a name, the server picks one.
+You read and write a volume's files from your code with the same calls as a sandbox's; see [Reading and writing files](/docs/tutorials/reading-writing-files/).
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 volume = await client.create_volume("data")
@@ -28,7 +28,7 @@ await volume.write_file("config.json", '{"retries": 3}')
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const volume = await client.createVolume('data')
@@ -36,9 +36,11 @@ await volume.writeFile('config.json', '{"retries": 3}')
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
+use virtx::Files; // write_file and read_dir come from this trait
+
 let volume = client.create_volume(Some("data")).await?;
 volume.write_file("config.json", r#"{"retries": 3}"#, None).await?;
 ```
@@ -48,11 +50,11 @@ volume.write_file("config.json", r#"{"retries": 3}"#, None).await?;
 
 ## Mount it into a sandbox
 
-Pass `volumes` to `create_sandbox`, each with the volume, the path it is mounted at, and whether it is read-only.
-What the sandbox writes under that path goes into the volume.
+Pass `volumes` to `create_sandbox`. For each volume, give the volume, the path to mount it at, and whether it is read-only.
+Files the sandbox writes under that path are stored in the volume.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 from virtx import SandboxVolume
@@ -65,7 +67,7 @@ await sandbox.exec(["cat", "/data/config.json"]).complete(print=True)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const sandbox = await client.createSandbox('alpine:latest', {
@@ -75,7 +77,7 @@ await sandbox.exec(['cat', '/data/config.json']).complete({ print: true })
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let args = SandboxCreateArgs::new("alpine:latest").volume(volume.name(), "/data");
@@ -86,29 +88,29 @@ sandbox.exec(&SandboxExecArgs::new(["cat", "/data/config.json"])).complete(true)
 </TabItem>
 </Tabs>
 
-Set `readonly` to mount it read-only: `SandboxVolume(volume, "/data", readonly=True)` in Python, `{ volume, path: '/data', readonly: true }` in Node.js, or a `SandboxVolume` with `readonly: true` pushed onto `args.volumes` in Rust.
-A sandbox can mount several volumes, in order, so a later path can sit inside an earlier one; two at one path are refused.
+Set `readonly` to mount it read-only: `SandboxVolume(volume, "/data", readonly=True)` in Python, `{ volume, path: '/data', readonly: true }` in Node.js, or `.readonly_volume(volume.name(), "/data")` in Rust.
+A sandbox can mount several volumes. They are mounted in the order you list them, so a later volume can be mounted inside an earlier one. Two volumes at the same path are rejected.
 
 ## Mount a remote store inside it
 
-A volume can also show a remote store as files.
-`mount` puts the store at a path in the volume, a directory the mount creates, and every sandbox that mounts the volume sees it there.
-Remote mounts are read-only: copy a file out of one into the volume to change it.
+A volume can also show the contents of a remote store, such as Notion or Google Drive, as files.
+`mount` attaches the store at a new directory in the volume, and every sandbox that mounts the volume sees the store's files there.
+Remote mounts are read-only. To change a file, copy it out of the mount into the volume first.
 
 These are the stores a volume can mount, with the credentials each takes:
 
 | Store | Shows | Source (Python) | Credentials |
 | --- | --- | --- | --- |
 | Notion | The pages a Notion integration can reach | `NotionSource` | `api_key` |
-| Google Drive | A Google Drive, with Docs, Sheets and Slides as files | `GdriveSource` | `client_id`, `client_secret`, `refresh_token` |
+| Google Drive | A Google Drive, with Docs, Sheets and Slides as files, read-only | `GdriveSource` | `client_id`, `client_secret`, `refresh_token` with the `drive.readonly` scope |
 | OneDrive | A OneDrive | `OnedriveSource` | `client_id`, `refresh_token`, and `client_secret` for a confidential app |
 
-In Node.js, a source is an object with its `type`, `'notion'`, `'gdrive'` or `'onedrive'`, and its credentials in camelCase.
+In Node.js, a source is an object with a `type` (`'notion'`, `'gdrive'` or `'onedrive'`) and the credentials in camelCase.
 In Rust, it is a `MountSource` variant.
-A refresh token is taken as given: getting one through the service's consent screen is up to your app.
+VirtX doesn't obtain refresh tokens. Your app must get one through the service's consent screen and pass it in.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 import os
@@ -121,7 +123,7 @@ for entry in await volume.read_dir("docs/notion"):
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 await volume.mount('docs/notion', { type: 'notion', apiKey: process.env.NOTION_API_KEY })
@@ -129,7 +131,7 @@ for (const entry of await volume.readDir('docs/notion')) console.log(entry.name)
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let source = MountSource::Notion { api_key: std::env::var("NOTION_API_KEY")? };
@@ -142,6 +144,63 @@ for entry in volume.read_dir("docs/notion").await? {
 </TabItem>
 </Tabs>
 
-`mounts` lists a volume's mounts without their credentials, and `unmount` takes one away, leaving the store as it is.
+`mounts` lists a volume's mounts, without their credentials. `unmount` removes a mount and leaves the remote store unchanged.
 
-When it is no longer needed, `remove` deletes the volume and everything in it.
+## Remove a volume
+
+`remove` deletes the volume and everything in it. It fails with `409` while a sandbox has the volume mounted, so remove those sandboxes first.
+
+## Troubleshooting
+
+1. **`409`, `exists`, `a volume named … is already here`**
+
+   **Cause:** Another volume has that name.
+
+   **Fix:** Use `get_volume` to open it, or pick another name.
+
+2. **`404`, `not_found`, `no volume here is named …`**
+
+   **Cause:** No volume has that name.
+
+   **Fix:** Check the name against `list_volume`.
+
+3. **`400`, `invalid`, `… another volume is there`**
+
+   **Cause:** Two volumes are mounted at one path.
+
+   **Fix:** Give each its own path.
+
+4. **`409`, `exists`, `a mount is at … already`**
+
+   **Cause:** A store is already mounted at that path.
+
+   **Fix:** `unmount` it first, or use another path.
+
+5. **`400`, `invalid`, `… would be inside or over the mount at …`**
+
+   **Cause:** A mount inside or over another one, or at the volume's root.
+
+   **Fix:** Mount each store in its own subdirectory.
+
+6. **`400`, `invalid`, `… is or holds the mount at …; unmount it first`**
+
+   **Cause:** A remove or rename of a path that holds a mount.
+
+   **Fix:** `unmount` it first.
+
+7. **`409`, `in_use`, `volume … is mounted by a machine or being removed`**
+
+   **Cause:** A sandbox still mounts the volume.
+
+   **Fix:** Remove that sandbox first.
+
+8. **`400`, `invalid`, `making the mount's store: …`**
+
+   **Cause:** The store refused the credentials, or they are malformed.
+
+   **Fix:** Check the API key or refresh token, and for Google Drive the `drive.readonly` scope.
+
+## Next
+
+- [Reading and writing files](/docs/tutorials/reading-writing-files/): the file calls a volume shares with a sandbox.
+- [Managing projects](/docs/tutorials/projects/): share volumes with your team.

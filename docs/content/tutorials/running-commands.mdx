@@ -7,12 +7,12 @@ import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
 ## Run a command
 
-`exec` takes an argv and starts a job, and `complete` follows it to its end and answers its exit code.
-With `print`, it prints what the command writes as it writes it, stdout to stdout and stderr to stderr.
-A nonzero exit code is the answer, not an error.
+`exec` starts a command in the sandbox. Pass the command as a list of arguments (an argv), not as one string.
+`complete` waits for the command to finish and returns its exit code. With `print`, it also prints the command's stdout and stderr as they are written.
+A nonzero exit code is returned as a value. It is not raised as an error.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 code = await sandbox.exec(["uname", "-a"]).complete(print=True)
@@ -20,7 +20,7 @@ print("exited", code)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const code = await sandbox.exec(['uname', '-a']).complete({ print: true })
@@ -28,7 +28,7 @@ console.log('exited', code)
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let code = sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).complete(true).await?;
@@ -38,20 +38,29 @@ println!("exited {code}");
 </TabItem>
 </Tabs>
 
-A command that cannot start, such as one not found, is refused at `exec` and starts no job.
+If the command can't start, for example because it isn't installed in the image, the call fails with `422`, `not_started`, and no job is created.
+In Python, the error is raised where you first await, iterate or complete the value, because nothing is sent to the server before that.
 
 ## Follow a job
 
-Each command runs as a **job**. The server runs it apart from the request that started it, so a job keeps going when a loop is left or a connection drops, and its output is kept in a log you can read again.
+Each command runs as a **job**. A job runs independently of the request that started it: it keeps running if your loop exits or your connection drops, and the server keeps its output in a log you can read again.
 
-The value `exec` returns is three things at once.
-Completed, it answers how the job ended; iterated, it is the job's log.
-Awaited, it is the job itself: its `id`, whether it is `running`, and once it has ended, its exit `code`, and its `reason` if it did not end by itself.
-`get` asks for the job as it is now, a sandbox's `jobs` and `job(id)` find it again later, and the job's `log` reads its output from the start, or after the `id` of the last entry seen.
-A log read from a server over HTTP whose connection breaks, the server restarted or a proxy in front of it replaced, is read on after the last entry by itself, up to five times in a row, before its error is yours. A log that stops before the job's end is read on too, and one whose job is deleted while you read it ends with the job's `end`, or, where the server sends none, fails with `404` rather than stopping short.
+`exec` returns a value you can use in three ways:
+
+- **Await it** to get the job: its `id`, whether it is `running`, and after it ends, its exit `code` and the `reason` it was stopped, if it didn't exit on its own.
+- **Iterate it** to read the job's log, entry by entry.
+- **Call `complete()`** to wait for the job to end and get its exit code.
+
+To check on a job later:
+
+- `job.get()` returns the job's current state.
+- `sandbox.jobs()` lists a sandbox's jobs, and `sandbox.job(id)` returns one by its id.
+- `job.log()` reads the job's output from the start, or from after the `id` of the last entry you read.
+
+Over HTTP, if the connection breaks while you read a log (for example because the server restarted or a proxy in front of it was replaced), the client reconnects and continues after the last entry. It retries up to five times in a row before it raises the error. A log that stops before the job's `end` entry is read on the same way, over HTTP or stdio. If the job is removed while you read its log, the log ends with the job's `end` entry, or fails with `404` if the server doesn't send one.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 job = await sandbox.exec(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 1; done"])
@@ -66,7 +75,7 @@ print(job.running, job.code)
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 let job = await sandbox.exec(['sh', '-c', 'for i in 1 2 3; do echo $i; sleep 1; done'])
@@ -80,9 +89,11 @@ console.log(job.running, job.code)
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
+use futures::StreamExt; // cargo add futures: a log is a Stream
+
 let args = SandboxExecArgs::new(["sh", "-c", "for i in 1 2 3; do echo $i; sleep 1; done"]);
 let job = sandbox.exec(&args).await?;
 println!("{} {}", job.id(), job.info().running);
@@ -103,29 +114,29 @@ println!("{} {:?}", job.info().running, job.info().code);
 
 It prints:
 
-```text frame="terminal" title="Output"
+```text frame="terminal" title="Output (Python)"
 4ea37caf True
 1 Stdout(line='1')
 2 Stdout(line='2')
 3 Stdout(line='3')
-4 SandboxJobEnd(code=0)
+4 SandboxJobEnd(code=0, reason=None)
 False 0
 ```
 
-A log keeps a limit's worth of entries. Past it, one `truncated` entry stands for what was dropped, and `end` still comes last.
+A log holds a limited number of entries. When a job writes more, the dropped entries are replaced by a single `truncated` entry, and the `end` entry still comes last.
 
 <Aside type="tip">
-Building, pulling, and pushing an image are jobs too, used the same way: complete `build_image`, `pull_image`, or `push_image` for its digest, iterate it for the log, or await it for the job. See [Working with images](/docs/tutorials/images/).
+Image builds, pulls and pushes are jobs too, and work the same way: call `complete()` on `build_image`, `pull_image` or `push_image` to get the image digest, iterate it to read the log, or await it to get the job. See [Working with images](/docs/tutorials/images/).
 </Aside>
 
 ## Stream output
 
-To handle each line as it comes, iterate the job instead of completing it.
-It yields the command's output, a line per entry, then how it ended.
-Here a command reports its progress a step a second, and a warning on stderr, and the loop tells the two apart:
+To handle each line of output as it arrives, iterate the job instead of calling `complete()`.
+Each entry is one line of stdout or stderr, and the last entry says how the job ended.
+In this example, a command prints one progress line per second to stdout and a warning to stderr, and the loop handles each kind separately:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 cmd = ["sh", "-c", "for i in 1 2 3; do echo step $i/3; sleep 1; done; echo cache miss >&2"]
@@ -140,7 +151,7 @@ async for entry in sandbox.exec(cmd):
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const cmd = ['sh', '-c', 'for i in 1 2 3; do echo step $i/3; sleep 1; done; echo cache miss >&2']
@@ -152,7 +163,7 @@ for await (const entry of sandbox.exec(cmd)) {
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let cmd = ["sh", "-c", "for i in 1 2 3; do echo step $i/3; sleep 1; done; echo cache miss >&2"];
@@ -170,7 +181,7 @@ while let Some(entry) = log.next().await {
 </TabItem>
 </Tabs>
 
-Each step prints as the command writes it, a second apart, not all at once when it ends:
+Each line prints as soon as the command writes it, one second apart:
 
 ```text frame="terminal" title="Output"
 stdout: step 1/3
@@ -180,20 +191,20 @@ stderr: cache miss
 exited 0
 ```
 
-A line longer than 64 KiB arrives as several entries, and leaving the loop leaves the command running.
+A line longer than 64 KiB arrives as several entries. Exiting the loop early doesn't stop the command.
 
-Iterated before it is awaited, `exec` starts the command and reads its output as one request where the server answers so, and as two, the job and then its log, where it does not; awaited after, it is the same job.
-In Python nothing is sent until the value is first awaited or iterated, so whichever of the two comes first decides, whatever else the code awaits in between.
-In Node.js the command is started as the call returns, as a promise's work is: it is one request only when the loop begins before the code awaits anything else, as `for await (const entry of sandbox.exec(cmd))` does, and two once anything is awaited between the call and the loop.
-In Rust, `sandbox.exec_with_log(&args)` does the same, yielding the job first and then each entry.
+When you iterate `exec` directly, the client starts the command and reads its output in a single request, if the server supports it. Otherwise it sends two requests: one to start the job and one to read its log. Either way, awaiting the value afterwards returns the same job.
+- **Python:** nothing is sent until you first await or iterate the value, so whichever you do first decides how the request is made.
+- **Node.js:** the command starts when `exec` returns. It is one request only if the loop starts before your code awaits anything else, as in `for await (const entry of sandbox.exec(cmd))`.
+- **Rust:** use `sandbox.exec_with_log(&args)`, which yields the job first and then each log entry.
 
 ## Run several commands at once
 
-Awaiting `exec` starts a job and returns without waiting for it to end, so a command can run in the background while others run beside it.
-Here one job writes a line to a file every second, and another waits a few seconds and reads what has been written so far.
+Awaiting `exec` starts a job and returns without waiting for it to end, so you can run several commands at the same time.
+In this example, one job appends a line to a file every second, and a second job waits a few seconds and then prints the file.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 writer = await sandbox.exec(["sh", "-c", "i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done"])
@@ -205,7 +216,7 @@ await writer.remove()  # kills the writer, which never ends on its own
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const writer = await sandbox.exec(['sh', '-c', 'i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done'])
@@ -218,7 +229,7 @@ await writer.remove() // kills the writer, which never ends on its own
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let args = SandboxExecArgs::new(["sh", "-c", "i=0; while true; do i=$((i+1)); echo tick $i >> /tmp/events; sleep 1; done"]);
@@ -235,7 +246,7 @@ writer.remove().await?; // kills the writer, which never ends on its own
 </TabItem>
 </Tabs>
 
-The reader prints as many ticks as seconds it waited, since the writer kept going the whole time.
+The second job prints one line for each second it waited, because the first job kept running the whole time.
 For example:
 
 ```text frame="terminal" title="Output (Python, random wait: 4 s)"
@@ -243,31 +254,33 @@ Stdout(line='tick 1')
 Stdout(line='tick 2')
 Stdout(line='tick 3')
 Stdout(line='tick 4')
-SandboxJobEnd(code=0)
+SandboxJobEnd(code=0, reason=None)
 ```
 
-A job left in the background runs until it ends or is removed; removing the sandbox stops every job in it. An ended job is kept, with its log, for its output to be read: a sandbox keeps its last 100, and as another starts past them the one that ended first is removed. A job that runs is never removed so.
+A background job runs until it exits or you remove it. Removing the sandbox stops every job in it.
+
+After a job ends, the sandbox keeps it and its log so you can read the output. Each sandbox keeps its last 100 ended jobs; when another job starts past them, the one that ended first is deleted. Running jobs are never deleted this way.
 
 ## Set a timeout
 
-`timeout_ms` kills the process when the time runs out, which ends it with `137`, as `SIGKILL` does:
+`timeout_ms` kills the command when the time runs out. The job then ends with exit code `137`, the same code `SIGKILL` gives:
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 code = await sandbox.exec(["sleep", "60"], timeout_ms=10_000).complete()  # 137
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const code = await sandbox.exec(['sleep', '60'], { timeoutMs: 10_000 }).complete() // 137
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let mut args = SandboxExecArgs::new(["sleep", "60"]);
@@ -278,25 +291,70 @@ let code = sandbox.exec(&args).complete(false).await?; // 137
 </TabItem>
 </Tabs>
 
-The job says why it ended where the process did not end by itself: its `reason`, and its log's `end`'s, is `timeout` here. A process that exits with `137` itself, or that is sent `SIGKILL`, has no `reason`, so `137` alone does not say a timeout ended it.
+Exit code `137` alone doesn't tell you a timeout happened, because a process can also exit with `137` itself or receive `SIGKILL` from elsewhere. When VirtX stops a job, it sets the job's `reason`, and the `reason` on the log's `end` entry, to say why. Here it is `timeout`.
 
-| `reason` | Why the process ended, killed with its code `137` |
+| `reason` | Why VirtX stopped the command (exit code `137`) |
 | --- | --- |
-| `timeout` | Its `timeout_ms` ran out. |
-| `cancelled` | Its job was removed while it ran. Its sandbox is still there, and the command can be run again. |
-| `sandbox_deleted` | Its sandbox was removed under it, and everything it had with it. |
-| `vm_exited` | Its sandbox's machine exited on its own under it. |
-| `oom` | Its memory ran out: it, or a process it started, was killed past the memory one command may take or the machine's, or for thrashing there. |
-| `restarted` | Its server restarted while it ran, keeping its sandbox. |
+| `timeout` | `timeout_ms` ran out. |
+| `cancelled` | The job was removed while it ran. The sandbox still exists, and you can run the command again. |
+| `sandbox_deleted` | The sandbox was removed while the command ran. |
+| `vm_exited` | The sandbox's VM exited on its own. |
+| `oom` | The command, or a process it started, ran out of memory: it went past the memory one command may use, or the sandbox's memory, or the sandbox was thrashing. |
+| `restarted` | The server restarted while the command ran. The sandbox was kept. |
 
-A later version may add a reason. A package that does not know it keeps it as the string it was sent, so the job still reads.
+A later version of VirtX may add a reason. A client that doesn't know it keeps it as the string the server sent, so the job can still be read.
+
+## Write to a command's stdin
+
+To send input to a command, start it with `stdin` turned on, then call `write_stdin`. Pass `eof` to close stdin after the write, so the command knows the input has ended.
+Await each write before you send the next one, so the writes arrive in order.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+job = await sandbox.exec(["cat"], stdin=True)
+await job.write_stdin("one\n")
+await job.write_stdin("two\n", eof=True)
+async for entry in job.log():
+    print(entry.entry)  # Stdout(line='one'), Stdout(line='two'), SandboxJobEnd(code=0, ...)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const job = await sandbox.exec(['cat'], { stdin: true })
+await job.writeStdin('one\n')
+await job.writeStdin('two\n', true) // true closes stdin after this write
+for await (const entry of job.log()) console.log(entry)
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+let job = sandbox.exec(&SandboxExecArgs::new(["cat"]).stdin(true)).await?;
+job.write_stdin(Some("one\n"), false).await?;
+job.write_stdin(Some("two\n"), true).await?; // true closes stdin after this write
+let mut log = job.log(None);
+while let Some(entry) = log.next().await {
+    println!("{:?}", entry?.entry);
+}
+```
+
+</TabItem>
+</Tabs>
+
+If the command closes its stdin while you are writing, the write fails with `409`, `ended`, and the error's `written` field says how many bytes were delivered.
 
 ## Signal or cancel a job
 
-A job's `signal` sends a signal such as `SIGTERM` to its process and every process it started, and `remove` kills them and forgets the job: a log being read then ends with the job's `end`, its `reason` `cancelled`. Removing the sandbox ends each job that runs in it so too, its `reason` `sandbox_deleted`.
+`signal` sends a signal, such as `SIGTERM`, to the job's process and every process it started.
+`remove` kills those processes and deletes the job. A log you are reading then ends with the job's `end` entry, with `reason` set to `cancelled`. Removing the sandbox also kills its running jobs, with `reason` set to `sandbox_deleted`.
 
 <Tabs syncKey="lang">
-<TabItem label="Python">
+<TabItem label="Python" icon="seti:python">
 
 ```python
 job = await sandbox.exec(["sleep", "600"])
@@ -305,7 +363,7 @@ await job.remove()
 ```
 
 </TabItem>
-<TabItem label="Node.js">
+<TabItem label="Node.js" icon="node">
 
 ```js
 const job = await sandbox.exec(['sleep', '600'])
@@ -314,7 +372,7 @@ await job.remove()
 ```
 
 </TabItem>
-<TabItem label="Rust">
+<TabItem label="Rust" icon="seti:rust">
 
 ```rust
 let job = sandbox.exec(&SandboxExecArgs::new(["sleep", "600"])).await?;
@@ -325,3 +383,46 @@ job.remove().await?;
 </TabItem>
 </Tabs>
 
+
+## Troubleshooting
+
+1. **`422`, `not_started`**
+
+   **Cause:** The command was not found, or could not start. No job is made.
+
+   **Fix:** Check the first word of the command. For shell syntax such as pipes or `$VAR`, run `["sh", "-c", "..."]`.
+
+2. **`400`, `invalid`**
+
+   **Cause:** The command was empty.
+
+   **Fix:** Pass a list of arguments, with at least the program to run. In Python, a string isn't refused but split into its characters, so `exec("ls")` runs `l`: always pass a list.
+
+3. **`404`, `not_found`, from `job(id)`, `get` or `log`**
+
+   **Cause:** The job was removed, or it was deleted to make room: a sandbox keeps its last 100 ended jobs, and deletes the oldest as another starts.
+
+   **Fix:** Read a job's output before 100 more jobs start, or have the command write its output to a file on a volume.
+
+4. **`the job was removed before it ended`**
+
+   **Cause:** The job was removed while `complete` was waiting for it.
+
+   **Fix:** Don't remove a job you are completing.
+
+5. **`409`, `ended`**
+
+   **Cause:** The sandbox's VM has stopped permanently, or `write_stdin` was called on a job started without `stdin`, or whose stdin is already closed, or that has ended.
+
+   **Fix:** Start the job with `stdin` turned on. If the sandbox has ended, remove it and create another.
+
+6. **Exit code `137` with a `reason`**
+
+   **Cause:** The job was stopped: see [the reasons above](#set-a-timeout).
+
+   **Fix:** Raise `timeout_ms` for `timeout`. For `oom`, create the sandbox with more `memory_mib`.
+
+## Next
+
+- [Reading and writing files](/docs/tutorials/reading-writing-files/): put a command's input in and get its output back without running anything.
+- [Networks and ports](/docs/tutorials/networks-ports/): reach a server a command started in the sandbox.

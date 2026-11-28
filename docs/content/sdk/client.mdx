@@ -1,0 +1,285 @@
+---
+title: "Client"
+description: "Reference for Client: spawn a server, or connect to one over HTTP, such as VirtX cloud."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A `Client` holds a session with one server: one it starts as a child process and talks to over stdio, or one it reaches over HTTP.
+Everything else in the SDK is reached through a client.
+See [Quick start](/docs/hello-world/) for the three ways to reach a server.
+
+| Member | Does |
+| --- | --- |
+| [`spawn`](#spawn) | Starts a server as a child process and talks to it over its stdin and stdout. |
+| [`connect`](#connect) | Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`. |
+| [`set_auth`](#set_auth) | Replaces the credentials every later request sends, such as a new token when the server's are short-lived. |
+| [`set_headers`](#set_headers) | Replaces the headers every later request sends. |
+| [`set_project`](#set_project) | Names the project of every later request. |
+| [`clone`](#clone) | Another hold of the same session. |
+| [`close`](#close) | Lets go of this hold; the last one ends the session. |
+| [`ensure_virtx`](#ensure_virtx) | A function of the package rather than of a client: fetches `virtx-stdio` into the cache ahead of `spawn`, without starting it, and returns its path. |
+
+## `spawn`
+
+Starts a server as a child process and talks to it over its stdin and stdout.
+Without `program`, it starts `virtx-stdio` of the library's version, fetched into a cache the first time. Rust calls the no-program form `Client::spawn_virtx`, which returns an `Opening` to await.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@classmethod
+def spawn(program: str | None = None, args: Iterable[str] = ()) -> Client
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+static spawn(program?: string | null, args?: string[]): Client
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn spawn(program: impl AsRef<str>, args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Client, Error>
+pub fn spawn_virtx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Opening
+```
+
+</TabItem>
+</Tabs>
+
+## `connect`
+
+Reaches a server over HTTP at its base `url`, sending `auth` and `headers` with every request, every request in `project`.
+A token is sent over plain `http` only to this machine's loopback.
+For VirtX cloud, the `url` is `https://cloud.virtx.sh` and `auth` is a `BearerAuth` with an API key from the console; see [Hello world](/docs/hello-world/#virtx-cloud).
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@classmethod
+def connect(url: str, auth: Auth | None = None, project: str | None = None,
+            headers: Mapping[str, str] | None = None) -> Client
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+static connect(url: string, auth?: Auth | null, project?: string | null,
+               headers?: Record<string, string>): Client
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn connect(url: impl AsRef<str>, auth: Auth, project: Option<&str>,
+               headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>) -> Result<Client, Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `set_auth`
+
+Replaces the credentials every later request sends, such as a new token when the server's are short-lived. A forwarder already open sends it with its next connection. Over stdio nothing changes.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def set_auth(auth: Auth | None) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+setAuth(auth: Auth | null): void
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn set_auth(&self, auth: Auth) -> Result<(), Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `set_headers`
+
+Replaces the headers every later request sends. Over stdio nothing changes.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def set_headers(headers: Mapping[str, str]) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+setHeaders(headers: Record<string, string>): void
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn set_headers(&self, headers: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>) -> Result<(), Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `set_project`
+
+Names the project of every later request. Without a project, a request is in its user's own, `default`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def set_project(project: str | None) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+setProject(project: string | null): void
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn set_project(&self, project: Option<&str>) -> Result<(), Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `clone`
+
+Another hold of the same session.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def clone() -> Client
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+clone(): Client
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+impl Clone for Client  // client.clone()
+```
+
+</TabItem>
+</Tabs>
+
+## `close`
+
+Lets go of this hold; the last one ends the session. Python's `aclose` does it off the event loop; in Rust, dropping the client does the same.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def close() -> None
+async def aclose() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+close(): Promise<void>
+[Symbol.asyncDispose](): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn close(self) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `ensure_virtx`
+
+A function of the package rather than of a client: fetches `virtx-stdio` into the cache ahead of `spawn`, without starting it, and returns its path.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def ensure_virtx() -> str
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+function ensureVirtx(): Promise<string>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn ensure_virtx() -> Result<Call<PathBuf>, Error>
+```
+
+</TabItem>
+</Tabs>
+
+## Auth
+
+`auth` is one of:
+
+- **None:** no credentials.
+- **A bearer token:** sent as it is. It isn't refreshed; replace it with `set_auth` before it expires.
+- **A command:** the client runs it to get a token, and runs it again when the token is about to expire or the server rejects it. On a rerun after a rejection, `VIRTX_TOKEN_REFUSED` is set in the command's environment.
+
+| Python | Node.js | Rust |
+| --- | --- | --- |
+| `BearerAuth(token)` | `{ type: 'bearer', token }` | `Auth::Bearer` |
+| `CommandAuth(program, args)` | `{ type: 'command', program, args }` | `Auth::Command` |
+| `None` | `null` | `Auth::None` |
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `401`, `unauthorized` | Any call, on a server reached with `connect` | The credentials are missing, not ones the server knows, or expired. Sign in again, or pass new credentials with `set_auth`. |
+| `403`, `forbidden` | Any call | The credentials don't allow the request, or the project doesn't exist or you aren't a member of it. The server doesn't say which. |
+| The client refuses to send a token in the clear | `connect` | The URL is `http://` to another machine. Put TLS in front of the server and use `https://`. |
+| `source` `transport` | Any call | The request or its response didn't get through: the connection failed, or the session ended. |
+| `no virtx-stdio release v… is published for …` | `spawn`, `ensure_virtx` | No server is published for this platform, such as an Intel Mac. Use VirtX cloud or a server of your own. |
+| `fetching …/virtx/releases/…` | `spawn`, `ensure_virtx` | Downloading the server failed. Check the network or proxy, set `VIRTX_DIST_URL` to a mirror, or point `VIRTX_STDIO` at a server you downloaded. |
+| `… does not match its SHA256SUMS` | `spawn`, `ensure_virtx` | The download came back changed, as a proxy may do. Try again, or set `VIRTX_STDIO`. |
+| `another fetch of virtx-stdio v… has held …` | `spawn`, `ensure_virtx` | Another program on this machine has been downloading the same server for five minutes. Wait for it, or stop it. |

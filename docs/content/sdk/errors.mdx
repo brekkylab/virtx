@@ -1,0 +1,68 @@
+---
+title: "Errors"
+description: "Reference for VirtxError: what a failed call raises, and how to tell failures apart."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A call that fails raises a `VirtxError` in Python, throws one in Node.js, and returns an `Error` in Rust.
+Tell errors apart by `source`, `status` and `code`, not by the message.
+
+## `VirtxError`
+
+`source` says where it failed, and `status` the HTTP status when the server refused the request. When the server returns its error in the protocol's format, `code` is the protocol's error code, such as `not_found` or `in_use`.
+In Python and Node.js, `body` holds the server's response when it was not a JSON error. A write to a job's stdin that its process closed part-way also has `written`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+class VirtxError(Exception):
+    source: Source        # server | job | transport | client
+    status: int | None
+    code: str | None
+    body: str | None
+    written: int | None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+class VirtxError extends Error {
+  source: 'server' | 'job' | 'transport' | 'client'
+  status: number | null
+  code: string | null
+  body: string | null
+  written: number | null
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+impl Error {
+    pub fn source_kind(&self) -> Source
+    pub fn status(&self) -> Option<u16>
+    pub fn code(&self) -> Option<&str>
+    pub fn written(&self) -> Option<u64>
+}
+```
+
+</TabItem>
+</Tabs>
+
+## Sources
+
+| `source` | `status` | When |
+| --- | --- | --- |
+| `server` | the HTTP status | The server refused the request, such as `404` for what does not exist and `409` for what is in use. |
+| `job` | none | The job the call started failed, such as a build whose step exited nonzero. |
+| `transport` | none | The request or its response did not get through: the connection failed or the session ended. |
+| `client` | none | This side failed: an argument, a file on this machine, or a response it could not read. |
+
+## Retries
+
+A request the server turns away for now, such as `503` `capacity` while it has no room for a sandbox, is sent again after the wait the server asks for, for up to 30 seconds, before the call fails with it. Only a request whose body is at most 1 MiB is sent again; a larger one fails with the first refusal.
+A `429` `quota` for a limit that frees up only as you close or delete something, such as the sandboxes you have, fails at once.

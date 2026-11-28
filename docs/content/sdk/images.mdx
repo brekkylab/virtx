@@ -1,0 +1,351 @@
+---
+title: "Images"
+description: "Reference for building, pulling, pushing, tagging, moving and pruning images."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A sandbox boots from an image the server already has. Build, pull and push are [jobs](/docs/sdk/jobs/); the rest return a single result.
+See [Working with images](/docs/tutorials/images/).
+
+| Member | Does |
+| --- | --- |
+| [`build_image`](#build_image) | **Job.** Builds `recipe` and points `reference` (`name:tag`) at the result. |
+| [`Recipe`](#recipe) | A base and the steps over it, each returning the recipe so they chain: `run` a command through `sh -c`, set an `env` variable for later steps and the image, or set the `workdir`. |
+| [`pull_image`](#pull_image) | **Job.** Pulls `reference` from its registry. |
+| [`push_image`](#push_image) | **Job.** Pushes the image `reference` points at to the registry it names. |
+| [`list_image`](#list_image) | Every tag on the server's images, with the digest it points at. |
+| [`tag_image`](#tag_image) | Points the tag `target` at the image `source` names, moving it if it is in use. |
+| [`untag_image`](#untag_image) | Removes a tag, leaving the image; refused with `409` for the last tag of an image a sandbox or a build uses. |
+| [`remove_image`](#remove_image) | Removes the image and every tag on it in that name; refused with `409`, with nothing removed, while a sandbox or a build uses it. |
+| [`download_image`](#download_image) | Writes the image to an OCI image layout tar archive at `path`. |
+| [`upload_image`](#upload_image) | Uploads the image in an OCI archive and points the tag `reference` at it. |
+| [`prune_image`](#prune_image) | Deletes images no tag points at and no sandbox uses, once they are an hour old, and returns their digests and the bytes freed. |
+
+## `build_image`
+
+**Job.** Builds `recipe` and points `reference` (`name:tag`) at the result.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def build_image(recipe: Recipe | Mapping[str, Any], reference: str) -> StartedJob[ImageJob, ImageJobEntry]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+buildImage(recipe: Recipe | ReturnType<Recipe['toJSON']>, reference: string): StartedJob<ImageJob, ImageJobEntry>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn build_image(&self, recipe: Recipe, reference: impl Into<String>) -> StartedJob<ImageJob, ImageJobEntry>
+```
+
+</TabItem>
+</Tabs>
+
+## `Recipe`
+
+A base and the steps over it, each returning the recipe so they chain: `run` a command through `sh -c`, set an `env` variable for later steps and the image, or set the `workdir`.
+In Rust, `Recipe::new(base).step(..)` takes a `Step::run`, `Step::env` or `Step::workdir`, or a plain string as a `run` step, and `Recipe::from_dockerfile(text)` reads a Dockerfile.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+Recipe(base).run(command).env(key, value).workdir(directory)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+new Recipe(base).run(command).env(key, value).workdir(directory)
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+Recipe::new(base).step(Step::run(command)).step(Step::env(key, value)).step(Step::workdir(directory))
+Recipe::from_dockerfile(text)
+```
+
+</TabItem>
+</Tabs>
+
+`Recipe::from_dockerfile` (and `virtx build`, which calls it) fails before anything is sent when the Dockerfile uses what a recipe can't hold:
+
+- `Dockerfile:N: … is not one of FROM, RUN, ENV and WORKDIR`: another instruction, such as `COPY` or `CMD`. Write files in with the file calls, and start programs with `exec`.
+- `Dockerfile:N: ENV with a bare word …`: `ENV key value`, the old form. Write `ENV key=value`.
+- `Dockerfile:N: a second FROM …`, or `a named stage …`: a multi-stage Dockerfile. Use one stage, with one `FROM` and no `AS`.
+
+## `pull_image`
+
+**Job.** Pulls `reference` from its registry. Without `auth`, anonymously; with it, a `BasicAuth(username, password)` or a `BearerAuth(token)`.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def pull_image(reference: str, auth: RegistryAuth | None = None) -> StartedJob[ImageJob, ImageJobEntry]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+pullImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn pull_image(&self, reference: impl Into<String>, auth: Option<RegistryAuth>) -> StartedJob<ImageJob, ImageJobEntry>
+```
+
+</TabItem>
+</Tabs>
+
+## `push_image`
+
+**Job.** Pushes the image `reference` points at to the registry it names.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def push_image(reference: str, auth: RegistryAuth | None = None) -> StartedJob[ImageJob, ImageJobEntry]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+pushImage(reference: string, auth?: RegistryAuth): StartedJob<ImageJob, ImageJobEntry>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn push_image(&self, reference: impl Into<String>, auth: Option<RegistryAuth>) -> StartedJob<ImageJob, ImageJobEntry>
+```
+
+</TabItem>
+</Tabs>
+
+## `list_image`
+
+Every tag on the server's images, with the digest it points at.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def list_image() -> list[ImageListOutputItem]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+listImage(): Promise<ImageListOutputItem[]>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn list_image(&self) -> Call<Vec<ImageListOutputItem>>
+```
+
+</TabItem>
+</Tabs>
+
+## `tag_image`
+
+Points the tag `target` at the image `source` names, moving it if it is in use.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def tag_image(source: str, target: str) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+tagImage(source: string, target: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn tag_image(&self, source: impl Into<String>, target: impl Into<String>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `untag_image`
+
+Removes a tag, leaving the image; refused with `409` for the last tag of an image a sandbox or a build uses.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def untag_image(reference: str) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+untagImage(reference: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn untag_image(&self, reference: impl Into<String>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `remove_image`
+
+Removes the image and every tag on it in that name; refused with `409`, with nothing removed, while a sandbox or a build uses it.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove_image(reference: str) -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+removeImage(reference: string): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn remove_image(&self, reference: impl Into<String>) -> Call<()>
+```
+
+</TabItem>
+</Tabs>
+
+## `download_image`
+
+Writes the image to an OCI image layout tar archive at `path`. Yields `Progress` events, each a line of log, then what it wrote.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def download_image(reference: str, path: str | os.PathLike[str]) -> AsyncIterator[Event[ImageDownloadOutput, str]]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+downloadImage(reference: string, path: string): AsyncGenerator<Event<ImageDownloadOutput, string>>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn download_image(&self, reference: impl Into<String>, path: impl Into<PathBuf>) -> Events<Event<ImageDownloadOutput, String>>
+```
+
+</TabItem>
+</Tabs>
+
+## `upload_image`
+
+Uploads the image in an OCI archive and points the tag `reference` at it. Yields `Progress` events, then what it uploaded.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+def upload_image(path: str | os.PathLike[str], reference: str) -> AsyncIterator[Event[ImageUploadOutput, str]]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+uploadImage(path: string, reference: string): AsyncGenerator<Event<ImageUploadOutput, string>>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn upload_image(&self, path: impl Into<PathBuf>, reference: impl Into<String>) -> Events<Event<ImageUploadOutput, String>>
+```
+
+</TabItem>
+</Tabs>
+
+## `prune_image`
+
+Deletes images no tag points at and no sandbox uses, once they are an hour old, and returns their digests and the bytes freed.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def prune_image() -> ImagePruneOutput
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+pruneImage(): Promise<ImagePruneOutput>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub fn prune_image(&self) -> Call<ImagePruneOutput>
+```
+
+</TabItem>
+</Tabs>
+
+## Errors
+
+A call that fails raises a [`VirtxError`](/docs/sdk/errors/) in Python, throws one in Node.js, and returns one in Rust. Branch on its `status` and `code`, not its message. These are the errors the calls on this page return most often.
+
+| Error | From | Cause |
+| --- | --- | --- |
+| `… is not reachable from this server: it is not a public address` | `pull_image`, `push_image` | On your own server, the registry is on its machine or private network. List it in `private_registries`. |
+| `409` | `remove_image`, `untag_image` | A sandbox or a build stands on the image, and no other tag names it. The OCI code is `DENIED`. Remove the sandbox, or let the build finish. |
+| `source` `job` | Awaiting a build, pull or push | The job failed, such as a build step that exited nonzero. Its log says why. |
+
+Any call can also fail with `401`, `unauthorized` or `403`, `forbidden` (see [Client](/docs/sdk/client/#errors)), or with `source` `transport` when the connection drops. The client retries `503`, `capacity` and a `429`, `quota` for the request rate by itself for up to 30 seconds: see [Retries](/docs/sdk/errors/#retries).

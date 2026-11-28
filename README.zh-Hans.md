@@ -214,6 +214,7 @@ let client = Client::connect(
   - **客户端：** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **服务器：** 💻 本地 (stdio) · 🖥️ 远程 (tcp) · ☁️ 云端
   - **主机：** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **把智能体作为应用发布：** 基于 virtx 构建应用并分发给用户，每位用户都有自己的沙箱，也无需运维后端。详见[构建应用](https://virtx.sh/docs/tutorials/app-client/)。
 - **几乎不用配置：** 装好包就能直接跑，不需要 Docker，也不用另外跑守护进程。
 - **适用于任何智能体框架：** 沙箱和其他工具一样，任何框架或编码智能体都能调用。开源智能体 SDK [Ailoy](https://github.com/brekkylab/ailoy) 就是其中之一。
 

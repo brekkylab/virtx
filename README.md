@@ -215,6 +215,7 @@ let client = Client::connect(
   - **Clients:** <img src="https://cdn.simpleicons.org/python" width="16"/> Python · <img src="https://cdn.simpleicons.org/nodedotjs" width="16"/> Node · <img src="https://cdn.simpleicons.org/rust/000000/ffffff" width="16"/> Rust
   - **Servers:** 💻 local (stdio) · 🖥️ remote (tcp) · ☁️ cloud
   - **Hosts:** <img src="https://cdn.simpleicons.org/linux/000000/ffffff" width="16"/> Linux · <img src="https://cdn.simpleicons.org/apple/000000/ffffff" width="16"/> macOS · <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/windows11/windows11-original.svg" width="16"/> Windows
+- **Ship your agent as an app:** build an app on virtx and give it to your users, and each of them gets a sandbox of their own, with no backend to run. See [building an app](https://virtx.sh/docs/tutorials/app-client/).
 - **Minimal setup:** install the package and you are ready to run, with no Docker and no daemon to set up.
 - **Works with any agent framework:** a sandbox is a tool like any other, so any framework or coding agent can drive it. [Ailoy](https://github.com/brekkylab/ailoy), an open-source agent SDK, is one that does.
 

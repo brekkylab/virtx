@@ -3,11 +3,7 @@
 //! each of those reaching the sandbox it made alone with its grant.
 
 #[cfg(feature = "client")]
-mod app;
-#[cfg(feature = "client")]
 pub(crate) mod client;
 mod store;
 
-#[cfg(feature = "client")]
-pub use app::AppClient;
 pub use store::*;

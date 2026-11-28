@@ -191,12 +191,11 @@ class AppClient:
 
         client = Client.connect(url, auth)
         try:
-            made = PackageSandbox.from_dict(client, await client._call(request, arguments))
+            made = await client._call(request, arguments)
         except BaseException:
             await client.aclose()
             raise
-        assert made.grant is not None, "the library answers an app's sandbox with its grant"
-        return cls(made.sandbox, made.grant)
+        return cls(Sandbox.from_dict(client, made["sandbox"]), made["grant"])
 
     async def close(self) -> None:
         """Close the client, leaving its sandbox as it is."""

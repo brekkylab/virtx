@@ -71,11 +71,11 @@ impl AppClient {
         request: unsafe extern "C" fn(*mut Opaque, *const u8, usize) -> *mut Opaque,
         args: serde_json::Value,
     ) -> Result<AppClient, Error> {
-        let call: crate::Call<virtx_core::PackageSandbox> = client.call(request, args);
+        let call: crate::Call<virtx_core::AppSandbox> = client.call(request, args);
         match call.await {
             Ok(made) => Ok(AppClient {
                 sandbox: Sandbox::new(client, made.sandbox),
-                grant: made.grant.unwrap_or_default(),
+                grant: made.grant,
             }),
             Err(failed) => {
                 client.close().await?;

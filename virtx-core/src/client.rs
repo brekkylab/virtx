@@ -23,7 +23,9 @@ use crate::{
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
         Recipe, RegistryAuth, oci,
     },
-    package::{self, Package, PackagePutArgs, PackageSandbox, PackageSandboxCreateArgs},
+    package::{
+        self, AppSandbox, Package, PackagePutArgs, PackageSandbox, PackageSandboxCreateArgs,
+    },
     project::{
         self, ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem,
         ProjectMemberSetArgs, Role,
@@ -541,6 +543,38 @@ impl Client {
         package::client::grant_sandbox(self, package.as_ref(), sandbox.as_ref()).await
     }
 
+    /// Make a sandbox of the package `package`, by its id, for an app's user, with `ports` on
+    /// local beside those the package gives it in the sandbox; and send its grant alone from
+    /// then on, so that this client reaches it and nothing else. A sandbox the server gives no
+    /// grant, as one over stdio, is removed, and refused.
+    pub async fn app_create(
+        &self,
+        package: impl AsRef<str>,
+        ports: Vec<crate::PortSpec>,
+    ) -> Result<AppSandbox, Error> {
+        package::client::app_create(self, package.as_ref(), ports).await
+    }
+
+    /// Send `grant` alone from now on, and answer the sandbox it reaches: refused `401` once the
+    /// sandbox is deleted.
+    pub async fn app_resume(&self, grant: impl Into<String>) -> Result<AppSandbox, Error> {
+        package::client::app_resume(self, grant.into()).await
+    }
+
+    /// A new grant to the sandbox `sandbox`, one [`list_package_sandbox`] finds, sent alone from
+    /// then on, as [`app_create`] does: for an app's user who kept no grant, let in by who they
+    /// are. Refused `401` with no credentials, and `404` for a sandbox they did not make.
+    ///
+    /// [`list_package_sandbox`]: Client::list_package_sandbox
+    /// [`app_create`]: Client::app_create
+    pub async fn app_resume_as(
+        &self,
+        package: impl AsRef<str>,
+        sandbox: impl AsRef<str>,
+    ) -> Result<AppSandbox, Error> {
+        package::client::app_resume_as(self, package.as_ref(), sandbox.as_ref()).await
+    }
+
     /// Every sandbox the server holds.
     pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
         sandbox::client::list(self).await
@@ -723,7 +757,7 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
-        package::{AppClient, PackagePutArgs, PackageSandbox, PackageSandboxCreateArgs},
+        package::{PackagePutArgs, PackageSandboxCreateArgs},
         project::{ProjectCreateArgs, Role},
         sandbox::{SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs},
         volume::{MountSource, VolumeCreateArgs},
@@ -2073,9 +2107,9 @@ pub(crate) mod ffi {
 
     /// Makes a sandbox of the package `package`, by its id, as what `client` is connected with
     /// lets in, given `{"package": "...", "ports": [{"port": n, "on": "local", "label": "..."}]}`,
-    /// `ports` optional; and from then on sends its grant alone. Answers as
-    /// `virtx_client_create_package_sandbox` does, always with a `grant`: a sandbox the server
-    /// gives none is removed, and refused.
+    /// `ports` optional; and from then on sends its grant alone. Answers
+    /// `{"sandbox": {...}, "grant": "..."}`, the sandbox as `virtx_client_get_sandbox` answers
+    /// it: a sandbox the server gives no grant is removed, and refused.
     ///
     /// # Safety
     ///
@@ -2089,8 +2123,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<AppCreate>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let AppCreate { package, ports } = args?;
-            let app = AppClient::create(client, &package, ports).await?;
-            Ok(PackageSandbox::from(app))
+            client.app_create(&package, ports).await
         })
     }
 
@@ -2107,10 +2140,7 @@ pub(crate) mod ffi {
         args_len: usize,
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<Granted>(args, args_len) };
-        unsafe { &(*client).0 }.future(|client| async move {
-            let app = AppClient::resume(client, args?.grant).await?;
-            Ok(PackageSandbox::from(app))
-        })
+        unsafe { &(*client).0 }.future(|client| async move { client.app_resume(args?.grant).await })
     }
 
     /// Gives out a new grant to the sandbox `sandbox`, one made of the package `package` with
@@ -2129,8 +2159,7 @@ pub(crate) mod ffi {
         let args = unsafe { json::<PackageSandboxNamed>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move {
             let PackageSandboxNamed { package, sandbox } = args?;
-            let app = AppClient::resume_as(client, &package, &sandbox).await?;
-            Ok(PackageSandbox::from(app))
+            client.app_resume_as(&package, &sandbox).await
         })
     }
 

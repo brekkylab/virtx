@@ -201,6 +201,17 @@ pub struct PackageSandbox {
     pub grant: Option<String>,
 }
 
+/// A sandbox made of a package for an app's user, and the grant they reach it with: what
+/// [`Client::app_create`](crate::Client::app_create) and the calls that come back to one answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppSandbox {
+    /// The sandbox, as a sandbox's `POST` answers it.
+    pub sandbox: Sandbox,
+
+    /// The token that reaches the sandbox alone.
+    pub grant: String,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

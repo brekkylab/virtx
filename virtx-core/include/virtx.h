@@ -717,9 +717,9 @@ struct VirtxFuture *virtx_client_grant_package_sandbox(struct VirtxClient *clien
 
 // Makes a sandbox of the package `package`, by its id, as what `client` is connected with
 // lets in, given `{"package": "...", "ports": [{"port": n, "on": "local", "label": "..."}]}`,
-// `ports` optional; and from then on sends its grant alone. Answers as
-// `virtx_client_create_package_sandbox` does, always with a `grant`: a sandbox the server
-// gives none is removed, and refused.
+// `ports` optional; and from then on sends its grant alone. Answers
+// `{"sandbox": {...}, "grant": "..."}`, the sandbox as `virtx_client_get_sandbox` answers
+// it: a sandbox the server gives no grant is removed, and refused.
 //
 // # Safety
 //

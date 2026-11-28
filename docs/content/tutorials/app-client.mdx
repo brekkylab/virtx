@@ -1,6 +1,6 @@
 ---
 title: "Building an app on a package"
-description: "Make a sandbox of a package from your app, as your user, and run commands, move files and forward ports in it with its grant alone."
+description: "Make a sandbox of a package from your app, as your user, run commands, move files and forward ports in it with its grant alone, and come back to it later."
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -10,6 +10,7 @@ Your app runs on your user's machine, or wherever you run it, and makes a sandbo
 It then uses that sandbox with the sandbox's grant, which reaches nothing else.
 
 `AppClient` does both: it makes the sandbox, and from then on sends its grant and no other credentials.
+The sandbox stays until it is removed, so the user can come back to it later, such as to a conversation they left.
 
 ## Before you start
 
@@ -200,14 +201,75 @@ app.close().await?;
 
 A port in the sandbox given here is refused with `400`: those are the package's to give.
 
-## Close the sandbox
+## Come back to the sandbox
 
-`close` removes the sandbox, which takes its grant with it, and closes the client.
-`async with` in Python closes it as the block ends, and in Rust an `AppClient` dropped removes its sandbox too, waiting until it is removed.
+`close` closes the client and leaves the sandbox as it is, as `async with` in Python, `await using` in Node.js and a dropped `AppClient` in Rust do too.
+The sandbox's machine stops while nothing uses it, and starts again when it is next reached, with its files as they were.
 
-A sandbox lives until it is removed, whether or not the app that made it is still running.
-If the app exits without closing it, it keeps its place in the package's [limits](/docs/tutorials/package-access/#limit-how-many), and the project keeps paying for it, until a member of the project removes it with `list_sandbox` and `remove`.
-So close the `AppClient` on every way out of the app, as the examples do with `async with`, `try`/`finally` or `Drop`.
+To come back to it, keep its `grant` beside what it is for, such as the user's conversation, and pass it to `AppClient.resume`:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async with await AppClient.connect(url, package_id, BearerAuth(id_token)) as app:
+    conversation.grant = app.grant
+
+# Later, as the user comes back.
+async with await AppClient.resume(url, conversation.grant) as app:
+    await app.sandbox.exec(["ls"]).complete(print=True)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const app = await AppClient.connect(url, packageId, { type: 'bearer', token: idToken })
+conversation.grant = app.grant
+await app.close()
+
+// Later, as the user comes back.
+const again = await AppClient.resume(url, conversation.grant)
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+let app = AppClient::connect(url, package_id, Auth::Bearer { token: id_token }, []).await?;
+conversation.grant = app.grant().to_owned();
+app.close().await?;
+
+// Later, as the user comes back.
+let again = AppClient::resume(url, &conversation.grant).await?;
+```
+
+</TabItem>
+</Tabs>
+
+A grant reaches its sandbox for as long as the sandbox lives, so keep it as you would a password to the sandbox: on your app's server, or wherever the user's other secrets are.
+
+A user let in by a token, rather than by a public package, can come back without a kept grant.
+`AppClient.resume_as` (`resumeAs` in Node.js) takes the package, the user's token and the sandbox's id, and gives out a new grant to it.
+`Client.list_package_sandbox` answers the sandboxes the user made of the package, to find the id by:
+
+```python
+client = Client.connect(url, BearerAuth(id_token))
+for sandbox in await client.list_package_sandbox(package_id):
+    print(sandbox.id)
+app = await AppClient.resume_as(url, package_id, BearerAuth(id_token), sandbox_id)
+```
+
+Each finds the user's own sandboxes alone, those made with the same subject.
+A sandbox made of a public package, with no credentials, is come back to with its grant alone: its subject is an address, which many users can share.
+
+## Remove the sandbox
+
+`remove` deletes the sandbox, which takes every grant to it with it, and closes the client.
+Remove it once its user is done with it, such as when they delete the conversation.
+
+Until it is removed, a sandbox keeps its place in the package's [limits](/docs/tutorials/package-access/#limit-how-many), and the project keeps paying for its disk.
+A member of the project finds every sandbox made of the package with `Package.list_sandbox`, and removes those no one comes back to.
 
 ## Troubleshooting
 
@@ -233,9 +295,21 @@ So close the `AppClient` on every way out of the app, as the examples do with `a
 
    **Cause:** As many sandboxes of the package live as its `limits` allow, all of them or this user's.
 
-   **Fix:** Close the sandboxes the app no longer uses.
+   **Fix:** Remove the sandboxes the app no longer uses.
 
-5. **`403`, `forbidden`, through `sandbox`**
+5. **`401`, `unauthorized`, from `resume` or `resume_as`**
+
+   **Cause:** From `resume`, the sandbox was removed, which took its grant with it. From `resume_as`, no token was given: the sandbox was made of a public package.
+
+   **Fix:** Make a new sandbox with `connect`. For a public package, keep the grant to come back with `resume`.
+
+6. **`404`, `not_found`, from `resume_as`**
+
+   **Cause:** The sandbox is not one this user made of the package, or it was removed.
+
+   **Fix:** Pick one `list_package_sandbox` answers.
+
+7. **`403`, `forbidden`, through `sandbox`**
 
    **Cause:** A request the grant does not reach, such as a resize past the package's `max`.
 

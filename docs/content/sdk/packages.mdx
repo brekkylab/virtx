@@ -1,6 +1,6 @@
 ---
 title: "Packages"
-description: "Reference for packages, which keep a sandbox under a name to be made by members and whom its access lets in, and AppClient, which reaches one sandbox by its grant."
+description: "Reference for packages, which keep a sandbox under a name to be made by members and whom its access lets in, and AppClient, which reaches one sandbox by its grant and comes back to it."
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -14,9 +14,14 @@ See [Making packages](/docs/tutorials/packages/), [Letting your users in](/docs/
 | [`put_package`](#put_package) | Keeps a package under `name`, made or replaced in whole. |
 | [`list_package`](#list_package) | The project's packages, or the one an `id` or name names. |
 | [`create_sandbox`](#create_sandbox) | Makes a sandbox of a package, answered with its grant. |
+| [`list_sandbox`](#list_sandbox) | The sandboxes made of a package that the client's credentials made. |
+| [`grant_sandbox`](#grant_sandbox) | A new grant to one of those. |
 | [`remove`](#remove) | Removes the package; the sandboxes made of it stay. |
 | [`AppClient.connect`](#appclientconnect) | Makes a sandbox of a package as an app's user, and reaches it with its grant alone from then on. |
-| [`AppClient.close`](#appclientclose) | Removes its sandbox, and its grant with it, and closes the client. |
+| [`AppClient.resume`](#appclientresume) | Reaches again the sandbox a kept grant reaches. |
+| [`AppClient.resume_as`](#appclientresume_as) | Reaches again a sandbox the user made, as who they are, with a new grant. |
+| [`AppClient.close`](#appclientclose) | Closes the client, leaving its sandbox. |
+| [`AppClient.remove`](#appclientremove) | Removes its sandbox, and every grant to it, and closes the client. |
 
 ## `put_package`
 
@@ -193,6 +198,86 @@ pub struct PackageSandbox {
 </TabItem>
 </Tabs>
 
+## `list_sandbox`
+
+The sandboxes made of the package that the client's credentials made: to a member of the project, every one; to one its access lets in, those made with the same subject, as it lets them in now.
+A request with no credentials is refused with `401`: a sandbox made so is reached with its grant alone.
+`list_package_sandbox` on the client does the same for a package by its `id` or name.
+A server that takes no credentials answers none of this.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+# Package
+async def list_sandbox() -> list[Sandbox]
+# Client
+async def list_package_sandbox(package: str) -> list[Sandbox]
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+// Package
+listSandbox(): Promise<Sandbox[]>
+// Client
+listPackageSandbox(pkg: string): Promise<Sandbox[]>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+// Package
+pub fn list_sandbox(&self) -> Call<Vec<Sandbox>>
+// Client
+pub fn list_package_sandbox(&self, package: impl AsRef<str>) -> Call<Vec<Sandbox>>
+```
+
+</TabItem>
+</Tabs>
+
+## `grant_sandbox`
+
+Gives out a new grant to the sandbox `sandbox`, one `list_sandbox` answers, answered as a `PackageSandbox` as `create_sandbox` is.
+Its other grants still reach it, and each is held to the package's `max` and `origins` as they were when the sandbox was made.
+A sandbox that is none of the client's credentials', or none made of the package, is refused with `404`.
+`grant_package_sandbox` on the client does the same for a package by its `id` or name.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+# Package
+async def grant_sandbox(sandbox: str) -> PackageSandbox
+# Client
+async def grant_package_sandbox(package: str, sandbox: str) -> PackageSandbox
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+// Package
+grantSandbox(sandbox: string): Promise<PackageSandbox>
+// Client
+grantPackageSandbox(pkg: string, sandbox: string): Promise<PackageSandbox>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+// Package
+pub fn grant_sandbox(&self, sandbox: impl AsRef<str>) -> Call<PackageSandbox>
+// Client
+pub fn grant_package_sandbox(&self, package: impl AsRef<str>, sandbox: impl AsRef<str>) -> Call<PackageSandbox>
+```
+
+</TabItem>
+</Tabs>
+
 ## `remove`
 
 Removes the package, and what its access lets in from then on.
@@ -227,6 +312,7 @@ pub fn remove(&self) -> Call<()>
 Makes a sandbox of the package `package`, by its `id`, on the server at `url`, as `auth` lets in: none where the package is public, or a bearer token of the issuer its access names.
 `ports` are its ports on local, each `on="local"`, beside those the package gives it in the sandbox.
 From then on the client sends the sandbox's grant alone, and its `sandbox` reaches that sandbox and nothing else.
+Its `grant` is that token, to keep and come back to the sandbox with [`resume`](#appclientresume).
 
 It is refused as making the sandbox is: `401` or `403` for one the package does not let in, `429` past its limits, and `400` for a port in the sandbox.
 A server that gives no grant fails it too.
@@ -241,6 +327,7 @@ async def connect(
 ) -> AppClient
 
 sandbox: Sandbox
+grant: str
 ```
 
 </TabItem>
@@ -250,6 +337,7 @@ sandbox: Sandbox
 static connect(url: string, pkg: string, auth?: Auth | null, options?: { ports?: PortSpec[] }): Promise<AppClient>
 
 readonly sandbox: Sandbox
+readonly grant: string
 ```
 
 </TabItem>
@@ -264,6 +352,68 @@ pub async fn connect(
 ) -> Result<AppClient, Error>
 
 pub fn sandbox(&self) -> &Sandbox
+pub fn grant(&self) -> &str
+```
+
+</TabItem>
+</Tabs>
+
+## `AppClient.resume`
+
+Reaches again the sandbox `grant` reaches, on the server at `url`, with that grant alone.
+It is refused with `401` once the sandbox is removed.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@classmethod
+async def resume(url: str, grant: str) -> AppClient
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+static resume(url: string, grant: string): Promise<AppClient>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub async fn resume(url: &str, grant: &str) -> Result<AppClient, Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `AppClient.resume_as`
+
+Reaches again the sandbox `sandbox`, one the user made of the package `package` with `auth`, as [`list_sandbox`](#list_sandbox) finds it, with a new grant: for one who kept no grant, let in by who they are.
+It is refused with `401` with no credentials, as for a sandbox made of a public package, and with `404` for a sandbox they did not make.
+It is `resumeAs` in Node.js.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+@classmethod
+async def resume_as(url: str, package: str, auth: Auth, sandbox: str) -> AppClient
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+static resumeAs(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub async fn resume_as(url: &str, package: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
 ```
 
 </TabItem>
@@ -271,8 +421,8 @@ pub fn sandbox(&self) -> &Sandbox
 
 ## `AppClient.close`
 
-Removes its sandbox, and its grant with it, and closes the client.
-`async with` closes it in Python, and `await using` in Node.js where the runtime has it; in Rust, an `AppClient` dropped removes its sandbox, waiting until it is removed.
+Closes the client and leaves its sandbox as it is, to come back to.
+`async with` closes it in Python, `await using` in Node.js where the runtime has it, and dropping it in Rust.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
@@ -293,6 +443,34 @@ close(): Promise<void>
 
 ```rust
 pub async fn close(self) -> Result<(), Error>
+```
+
+</TabItem>
+</Tabs>
+
+## `AppClient.remove`
+
+Removes its sandbox, which takes every grant to it with it, and closes the client.
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+async def remove() -> None
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```ts
+remove(): Promise<void>
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+pub async fn remove(self) -> Result<(), Error>
 ```
 
 </TabItem>

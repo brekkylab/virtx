@@ -195,7 +195,7 @@ Without `limits`, the server sets its own.
 Sandboxes the project's members make do not count.
 
 A sandbox lives until it is removed, so an app that does not remove its sandbox when it is done keeps using up its user's share.
-See [Close the sandbox](/docs/tutorials/app-client/#close-the-sandbox).
+See [Remove the sandbox](/docs/tutorials/app-client/#remove-the-sandbox).
 
 ## What a grant reaches
 
@@ -211,6 +211,7 @@ A grant reaches its own sandbox, and all of it:
 Every other request with it is refused with `403`.
 Once the sandbox is removed, by the one who made it, a member or the server, its grant is refused with `401`.
 The server keeps no copy of a grant it could show again: it is in the answer that made the sandbox, and nowhere else.
+One let in by a token can be given a new grant to a sandbox they made, as [Come back to the sandbox](/docs/tutorials/app-client/#come-back-to-the-sandbox) shows; the grants before it still reach it.
 
 Replacing or removing the package changes no sandbox made of it, nor its grant.
 To take back a sandbox someone made, a member removes it.

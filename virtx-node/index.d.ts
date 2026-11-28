@@ -28,6 +28,16 @@ export class VirtxError extends Error {
    * it: that `409`, `ended`, alone has it.
    */
   written: number | null
+
+  /** Make the error `index.js` raises; every argument but `message` defaults as there. */
+  constructor(
+    message: string,
+    status?: number | null,
+    body?: string | null,
+    source?: 'server' | 'job' | 'transport' | 'client',
+    code?: string | null,
+    written?: number | null,
+  )
 }
 
 /** Open the library at `file` for this process's clients; another than the one open is refused. */

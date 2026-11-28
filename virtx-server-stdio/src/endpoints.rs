@@ -29,11 +29,11 @@ use tokio::task::{AbortHandle, JoinSet};
 use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, PortSide, PresetPutArgs, PresetSandbox,
-    PresetSandboxCreateArgs, ProjectCreateArgs, ProjectListOutputItem, Role, SandboxCreateArgs,
-    SandboxExecArgs, SandboxExecItem, SandboxPort, SandboxResizeArgs, SandboxSignalArgs,
-    SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs,
-    VolumeMountListOutputItem,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, PackagePutArgs, PackageSandbox,
+    PackageSandboxCreateArgs, PortSide, ProjectCreateArgs, ProjectListOutputItem, Role,
+    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort, SandboxResizeArgs,
+    SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
+    VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
@@ -42,7 +42,7 @@ use virtx_uvm::{
     Reference, RegistryClient, RegistryServer, Sandbox, SandboxError, VolumeError, VolumeStore,
     based_on, build_step, park_after, signal_number,
 };
-use virtx_uvm::{PresetStore, ProjectId};
+use virtx_uvm::{PackageStore, ProjectId};
 
 use crate::Host;
 
@@ -63,7 +63,7 @@ pub struct Home {
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     root: PathBuf,
     volumes: VolumeStore,
-    presets: PresetStore,
+    packages: PackageStore,
     /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
@@ -80,7 +80,7 @@ pub struct Home {
 
 impl Home {
     /// Project `project`'s home: the images in `images`, which `registry` answers for, and the
-    /// volumes, the presets and the sandboxes' upper disks under `root`.
+    /// volumes, the packages and the sandboxes' upper disks under `root`.
     pub fn new(
         project: ProjectId,
         images: ImageStore,
@@ -89,18 +89,18 @@ impl Home {
     ) -> anyhow::Result<Home> {
         Sandbox::sweep(root);
         let volumes = VolumeStore::new(root)?;
-        let presets = PresetStore::new(root)?;
-        let naming = presets.clone();
+        let packages = PackageStore::new(root)?;
+        let naming = packages.clone();
         registry.keeping(Arc::new(move |tag| {
             let named = naming.steady().naming_tag(tag);
             named
                 .ok()
                 .flatten()
-                .map(|name| format!("preset {name} names it"))
+                .map(|name| format!("package {name} names it"))
         }));
         Ok(Home {
             project,
-            presets,
+            packages,
             images,
             registry,
             files: Files::new(volumes.clone()).with_host_paths(HostPaths::Named),
@@ -423,10 +423,10 @@ pub fn router() -> Router {
         )
         .route("/sandboxes/{id}/jobs/{job}/stdin", post(sandbox_job_stdin))
         .route("/sandboxes/{id}/jobs/{job}/events", get(sandbox_job_events))
-        .route("/presets/", get(preset_list))
+        .route("/packages/", get(package_list))
         .route(
-            "/presets/{preset}",
-            get(preset_get).put(preset_put).delete(preset_remove),
+            "/packages/{package}",
+            get(package_get).put(package_put).delete(package_remove),
         )
         .method_not_allowed_fallback(async || {
             refused(
@@ -439,10 +439,13 @@ pub fn router() -> Router {
 }
 
 /// The projects, each the client's, answered from the [`Host`] in each request's extensions.
-/// Making a sandbox of a preset, answered from the [`Host`] in its extensions: in the project
+/// Making a sandbox of a package, answered from the [`Host`] in its extensions: in the project
 /// its id names, or by its name in the one the request names.
-pub fn preset_sandboxes() -> Router {
-    Router::new().route("/presets/{preset}/sandboxes/", post(preset_sandbox_create))
+pub fn package_sandboxes() -> Router {
+    Router::new().route(
+        "/packages/{package}/sandboxes/",
+        post(package_sandbox_create),
+    )
 }
 
 pub fn projects() -> Router {
@@ -856,12 +859,12 @@ async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    let steady = home.presets.steady();
-    if let Some(preset) = steady.naming_volume(&name)? {
+    let steady = home.packages.steady();
+    if let Some(package) = steady.naming_volume(&name)? {
         return Err(refused(
             StatusCode::CONFLICT,
             "in_use",
-            format!("volume {name} is in use: preset {preset} mounts it"),
+            format!("volume {name} is in use: package {package} mounts it"),
         ));
     }
     home.volumes.remove(&name)?;
@@ -953,28 +956,28 @@ async fn sandbox_create(Extension(home): Extension<Arc<Home>>, Whole(request): W
     Ok(created(format!("/sandboxes/{}", answer.id), &answer))
 }
 
-async fn preset_list(Extension(home): Extension<Arc<Home>>) -> Answer {
-    Ok(json(&home.presets.list()?))
+async fn package_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+    Ok(json(&home.packages.list()?))
 }
 
-async fn preset_get(
+async fn package_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(named): Segments<String>,
 ) -> Answer {
-    let preset = home.presets.get(&named)?;
-    Ok(json(&preset.ok_or_else(|| {
-        not_found(format!("no preset here is {named}"))
+    let package = home.packages.get(&named)?;
+    Ok(json(&package.ok_or_else(|| {
+        not_found(format!("no package here is {named}"))
     })?))
 }
 
-/// `PUT /presets/{name}`: refused for an image or a volume not here, as a sandbox's `POST` is,
+/// `PUT /packages/{name}`: refused for an image or a volume not here, as a sandbox's `POST` is,
 /// before it is kept.
-async fn preset_put(
+async fn package_put(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
     Whole(request): Whole,
 ) -> Answer {
-    let args: PresetPutArgs = body(&request)?;
+    let args: PackagePutArgs = body(&request)?;
     let here = match &args.sandbox.image {
         ImageName::Tag { tag } => {
             let reference: Reference = tag
@@ -991,34 +994,34 @@ async fn preset_put(
         }
     };
     if !here {
-        return Err(not_found("no image here is the preset's: pull it first"));
+        return Err(not_found("no image here is the package's: pull it first"));
     }
     for asked in &args.sandbox.volumes {
         home.volumes.open(&asked.volume)?;
     }
     let project = home.project;
-    let (preset, made) = home.presets.put(&name, args, &home.vm, || {
+    let (package, made) = home.packages.put(&name, args, &home.vm, || {
         format!("{project}.{}", uuid::Uuid::new_v4().simple())
     })?;
     Ok(match made {
-        true => created(format!("/presets/{}", preset.id), &preset),
-        false => json(&preset),
+        true => created(format!("/packages/{}", package.id), &package),
+        false => json(&package),
     })
 }
 
-async fn preset_remove(
+async fn package_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(named): Segments<String>,
 ) -> Answer {
-    match home.presets.remove(&named)? {
+    match home.packages.remove(&named)? {
         true => Ok(StatusCode::NO_CONTENT.into_response()),
-        false => Err(not_found(format!("no preset here is {named}"))),
+        false => Err(not_found(format!("no package here is {named}"))),
     }
 }
 
-/// `POST /presets/{preset}/sandboxes/`: the sandbox, made as the preset says, by the one client
+/// `POST /packages/{package}/sandboxes/`: the sandbox, made as the package says, by the one client
 /// stdio has, and no grant, which it has no use for.
-async fn preset_sandbox_create(
+async fn package_sandbox_create(
     Extension(host): Extension<Arc<Host>>,
     Segments(named): Segments<String>,
     headers: HeaderMap,
@@ -1029,18 +1032,17 @@ async fn preset_sandbox_create(
         Some(project) => host
             .home_of(&project)
             .map_err(|e| internal(format!("making project {project}'s home: {e:#}")))?
-            .ok_or_else(|| not_found(format!("no preset here is {named}")))?,
+            .ok_or_else(|| not_found(format!("no package here is {named}")))?,
         None => host.home(&headers).await?,
     };
-    let preset = home.presets.get(&named)?;
-    let preset = preset.ok_or_else(|| not_found(format!("no preset here is {named}")))?;
-    let args: PresetSandboxCreateArgs = body(&request)?;
-    let mut made = preset.sandbox;
-    made.name = args.name;
+    let package = home.packages.get(&named)?;
+    let package = package.ok_or_else(|| not_found(format!("no package here is {named}")))?;
+    let args: PackageSandboxCreateArgs = body(&request)?;
+    let made = virtx_uvm::package_sandbox_args(&package, args)?;
     let sandbox = home.create(made).await?;
     Ok(created(
         format!("/sandboxes/{}", sandbox.id),
-        &PresetSandbox {
+        &PackageSandbox {
             sandbox,
             grant: None,
         },

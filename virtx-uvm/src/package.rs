@@ -1,14 +1,14 @@
-//! Presets: a sandbox kept under a name in a project, for its server to make as many times as
+//! Packages: a sandbox kept under a name in a project, for its server to make as many times as
 //! it is asked for. The store keeps each as it was put, checked as a sandbox's making checks
-//! what it can without making one; what a preset lets in, and the sandboxes made of it, are
+//! what it can without making one; what a package lets in, and the sandboxes made of it, are
 //! its server's.
 //!
 //! # Layout
 //!
 //! ```text
 //! <root>/
-//!   preset/<name>.json        a preset, as it is answered
-//!   preset/<name>.json.part   one being written, renamed over it once whole
+//!   package/<name>.json        a package, as it is answered
+//!   package/<name>.json.part   one being written, renamed over it once whole
 //! ```
 
 use std::ffi::OsString;
@@ -17,33 +17,36 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use virtx_core::{ImageName, Preset, PresetAccess, PresetPutArgs, SandboxResizeArgs};
+use virtx_core::{
+    ImageName, Package, PackageAccess, PackagePutArgs, PackageSandboxCreateArgs, PortSide,
+    SandboxCreateArgs, SandboxResizeArgs,
+};
 
 use crate::{
     DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_VCPUS, Reference, Sandbox, SandboxError,
 };
 
-const PRESET: &str = "preset";
+const PACKAGE: &str = "package";
 
-/// The presets of one project, kept under its root.
+/// The packages of one project, kept under its root.
 #[derive(Clone, Debug)]
 pub struct Store {
     dir: PathBuf,
-    /// Held while presets are changed, or read by what must see them hold still
+    /// Held while packages are changed, or read by what must see them hold still
     /// ([`Store::steady`]).
     changing: Arc<Mutex<()>>,
 }
 
-/// The presets held still, as [`Store::steady`] answers: none is put or removed until it drops.
+/// The packages held still, as [`Store::steady`] answers: none is put or removed until it drops.
 pub struct Steady<'a> {
     store: &'a Store,
     _held: MutexGuard<'a, ()>,
 }
 
 impl Store {
-    /// The presets kept under `root`.
+    /// The packages kept under `root`.
     pub fn new(root: &Path) -> io::Result<Store> {
-        let dir = root.join(PRESET);
+        let dir = root.join(PACKAGE);
         fs::create_dir_all(&dir)?;
         Ok(Store {
             dir,
@@ -51,34 +54,34 @@ impl Store {
         })
     }
 
-    /// Every preset here, by name.
-    pub fn list(&self) -> Result<Vec<Preset>, SandboxError> {
-        let mut presets = Vec::new();
+    /// Every package here, by name.
+    pub fn list(&self) -> Result<Vec<Package>, SandboxError> {
+        let mut packages = Vec::new();
         for entry in fs::read_dir(&self.dir).map_err(|e| io_error(&self.dir, e))? {
             let path = entry.map_err(|e| io_error(&self.dir, e))?.path();
             if path
                 .extension()
                 .is_some_and(|extension| extension == "json")
             {
-                presets.push(read(&path)?);
+                packages.push(read(&path)?);
             }
         }
-        presets.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(presets)
+        packages.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(packages)
     }
 
-    /// The preset `named` names: by its id, or by its name.
-    pub fn get(&self, named: &str) -> Result<Option<Preset>, SandboxError> {
+    /// The package `named` names: by its id, or by its name.
+    pub fn get(&self, named: &str) -> Result<Option<Package>, SandboxError> {
         if crate::is_name(named) {
             let path = self.path(named);
             if path.exists() {
                 return read(&path).map(Some);
             }
         }
-        Ok(self.list()?.into_iter().find(|preset| preset.id == named))
+        Ok(self.list()?.into_iter().find(|package| package.id == named))
     }
 
-    /// Keep `args` as preset `name`, made under the id `id` gives where there is none of that
+    /// Keep `args` as package `name`, made under the id `id` gives where there is none of that
     /// name, or replacing it in whole and keeping its id: answered with whether it was made.
     /// Refused [`Invalid`](SandboxError::Invalid) for a name that is none, and for `args` no
     /// sandbox could be made of whatever is here ([`Sandbox::check`], with `vm` the program its
@@ -87,13 +90,13 @@ impl Store {
     pub fn put(
         &self,
         name: &str,
-        args: PresetPutArgs,
+        args: PackagePutArgs,
         vm: &[OsString],
         id: impl FnOnce() -> String,
-    ) -> Result<(Preset, bool), SandboxError> {
+    ) -> Result<(Package, bool), SandboxError> {
         if !crate::is_name(name) {
             return Err(SandboxError::Invalid(format!(
-                "{name:?} is not a preset's name: letters, digits, '.', '_' and '-', not \
+                "{name:?} is not a package's name: letters, digits, '.', '_' and '-', not \
                  starting with '.' or '-', 128 at most"
             )));
         }
@@ -104,7 +107,7 @@ impl Store {
             true => (read(&path)?.id, false),
             false => (id(), true),
         };
-        let preset = Preset {
+        let package = Package {
             id,
             name: name.to_owned(),
             sandbox: args.sandbox,
@@ -114,25 +117,25 @@ impl Store {
             limits: args.limits,
         };
         let part = self.dir.join(format!("{name}.json.part"));
-        let json = serde_json::to_vec_pretty(&preset).expect("a preset is JSON");
+        let json = serde_json::to_vec_pretty(&package).expect("a package is JSON");
         fs::write(&part, json).map_err(|e| io_error(&part, e))?;
         fs::rename(&part, &path).map_err(|e| io_error(&path, e))?;
-        Ok((preset, made))
+        Ok((package, made))
     }
 
-    /// Remove the preset `named` names, by its id or its name: `false` where there is none.
+    /// Remove the package `named` names, by its id or its name: `false` where there is none.
     pub fn remove(&self, named: &str) -> Result<bool, SandboxError> {
         let _held = self.changing.lock().unwrap();
-        let Some(preset) = self.get(named)? else {
+        let Some(package) = self.get(named)? else {
             return Ok(false);
         };
-        let path = self.path(&preset.name);
+        let path = self.path(&package.name);
         fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
         Ok(true)
     }
 
-    /// The presets held still until what this answers drops: what refuses to take away what a
-    /// preset names asks it, so that no preset comes to name it meanwhile.
+    /// The packages held still until what this answers drops: what refuses to take away what a
+    /// package names asks it, so that no package comes to name it meanwhile.
     pub fn steady(&self) -> Steady<'_> {
         Steady {
             store: self,
@@ -146,31 +149,57 @@ impl Store {
 }
 
 impl Steady<'_> {
-    /// The name of a preset that mounts volume `volume`, if one does.
+    /// The name of a package that mounts volume `volume`, if one does.
     pub fn naming_volume(&self, volume: &str) -> Result<Option<String>, SandboxError> {
         Ok((self.store.list()?.into_iter())
-            .find(|preset| (preset.sandbox.volumes.iter()).any(|asked| asked.volume == volume))
-            .map(|preset| preset.name))
+            .find(|package| (package.sandbox.volumes.iter()).any(|asked| asked.volume == volume))
+            .map(|package| package.name))
     }
 
-    /// The name of a preset whose image is tag `tag`, if one's is.
+    /// The name of a package whose image is tag `tag`, if one's is.
     pub fn naming_tag(&self, tag: &Reference) -> Result<Option<String>, SandboxError> {
         Ok((self.store.list()?.into_iter())
-            .find(|preset| match &preset.sandbox.image {
+            .find(|package| match &package.sandbox.image {
                 ImageName::Tag { tag: named } => {
                     named.parse::<Reference>().ok().as_ref() == Some(tag)
                 }
                 ImageName::Digest { .. } => false,
             })
-            .map(|preset| preset.name))
+            .map(|package| package.name))
     }
 }
 
-/// Refuse `args` where no preset could be made of them, whatever is here.
-fn check(args: &PresetPutArgs, vm: &[OsString]) -> Result<(), SandboxError> {
+/// What a sandbox made of `package` as `args` asks is made with: the package's sandbox, named
+/// `args`' name, with `args`' ports on local beside its own. Refused
+/// [`Invalid`](SandboxError::Invalid) for a port asked for in the sandbox, which is the
+/// package's to give.
+pub fn sandbox_args(
+    package: &Package,
+    args: PackageSandboxCreateArgs,
+) -> Result<SandboxCreateArgs, SandboxError> {
+    if let Some(inside) = (args.ports.iter()).find(|spec| spec.on != PortSide::Local) {
+        return Err(SandboxError::Invalid(format!(
+            "ports: {} is in the sandbox, which is the package's to give: ask for ports on local",
+            inside.port
+        )));
+    }
+    let mut made = package.sandbox.clone();
+    made.name = args.name;
+    made.ports.extend(args.ports);
+    Ok(made)
+}
+
+/// Refuse `args` where no package could be made of them, whatever is here.
+fn check(args: &PackagePutArgs, vm: &[OsString]) -> Result<(), SandboxError> {
     let invalid = |why: String| Err(SandboxError::Invalid(why));
     if args.sandbox.name.is_some() {
-        return invalid("sandbox: name: each sandbox of a preset is named as it is made".into());
+        return invalid("sandbox: name: each sandbox of a package is named as it is made".into());
+    }
+    if let Some(local) = (args.sandbox.ports.iter()).find(|spec| spec.on == PortSide::Local) {
+        return invalid(format!(
+            "sandbox: ports: {} is on local, which each sandbox's client asks for as it is made",
+            local.port
+        ));
     }
     Sandbox::check(&args.sandbox, vm).map_err(|e| match e {
         SandboxError::Invalid(why) => SandboxError::Invalid(format!("sandbox: {why}")),
@@ -210,7 +239,7 @@ fn check(args: &PresetPutArgs, vm: &[OsString]) -> Result<(), SandboxError> {
         }
     }
     for access in &args.access {
-        if let PresetAccess::Jwt { issuer, jwks, .. } = access {
+        if let PackageAccess::Jwt { issuer, jwks, .. } = access {
             for (name, url) in [("issuer", Some(issuer)), ("jwks", jwks.as_ref())] {
                 if let Some(url) = url
                     && !is_https(url)
@@ -265,7 +294,7 @@ fn is_origin(origin: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
 }
 
-fn read(path: &Path) -> Result<Preset, SandboxError> {
+fn read(path: &Path) -> Result<Package, SandboxError> {
     let json = fs::read(path).map_err(|e| io_error(path, e))?;
     serde_json::from_slice(&json).map_err(|e| io_error(path, e.into()))
 }
@@ -283,12 +312,12 @@ mod tests {
 
     use super::*;
 
-    fn args(image: &str) -> PresetPutArgs {
-        PresetPutArgs::new(SandboxCreateArgs::new(image))
+    fn args(image: &str) -> PackagePutArgs {
+        PackagePutArgs::new(SandboxCreateArgs::new(image))
     }
 
     #[test]
-    fn a_preset_is_put_found_by_its_id_or_name_replaced_keeping_its_id_and_removed() {
+    fn a_package_is_put_found_by_its_id_or_name_replaced_keeping_its_id_and_removed() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::new(root.path()).unwrap();
         let (made, new) = store
@@ -317,34 +346,37 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_no_sandbox_could_be_made_of_is_refused() {
+    fn a_package_no_sandbox_could_be_made_of_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::new(root.path()).unwrap();
         let refused =
-            |name: &str, args: PresetPutArgs| match store.put(name, args, &[], || "p".into()) {
+            |name: &str, args: PackagePutArgs| match store.put(name, args, &[], || "p".into()) {
                 Err(SandboxError::Invalid(why)) => why,
                 answered => panic!("{answered:?}"),
             };
-        assert!(refused("../app", args("app:1")).contains("not a preset's name"));
-        let named = PresetPutArgs::new(SandboxCreateArgs::new("app:1").name("dev"));
+        assert!(refused("../app", args("app:1")).contains("not a package's name"));
+        let local = virtx_core::PortSpec::new(5037).on(PortSide::Local);
+        let offering = PackagePutArgs::new(SandboxCreateArgs::new("app:1").port(local));
+        assert!(refused("app", offering).starts_with("sandbox: ports: 5037"));
+        let named = PackagePutArgs::new(SandboxCreateArgs::new("app:1").name("dev"));
         assert!(refused("app", named).starts_with("sandbox: name:"));
-        let forever = PresetPutArgs::new(SandboxCreateArgs::new("app:1").lifetime(0));
+        let forever = PackagePutArgs::new(SandboxCreateArgs::new("app:1").lifetime(0));
         assert!(refused("app", forever).starts_with("sandbox: lifetime:"));
         let larger = args("app:1").max(SandboxResizeArgs::default().vcpus(DEFAULT_VCPUS + 1));
-        let made = PresetPutArgs::new(SandboxCreateArgs::new("app:1").vcpus(2));
+        let made = PackagePutArgs::new(SandboxCreateArgs::new("app:1").vcpus(2));
         assert!(
             refused("app", made.max(SandboxResizeArgs::default().vcpus(1)))
                 .starts_with("max: vcpus")
         );
         store.put("app", larger, &[], || "p".into()).unwrap();
-        let plain = PresetAccess::Jwt {
+        let plain = PackageAccess::Jwt {
             issuer: "http://idp.example".into(),
             audience: "app".into(),
             jwks: None,
             claims: Default::default(),
         };
         assert!(refused("app", args("app:1").access(plain)).starts_with("access: issuer"));
-        let local = PresetAccess::Jwt {
+        let local = PackageAccess::Jwt {
             issuer: "https://idp.example".into(),
             audience: "app".into(),
             jwks: Some("http://127.0.0.1:8080/keys".into()),
@@ -359,13 +391,37 @@ mod tests {
         );
     }
 
+    /// A sandbox of a package is made of its sandbox, named as asked, with the ports on local
+    /// asked for beside the package's in the sandbox; one asked for in the sandbox is refused.
     #[test]
-    fn what_a_preset_names_is_found_while_the_presets_hold_still() {
+    fn a_sandbox_of_a_package_has_the_ports_on_local_asked_for_beside_its_own() {
+        use virtx_core::{PackageSandboxCreateArgs, PortSpec};
+
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(root.path()).unwrap();
+        let args = PackagePutArgs::new(SandboxCreateArgs::new("app:1").port(8000));
+        let (package, _) = store.put("app", args, &[], || "p".into()).unwrap();
+        let asked = PackageSandboxCreateArgs::default()
+            .name("dev")
+            .port(PortSpec::new(5037).on(PortSide::Local));
+        let made = sandbox_args(&package, asked).unwrap();
+        assert_eq!(made.name.as_deref(), Some("dev"));
+        let ports: Vec<_> = made.ports.iter().map(|spec| (spec.port, spec.on)).collect();
+        assert_eq!(ports, [(8000, PortSide::Sandbox), (5037, PortSide::Local)]);
+        let inside = PackageSandboxCreateArgs::default().port(PortSpec::new(9000));
+        assert!(matches!(
+            sandbox_args(&package, inside),
+            Err(SandboxError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn what_a_package_names_is_found_while_the_packages_hold_still() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::new(root.path()).unwrap();
         let mounting = SandboxCreateArgs::new("app:1").volume("data", "/data");
         store
-            .put("app", PresetPutArgs::new(mounting), &[], || "p".into())
+            .put("app", PackagePutArgs::new(mounting), &[], || "p".into())
             .unwrap();
         let steady = store.steady();
         assert_eq!(

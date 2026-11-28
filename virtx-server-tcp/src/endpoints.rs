@@ -33,11 +33,11 @@ use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Preset, PresetPutArgs, PresetSandbox,
-    PresetSandboxCreateArgs, ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem,
-    ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
-    SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step, VolumeCreateArgs,
-    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Package, PackagePutArgs, PackageSandbox,
+    PackageSandboxCreateArgs, ProjectCreateArgs, ProjectListOutputItem,
+    ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
@@ -48,7 +48,7 @@ use virtx_uvm::{
     UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after, signal_number,
 };
 
-use virtx_uvm::{PresetStore, ProjectError, ProjectId};
+use virtx_uvm::{PackageStore, ProjectError, ProjectId};
 
 use crate::access::Access;
 use crate::access::Principal;
@@ -81,11 +81,11 @@ pub struct Home {
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     pub root: PathBuf,
     volumes: VolumeStore,
-    presets: PresetStore,
-    /// The grants given out to the sandboxes made of its presets.
+    packages: PackageStore,
+    /// The grants given out to the sandboxes made of its packages.
     grants: Grants,
-    /// The preset and subject of each sandbox being made of a preset for one its access let
-    /// in, until it is made or is not: counted toward the preset's limits as those made are.
+    /// The package and subject of each sandbox being made of a package for one its access let
+    /// in, until it is made or is not: counted toward the package's limits as those made are.
     making: Mutex<Vec<(String, String)>>,
     /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
@@ -110,7 +110,7 @@ pub struct Home {
 
 impl Home {
     /// Project `project`'s home: the images in `images`, which `registry` answers for, and the
-    /// volumes, presets and grants and the sandboxes' upper disks under `root`, with each sandbox a server before it kept there
+    /// volumes, packages and grants and the sandboxes' upper disks under `root`, with each sandbox a server before it kept there
     /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
     /// is made for says otherwise ([`Access::through`]). `registry` is this home's alone: it is
@@ -123,14 +123,14 @@ impl Home {
         root: &Path,
     ) -> anyhow::Result<Home> {
         let volumes = VolumeStore::new(root)?;
-        let presets = PresetStore::new(root)?;
-        let naming = presets.clone();
+        let packages = PackageStore::new(root)?;
+        let naming = packages.clone();
         registry.keeping(Arc::new(move |tag| {
             let named = naming.steady().naming_tag(tag);
             named
                 .ok()
                 .flatten()
-                .map(|name| format!("preset {name} names it"))
+                .map(|name| format!("package {name} names it"))
         }));
         let vm: Vec<OsString> = vec![
             std::env::current_exe()?.into(),
@@ -159,7 +159,7 @@ impl Home {
             files: Files::new(volumes.clone()).backed_by(backing.clone()),
             root: root.to_owned(),
             volumes,
-            presets,
+            packages,
             grants: Grants::new(root)?,
             making: Mutex::default(),
             vm,
@@ -529,22 +529,22 @@ impl Home {
         }
     }
 
-    /// The preset `named` names here, by its id or its name: `404` where none does.
-    pub(crate) async fn preset(&self, named: &str) -> Result<Preset, Refused> {
-        let (presets, looked) = (self.presets.clone(), named.to_owned());
-        tokio::task::spawn_blocking(move || presets.get(&looked))
+    /// The package `named` names here, by its id or its name: `404` where none does.
+    pub(crate) async fn package(&self, named: &str) -> Result<Package, Refused> {
+        let (packages, looked) = (self.packages.clone(), named.to_owned());
+        tokio::task::spawn_blocking(move || packages.get(&looked))
             .await??
-            .ok_or_else(|| not_found(format!("no preset here is {named}")))
+            .ok_or_else(|| not_found(format!("no package here is {named}")))
     }
 
-    /// A sandbox made of `preset` by `maker`, as `args` asks, and its grant: `400` for a name
+    /// A sandbox made of `package` by `maker`, as `args` asks, and its grant: `400` for a name
     /// asked by one its access let in, and `429` `quota` past its limits for one.
     pub(crate) async fn make_of(
         &self,
-        preset: &Preset,
+        package: &Package,
         maker: Maker,
-        args: PresetSandboxCreateArgs,
-    ) -> Result<PresetSandbox, Refused> {
+        args: PackageSandboxCreateArgs,
+    ) -> Result<PackageSandbox, Refused> {
         let (subject, member) = match maker {
             Maker::Member(user) => (user, true),
             Maker::LetIn(subject) => (subject, false),
@@ -556,16 +556,15 @@ impl Home {
         }
         let _reserved = match member {
             true => None,
-            false => Some(self.reserve(preset, &subject).await?),
+            false => Some(self.reserve(package, &subject).await?),
         };
-        let mut made = preset.sandbox.clone();
-        made.name = args.name;
+        let made = virtx_uvm::package_sandbox_args(package, args)?;
         let sandbox = self.create(made, None).await?;
         let size = self.sandbox(&sandbox.id)?.args();
-        let max = preset.max.clone().unwrap_or_default();
+        let max = package.max.clone().unwrap_or_default();
         let grant = Grant {
             sandbox: sandbox.id.clone(),
-            preset: preset.id.clone(),
+            package: package.id.clone(),
             subject,
             member,
             max: SandboxResizeArgs {
@@ -581,11 +580,11 @@ impl Home {
                         .unwrap_or(virtx_uvm::DEFAULT_DISK_GIB),
                 ),
             },
-            origins: preset.origins.clone(),
+            origins: package.origins.clone(),
         };
         let (grants, project) = (self.grants.clone(), self.project);
         match tokio::task::spawn_blocking(move || grants.give(&project, &grant)).await? {
-            Ok(token) => Ok(PresetSandbox {
+            Ok(token) => Ok(PackageSandbox {
                 sandbox,
                 grant: Some(token),
             }),
@@ -596,26 +595,26 @@ impl Home {
         }
     }
 
-    /// Room under `preset`'s limits for one more sandbox of `subject`'s, held until what this
+    /// Room under `package`'s limits for one more sandbox of `subject`'s, held until what this
     /// answers drops: `429` `quota` where those alive and being made fill them.
-    async fn reserve(&self, preset: &Preset, subject: &str) -> Result<Reserved<'_>, Refused> {
+    async fn reserve(&self, package: &Package, subject: &str) -> Result<Reserved<'_>, Refused> {
         let grants = self.grants.clone();
         let given = tokio::task::spawn_blocking(move || grants.list())
             .await?
             .map_err(|e| internal(format!("reading the grants: {e}")))?;
         let mut making = self.making.lock().unwrap();
         let of = (given.iter())
-            .filter(|grant| !grant.member && grant.preset == preset.id)
+            .filter(|grant| !grant.member && grant.package == package.id)
             .map(|grant| grant.subject.as_str())
             .chain(
                 (making.iter())
-                    .filter(|(of, _)| *of == preset.id)
+                    .filter(|(of, _)| *of == package.id)
                     .map(|(_, subject)| subject.as_str()),
             );
         let (all, theirs) = of.fold((0, 0), |(all, theirs), of| {
             (all + 1, theirs + u32::from(of == subject))
         });
-        let limits = preset.limits.unwrap_or_default();
+        let limits = package.limits.unwrap_or_default();
         if limits.sandboxes.is_some_and(|most| all >= most)
             || limits.per_subject.is_some_and(|most| theirs >= most)
         {
@@ -623,13 +622,13 @@ impl Home {
                 StatusCode::TOO_MANY_REQUESTS,
                 "quota",
                 format!(
-                    "preset {} has as many sandboxes as its limits let it",
-                    preset.name
+                    "package {} has as many sandboxes as its limits let it",
+                    package.name
                 ),
             )
             .with("reason", "sandboxes"));
         }
-        let held = (preset.id.clone(), subject.to_owned());
+        let held = (package.id.clone(), subject.to_owned());
         making.push(held.clone());
         Ok(Reserved(self, held))
     }
@@ -726,7 +725,7 @@ impl Drop for Naming<'_> {
     }
 }
 
-/// Room for a sandbox being made of a preset, given back as this drops: once its grant is
+/// Room for a sandbox being made of a package, given back as this drops: once its grant is
 /// given out, which counts it from there, or once its making failed.
 struct Reserved<'a>(&'a Home, (String, String));
 
@@ -739,7 +738,7 @@ impl Drop for Reserved<'_> {
     }
 }
 
-/// Who makes a sandbox of a preset, as [`Access::maker`] found.
+/// Who makes a sandbox of a package, as [`Access::maker`] found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Maker {
     /// A member of its project, by their user.
@@ -857,10 +856,10 @@ pub fn router() -> Router {
         )
         .route("/sandboxes/{id}/jobs/{job}/stdin", post(sandbox_job_stdin))
         .route("/sandboxes/{id}/jobs/{job}/events", get(sandbox_job_events))
-        .route("/presets/", get(preset_list))
+        .route("/packages/", get(package_list))
         .route(
-            "/presets/{preset}",
-            get(preset_get).put(preset_put).delete(preset_remove),
+            "/packages/{package}",
+            get(package_get).put(package_put).delete(package_remove),
         )
         .method_not_allowed_fallback(async || {
             refused(
@@ -872,11 +871,14 @@ pub fn router() -> Router {
         .fallback(async || not_found("no endpoint here"))
 }
 
-/// Making a sandbox of a preset, as its members or whom its access lets in: answered from the
-/// [`Access`] in its extensions, which reaches the preset's home by its id with no member's
+/// Making a sandbox of a package, as its members or whom its access lets in: answered from the
+/// [`Access`] in its extensions, which reaches the package's home by its id with no member's
 /// token.
-pub fn preset_sandboxes() -> Router {
-    Router::new().route("/presets/{preset}/sandboxes/", post(preset_sandbox_create))
+pub fn package_sandboxes() -> Router {
+    Router::new().route(
+        "/packages/{package}/sandboxes/",
+        post(package_sandbox_create),
+    )
 }
 
 /// The projects, and their members, each request answered as its sender, from the [`Access`] in
@@ -1522,14 +1524,14 @@ async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
-    let presets = home.presets.clone();
+    let packages = home.packages.clone();
     let looked = name.clone();
-    let naming = tokio::task::spawn_blocking(move || presets.steady().naming_volume(&looked));
-    if let Some(preset) = naming.await?? {
+    let naming = tokio::task::spawn_blocking(move || packages.steady().naming_volume(&looked));
+    if let Some(package) = naming.await?? {
         return Err(refused(
             StatusCode::CONFLICT,
             "in_use",
-            format!("volume {name} is in use: preset {preset} mounts it"),
+            format!("volume {name} is in use: package {package} mounts it"),
         ));
     }
     let Some(backend) = home.backing.get() else {
@@ -1841,29 +1843,29 @@ async fn sandbox_job_events(
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.
-async fn preset_list(Extension(home): Extension<Arc<Home>>) -> Answer {
-    let presets = home.presets.clone();
+async fn package_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+    let packages = home.packages.clone();
     Ok(json(
-        &tokio::task::spawn_blocking(move || presets.list()).await??,
+        &tokio::task::spawn_blocking(move || packages.list()).await??,
     ))
 }
 
-/// The preset `{preset}` names here, by its id or its name.
-async fn preset_get(
+/// The package `{package}` names here, by its id or its name.
+async fn package_get(
     Extension(home): Extension<Arc<Home>>,
     Segments(named): Segments<String>,
 ) -> Answer {
-    Ok(json(&home.preset(&named).await?))
+    Ok(json(&home.package(&named).await?))
 }
 
-/// `PUT /presets/{name}`: refused for an image or a volume not here, as a sandbox's `POST`
+/// `PUT /packages/{name}`: refused for an image or a volume not here, as a sandbox's `POST`
 /// is, before it is kept.
-async fn preset_put(
+async fn package_put(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
     Whole(request): Whole,
 ) -> Answer {
-    let args: PresetPutArgs = body(&request)?;
+    let args: PackagePutArgs = body(&request)?;
     let backend = home.backing.get();
     match &args.sandbox.image {
         ImageName::Tag { tag } => {
@@ -1900,16 +1902,16 @@ async fn preset_put(
         bring_up(&home, &asked.volume).await?;
         home.volumes.open(&asked.volume)?;
     }
-    let (presets, vm, project) = (home.presets.clone(), home.vm.clone(), home.project);
+    let (packages, vm, project) = (home.packages.clone(), home.vm.clone(), home.project);
     let put = move || {
-        presets.put(&name, args, &vm, || {
+        packages.put(&name, args, &vm, || {
             format!("{project}.{}", uuid::Uuid::new_v4().simple())
         })
     };
-    let (preset, made) = tokio::task::spawn_blocking(put).await??;
+    let (package, made) = tokio::task::spawn_blocking(put).await??;
     Ok(match made {
-        true => created(format!("/presets/{}", preset.id), &preset),
-        false => json(&preset),
+        true => created(format!("/packages/{}", package.id), &package),
+        false => json(&package),
     })
 }
 
@@ -1920,22 +1922,22 @@ fn wanted(e: anyhow::Error) -> Refused {
     internal("the image could not be brought from where it is kept")
 }
 
-/// `DELETE /presets/{preset}`: the sandboxes made of it stay, with their grants.
-async fn preset_remove(
+/// `DELETE /packages/{package}`: the sandboxes made of it stay, with their grants.
+async fn package_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(named): Segments<String>,
 ) -> Answer {
-    let presets = home.presets.clone();
+    let packages = home.packages.clone();
     let looked = named.clone();
-    match tokio::task::spawn_blocking(move || presets.remove(&looked)).await?? {
+    match tokio::task::spawn_blocking(move || packages.remove(&looked)).await?? {
         true => Ok(StatusCode::NO_CONTENT.into_response()),
-        false => Err(not_found(format!("no preset here is {named}"))),
+        false => Err(not_found(format!("no package here is {named}"))),
     }
 }
 
-/// `POST /presets/{preset}/sandboxes/`, as its member or one its access lets in, as
+/// `POST /packages/{package}/sandboxes/`, as its member or one its access lets in, as
 /// [`Access::maker`] says: the sandbox, and its grant.
-async fn preset_sandbox_create(
+async fn package_sandbox_create(
     Extension(access): Extension<Arc<Access>>,
     connected: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Segments(named): Segments<String>,
@@ -1943,9 +1945,9 @@ async fn preset_sandbox_create(
     Whole(request): Whole,
 ) -> Answer {
     let from = connected.map(|Extension(connected)| connected.0.ip());
-    let (home, preset, maker) = access.maker(&headers, &named, from).await?;
-    let args: PresetSandboxCreateArgs = body(&request)?;
-    let answer = home.make_of(&preset, maker, args).await?;
+    let (home, package, maker) = access.maker(&headers, &named, from).await?;
+    let args: PackageSandboxCreateArgs = body(&request)?;
+    let answer = home.make_of(&package, maker, args).await?;
     Ok(created(
         format!("/sandboxes/{}", answer.sandbox.id),
         &answer,

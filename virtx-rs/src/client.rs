@@ -17,8 +17,8 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, LogEntry, Metadata, MountSource, Preset as PresetInfo, PresetPutArgs,
-    ProjectCreateArgs, ProjectListOutputItem as ProjectInfo,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, Package as PackageInfo, PackagePutArgs,
+    PackageSandboxCreateArgs, ProjectCreateArgs, ProjectListOutputItem as ProjectInfo,
     ProjectMemberListOutputItem as ProjectMemberInfo, Recipe, RegistryAuth, Role,
     Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
     SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs, SandboxResources,
@@ -26,7 +26,7 @@ use virtx_core::{
 };
 
 use crate::{
-    Error, ImageJob, Preset, PresetSandbox, Project, Sandbox, SandboxJob, Volume,
+    Error, ImageJob, Package, PackageSandbox, Project, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -682,55 +682,56 @@ impl Client {
         self.call(self.api.virtx_client_copy_file, args)
     }
 
-    /// Every preset in the project.
-    pub fn list_preset(&self) -> Call<Vec<Preset>> {
+    /// Every package in the project.
+    pub fn list_package(&self) -> Call<Vec<Package>> {
         let client = self.clone();
-        let call: Call<Vec<PresetInfo>> = Call::new(self.api, unsafe {
-            (self.api.virtx_client_list_preset)(self.raw)
+        let call: Call<Vec<PackageInfo>> = Call::new(self.api, unsafe {
+            (self.api.virtx_client_list_package)(self.raw)
         });
         call.map(move |infos| {
             infos
                 .into_iter()
-                .map(|info| Preset::new(client.clone(), info))
+                .map(|info| Package::new(client.clone(), info))
                 .collect()
         })
     }
 
-    /// Keep `args` as the preset `name`, made or replaced in whole; see [`PresetPutArgs::new`].
+    /// Keep `args` as the package `name`, made or replaced in whole; see [`PackagePutArgs::new`].
     /// Its image and volumes have to be on the server already.
-    pub fn put_preset(&self, name: impl AsRef<str>, args: &PresetPutArgs) -> Call<Preset> {
+    pub fn put_package(&self, name: impl AsRef<str>, args: &PackagePutArgs) -> Call<Package> {
         let args = json!({ "name": name.as_ref(), "args": args });
         let client = self.clone();
-        let call: Call<PresetInfo> = self.call(self.api.virtx_client_put_preset, args);
-        call.map(move |info| Preset::new(client.clone(), info))
+        let call: Call<PackageInfo> = self.call(self.api.virtx_client_put_package, args);
+        call.map(move |info| Package::new(client.clone(), info))
     }
 
-    /// The preset `preset` names: by its id, or its name in the project.
-    pub fn get_preset(&self, preset: impl AsRef<str>) -> Call<Preset> {
-        let args = json!({ "preset": preset.as_ref() });
+    /// The package `package` names: by its id, or its name in the project.
+    pub fn get_package(&self, package: impl AsRef<str>) -> Call<Package> {
+        let args = json!({ "package": package.as_ref() });
         let client = self.clone();
-        let call: Call<PresetInfo> = self.call(self.api.virtx_client_get_preset, args);
-        call.map(move |info| Preset::new(client.clone(), info))
+        let call: Call<PackageInfo> = self.call(self.api.virtx_client_get_package, args);
+        call.map(move |info| Package::new(client.clone(), info))
     }
 
-    /// Remove the preset `preset` names.
-    pub(crate) fn remove_preset(&self, preset: impl AsRef<str>) -> Call<()> {
-        let args = json!({ "preset": preset.as_ref() });
-        self.call(self.api.virtx_client_remove_preset, args)
+    /// Remove the package `package` names.
+    pub(crate) fn remove_package(&self, package: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "package": package.as_ref() });
+        self.call(self.api.virtx_client_remove_package, args)
     }
 
-    /// Make a sandbox of the preset `preset` names, by its id or its name, named `name` where
-    /// one is given: answered with it and its grant.
-    pub fn create_preset_sandbox(
+    /// Make a sandbox of the package `package` names, by its id or its name, as `args` says: a
+    /// name, and its ports on local. Answered with it and its grant.
+    pub fn create_package_sandbox(
         &self,
-        preset: impl AsRef<str>,
-        name: Option<&str>,
-    ) -> Call<PresetSandbox> {
-        let args = json!({ "preset": preset.as_ref(), "name": name });
+        package: impl AsRef<str>,
+        args: &PackageSandboxCreateArgs,
+    ) -> Call<PackageSandbox> {
+        let mut args = serde_json::to_value(args).expect("a sandbox's args serialize");
+        args["package"] = json!(package.as_ref());
         let client = self.clone();
-        let call: Call<virtx_core::PresetSandbox> =
-            self.call(self.api.virtx_client_create_preset_sandbox, args);
-        call.map(move |made| PresetSandbox {
+        let call: Call<virtx_core::PackageSandbox> =
+            self.call(self.api.virtx_client_create_package_sandbox, args);
+        call.map(move |made| PackageSandbox {
             sandbox: Sandbox::new(client.clone(), made.sandbox),
             grant: made.grant,
         })

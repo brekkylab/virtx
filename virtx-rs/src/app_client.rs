@@ -1,10 +1,10 @@
-//! A client of one sandbox an app's user makes of a preset.
+//! A client of one sandbox an app's user makes of a package.
 
-use virtx_core::Auth;
+use virtx_core::{Auth, PackageSandboxCreateArgs, PortSpec};
 
 use crate::{Client, Error, Sandbox};
 
-/// One sandbox, made of a preset for whom its access lets in and reached with its grant alone:
+/// One sandbox, made of a package for whom its access lets in and reached with its grant alone:
 /// what an app's user runs processes in, reads and writes the files of, and forwards the ports
 /// of, through [`sandbox`](Self::sandbox), and deletes with [`close`](Self::close), or as it
 /// drops, blocking until it is. The grant reaches nothing else, so neither does this.
@@ -14,13 +14,25 @@ pub struct AppClient {
 }
 
 impl AppClient {
-    /// Make a sandbox of the preset `preset`, by its id, on the server at `url`, as `auth` lets
-    /// in -- [`Auth::None`] where the preset is public, or a token of the issuer its access
-    /// names -- and reach it with its grant from then on, over the same client. Refused as the server refuses making
-    /// it: `401` or `403` for one the preset does not let in, and `429` past its limits.
-    pub async fn connect(url: &str, preset: &str, auth: Auth) -> Result<AppClient, Error> {
+    /// Make a sandbox of the package `package`, by its id, on the server at `url`, as `auth`
+    /// lets in -- [`Auth::None`] where the package is public, or a token of the issuer its
+    /// access names -- with `ports` on local, this machine's, beside those the package gives it
+    /// in the sandbox, each [`PortSide::Local`](crate::PortSide::Local); and reach it with its
+    /// grant from then on, over the same client. Refused as the server refuses making it: `401`
+    /// or `403` for one the package does not let in, `429` past its limits, and `400` for a
+    /// port in the sandbox.
+    pub async fn connect(
+        url: &str,
+        package: &str,
+        auth: Auth,
+        ports: impl IntoIterator<Item = PortSpec>,
+    ) -> Result<AppClient, Error> {
         let client = Client::connect(url, auth, None)?;
-        let made = client.create_preset_sandbox(preset, None).await?;
+        let args = PackageSandboxCreateArgs {
+            name: None,
+            ports: ports.into_iter().collect(),
+        };
+        let made = client.create_package_sandbox(package, &args).await?;
         let Some(token) = made.grant else {
             return Err(Error::Call(
                 virtx_core::Source::Server,

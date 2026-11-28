@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
 use http::{HeaderMap, Method, StatusCode, header};
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Preset, PresetAccess, Role};
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Package, PackageAccess, Role};
 use virtx_uvm::{
     ImageStore, ProjectError, ProjectId, ProjectStore, PublicImages, PublicRegistries,
     RegistryProxy, RegistryServer, Sandbox,
@@ -102,7 +102,7 @@ pub struct Access {
     mirror: Option<Arc<str>>,
     /// Where the homes' anonymous pulls are shared, in place of what each home was made with.
     public: Option<Arc<dyn PublicImages>>,
-    /// The issuers presets' access names, by issuer and where its keys are, each made as a
+    /// The issuers packages' access names, by issuer and where its keys are, each made as a
     /// token is first checked against it.
     issuers: Mutex<HashMap<IssuerKeys, Arc<Issuer>>>,
 }
@@ -224,7 +224,7 @@ impl Access {
     /// The home a request to `path` with `method` and `headers` reaches, and its grant where it
     /// is sent with one: a grant's own project's, as far as [`Grant::reaches`] says, `401` for
     /// one no longer given, and `403` for anything else of it, from an origin neither the
-    /// server nor its preset let in, or naming another project; otherwise a member's, as
+    /// server nor its package let in, or naming another project; otherwise a member's, as
     /// [`home`](Access::home) says.
     pub async fn reach(
         &self,
@@ -256,19 +256,19 @@ impl Access {
         Ok((home, Some(grant)))
     }
 
-    /// The home of the preset `named` names, the preset, and who makes a sandbox of it with
+    /// The home of the package `named` names, the package, and who makes a sandbox of it with
     /// `headers`, from `from`: a member of its project, with their token, or one its access
     /// lets in. Named by its id, it is reached with no member's token; by its name, in the
-    /// project the request names, by members alone. Refused `404` for no such preset, `401`
+    /// project the request names, by members alone. Refused `404` for no such package, `401`
     /// for a request no way lets in with no credentials or a token no one's, `403` for one
-    /// with a token that is someone's but not one the preset takes, or a grant, and from an
-    /// origin neither the server nor the preset lets in.
+    /// with a token that is someone's but not one the package takes, or a grant, and from an
+    /// origin neither the server nor the package lets in.
     pub(crate) async fn maker(
         &self,
         headers: &HeaderMap,
         named: &str,
         from: Option<std::net::IpAddr>,
-    ) -> Result<(Arc<Home>, Preset, Maker), Refused> {
+    ) -> Result<(Arc<Home>, Package, Maker), Refused> {
         let token = bearer(headers);
         if token.and_then(grant::project_of).is_some() {
             return Err(refusal(StatusCode::FORBIDDEN));
@@ -277,7 +277,7 @@ impl Access {
             refused(
                 StatusCode::NOT_FOUND,
                 "not_found",
-                format!("no preset here is {named}"),
+                format!("no package here is {named}"),
             )
         };
         let by_id =
@@ -301,22 +301,22 @@ impl Access {
                 (home, Some(who), true)
             }
         };
-        let preset = home.preset(named).await?;
-        self.origin_among(headers, &preset.origins)
+        let package = home.package(named).await?;
+        self.origin_among(headers, &package.origins)
             .map_err(refusal)?;
         if member && let Some(who) = who {
-            return Ok((home, preset, Maker::Member(who.user)));
+            return Ok((home, package, Maker::Member(who.user)));
         }
         let mut someone_s = who.is_some();
-        for way in &preset.access {
+        for way in &package.access {
             match (way, token) {
-                (PresetAccess::Public, None) => {
+                (PackageAccess::Public, None) => {
                     let subject =
                         from.map_or_else(|| "unknown".to_owned(), |from| from.to_string());
-                    return Ok((home, preset, Maker::LetIn(subject)));
+                    return Ok((home, package, Maker::LetIn(subject)));
                 }
                 (
-                    PresetAccess::Jwt {
+                    PackageAccess::Jwt {
                         issuer,
                         audience,
                         jwks,
@@ -335,7 +335,7 @@ impl Access {
                             .iter()
                             .all(|(name, value)| carried.get(name) == Some(value))
                     {
-                        return Ok((home, preset, Maker::LetIn(subject.to_owned())));
+                        return Ok((home, package, Maker::LetIn(subject.to_owned())));
                     }
                 }
                 _ => {}
@@ -754,22 +754,22 @@ mod tests {
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
     }
 
-    /// Who makes a sandbox of a preset named by its id: a member of its project with their token,
+    /// Who makes a sandbox of a package named by its id: a member of its project with their token,
     /// or one its access lets in -- anyone with no credentials where it is public, its subject
     /// their address, and a token of its issuer's for its audience carrying its claims, its
-    /// subject the token's -- from the server's origins or the preset's. Refused `401` with a
-    /// token no one's, `403` with someone's the preset does not take or a grant, and `404` for
-    /// no such preset. One let in names no sandbox, and is held to the preset's limits.
+    /// subject the token's -- from the server's origins or the package's. Refused `401` with a
+    /// token no one's, `403` with someone's the package does not take or a grant, and `404` for
+    /// no such package. One let in names no sandbox, and is held to the package's limits.
     #[tokio::test]
-    async fn a_preset_s_sandbox_is_made_by_its_members_and_whom_its_access_lets_in() {
+    async fn a_package_s_sandbox_is_made_by_its_members_and_whom_its_access_lets_in() {
         use std::time::SystemTime;
 
         use jsonwebtoken::{Algorithm, EncodingKey, Header};
         use virtx_core::{
-            PresetAccess, PresetLimits, PresetPutArgs, PresetSandboxCreateArgs, SandboxCreateArgs,
-            SandboxResizeArgs,
+            PackageAccess, PackageLimits, PackagePutArgs, PackageSandboxCreateArgs,
+            SandboxCreateArgs, SandboxResizeArgs,
         };
-        use virtx_uvm::PresetStore;
+        use virtx_uvm::PackageStore;
 
         use crate::endpoints::Maker;
         use crate::grant::{Grant, Grants};
@@ -804,21 +804,21 @@ mod tests {
         let home = access.home_of(&demo).await.unwrap().unwrap();
         let mut claims = serde_json::Map::new();
         claims.insert("repository".into(), json!("owner/app"));
-        let args = PresetPutArgs::new(SandboxCreateArgs::new("app:1"))
-            .access(PresetAccess::Public)
-            .access(PresetAccess::Jwt {
+        let args = PackagePutArgs::new(SandboxCreateArgs::new("app:1"))
+            .access(PackageAccess::Public)
+            .access(PackageAccess::Jwt {
                 issuer: "https://idp.example".into(),
                 audience: "app".into(),
                 jwks: Some(jwks),
                 claims,
             })
             .origin("https://app.example")
-            .limits(PresetLimits {
+            .limits(PackageLimits {
                 sandboxes: Some(2),
                 per_subject: Some(1),
             });
-        let presets = PresetStore::new(&store.path(&demo)).unwrap();
-        let (preset, _) = presets
+        let packages = PackageStore::new(&store.path(&demo)).unwrap();
+        let (package, _) = packages
             .put("app", args, &[], || format!("{demo}.p1"))
             .unwrap();
 
@@ -842,7 +842,7 @@ mod tests {
             made.map(|(_, _, maker)| maker)
                 .map_err(|refused| refused.status())
         };
-        let id = preset.id.as_str();
+        let id = package.id.as_str();
         let let_in = |subject: &str| Ok(Maker::LetIn(subject.into()));
 
         assert_eq!(maker(None, None, None, id).await, let_in("203.0.113.7"));
@@ -899,14 +899,15 @@ mod tests {
             "by name, members alone"
         );
 
-        // One let in names no sandbox, and makes none past the preset's limits, with those of
+        // One let in names no sandbox, and makes none past the package's limits, with those of
         // its sandboxes alive given out: a member's counted toward none.
         let make = async |subject: &str, name: Option<&str>| {
-            let args = PresetSandboxCreateArgs {
+            let args = PackageSandboxCreateArgs {
                 name: name.map(str::to_owned),
+                ports: Vec::new(),
             };
             let made = home
-                .make_of(&preset, Maker::LetIn(subject.into()), args)
+                .make_of(&package, Maker::LetIn(subject.into()), args)
                 .await;
             made.err().map(|refused| refused.status())
         };
@@ -914,7 +915,7 @@ mod tests {
         let grants = Grants::new(&store.path(&demo)).unwrap();
         let given = |subject: &str, member| Grant {
             sandbox: format!("of-{subject}"),
-            preset: preset.id.clone(),
+            package: package.id.clone(),
             subject: subject.into(),
             member,
             max: SandboxResizeArgs::default(),

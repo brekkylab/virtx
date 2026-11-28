@@ -24,7 +24,7 @@ known by its id or name is had with ``get_sandbox``, ``find_sandbox``, ``get_vol
 ``get_image_job`` or ``Sandbox.job``. The two with files read and write them as ``Files``:
 ``await volume.read_file("a.txt")``.
 
-A preset is answered as a ``Preset``, which makes sandboxes of it; an app's user reaches the
+A package is answered as a ``Package``, which makes sandboxes of it; an app's user reaches the
 one they made with an ``AppClient``, by its grant alone.
 
 A project is answered as a ``Project``, carrying its client the same way: its members, and its
@@ -59,16 +59,16 @@ from .image import (
     image_name,
 )
 from .job import LogEntry, StartedJob, Truncated
-from .port_forward import PortForwarder
-from .preset import (
+from .package import (
     AppClient,
     JwtAccess,
-    Preset,
-    PresetAccess,
-    PresetLimits,
-    PresetSandbox,
+    Package,
+    PackageAccess,
+    PackageLimits,
+    PackageSandbox,
     PublicAccess,
 )
+from .port_forward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
 from .sandbox import (
     PortSide,
@@ -127,13 +127,13 @@ __all__ = [
     "NotionSource",
     "OnedriveSource",
     "Output",
+    "Package",
+    "PackageAccess",
+    "PackageLimits",
+    "PackageSandbox",
     "PortForwarder",
     "PortSide",
     "PortSpec",
-    "Preset",
-    "PresetAccess",
-    "PresetLimits",
-    "PresetSandbox",
     "Progress",
     "Project",
     "ProjectMemberListOutputItem",

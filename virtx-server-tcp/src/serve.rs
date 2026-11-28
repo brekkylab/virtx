@@ -112,7 +112,7 @@ pub fn router(access: Arc<Access>, own: axum::Router) -> axum::Router {
                 }
             },
         ))
-        .merge(endpoints::preset_sandboxes().layer(Extension(Arc::clone(&access))))
+        .merge(endpoints::package_sandboxes().layer(Extension(Arc::clone(&access))))
         .merge(own)
         .route(&registry, any(images.clone()))
         .route(&format!("{registry}/"), any(images.clone()))
@@ -212,8 +212,8 @@ async fn interrupted() {
 /// What a browser at one of the config's `origins` may do here: every method the endpoints
 /// take, with the headers they read and the ones a client reads back. A preflight is answered
 /// here, before any check, as a browser sends it without the token; the request it clears is
-/// checked as any other. A browser at any origin is let send what a preset's origins or a
-/// grant's may -- making a sandbox of a preset, and reaching a sandbox -- which the server
+/// checked as any other. A browser at any origin is let send what a package's origins or a
+/// grant's may -- making a sandbox of a package, and reaching a sandbox -- which the server
 /// checks against those as the request comes.
 fn cors(origins: &[String]) -> CorsLayer {
     let origins: Vec<HeaderValue> = origins
@@ -224,7 +224,7 @@ fn cors(origins: &[String]) -> CorsLayer {
         let path = request.uri.path();
         origins.contains(origin)
             || path.starts_with("/sandboxes/")
-            || (path.starts_with("/presets/") && path.ends_with("/sandboxes/"))
+            || (path.starts_with("/packages/") && path.ends_with("/sandboxes/"))
     });
     let method = |name| Method::from_bytes(name).expect("a method name");
     CorsLayer::new()
@@ -812,25 +812,25 @@ mod tests {
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
     }
 
-    /// A preset is kept as it is put, refused for an image or a volume the project has none of,
+    /// A package is kept as it is put, refused for an image or a volume the project has none of,
     /// replaced keeping its id, which names its project, found by that id or its name, and
     /// removed; while it is kept, its volume and its tag are refused their removal.
     #[tokio::test]
-    async fn a_project_s_presets_are_kept_and_what_they_name_is_in_use() {
-        let served = Served::spawn("presets").await;
+    async fn a_project_s_packages_are_kept_and_what_they_name_is_in_use() {
+        let served = Served::spawn("packages").await;
         let demo = Some("demo");
         let mounting = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"},
             "volumes": [{"volume": "data", "path": "/data"}]}, "origins": ["https://app.example"]}"#;
-        let (status, body) = served.send("PUT", "presets/app", demo, mounting).await;
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
         served.file_image("app:1").await;
-        let (status, body) = served.send("PUT", "presets/app", demo, mounting).await;
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "no volume: {body}");
         served
             .send("POST", "volumes/", demo, r#"{"name": "data"}"#)
             .await;
 
-        let (status, body) = served.send("PUT", "presets/app", demo, mounting).await;
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         let made: Value = serde_json::from_str(&body).unwrap();
         let id = made["id"].as_str().unwrap().to_owned();
@@ -838,19 +838,19 @@ mod tests {
         let project = project.file_name().unwrap().to_str().unwrap();
         assert!(id.starts_with(&format!("{project}.")), "{id}");
         assert_eq!(made["origins"], json!(["https://app.example"]));
-        let (status, body) = served.send("PUT", "presets/app", demo, mounting).await;
+        let (status, body) = served.send("PUT", "packages/app", demo, mounting).await;
         assert_eq!(
             (status, &serde_json::from_str::<Value>(&body).unwrap()["id"]),
             (StatusCode::OK, &json!(id))
         );
         for named in ["app", id.as_str()] {
             let (status, body) = served
-                .send("GET", &format!("presets/{named}"), demo, "")
+                .send("GET", &format!("packages/{named}"), demo, "")
                 .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["name"], "app");
         }
-        let (_, listed) = served.send("GET", "presets/", demo, "").await;
+        let (_, listed) = served.send("GET", "packages/", demo, "").await;
         assert_eq!(
             serde_json::from_str::<Value>(&listed)
                 .unwrap()
@@ -859,17 +859,17 @@ mod tests {
                 .len(),
             1
         );
-        let (status, _) = served.send("GET", "presets/app", Some("other"), "").await;
+        let (status, _) = served.send("GET", "packages/app", Some("other"), "").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "another project's");
 
         let named = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"}, "name": "dev"}}"#;
-        let (status, body) = served.send("PUT", "presets/named", demo, named).await;
+        let (status, body) = served.send("PUT", "packages/named", demo, named).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
         let (status, body) = served.send("DELETE", "volumes/data", demo, "").await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert!(
-            body.contains("in_use") && body.contains("preset app"),
+            body.contains("in_use") && body.contains("package app"),
             "{body}"
         );
         let (status, body) = served
@@ -879,10 +879,10 @@ mod tests {
         assert!(body.contains("DENIED"), "{body}");
 
         let (status, _) = served
-            .send("DELETE", &format!("presets/{id}"), demo, "")
+            .send("DELETE", &format!("packages/{id}"), demo, "")
             .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let (status, _) = served.send("DELETE", "presets/app", demo, "").await;
+        let (status, _) = served.send("DELETE", "packages/app", demo, "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = served.send("DELETE", "volumes/data", demo, "").await;
         assert_eq!(status, StatusCode::NO_CONTENT);
@@ -905,7 +905,7 @@ mod tests {
         let grants = crate::grant::Grants::new(&dir).unwrap();
         let grant = crate::grant::Grant {
             sandbox: "mine".into(),
-            preset: format!("{project}.p"),
+            package: format!("{project}.p"),
             subject: "203.0.113.7".into(),
             member: false,
             max: virtx_core::SandboxResizeArgs::default()
@@ -957,7 +957,7 @@ mod tests {
             ("GET", "sandboxes/theirs/jobs/"),
             ("POST", "sandboxes/"),
             ("GET", "volumes/"),
-            ("GET", "presets/"),
+            ("GET", "packages/"),
             ("GET", "images/oci/v2/"),
             ("GET", "projects/"),
         ] {

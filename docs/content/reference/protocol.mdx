@@ -32,8 +32,8 @@ A server offers several endpoints, and each speaks its own protocol:
 | [`/sandboxes/{id}/jobs/{job}/stdin`](#sandbox-jobs) | HTTP | Writing to a process's stdin |
 | [`/sandboxes/{id}/jobs/{job}/signal`](#sandbox-jobs) | HTTP | Sending a signal to a process |
 | [`/sandboxes/{id}/jobs/{job}/events`](#events) | Event stream | A process's output and end |
-| [`/presets/`](#presets) | HTTP | Preset CRUD |
-| [`/presets/{preset}/sandboxes/`](#presets) | HTTP | Making a sandbox as a preset says, by its members or whom its [access](#access) lets in |
+| [`/packages/`](#packages) | HTTP | Package CRUD |
+| [`/packages/{package}/sandboxes/`](#packages) | HTTP | Making a sandbox as a package says, by its members or whom its [access](#access) lets in |
 
 Everything is made, read and removed with plain HTTP, each request standing alone.
 What runs for a while, such as a build or a process, is a [job](#jobs): started with a `POST`, read with a `GET`, cancelled with a `DELETE`, and its log read as an event stream by any client allowed to, from where it left off.
@@ -59,7 +59,7 @@ A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface
 
 A web page could reach a server through DNS rebinding, so the server MUST check the `Origin` header of every request, the opening of a [port's](#ports) WebSocket included.
 It MUST answer `403 Forbidden` to a request whose `Origin` names an origin it does not allow.
-A [preset's](#presets) `origins` are allowed beside the server's own, for the requests that make a sandbox of it and those its [grant](#grants) sends.
+A [package's](#packages) `origins` are allowed beside the server's own, for the requests that make a sandbox of it and those its [grant](#grants) sends.
 A request with no `Origin`, from any non-browser client, is not refused for that.
 
 ### Stdio
@@ -83,7 +83,7 @@ How the client obtains the token is outside this protocol, but a server MAY say 
 - `oidc`, if the tokens are an OpenID Connect provider's, is `{"issuer": "...", "client_id": "..."}`: the provider, and the public client to sign in to it as. The token is then the ID token the provider issues that client.
 - Without `oidc`, the server names no way to sign in: it takes tokens given out some other way, or none.
 
-A server that takes credentials also takes, sent the same way, the tokens a [preset's `access`](#access) lets in to make a sandbox of it, and the [grant](#grants) of each sandbox so made: a token of its own, which reaches that sandbox alone.
+A server that takes credentials also takes, sent the same way, the tokens a [package's `access`](#access) lets in to make a sandbox of it, and the [grant](#grants) of each sandbox so made: a token of its own, which reaches that sandbox alone.
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
@@ -280,7 +280,7 @@ Its files are reached at [`/volumes/{name}/files/`](#files).
 
 Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
 `size` is the bytes the volume's files take on the server.
-`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`, and one a [preset](#presets) names, from its `PUT` until its `DELETE`.
+`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`, and one a [package](#packages) names, from its `PUT` until its `DELETE`.
 
 #### Mounts
 
@@ -488,41 +488,42 @@ With `stdin` `true`, the client writes to it with `POST {job}/stdin`:
 - A job started without `stdin`, one whose stdin is closed -- by `eof` or by its process -- and one that has ended refuse it with `409`, `ended`. So does a write its process closed its stdin under part-way, with `written` beside `code` and `message`: how many bytes of `data`, as UTF-8, went in before it closed, so `{"error": {"code": "ended", "message": "...", "written": 65536}}`. No other refusal of a write has `written`.
 - An empty `data` writes nothing, and is answered as any write is: `204` while the process's stdin still has a reader.
 
-### Presets
+### Packages
 
-A preset is a sandbox kept under a name, made as many times as it is asked for: what a [sandbox's `POST`](#sandboxes) takes, said once by a project's members, with who else may make one and how many.
-It lets the users of an app built on VirtX make sandboxes from the app itself, with no server of the app's own between them and VirtX: each is let in by what its preset's [`access`](#access) takes, and reaches the sandbox it made alone, with a [grant](#grants).
+A package is a sandbox kept under a name, made as many times as it is asked for: what a [sandbox's `POST`](#sandboxes) takes, said once by a project's members, with who else may make one and how many.
+It lets the users of an app built on VirtX make sandboxes from the app itself, with no server of the app's own between them and VirtX: each is let in by what its package's [`access`](#access) takes, and reaches the sandbox it made alone, with a [grant](#grants).
 
 | Request | Body | Answer |
 | --- | --- | --- |
-| `GET /presets/` | | `200`, array of presets |
-| `PUT /presets/{name}` | `{sandbox, max?, access?, origins?, limits?}` | `201` or `200`, the preset |
-| `GET /presets/{preset}` | | `200`, the preset |
-| `DELETE /presets/{preset}` | | `204` |
-| `POST /presets/{preset}/sandboxes/` | `{name?}` | `201`, `{sandbox, grant?}` |
+| `GET /packages/` | | `200`, array of packages |
+| `PUT /packages/{name}` | `{sandbox, max?, access?, origins?, limits?}` | `201` or `200`, the package |
+| `GET /packages/{package}` | | `200`, the package |
+| `DELETE /packages/{package}` | | `204` |
+| `POST /packages/{package}/sandboxes/` | `{name?, ports?}` | `201`, `{sandbox, grant?}` |
 
-A preset is `{id, name, sandbox, max?, access, origins, limits?}`:
+A package is `{id, name, sandbox, max?, access, origins, limits?}`:
 
 - `id` is given it by the server once, kept as it is replaced, and names its project with it. `name` is letters, digits, `.`, `_` and `-`, as a sandbox's, and any other is refused with `400`, `invalid`.
-- `{preset}` names a preset by its id, or by its name in the project the request names. An app names it by its id: its users are no project's members, and name no project.
-- `sandbox` is what a sandbox's `POST` takes, `lifetime` among it, but `name`, which is refused with `400`, `invalid`. It is held to what that `POST` holds it to as the `PUT` is answered. Its `image` names a tag or a digest as there; a tag is read as each sandbox is made, so a preset of `app:latest` makes the next sandbox of the image the tag points at then.
+- `{package}` names a package by its id, or by its name in the project the request names. An app names it by its id: its users are no project's members, and name no project.
+- `sandbox` is what a sandbox's `POST` takes, `lifetime` among it, but `name` and a [port](#ports) on local, each refused with `400`, `invalid`: each sandbox is named, and has its ports on local, as it is made. It is held to what that `POST` holds it to as the `PUT` is answered. Its `image` names a tag or a digest as there; a tag is read as each sandbox is made, so a package of `app:latest` makes the next sandbox of the image the tag points at then.
 - `max` is `{vcpus?, memory_mib?, disk_gib?}`: how large a sandbox made of it may be [resized](#resizing) with its grant, each no less than what `sandbox` makes it, or `400`, `invalid`. One left out, or no `max`, holds the grant to the size the sandbox was made with.
 - `access` is who beside the project's members may make a sandbox of it, as [Access](#access) says: a list of ways in, any of which lets a request in. Without it, or empty, its members alone may.
 - `origins` are the [origins](#origin) a web page may make a sandbox of it from, and reach that sandbox with its grant from, beside those the server allows itself: each a scheme, host and port, as `https://app.example`.
 - `limits` is `{sandboxes?, per_subject?}`: how many sandboxes made of it by those `access` lets in may live at once, all of them and each subject's. A `POST` past either is refused with `429`, `quota`, its `reason` `sandboxes`, as [Refused for now](#refused-for-now) says. Without one, that is the server's to limit.
 
-`PUT` makes a preset, answered `201`, or replaces one in whole, `200`, and is refused for an image or a volume the project has none of, as a sandbox's `POST` is.
-A preset's tag and its volumes are in use from its `PUT` until its `DELETE`: the `DELETE` that would take the tag away is refused as under [Images](#images), and a volume's `DELETE` with `409`, `in_use`. Moving the tag to another image is not refused.
-`DELETE` removes the preset, and what it lets in from then on.
-A sandbox made of a preset is a sandbox as any other, and knows nothing of it: replacing or removing the preset changes no sandbox made of it, nor its grant.
+`PUT` makes a package, answered `201`, or replaces one in whole, `200`, and is refused for an image or a volume the project has none of, as a sandbox's `POST` is.
+A package's tag and its volumes are in use from its `PUT` until its `DELETE`: the `DELETE` that would take the tag away is refused as under [Images](#images), and a volume's `DELETE` with `409`, `in_use`. Moving the tag to another image is not refused.
+`DELETE` removes the package, and what it lets in from then on.
+A sandbox made of a package is a sandbox as any other, and knows nothing of it: replacing or removing the package changes no sandbox made of it, nor its grant.
 
-`POST /presets/{preset}/sandboxes/` makes a sandbox as the preset says, answered `{sandbox, grant?}`: the sandbox, as a sandbox's `POST` answers it, and its [grant](#grants), in this answer alone.
+`POST /packages/{package}/sandboxes/` makes a sandbox as the package says, answered `{sandbox, grant?}`: the sandbox, as a sandbox's `POST` answers it, and its [grant](#grants), in this answer alone.
 
+- `ports` are its ports on local, each `{"port", "on": "local", "label"?}` as under [Ports](#ports), beside those in the sandbox the package gives it: the machine of the one who makes it is theirs to offer. A port in the sandbox is the package's to give, and is refused with `400`, `invalid`.
 - A member makes it as a sandbox's `POST` does, and may name it with `name`.
-- One `access` lets in sends `{}`: a `name` is refused with `400`, `invalid`, since names are the project's.
-- A request no way lets in is refused with `401`, `unauthorized`, with no credentials or a token no one's, and with `403`, `forbidden`, with a token that is someone's but not one the preset takes.
+- One `access` lets in may not: a `name` is refused with `400`, `invalid`, since names are the project's.
+- A request no way lets in is refused with `401`, `unauthorized`, with no credentials or a token no one's, and with `403`, `forbidden`, with a token that is someone's but not one the package takes.
 
-A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), keeps presets for its one client, and answers no `grant`: `access`, `origins` and `limits` are kept and answered, and let no one in.
+A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), keeps packages for its one client, and answers no `grant`: `access`, `origins` and `limits` are kept and answered, and let no one in.
 
 #### Access
 
@@ -541,12 +542,12 @@ A token the server takes from its own members, as [Authentication](#authenticati
 
 #### Grants
 
-A grant is a token that reaches one sandbox and nothing else, given out by the `POST` that made that sandbox of a [preset](#presets): what the one who made it calls it with from then on.
+A grant is a token that reaches one sandbox and nothing else, given out by the `POST` that made that sandbox of a [package](#packages): what the one who made it calls it with from then on.
 
 - It is answered by that `POST` alone. The server MUST NOT keep it beyond what tells it apart, such as its hash, show it in another answer, or write it to a log of its own.
 - It is sent as credentials are, `Authorization: Bearer <grant>`, and reaches the sandbox's project, with no `virtx-project`: a request naming another project is refused with `403`, `forbidden`.
-- It reaches `GET /sandboxes/`, answered with its sandbox alone, `GET`, `PATCH` and `DELETE /sandboxes/{id}`, and everything under `/sandboxes/{id}/` -- its [files](#files), [ports](#ports) and [jobs](#sandbox-jobs). A `PATCH` past the preset's `max`, as it was when the sandbox was made, is refused with `403`, `forbidden`, changing nothing. Every other request is refused with `403`, `forbidden`.
-- A web page's requests with it are let in from the preset's `origins`, as they were when the sandbox was made, beside the server's own.
+- It reaches `GET /sandboxes/`, answered with its sandbox alone, `GET`, `PATCH` and `DELETE /sandboxes/{id}`, and everything under `/sandboxes/{id}/` -- its [files](#files), [ports](#ports) and [jobs](#sandbox-jobs). A `PATCH` past the package's `max`, as it was when the sandbox was made, is refused with `403`, `forbidden`, changing nothing. Every other request is refused with `403`, `forbidden`.
+- A web page's requests with it are let in from the package's `origins`, as they were when the sandbox was made, beside the server's own.
 - It lives as its sandbox does: once the sandbox is deleted, by it, a member or the server, it is refused with `401`, `unauthorized`, as a token no one's is.
 
 A grant is no member of the project, and reaches neither its other sandboxes nor anything else in it.
@@ -577,7 +578,7 @@ Images are listed, tagged and removed with the specification's requests:
 
 A sandbox stands on the image it was made from, from its `POST` until its `DELETE`, its VM parked or not, and a build on its base while it runs.
 A `DELETE` that would leave an image a sandbox or a build stands on with no tag -- the image's removal, or the untagging of its last tag -- is refused with `409 Conflict` and the code `DENIED`, and removes nothing.
-So is a `DELETE` that would take away a tag a [preset](#presets) names: its untagging, or the removal of the image it points at.
+So is a `DELETE` that would take away a tag a [package](#packages) names: its untagging, or the removal of the image it points at.
 A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time.
 A client pushing an image therefore puts its manifest by tag, not by digest alone.
 

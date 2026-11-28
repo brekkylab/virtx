@@ -1,5 +1,5 @@
 //! Grants: each a token that reaches one sandbox and nothing else, given out as the sandbox is
-//! made of a preset. A home keeps each by its token's hash alone, with what it reaches, and
+//! made of a package. A home keeps each by its token's hash alone, with what it reaches, and
 //! takes it away with its sandbox; the sandbox knows nothing of it.
 //!
 //! A grant's token names its project, so a request with one is taken to its home without
@@ -31,11 +31,11 @@ const PREFIX: &str = "vxg.";
 pub struct Grant {
     /// The sandbox it reaches.
     pub sandbox: String,
-    /// The preset the sandbox was made of, by id.
-    pub preset: String,
-    /// Who made it: the member, or the subject the preset's access let in.
+    /// The package the sandbox was made of, by id.
+    pub package: String,
+    /// Who made it: the member, or the subject the package's access let in.
     pub subject: String,
-    /// Whether that was a member, who counts toward none of the preset's limits.
+    /// Whether that was a member, who counts toward none of the package's limits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub member: bool,
     /// How large it may resize the sandbox to, each member given.
@@ -157,7 +157,7 @@ mod tests {
     fn grant(sandbox: &str) -> Grant {
         Grant {
             sandbox: sandbox.into(),
-            preset: "p".into(),
+            package: "p".into(),
             subject: "alice".into(),
             member: false,
             max: SandboxResizeArgs::default().vcpus(2),

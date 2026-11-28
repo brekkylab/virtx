@@ -26,7 +26,7 @@ from .image import (
     RegistryAuth,
 )
 from .job import StartedJob
-from .preset import Preset, PresetAccess, PresetLimits, PresetSandbox
+from .package import Package, PackageAccess, PackageLimits, PackageSandbox
 from .project import Project
 from .sandbox import PortSpec, Sandbox, SandboxVolume, create_args
 from .volume import Volume
@@ -416,12 +416,12 @@ class Client:
         output = await self._call("virtx_client_get_volume", _args(name=name))
         return Volume.from_dict(self, output)
 
-    async def list_preset(self) -> list[Preset]:
-        """Every preset in the project."""
-        items = await self._call("virtx_client_list_preset")
-        return [Preset.from_dict(self, item) for item in items]
+    async def list_package(self) -> list[Package]:
+        """Every package in the project."""
+        items = await self._call("virtx_client_list_package")
+        return [Package.from_dict(self, item) for item in items]
 
-    async def put_preset(
+    async def put_package(
         self,
         name: str,
         image: str | ImageName,
@@ -437,11 +437,11 @@ class Client:
         abins: Iterable[str] = (),
         lifetime: int | None = None,
         max: Mapping[str, int] | None = None,
-        access: Iterable[PresetAccess] = (),
+        access: Iterable[PackageAccess] = (),
         origins: Iterable[str] = (),
-        limits: PresetLimits | None = None,
-    ) -> Preset:
-        """Keep the preset ``name``, made or replaced in whole: each sandbox made of it made of
+        limits: PackageLimits | None = None,
+    ) -> Package:
+        """Keep the package ``name``, made or replaced in whole: each sandbox made of it made of
         ``image`` as ``create_sandbox`` makes one with the rest, but a name, which each is given
         as it is made. ``max`` is how large one may be resized with its grant, as
         ``{"vcpus": n, "memory_mib": n, "disk_gib": n}``; ``access`` who beside the project's
@@ -461,27 +461,30 @@ class Client:
             abins=abins,
             lifetime=lifetime,
         )
-        preset = {
+        package = {
             "sandbox": sandbox,
             "max": dict(max) if max is not None else None,
             "access": [way.to_dict() for way in access],
             "origins": list(origins),
             "limits": limits.to_dict() if limits is not None else None,
         }
-        request = _args(name=name, args={k: v for k, v in preset.items() if v is not None})
-        return Preset.from_dict(self, await self._call("virtx_client_put_preset", request))
+        request = _args(name=name, args={k: v for k, v in package.items() if v is not None})
+        return Package.from_dict(self, await self._call("virtx_client_put_package", request))
 
-    async def get_preset(self, preset: str) -> Preset:
-        """The preset ``preset`` names: by its id, or its name in the project."""
-        output = await self._call("virtx_client_get_preset", _args(preset=preset))
-        return Preset.from_dict(self, output)
+    async def get_package(self, package: str) -> Package:
+        """The package ``package`` names: by its id, or its name in the project."""
+        output = await self._call("virtx_client_get_package", _args(package=package))
+        return Package.from_dict(self, output)
 
-    async def create_preset_sandbox(self, preset: str, *, name: str | None = None) -> PresetSandbox:
-        """Make a sandbox of the preset ``preset`` names, by its id or its name, named ``name``
-        where one is given: answered with it and its grant."""
-        request = _args(preset=preset, name=name)
-        output = await self._call("virtx_client_create_preset_sandbox", request)
-        return PresetSandbox.from_dict(self, output)
+    async def create_package_sandbox(
+        self, package: str, *, name: str | None = None, ports: Iterable[PortSpec] = ()
+    ) -> PackageSandbox:
+        """Make a sandbox of the package ``package`` names, by its id or its name, named ``name``
+        where one is given, with ``ports`` on local, each ``on="local"``, beside those the
+        package gives it in the sandbox: answered with it and its grant."""
+        request = _args(package=package, name=name, ports=[p.to_dict() for p in ports] or None)
+        output = await self._call("virtx_client_create_package_sandbox", request)
+        return PackageSandbox.from_dict(self, output)
 
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds."""

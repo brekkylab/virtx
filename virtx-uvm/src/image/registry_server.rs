@@ -1669,7 +1669,7 @@ mod tests {
         let kept = Arc::clone(&keeping);
         let app1: Reference = "app:1".parse().unwrap();
         assert!(server.keeping(Arc::new(move |tag: &Reference| {
-            (kept.load(Ordering::SeqCst) && *tag == app1).then(|| "preset app names it".into())
+            (kept.load(Ordering::SeqCst) && *tag == app1).then(|| "package app names it".into())
         })));
 
         for path in [
@@ -1684,7 +1684,7 @@ mod tests {
                 body["errors"][0]["message"]
                     .as_str()
                     .unwrap()
-                    .contains("preset app")
+                    .contains("package app")
             );
             assert_eq!(store.tags().unwrap().len(), 2, "every tag kept");
         }

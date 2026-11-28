@@ -133,11 +133,11 @@ const SIGNATURES = {
   virtx_client_remove_file: WITH_ARGS,
   virtx_client_rename_file: WITH_ARGS,
   virtx_client_copy_file: WITH_ARGS,
-  virtx_client_list_preset: PLAIN,
-  virtx_client_put_preset: WITH_ARGS,
-  virtx_client_get_preset: WITH_ARGS,
-  virtx_client_remove_preset: WITH_ARGS,
-  virtx_client_create_preset_sandbox: WITH_ARGS,
+  virtx_client_list_package: PLAIN,
+  virtx_client_put_package: WITH_ARGS,
+  virtx_client_get_package: WITH_ARGS,
+  virtx_client_remove_package: WITH_ARGS,
+  virtx_client_create_package_sandbox: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
@@ -341,7 +341,7 @@ function library() {
 }
 
 // The members whose value is the caller's own, its keys sent and answered as they are: a JSON
-// Web Token's claims, which a preset's access names.
+// Web Token's claims, which a package's access names.
 const VERBATIM = new Set(['claims'])
 
 // camelCase keys to the wire's snake_case, and back, through plain objects and arrays.
@@ -729,25 +729,27 @@ class Client {
     return new Sandbox(this, info)
   }
 
-  async listPreset() {
-    const infos = await this._call('virtx_client_list_preset')
-    return infos.map((info) => new Preset(this, info))
+  async listPackage() {
+    const infos = await this._call('virtx_client_list_package')
+    return infos.map((info) => new Package(this, info))
   }
 
   // Each sandbox made of it is made of `image` as `createSandbox` makes one with the rest of
-  // `options`; `max`, `access`, `origins` and `limits` are the preset's own.
-  async putPreset(name, image, options = {}) {
+  // `options`; `max`, `access`, `origins` and `limits` are the package's own.
+  async putPackage(name, image, options = {}) {
     const { max, access, origins, limits, ...sandbox } = options
     const args = { sandbox: sandboxArgs(image, sandbox), max, access, origins, limits }
-    return new Preset(this, await this._call('virtx_client_put_preset', { name, args }))
+    return new Package(this, await this._call('virtx_client_put_package', { name, args }))
   }
 
-  async getPreset(preset) {
-    return new Preset(this, await this._call('virtx_client_get_preset', { preset }))
+  async getPackage(pkg) {
+    return new Package(this, await this._call('virtx_client_get_package', { package: pkg }))
   }
 
-  async createPresetSandbox(preset, { name } = {}) {
-    const made = await this._call('virtx_client_create_preset_sandbox', { preset, name })
+  // `ports` are its ports on local, each `on: 'local'`, beside those the package gives it.
+  async createPackageSandbox(pkg, { name, ports } = {}) {
+    const args = { package: pkg, name, ports }
+    const made = await this._call('virtx_client_create_package_sandbox', args)
     return { sandbox: new Sandbox(this, made.sandbox), grant: made.grant ?? null }
   }
 
@@ -1137,25 +1139,25 @@ class Sandbox extends Files {
 
 // A process run in a sandbox (`id`, `kind`, `pid`, `cmd`, `running`, `code`), and the client and
 // sandbox, `sandboxId`, that reach it. Dropping it leaves the job; `remove` removes it.
-// A preset the server keeps, as keeping it or asking for it answered, and the client that
-// reaches it: what makes sandboxes of it. Dropping it leaves the preset; `remove` removes it.
-class Preset {
+// A package the server keeps, as keeping it or asking for it answered, and the client that
+// reaches it: what makes sandboxes of it. Dropping it leaves the package; `remove` removes it.
+class Package {
   constructor(client, info) {
     held(this, client, info)
   }
 
   // A sandbox made of it, named `name` where one is given, and its grant.
-  createSandbox({ name } = {}) {
-    return this.client.createPresetSandbox(this.id, { name })
+  createSandbox({ name, ports } = {}) {
+    return this.client.createPackageSandbox(this.id, { name, ports })
   }
 
   // The sandboxes made of it stay, each with its grant.
   async remove() {
-    await this.client._call('virtx_client_remove_preset', { preset: this.id })
+    await this.client._call('virtx_client_remove_package', { package: this.id })
   }
 }
 
-// One sandbox, made of a preset for whom its access lets in and reached with its grant alone:
+// One sandbox, made of a package for whom its access lets in and reached with its grant alone:
 // what an app's user runs processes in, reads and writes the files of, and forwards the ports
 // of, as `sandbox`, and deletes with `close`. The grant reaches nothing else, so neither does
 // this.
@@ -1164,13 +1166,13 @@ class AppClient {
     this.sandbox = sandbox
   }
 
-  // Make a sandbox of the preset `preset`, by its id, on the server at `url`, as `auth` lets in
-  // -- null where the preset is public, or `{ type: 'bearer', token }` of the issuer its access
+  // Make a sandbox of the package `pkg`, by its id, on the server at `url`, as `auth` lets in
+  // -- null where the package is public, or `{ type: 'bearer', token }` of the issuer its access
   // names -- and reach it with its grant from then on.
-  static async connect(url, preset, auth = null) {
+  static async connect(url, pkg, auth = null, { ports } = {}) {
     const client = Client.connect(url, auth)
     try {
-      const made = await client.createPresetSandbox(preset)
+      const made = await client.createPackageSandbox(pkg, { ports })
       if (!made.grant) throw new VirtxError('the server gave the sandbox no grant to reach it with')
       // From here on, the grant alone: what made it reaches nothing more through this client.
       client.setAuth({ type: 'bearer', token: made.grant })
@@ -1264,7 +1266,7 @@ module.exports = {
   ImageJob,
   LIBRARY_ENV,
   PortForwarder,
-  Preset,
+  Package,
   Project,
   Recipe,
   Sandbox,

@@ -638,59 +638,60 @@ struct VirtxFuture *virtx_client_create_sandbox(struct VirtxClient *client,
                                                 const uint8_t *args,
                                                 size_t args_len);
 
-// Answers with each preset in the project, as `[{"id": "...", "name": "...", "sandbox":
+// Answers with each package in the project, as `[{"id": "...", "name": "...", "sandbox":
 // {...}, "max": {...}, "access": [...], "origins": ["..."], "limits": {...}}, ...]`,
 // `sandbox` as `virtx_client_create_sandbox` takes it and `max` and `limits` only where set.
 //
 // # Safety
 //
 // `client` is as in `virtx_client_list_volume`.
-struct VirtxFuture *virtx_client_list_preset(struct VirtxClient *client);
+struct VirtxFuture *virtx_client_list_package(struct VirtxClient *client);
 
-// Keeps the preset `name`, made or replaced in whole, given `{"name": "...", "args":
+// Keeps the package `name`, made or replaced in whole, given `{"name": "...", "args":
 // {"sandbox": {...}, "max": {"vcpus": n, "memory_mib": n, "disk_gib": n}, "access":
 // [{"type": "public"} | {"type": "jwt", "issuer": "...", "audience": "...", "jwks": "...",
 // "claims": {...}}], "origins": ["..."], "limits": {"sandboxes": n, "per_subject": n}}}`,
-// all of `args` but `sandbox` optional. Answers with the preset, as
-// `virtx_client_list_preset` answers each.
+// all of `args` but `sandbox` optional. Answers with the package, as
+// `virtx_client_list_package` answers each.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_put_preset(struct VirtxClient *client,
-                                            const uint8_t *args,
-                                            size_t args_len);
+struct VirtxFuture *virtx_client_put_package(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
 
-// Answers with the preset `preset` names, by its id or its name, given
-// `{"preset": "..."}`, as `virtx_client_list_preset` answers each.
+// Answers with the package `package` names, by its id or its name, given
+// `{"package": "..."}`, as `virtx_client_list_package` answers each.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_get_preset(struct VirtxClient *client,
-                                            const uint8_t *args,
-                                            size_t args_len);
+struct VirtxFuture *virtx_client_get_package(struct VirtxClient *client,
+                                             const uint8_t *args,
+                                             size_t args_len);
 
-// Removes the preset `preset` names, given `{"preset": "..."}`. Answers with `null`.
+// Removes the package `package` names, given `{"package": "..."}`. Answers with `null`.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_remove_preset(struct VirtxClient *client,
-                                               const uint8_t *args,
-                                               size_t args_len);
+struct VirtxFuture *virtx_client_remove_package(struct VirtxClient *client,
+                                                const uint8_t *args,
+                                                size_t args_len);
 
-// Makes a sandbox of the preset `preset` names, given `{"preset": "...", "name": "..."}`,
-// `name` optional and a member's alone to give. Answers with `{"sandbox": {...},
+// Makes a sandbox of the package `package` names, given `{"package": "...", "name": "...",
+// "ports": [{"port": n, "on": "local", "label": "..."}]}`, `name` optional and a member's
+// alone to give, and `ports` its ports on local beside the package's in the sandbox. Answers with `{"sandbox": {...},
 // "grant": "..."}`: the sandbox as `virtx_client_list_sandbox` answers each, and the token
 // that reaches it alone, which no other answer gives; over stdio, no `grant`.
 //
 // # Safety
 //
 // As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_create_preset_sandbox(struct VirtxClient *client,
-                                                       const uint8_t *args,
-                                                       size_t args_len);
+struct VirtxFuture *virtx_client_create_package_sandbox(struct VirtxClient *client,
+                                                        const uint8_t *args,
+                                                        size_t args_len);
 
 // Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
 // answers each.

@@ -1,7 +1,7 @@
 //! Images, the machines provisioned from them, and the registries around them, and the
 //! volumes mounted into them; the sandboxes a server makes of those, and the jobs run in each
 //! -- and the files of a volume or a sandbox, served to a client; and the projects all of it
-//! belongs to, and the presets kept in each; and where a project's data is kept beyond this machine, if anywhere
+//! belongs to, and the packages kept in each; and where a project's data is kept beyond this machine, if anywhere
 //! ([`StorageBackend`]). How many machines may run at once is the embedder's to say
 //! ([`Admission`]).
 
@@ -12,8 +12,8 @@ mod files;
 mod fstree;
 mod image;
 mod machine;
+mod package;
 pub mod ports;
-mod preset;
 mod project;
 mod sandbox;
 mod volume;
@@ -43,7 +43,9 @@ pub use oci_spec::image::Digest;
 pub use oci_spec::image::{ANNOTATION_BASE_IMAGE_DIGEST, ANNOTATION_BASE_IMAGE_NAME};
 /// An image's config, and the OS it says it is for.
 pub use oci_spec::image::{ImageConfiguration, Os};
-pub use preset::{Steady as SteadyPresets, Store as PresetStore};
+pub use package::{
+    Steady as SteadyPackages, Store as PackageStore, sandbox_args as package_sandbox_args,
+};
 pub use project::{
     Error as ProjectError, Owner as ProjectOwner, Project, ProjectId, Store as ProjectStore,
     is_name as is_project_name,

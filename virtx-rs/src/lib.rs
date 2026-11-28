@@ -14,7 +14,7 @@
 //! Starting a job is a [`StartedJob`], a call answering with the job, its [`JobLog`], or its
 //! `complete`: a [`JobEnd`], what the job ended with once it has.
 //!
-//! An app's user reaches the one sandbox they make of a preset with an [`AppClient`].
+//! An app's user reaches the one sandbox they make of a package with an [`AppClient`].
 //!
 //! Making or asking for a sandbox or a volume answers a [`Sandbox`] or a [`Volume`], running a
 //! process in a sandbox a [`SandboxJob`], and building, pulling or pushing an image an
@@ -31,8 +31,8 @@ mod files;
 mod image;
 mod job;
 mod library;
+mod package;
 mod port_forward;
-mod preset;
 mod project;
 mod sandbox;
 mod volume;
@@ -45,14 +45,14 @@ pub use files::Files;
 pub use image::ImageJob;
 pub use job::{JobEnd, JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
+pub use package::{Package, PackageSandbox};
 pub use port_forward::{Closed, PortForwarder};
-pub use preset::{Preset, PresetSandbox};
 pub use project::Project;
 pub use sandbox::{Sandbox, SandboxJob};
 /// What the server answers about an image job; an [`ImageJob`] carries it with its client.
 pub use virtx_core::ImageJob as ImageJobInfo;
-/// What the server answers about a preset; a [`Preset`] carries it with its client.
-pub use virtx_core::Preset as PresetInfo;
+/// What the server answers about a package; a [`Package`] carries it with its client.
+pub use virtx_core::Package as PackageInfo;
 /// What the server answers about a project; a [`Project`] carries it with its client.
 pub use virtx_core::ProjectListOutputItem as ProjectInfo;
 /// What the server answers about a member of a project.
@@ -66,9 +66,10 @@ pub use virtx_core::VolumeListOutputItem as VolumeInfo;
 pub use virtx_core::{
     Auth, DirEntry, Event, ImageDownloadOutput, ImageJobEnd, ImageJobEntry, ImageJobKind,
     ImageListOutputItem, ImageName, ImagePruneOutput, ImageUploadOutput, LogEntry, Metadata,
-    MountSource, MountType, PortSide, PortSpec, PresetAccess, PresetLimits, PresetPutArgs,
-    Progress, Recipe, RegistryAuth, Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
-    SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind, SandboxPort,
-    SandboxResizeArgs, SandboxResources, SandboxVolume, Source, Step, VolumeMountListOutputItem,
+    MountSource, MountType, PackageAccess, PackageLimits, PackagePutArgs, PackageSandboxCreateArgs,
+    PortSide, PortSpec, Progress, Recipe, RegistryAuth, Role, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxJobEnd, SandboxJobEndReason, SandboxJobEntry, SandboxJobKind,
+    SandboxPort, SandboxResizeArgs, SandboxResources, SandboxVolume, Source, Step,
+    VolumeMountListOutputItem,
 };
 pub use volume::Volume;

@@ -27,9 +27,20 @@
 
 <br>
 
-virtxは、AIエージェントのためのmicroVMサンドボックスです。自分のコードから使い捨てのLinux VMを立ち上げてタスクを実行でき、VMは手元のマシン、自分で運用するサーバー、またはvirtx cloudで動かせます。
+virtxは、AIエージェントのためのmicroVMサンドボックスです。
+自分のコードからサンドボックスを作り、その上にユーザー向けのアプリを作れます。
 
-手元のマシンには入れたくない重い依存関係が必要な処理や、AIエージェントが自分の判断で実行するコマンドのように、そもそも手元で動かしたくないコードを扱うときに役立ちます。VMの中でインストールしたものや変更した内容はVMを削除すると消え、残るのは保存しておいたボリュームに書き込んだものだけです。
+サンドボックスは使い捨てのLinux VMで、手元のマシン、自分で運用するサーバー、またはvirtx cloudで動かせます。
+AIエージェントが自分の判断で実行するコマンドのように、手元で動かしたくないものをその中で実行します。
+サンドボックスの中でインストールしたものや変更した内容は削除すると消え、残るのは保存しておいたボリュームに書き込んだものだけです。
+
+virtxでアプリを作ると、そのアプリのユーザーもサンドボックスを使えます。
+各ユーザーのサンドボックスの中身をプロジェクトにパッケージとして置いておけば、アプリがそこからユーザーごとに専用のサンドボックスを作ります。
+間に自分で運用するバックエンドは要りません。
+
+<p align="center">
+  <img alt="The developer keeps a package on virtx and makes the app. Each app user makes a sandbox of the package from the app, and uses their own." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/app-user-developer-virtx.svg" width="640">
+</p>
 
 ## クイックスタート
 

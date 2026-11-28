@@ -27,10 +27,20 @@
 
 <br>
 
-virtx는 AI 에이전트를 위한 microVM 샌드박스입니다. 내 코드에서 일회용 Linux VM을 띄워 작업을 실행할 수 있고, VM은 내 컴퓨터, 직접 운영하는 서버, 또는 virtx cloud에서 돌릴 수 있습니다.
+virtx는 AI 에이전트를 위한 microVM 샌드박스입니다.
+내 코드에서 샌드박스를 만들고, 그 위에 사용자에게 줄 앱을 만들 수 있습니다.
 
-내 컴퓨터에 굳이 설치하고 싶지 않은 무거운 의존성이 필요한 작업이나, AI 에이전트가 스스로 판단해 실행하는 명령처럼 아예 내 컴퓨터에서 돌리고 싶지 않은 코드에 특히 유용합니다.
-VM 안에서 설치하거나 바꾼 것은 VM을 지우면 모두 사라지고, 남겨 둔 볼륨에 기록한 것만 그대로 남습니다.
+샌드박스는 일회용 Linux VM으로, 내 컴퓨터, 직접 운영하는 서버, 또는 virtx cloud에서 돌릴 수 있습니다.
+AI 에이전트가 스스로 판단해 실행하는 명령처럼 내 컴퓨터에서 돌리고 싶지 않은 것을 그 안에서 실행합니다.
+샌드박스 안에서 설치하거나 바꾼 것은 샌드박스를 지우면 모두 사라지고, 남겨 둔 볼륨에 기록한 것만 그대로 남습니다.
+
+virtx로 앱을 만들면 그 앱의 사용자도 샌드박스를 씁니다.
+각 사용자의 샌드박스를 무엇으로 만들지 내 프로젝트에 패키지로 두면, 앱이 그 패키지로 사용자마다 자기만의 샌드박스를 만들어 줍니다.
+그 사이에 내가 운영할 백엔드는 없습니다.
+
+<p align="center">
+  <img alt="The developer keeps a package on virtx and makes the app. Each app user makes a sandbox of the package from the app, and uses their own." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/app-user-developer-virtx.svg" width="640">
+</p>
 
 ## 빠르게 시작하기
 

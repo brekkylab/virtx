@@ -27,10 +27,18 @@
 
 <br>
 
-virtx is a microVM sandbox for AI agents. From your own code, it runs tasks in a disposable Linux VM on your machine, on a server you run, or on virtx cloud.
+virtx is a microVM sandbox for AI agents: make sandboxes from your own code, and build apps on them for your users.
 
-It's useful for jobs with heavy dependencies that you'd rather not install on your own machine, and for code you'd rather not run on it at all, such as the commands an AI agent decides to run.
-Whatever a VM installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
+A sandbox is a disposable Linux VM, on your machine, on a server you run, or on virtx cloud.
+Run in it what you'd rather not run on your own machine, such as the commands an AI agent decides to run.
+Whatever it installs or changes is gone when you remove it, unless it wrote it to a volume you kept.
+
+When you build an app on virtx, its users get sandboxes too.
+You keep what each user's sandbox is made of as a package in your project, and your app makes each user a sandbox of their own from it, with no backend of yours in between.
+
+<p align="center">
+  <img alt="The developer keeps a package on virtx and makes the app. Each app user makes a sandbox of the package from the app, and uses their own." src="https://raw.githubusercontent.com/brekkylab/virtx/main/docs/images/app-user-developer-virtx.svg" width="640">
+</p>
 
 ## Quickstart
 

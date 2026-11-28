@@ -24,6 +24,7 @@ Files that need to outlive the sandbox go in a volume.
 | **Job** | A command running in a sandbox, or an image build, pull or push. A job keeps running if your program stops reading it, and its output is kept in a log you can read again. |
 | **Volume** | Storage that exists apart from any sandbox. Mount it into sandboxes to keep files after they are removed, or to share files between them. |
 | **Project** | A group of sandboxes, images and volumes on a server. You can share a project with teammates. |
+| **Package** | A sandbox kept under a name in a project, which members, and anyone else it lets in, make as many sandboxes of as they need. Each who is let in reaches only the sandbox they made. |
 
 The server can run in three places. Your code is the same in each; only the line that creates the client changes.
 
@@ -59,10 +60,13 @@ Each tutorial covers one feature of VirtX in depth:
 - [Reading and writing files](/docs/tutorials/reading-writing-files/): move files in and out without running a command.
 - [Networks and ports](/docs/tutorials/networks-ports/): control outbound access and reach services in a sandbox.
 - [Mounting volumes](/docs/tutorials/mounting-volumes/): keep files after a sandbox is removed, and mount Notion, Google Drive or OneDrive.
-- [Managing projects](/docs/tutorials/projects/): organize resources and share them with your team.
-- [Running your own server](/docs/tutorials/self-hosting/): serve VirtX to your team, with users signed in through your OpenID Connect provider.
 - [Using GPUs](/docs/tutorials/using-gpus/): give a sandbox the host's GPU through Vulkan.
 - [Using built-in programs](/docs/tutorials/built-in-programs/): give a sandbox VirtX's built-in programs at `/abin`, which run on any image.
+- [Managing projects](/docs/tutorials/projects/): organize resources and share them with your team.
+- [Running your own server](/docs/tutorials/self-hosting/): serve VirtX to your team, with users signed in through your OpenID Connect provider.
+- [Making packages](/docs/tutorials/packages/): keep a sandbox under a name, and make as many sandboxes of it as you need.
+- [Letting your users in](/docs/tutorials/package-access/): let people who are not members make a sandbox of a package, each reaching only their own.
+- [Building an app on a package](/docs/tutorials/app-client/): make a sandbox of a package from your app with `AppClient`, and use it with its grant.
 
 ## Guides
 

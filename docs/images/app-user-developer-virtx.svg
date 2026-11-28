@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1580 720" width="1580" height="720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="80" y="116" width="468" height="128" rx="20" fill="#2b2f38" stroke="#5c6270" stroke-width="2"/>
+<path d="M166 164 L150 180 L166 196 M200 164 L216 180 L200 196 M190 160 L176 200" fill="none" stroke="#a8a2f5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="248" y="197" font-size="48" font-weight="700" fill="#ffffff">Developer</text>
+<rect x="96" y="300" width="476" height="390" rx="20" fill="rgba(133,139,151,0.08)" stroke="#858b97" stroke-width="3"/>
+<text x="334" y="360" font-size="48" font-weight="700" fill="#7d8390" text-anchor="middle">App</text>
+<g fill="#2b2f38" stroke="#5c6270" stroke-width="2">
+<rect x="160" y="392" width="388" height="112" rx="20"/>
+<rect x="160" y="560" width="388" height="112" rx="20"/>
+</g>
+<g fill="none" stroke="#a8a2f5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+<circle cx="239" cy="434" r="13"/><path d="M213 478 Q213 456 239 456 Q265 456 265 478"/>
+<circle cx="239" cy="602" r="13"/><path d="M213 646 Q213 624 239 624 Q265 624 265 646"/>
+</g>
+<text x="304" y="464" font-size="44" font-weight="700" fill="#ffffff">App user</text>
+<text x="304" y="632" font-size="44" font-weight="700" fill="#ffffff">App user</text>
+<rect x="1000" y="40" width="500" height="650" rx="20" fill="rgba(122,113,224,0.08)" stroke="#7a71e0" stroke-width="3"/>
+<text x="1250" y="100" font-size="48" font-weight="700" fill="#7a71e0" text-anchor="middle">VirtX</text>
+<g fill="rgba(122,113,224,0.15)" stroke="#7a71e0" stroke-width="4" stroke-linejoin="round">
+<rect x="1040" y="130" width="420" height="100" rx="12"/>
+<rect x="1040" y="398" width="340" height="100" rx="12"/>
+<rect x="1040" y="566" width="340" height="100" rx="12"/>
+</g>
+<text x="1250" y="194" font-size="40" font-weight="700" fill="#7a71e0" text-anchor="middle">Package</text>
+<text x="1210" y="461" font-size="36" font-weight="700" fill="#7a71e0" text-anchor="middle">Sandbox</text>
+<text x="1210" y="629" font-size="36" font-weight="700" fill="#7a71e0" text-anchor="middle">Sandbox</text>
+<g fill="none" stroke="#858b97" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+<path d="M548 180 H1028"/><path d="M1016 170 L1028 180 L1016 190"/>
+<path d="M120 244 V616 H148 M120 448 H148" stroke-dasharray="10 10"/><path d="M136 438 L148 448 L136 458 M136 606 L148 616 L136 626"/>
+<path d="M548 448 H1028"/><path d="M1016 438 L1028 448 L1016 458"/>
+<path d="M548 616 H1028"/><path d="M1016 606 L1028 616 L1016 626"/>
+<path d="M1420 230 V616 H1392 M1420 448 H1392" stroke-dasharray="10 10"/><path d="M1404 438 L1392 448 L1404 458 M1404 606 L1392 616 L1404 626"/>
+</g>
+<text x="788" y="162" font-size="28" fill="#7d8390" text-anchor="middle">put_package</text>
+<text x="788" y="430" font-size="28" fill="#7d8390" text-anchor="middle">AppClient</text>
+<text x="788" y="598" font-size="28" fill="#7d8390" text-anchor="middle">AppClient</text>
+</svg>

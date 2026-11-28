@@ -1,0 +1,247 @@
+---
+title: "Building an app on a package"
+description: "Make a sandbox of a package from your app, as your user, and run commands, move files and forward ports in it with its grant alone."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+This page is your app's side of a [package](/docs/tutorials/packages/).
+Your app runs on your user's machine, or wherever you run it, and makes a sandbox of the package as the user, as the package's [access](/docs/tutorials/package-access/) lets them in.
+It then uses that sandbox with the sandbox's grant, which reaches nothing else.
+
+`AppClient` does both: it makes the sandbox, and from then on sends its grant and no other credentials.
+
+## Before you start
+
+You need:
+
+- **The server's URL**, such as `https://virtx.example`.
+- **The package's `id`**, which `put_package` answered. An app names a package by its `id`, since its users are in no project.
+- **What the package lets in:** nothing for a public package, or a token of the issuer its access names, such as the ID token your app got when the user signed in.
+
+## Make a sandbox and use it
+
+`AppClient.connect` makes a sandbox of the package and answers once it is made.
+Its `sandbox` is a sandbox like any other, reached through the grant:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+import asyncio
+
+from virtx import AppClient, BearerAuth
+
+
+async def main(id_token: str) -> None:
+    async with await AppClient.connect(
+        "https://virtx.example", "<package id>", BearerAuth(id_token)
+    ) as app:
+        await app.sandbox.exec(["uname", "-a"]).complete(print=True)
+        await app.sandbox.write_file("notes.txt", "hello\n")
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const { AppClient } = require('@brekkylab/virtx')
+
+async function main(idToken) {
+  const app = await AppClient.connect('https://virtx.example', '<package id>', {
+    type: 'bearer',
+    token: idToken,
+  })
+  try {
+    await app.sandbox.exec(['uname', '-a']).complete({ print: true })
+    await app.sandbox.writeFile('notes.txt', 'hello\n')
+  } finally {
+    await app.close()
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use virtx::{AppClient, Auth, SandboxExecArgs};
+
+async fn run(id_token: String) -> Result<(), virtx::Error> {
+    let app = AppClient::connect(
+        "https://virtx.example",
+        "<package id>",
+        Auth::Bearer { token: id_token },
+        [],
+    )
+    .await?;
+    let result = app
+        .sandbox()
+        .exec(&SandboxExecArgs::new(["uname", "-a"]))
+        .complete(true)
+        .await;
+    app.close().await?;
+    result?;
+    Ok(())
+}
+```
+
+</TabItem>
+</Tabs>
+
+For a public package, pass no credentials: `None` in Python, `null` in Node.js, `Auth::None` in Rust.
+
+What made the sandbox, the user's token, is used once.
+From then on the client sends the grant alone, so the token is not needed to run commands, move files or forward ports, and does not have to stay fresh.
+
+Through `sandbox`, the app does what [Running commands](/docs/tutorials/running-commands/), [Reading and writing files](/docs/tutorials/reading-writing-files/) and [Networks and ports](/docs/tutorials/networks-ports/) show.
+It may also [resize](/docs/tutorials/setting-sandboxes/) the sandbox, up to the package's [`max`](/docs/tutorials/packages/#size).
+Anything else, such as another sandbox, an image or a volume, is refused with `403`.
+
+## Reach a port in the sandbox
+
+The ports in the sandbox are the package's.
+Forward one as any sandbox's, through the grant:
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+from virtx import PortForwarder
+
+await app.sandbox.exec(["httpd", "-f", "-p", "8000"])  # started, left running
+with await PortForwarder.open(app.sandbox, 8000) as forwarder:
+    print(f"http://{forwarder.local}")
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const { PortForwarder } = require('@brekkylab/virtx')
+
+await app.sandbox.exec(['httpd', '-f', '-p', '8000']) // started, left running
+const forwarder = await PortForwarder.open(app.sandbox, 8000)
+console.log(`http://${forwarder.local}`)
+forwarder.close()
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use virtx::{PortForwarder, PortSide};
+
+app.sandbox().exec(&SandboxExecArgs::new(["httpd", "-f", "-p", "8000"])).await?; // started, left running
+let forwarder = PortForwarder::open(app.sandbox(), 8000, PortSide::Sandbox, None).await?;
+println!("http://{}", forwarder.local());
+drop(forwarder);
+```
+
+</TabItem>
+</Tabs>
+
+## Give the sandbox a port on your user's machine
+
+The user's machine is theirs to offer, so ports on local are asked for as the sandbox is made, not by the package.
+A process in the sandbox then reaches the port at `10.0.2.2`, while the app forwards it, as [A port on local](/docs/tutorials/networks-ports/#a-port-on-local) describes.
+Here the sandbox reaches the user's browser at its debugging port, 9222, as in [Driving your browser from a sandbox](/docs/guides/your-browser/):
+
+<Tabs syncKey="lang">
+<TabItem label="Python" icon="seti:python">
+
+```python
+from virtx import AppClient, PortForwarder, PortSpec
+
+async with await AppClient.connect(
+    "https://virtx.example", "<package id>", ports=[PortSpec(9222, on="local")]
+) as app:
+    async with await PortForwarder.open(app.sandbox, 9222, on="local"):
+        await app.sandbox.exec(["wget", "-qO-", "http://10.0.2.2:9222/json/version"]).complete(print=True)
+```
+
+</TabItem>
+<TabItem label="Node.js" icon="node">
+
+```js
+const { AppClient, PortForwarder } = require('@brekkylab/virtx')
+
+const app = await AppClient.connect('https://virtx.example', '<package id>', null, {
+  ports: [{ port: 9222, on: 'local' }],
+})
+const forwarder = await PortForwarder.open(app.sandbox, 9222, { on: 'local' })
+await app.sandbox.exec(['wget', '-qO-', 'http://10.0.2.2:9222/json/version']).complete({ print: true })
+forwarder.close()
+await app.close()
+```
+
+</TabItem>
+<TabItem label="Rust" icon="seti:rust">
+
+```rust
+use virtx::{AppClient, Auth, PortForwarder, PortSide, PortSpec, SandboxExecArgs};
+
+let app = AppClient::connect(
+    "https://virtx.example",
+    "<package id>",
+    Auth::None,
+    [PortSpec::new(9222).on(PortSide::Local)],
+)
+.await?;
+let forwarder = PortForwarder::open(app.sandbox(), 9222, PortSide::Local, None).await?;
+let fetch = ["wget", "-qO-", "http://10.0.2.2:9222/json/version"];
+app.sandbox().exec(&SandboxExecArgs::new(fetch)).complete(true).await?;
+drop(forwarder);
+app.close().await?;
+```
+
+</TabItem>
+</Tabs>
+
+A port in the sandbox given here is refused with `400`: those are the package's to give.
+
+## Close the sandbox
+
+`close` removes the sandbox, which takes its grant with it, and closes the client.
+`async with` in Python closes it as the block ends, and in Rust an `AppClient` dropped removes its sandbox too, waiting until it is removed.
+
+A sandbox lives until it is removed, whether or not the app that made it is still running.
+If the app exits without closing it, it keeps its place in the package's [limits](/docs/tutorials/package-access/#limit-how-many), and the project keeps paying for it, until a member of the project removes it with `list_sandbox` and `remove`.
+So close the `AppClient` on every way out of the app, as the examples do with `async with`, `try`/`finally` or `Drop`.
+
+## Troubleshooting
+
+1. **`the server gave the sandbox no grant to reach it with`**
+
+   **Cause:** The server takes no credentials, such as one started by `Client.spawn()`, so it gives no grant.
+
+   **Fix:** Connect to a server reached over HTTP. To use a package on your own machine, make its sandboxes with a `Client`, as [Making packages](/docs/tutorials/packages/#make-a-sandbox-of-it) shows.
+
+2. **`401` or `403`, from `connect`**
+
+   **Cause:** The package does not let this user in: no token, an expired one, or one its `access` does not take.
+
+   **Fix:** See [Letting your users in](/docs/tutorials/package-access/#troubleshooting).
+
+3. **`404`, `not_found`, from `connect`**
+
+   **Cause:** No package has that `id`.
+
+   **Fix:** Check the `id` `put_package` answered. It stays the same when the package is replaced, but not when it is removed and kept again.
+
+4. **`429`, `quota`, from `connect`**
+
+   **Cause:** As many sandboxes of the package live as its `limits` allow, all of them or this user's.
+
+   **Fix:** Close the sandboxes the app no longer uses.
+
+5. **`403`, `forbidden`, through `sandbox`**
+
+   **Cause:** A request the grant does not reach, such as a resize past the package's `max`.
+
+   **Fix:** Keep to the sandbox and the size the package allows.
+
+## Next
+
+- [Packages](/docs/sdk/packages/) in the SDK reference: `AppClient` and every call on packages.
+- [Driving your browser from a sandbox](/docs/guides/your-browser/): what a sandbox can do with a port on the user's machine.

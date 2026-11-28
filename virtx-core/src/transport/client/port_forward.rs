@@ -394,7 +394,7 @@ fn reach(
             let path = format!("sandboxes/{}/ports/{port}", segment(sandbox));
             let url = (tcp.base.join(&path)).map_err(|e| Error::Client(format!("{path}: {e}")))?;
             Ok(Reached::Tunnel {
-                http: tcp.http.clone(),
+                http: tcp.upgrades.clone(),
                 credentials: Arc::clone(&tcp.credentials),
                 headers: Arc::clone(&tcp.headers),
                 project: (client.project.read())
@@ -763,7 +763,7 @@ async fn take_local(
             sent.insert(PROJECT_HEADER, project);
         }
         let waiting = match tcp.credentials.token().await {
-            Ok(token) => open(&tcp.http, token.as_deref(), sent, url.clone()).await,
+            Ok(token) => open(&tcp.upgrades, token.as_deref(), sent, url.clone()).await,
             Err(e) => Err(ForwardError::new(format!(
                 "no token to reach the server: {e}"
             ))),
@@ -909,8 +909,17 @@ mod tests {
     /// first connection at once and echoes every later one, and whose every other port is
     /// refused. Given `token`, it wants it as a bearer token.
     async fn serve(token: Option<&'static str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/virtx/", listener.local_addr().unwrap());
+        let app = ports(token);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        base
+    }
+
+    /// The ports [`serve`] serves, under `/virtx/`.
+    fn ports(token: Option<&'static str>) -> axum::Router {
         let late = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new().route(
+        axum::Router::new().route(
             "/virtx/sandboxes/{sandbox}/ports/{port}",
             axum::routing::get(
                 move |Path((sandbox, _port)): Path<(String, u16)>,
@@ -967,11 +976,31 @@ mod tests {
                         })
                 },
             ),
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}/virtx/", listener.local_addr().unwrap());
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        base
+        )
+    }
+
+    /// Over HTTPS to a server that offers HTTP/2, a port's WebSocket is still opened: it is
+    /// upgraded from HTTP/1.1. The client trusts the test's own certificate and is otherwise the
+    /// one a port's WebSocket is opened with.
+    #[tokio::test]
+    async fn over_https_a_websocket_is_opened_where_the_server_offers_http2() {
+        let (base, certificate, _) = super::super::tls::serve(ports(None)).await;
+        let url = reqwest::Url::parse(&base)
+            .unwrap()
+            .join("virtx/sandboxes/open/ports/7000")
+            .unwrap();
+        let upgrades = super::super::tcp::upgrades()
+            .tls_certs_only([certificate])
+            .build()
+            .unwrap();
+
+        let mut socket = open(&upgrades, None, HeaderMap::new(), url).await.unwrap();
+        socket
+            .send(Message::Binary(Bytes::from_static(b"one")))
+            .await
+            .unwrap();
+        let echoed = socket.next().await.unwrap().unwrap();
+        assert_eq!(echoed.into_data(), Bytes::from_static(b"one"));
     }
 
     #[tokio::test]

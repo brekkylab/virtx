@@ -6,7 +6,7 @@
 //! A home keeps its project's data in its own stores, and beyond this machine too where it is
 //! given a [`StorageBackend`] ([`Home::backed_by`]), whose cache its stores are then.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::future::Future;
@@ -33,7 +33,7 @@ use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Package, PackagePutArgs, PackageSandbox,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Package, PackagePutArgs,
     PackageSandboxCreateArgs, ProjectCreateArgs, ProjectListOutputItem,
     ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
     SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
@@ -52,7 +52,7 @@ use virtx_uvm::{PackageStore, ProjectError, ProjectId};
 
 use crate::access::Access;
 use crate::access::Principal;
-use crate::grant::{Grant, Grants};
+use crate::grant::{Grant, Grants, Maker};
 use crate::project::Project;
 
 /// An image job, with the entries its log carries.
@@ -82,11 +82,11 @@ pub struct Home {
     pub root: PathBuf,
     volumes: VolumeStore,
     packages: PackageStore,
-    /// The grants given out to the sandboxes made of its packages.
+    /// The grant of each sandbox made of its packages: who it is given to.
     grants: Grants,
-    /// The package and subject of each sandbox being made of a package for one its access let
+    /// The package and maker of each sandbox being made of a package for one its access let
     /// in, until it is made or is not: counted toward the package's limits as those made are.
-    making: Mutex<Vec<(String, String)>>,
+    making: Mutex<Vec<(String, Maker)>>,
     /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
@@ -110,7 +110,7 @@ pub struct Home {
 
 impl Home {
     /// Project `project`'s home: the images in `images`, which `registry` answers for, and the
-    /// volumes, packages and grants and the sandboxes' upper disks under `root`, with each sandbox a server before it kept there
+    /// volumes, packages, who made each sandbox of one, and the sandboxes' upper disks under `root`, with each sandbox a server before it kept there
     /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
     /// is made for says otherwise ([`Access::through`]). `registry` is this home's alone: it is
@@ -483,7 +483,7 @@ impl Home {
         });
     }
 
-    /// Remove sandbox `id`, its disk kept beyond this machine first, and take away its grants:
+    /// Remove sandbox `id`, its disk kept beyond this machine first, and take away its grant:
     /// refused, and nothing removed, where the backend refuses; `404` for an id no sandbox here
     /// has. Blocks until its machine has stopped.
     pub async fn remove_sandbox(&self, id: &str) -> Result<(), Refused> {
@@ -502,7 +502,7 @@ impl Home {
         let taken = id.to_owned();
         tokio::task::spawn_blocking(move || grants.take_away(&taken))
             .await?
-            .map_err(|e| internal(format!("taking away sandbox {id}'s grants: {e}")))?;
+            .map_err(|e| internal(format!("taking away sandbox {id}'s grant: {e}")))?;
         let unknown = self.unknown.lock().unwrap().remove(id);
         if let Some(unknown) = unknown {
             tokio::task::spawn_blocking(move || unknown.remove()).await?;
@@ -523,18 +523,15 @@ impl Home {
             .ok_or_else(|| not_found(format!("no package here is {named}")))
     }
 
-    /// A sandbox made of `package` by `maker`, as `args` asks, and its grant: `400` for a name
-    /// asked by one its access let in, and `429` `quota` past its limits for one.
+    /// A sandbox made of `package` by `maker`, as `args` asks, granted to them: `400`
+    /// for a name asked by one its access let in, and `429` `quota` past its limits for one.
     pub(crate) async fn make_of(
         &self,
         package: &Package,
         maker: Maker,
         args: PackageSandboxCreateArgs,
-    ) -> Result<PackageSandbox, Refused> {
-        let (subject, member) = match maker {
-            Maker::Member(user) => (user, true),
-            Maker::LetIn(subject) => (subject, false),
-        };
+    ) -> Result<virtx_core::Sandbox, Refused> {
+        let member = matches!(maker, Maker::Member { .. });
         if !member && args.name.is_some() {
             return Err(invalid(
                 "name: a sandbox's name is its project's members' to give",
@@ -542,7 +539,7 @@ impl Home {
         }
         let _reserved = match member {
             true => None,
-            false => Some(self.reserve(package, &subject).await?),
+            false => Some(self.reserve(package, &maker).await?),
         };
         let made = virtx_uvm::package_sandbox_args(package, args)?;
         let sandbox = self.create(made, None).await?;
@@ -551,8 +548,7 @@ impl Home {
         let grant = Grant {
             sandbox: sandbox.id.clone(),
             package: package.id.clone(),
-            subject,
-            member,
+            maker,
             max: SandboxResizeArgs {
                 vcpus: Some(max.vcpus.or(size.vcpus).unwrap_or(DEFAULT_VCPUS)),
                 memory_mib: Some(
@@ -568,39 +564,32 @@ impl Home {
             },
             origins: package.origins.clone(),
         };
-        let (grants, project) = (self.grants.clone(), self.project);
-        match tokio::task::spawn_blocking(move || grants.give(&project, &grant)).await? {
-            Ok(token) => Ok(PackageSandbox {
-                sandbox,
-                grant: Some(token),
-            }),
+        let grants = self.grants.clone();
+        match tokio::task::spawn_blocking(move || grants.keep(&grant)).await? {
+            Ok(()) => Ok(sandbox),
             Err(e) => {
                 let _ = self.remove_sandbox(&sandbox.id).await;
-                Err(internal(format!("giving out the sandbox's grant: {e}")))
+                Err(internal(format!("keeping the sandbox's grant: {e}")))
             }
         }
     }
 
-    /// Room under `package`'s limits for one more sandbox of `subject`'s, held until what this
+    /// Room under `package`'s limits for one more sandbox of `maker`'s, held until what this
     /// answers drops: `429` `quota` where those alive and being made fill them.
-    async fn reserve(&self, package: &Package, subject: &str) -> Result<Reserved<'_>, Refused> {
-        let grants = self.grants.clone();
-        let given = tokio::task::spawn_blocking(move || grants.list())
-            .await?
-            .map_err(|e| internal(format!("reading the grants: {e}")))?;
-        // A sandbox counts once, however many grants it has.
-        let made: HashMap<&str, &str> = (given.iter())
-            .filter(|grant| !grant.member && grant.package == package.id)
-            .map(|grant| (grant.sandbox.as_str(), grant.subject.as_str()))
-            .collect();
+    async fn reserve(&self, package: &Package, maker: &Maker) -> Result<Reserved<'_>, Refused> {
+        let grants = self.grants().await?;
         let mut making = self.making.lock().unwrap();
-        let of = (made.into_values()).chain(
-            (making.iter())
-                .filter(|(of, _)| *of == package.id)
-                .map(|(_, subject)| subject.as_str()),
-        );
+        let of = (grants.iter())
+            .filter(|grant| grant.package == package.id)
+            .map(|grant| &grant.maker)
+            .chain(
+                (making.iter())
+                    .filter(|(of, _)| *of == package.id)
+                    .map(|(_, maker)| maker),
+            )
+            .filter_map(Maker::subject);
         let (all, theirs) = of.fold((0, 0), |(all, theirs), of| {
-            (all + 1, theirs + u32::from(of == subject))
+            (all + 1, theirs + u32::from(Some(of) == maker.subject()))
         });
         let limits = package.limits.unwrap_or_default();
         if limits.sandboxes.is_some_and(|most| all >= most)
@@ -616,84 +605,48 @@ impl Home {
             )
             .with("reason", "sandboxes"));
         }
-        let held = (package.id.clone(), subject.to_owned());
+        let held = (package.id.clone(), maker.clone());
         making.push(held.clone());
         Ok(Reserved(self, held))
     }
 
-    /// The sandboxes made of `package` that `maker` made, as `GET /sandboxes/` answers each:
-    /// for one its access let in, those of the same subject; for a member, every one.
+    /// The sandboxes made of `package` that `maker` made, as `GET /sandboxes/` answers each, by
+    /// id: for one its access let in, those of the same issuer and subject; for a member, every
+    /// one.
     pub(crate) async fn made_of(
         &self,
         package: &Package,
         maker: &Maker,
     ) -> Result<Vec<virtx_core::Sandbox>, Refused> {
-        let theirs = self.grants_of(package, maker).await?;
+        let grants = self.grants().await?;
+        let theirs = |grant: &Grant| match maker {
+            Maker::Member { .. } => true,
+            Maker::LetIn { .. } => grant.maker.subject() == maker.subject(),
+        };
         let sandboxes = self.sandboxes.lock().unwrap();
         let unknown = self.unknown.lock().unwrap();
-        let answer = |id: &String| match sandboxes.get(id) {
+        let answer = |grant: &Grant| match sandboxes.get(&grant.sandbox) {
             Some(held) => Some(held.answer()),
-            None => unknown.get(id).map(UnknownSandbox::answer),
+            None => unknown.get(&grant.sandbox).map(UnknownSandbox::answer),
         };
-        Ok(theirs.keys().filter_map(answer).collect())
-    }
-
-    /// A new grant to sandbox `id`, one of those made of `package` that `maker` made, as its
-    /// first was given: `404` for any other.
-    pub(crate) async fn grant_again(
-        &self,
-        package: &Package,
-        maker: &Maker,
-        id: &str,
-    ) -> Result<PackageSandbox, Refused> {
-        let none = || {
-            not_found(format!(
-                "no sandbox of package {} you made is {id}",
-                package.name
-            ))
-        };
-        let grant = (self.grants_of(package, maker).await?)
-            .remove(id)
-            .ok_or_else(none)?;
-        let sandbox = match self.unknown.lock().unwrap().get(id) {
-            Some(unknown) => unknown.answer(),
-            None => self.sandbox(id).map_err(|_| none())?.answer(),
-        };
-        let (grants, project) = (self.grants.clone(), self.project);
-        let token = tokio::task::spawn_blocking(move || grants.give(&project, &grant))
-            .await?
-            .map_err(|e| internal(format!("giving out the sandbox's grant: {e}")))?;
-        Ok(PackageSandbox {
-            sandbox,
-            grant: Some(token),
-        })
-    }
-
-    /// One grant of each sandbox made of `package` that `maker` made, by the sandbox's id.
-    async fn grants_of(
-        &self,
-        package: &Package,
-        maker: &Maker,
-    ) -> Result<BTreeMap<String, Grant>, Refused> {
-        let grants = self.grants.clone();
-        let given = tokio::task::spawn_blocking(move || grants.list())
-            .await?
-            .map_err(|e| internal(format!("reading the grants: {e}")))?;
-        let theirs = |grant: &Grant| match maker {
-            Maker::Member(_) => true,
-            Maker::LetIn(subject) => !grant.member && grant.subject == *subject,
-        };
-        Ok(given
-            .into_iter()
+        Ok((grants.iter())
             .filter(|grant| grant.package == package.id && theirs(grant))
-            .map(|grant| (grant.sandbox.clone(), grant))
+            .filter_map(answer)
             .collect())
     }
 
-    /// The grant `token` is, if it is one of this home's.
-    pub(crate) async fn grant(&self, token: &str) -> Result<Option<Grant>, Refused> {
-        let (grants, token) = (self.grants.clone(), token.to_owned());
-        tokio::task::spawn_blocking(move || grants.find(&token))
+    /// The grant of each sandbox made of a package here, by the sandbox's id.
+    async fn grants(&self) -> Result<Vec<Grant>, Refused> {
+        let grants = self.grants.clone();
+        tokio::task::spawn_blocking(move || grants.list())
+            .await?
+            .map_err(|e| internal(format!("reading the grants: {e}")))
+    }
+
+    /// The grant of sandbox `id`, if it was made of a package here.
+    pub(crate) async fn grant(&self, id: &str) -> Result<Option<Grant>, Refused> {
+        let (grants, id) = (self.grants.clone(), id.to_owned());
+        tokio::task::spawn_blocking(move || grants.find(&id))
             .await?
             .map_err(|e| internal(format!("reading a grant: {e}")))
     }
@@ -783,8 +736,8 @@ impl Drop for Naming<'_> {
 }
 
 /// Room for a sandbox being made of a package, given back as this drops: once its grant is
-/// given out, which counts it from there, or once its making failed.
-struct Reserved<'a>(&'a Home, (String, String));
+/// kept, which counts it from there, or once its making failed.
+struct Reserved<'a>(&'a Home, (String, Maker));
 
 impl Drop for Reserved<'_> {
     fn drop(&mut self) {
@@ -793,15 +746,6 @@ impl Drop for Reserved<'_> {
             making.swap_remove(at);
         }
     }
-}
-
-/// Who makes a sandbox of a package, as [`Access::maker`] found.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Maker {
-    /// A member of its project, by their user.
-    Member(String),
-    /// One its access let in, by their subject.
-    LetIn(String),
 }
 
 /// The id a sandbox is made under, chosen by a server built on this one rather than picked
@@ -932,15 +876,10 @@ pub fn router() -> Router {
 /// [`Access`] in its extensions, which reaches the package's home by its id with no member's
 /// token.
 pub fn package_sandboxes() -> Router {
-    Router::new()
-        .route(
-            "/packages/{package}/sandboxes/",
-            post(package_sandbox_create).get(package_sandbox_list),
-        )
-        .route(
-            "/packages/{package}/sandboxes/{id}/grant",
-            post(package_sandbox_grant),
-        )
+    Router::new().route(
+        "/packages/{package}/sandboxes/",
+        post(package_sandbox_create).get(package_sandbox_list),
+    )
 }
 
 /// The projects, and their members, each request answered as its sender, from the [`Access`] in
@@ -1701,13 +1640,7 @@ async fn sandbox_files(
 }
 
 /// Every sandbox; with `?name=`, the one named so, if any.
-/// Every sandbox; with `?name=`, the one named so, if any; to a grant, its own alone.
-async fn sandbox_list(
-    Extension(home): Extension<Arc<Home>>,
-    grant: Option<Extension<Grant>>,
-    RawQuery(query): RawQuery,
-) -> Answer {
-    let reached = |id: &str| grant.as_ref().is_none_or(|grant| grant.sandbox == id);
+async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
     let name = query.as_deref().and_then(|query| {
         form_urlencoded::parse(query.as_bytes())
             .find(|(key, _)| key == "name")
@@ -1717,7 +1650,6 @@ async fn sandbox_list(
     let mut listed: Vec<_> = sandboxes
         .values()
         .filter(|held| name.is_none() || held.name() == name.as_deref())
-        .filter(|held| reached(held.id()))
         .map(|held| held.answer())
         .collect();
     let unknown = home.unknown.lock().unwrap();
@@ -1725,7 +1657,6 @@ async fn sandbox_list(
         unknown
             .values()
             .filter(|kept| name.is_none() || kept.name() == name.as_deref())
-            .filter(|kept| reached(kept.id()))
             .map(UnknownSandbox::answer),
     );
     Ok(json(&listed))
@@ -1750,7 +1681,8 @@ async fn sandbox_get(
 
 /// `PATCH /sandboxes/{id}`: its vCPUs and memory from its VM's next boot on, its VM parked now
 /// if it is up and nothing uses it, and refused `409`, `in_use`, if something does; its disk
-/// grown, never shrunk, as its VM next boots, without parking it.
+/// grown, never shrunk, as its VM next boots, without parking it. To one its package's access
+/// let in, refused `403` past the package's `max` as it was when the sandbox was made.
 async fn sandbox_resize(
     Extension(home): Extension<Arc<Home>>,
     grant: Option<Extension<Grant>>,
@@ -1998,62 +1930,27 @@ async fn package_remove(
 }
 
 /// `POST /packages/{package}/sandboxes/`, as its member or one its access lets in, as
-/// [`Access::maker`] says: the sandbox, and its grant.
+/// [`Access::maker`] says.
 async fn package_sandbox_create(
     Extension(access): Extension<Arc<Access>>,
-    connected: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Segments(named): Segments<String>,
     headers: HeaderMap,
     Whole(request): Whole,
 ) -> Answer {
-    let from = connected.map(|Extension(connected)| connected.0.ip());
-    let (home, package, maker) = access.maker(&headers, &named, from).await?;
+    let (home, package, maker) = access.maker(&headers, &named).await?;
     let args: PackageSandboxCreateArgs = body(&request)?;
-    let answer = home.make_of(&package, maker, args).await?;
-    Ok(created(
-        format!("/sandboxes/{}", answer.sandbox.id),
-        &answer,
-    ))
+    let sandbox = home.make_of(&package, maker, args).await?;
+    Ok(created(format!("/sandboxes/{}", sandbox.id), &sandbox))
 }
 
-/// `GET /packages/{package}/sandboxes/`: those its sender made, let in as [`found_by`] says.
+/// `GET /packages/{package}/sandboxes/`: those its sender made, let in as their making is.
 async fn package_sandbox_list(
     Extension(access): Extension<Arc<Access>>,
     Segments(named): Segments<String>,
     headers: HeaderMap,
 ) -> Answer {
-    let (home, package, maker) = found_by(&access, &headers, &named).await?;
+    let (home, package, maker) = access.maker(&headers, &named).await?;
     Ok(json(&home.made_of(&package, &maker).await?))
-}
-
-/// `POST /packages/{package}/sandboxes/{id}/grant`: a new grant to one its sender made, let
-/// in as [`found_by`] says.
-async fn package_sandbox_grant(
-    Extension(access): Extension<Arc<Access>>,
-    Segments((named, id)): Segments<(String, String)>,
-    headers: HeaderMap,
-) -> Answer {
-    let (home, package, maker) = found_by(&access, &headers, &named).await?;
-    let answer = home.grant_again(&package, &maker, &id).await?;
-    Ok(created(format!("/sandboxes/{id}"), &answer))
-}
-
-/// Who finds the sandboxes made of the package `named` names, let in as a sandbox's making is:
-/// refused `401` for one let in with no credentials, whose subject is an address many share.
-async fn found_by(
-    access: &Access,
-    headers: &HeaderMap,
-    named: &str,
-) -> Result<(Arc<Home>, Package, Maker), Refused> {
-    let found = access.maker(headers, named, None).await?;
-    if matches!(found.2, Maker::LetIn(_)) && crate::access::bearer(headers).is_none() {
-        return Err(refused(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "a sandbox made with no credentials is reached with its grant alone",
-        ));
-    }
-    Ok(found)
 }
 
 fn pick(taken: impl Fn(&str) -> bool) -> String {

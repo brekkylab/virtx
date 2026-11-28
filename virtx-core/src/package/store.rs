@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::sandbox::{PortSpec, Sandbox, SandboxCreateArgs, SandboxResizeArgs};
+use crate::sandbox::{PortSpec, SandboxCreateArgs, SandboxResizeArgs};
 
 /// A package, as the server answers it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,7 +18,7 @@ pub struct Package {
     /// What each sandbox made of it is made with, as a sandbox's `POST` takes it, with no name.
     pub sandbox: SandboxCreateArgs,
 
-    /// How large a sandbox made of it may be resized with its grant.
+    /// How large one its access let in may resize a sandbox they made of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<SandboxResizeArgs>,
 
@@ -45,8 +45,8 @@ pub struct PackagePutArgs {
     /// sandbox's client's own, which it asks for as it is made.
     pub sandbox: SandboxCreateArgs,
 
-    /// How large a sandbox made of it may be resized with its grant, each no less than what
-    /// `sandbox` makes it. One left out holds the grant to the size it was made with.
+    /// How large one its access let in may resize a sandbox they made of it, each no less than
+    /// what `sandbox` makes it. One left out holds them to the size it was made with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<SandboxResizeArgs>,
 
@@ -55,9 +55,8 @@ pub struct PackagePutArgs {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub access: Vec<PackageAccess>,
 
-    /// The origins a web page may make a sandbox of it from, and reach that sandbox with its
-    /// grant from, beside those the server allows itself: each a scheme, host and port, as
-    /// `https://app.example`.
+    /// The origins a web page may make a sandbox of it from, and reach that sandbox from, beside
+    /// those the server allows itself: each a scheme, host and port, as `https://app.example`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub origins: Vec<String>,
 
@@ -72,11 +71,17 @@ impl PackagePutArgs {
     ///
     /// ```
     /// # use virtx_core::{PackageAccess, PackagePutArgs, SandboxCreateArgs};
+    /// let users = PackageAccess::Jwt {
+    ///     issuer: "https://auth.example".into(),
+    ///     audience: "my-app".into(),
+    ///     jwks: None,
+    ///     claims: Default::default(),
+    /// };
     /// let args = PackagePutArgs::new(SandboxCreateArgs::new("app:latest"))
-    ///     .access(PackageAccess::Public)
+    ///     .access(users.clone())
     ///     .origin("https://app.example");
     ///
-    /// assert_eq!(args.access, [PackageAccess::Public]);
+    /// assert_eq!(args.access, [users]);
     /// ```
     pub fn new(sandbox: SandboxCreateArgs) -> Self {
         Self {
@@ -111,15 +116,13 @@ impl PackagePutArgs {
     }
 }
 
-/// A way in to make a sandbox of a package, for one who is no member of its project.
+/// A way in to make a sandbox of a package, and reach it after, for one who is no member of its
+/// project. Each request they send carries the token it takes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PackageAccess {
-    /// A request with no credentials, from anyone: its subject is the address it came from.
-    Public,
-
     /// A request whose bearer token is a JSON Web Token `issuer` signed for `audience`: its
-    /// subject is the token's `sub`.
+    /// subject is the token's `sub`, of that issuer.
     Jwt {
         /// The issuer, as its tokens' `iss` has it: an `https` URL.
         issuer: String,
@@ -189,29 +192,6 @@ impl PackageSandboxCreateArgs {
     }
 }
 
-/// A sandbox made of a package, as `POST /packages/{package}/sandboxes/` answers it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackageSandbox {
-    /// The sandbox, as a sandbox's `POST` answers it.
-    pub sandbox: Sandbox,
-
-    /// The token that reaches the sandbox alone, given out in this answer and no other. A
-    /// server that takes no credentials gives none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grant: Option<String>,
-}
-
-/// A sandbox made of a package for an app's user, and the grant they reach it with: what
-/// [`Client::app_create`](crate::Client::app_create) and the calls that come back to one answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AppSandbox {
-    /// The sandbox, as a sandbox's `POST` answers it.
-    pub sandbox: Sandbox,
-
-    /// The token that reaches the sandbox alone.
-    pub grant: String,
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -227,14 +207,9 @@ mod tests {
             "claims": {"repository": "owner/app"},
         }))
         .unwrap();
-        let PackageAccess::Jwt { jwks, claims, .. } = &jwt else {
-            panic!("{jwt:?}");
-        };
+        let PackageAccess::Jwt { jwks, claims, .. } = &jwt;
         assert_eq!((jwks, &claims["repository"]), (&None, &json!("owner/app")));
-        assert_eq!(
-            serde_json::to_value(PackageAccess::Public).unwrap(),
-            json!({"type": "public"})
-        );
+        assert!(serde_json::from_value::<PackageAccess>(json!({"type": "public"})).is_err());
         let unknown = json!({"type": "jwt", "issuer": "https://idp.example", "audience": "app",
             "subject": "alice"});
         assert!(serde_json::from_value::<PackageAccess>(unknown).is_err());

@@ -1,6 +1,6 @@
 ---
 title: "Packages"
-description: "Reference for packages, which keep a sandbox under a name to be made by members and whom its access lets in, and AppClient, which reaches one sandbox by its grant and comes back to it."
+description: "Reference for packages, which keep a sandbox under a name to be made by members and whom its access lets in, and AppClient, which reaches the sandbox an app's user made as them and comes back to it."
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -13,15 +13,13 @@ See [Making packages](/docs/tutorials/packages/), [Letting your users in](/docs/
 | --- | --- |
 | [`put_package`](#put_package) | Keeps a package under `name`, made or replaced in whole. |
 | [`list_package`](#list_package) | The project's packages, or the one an `id` or name names. |
-| [`create_sandbox`](#create_sandbox) | Makes a sandbox of a package, answered with its grant. |
+| [`create_sandbox`](#create_sandbox) | Makes a sandbox of a package. |
 | [`list_sandbox`](#list_sandbox) | The sandboxes made of a package that the client's credentials made. |
-| [`grant_sandbox`](#grant_sandbox) | A new grant to one of those. |
 | [`remove`](#remove) | Removes the package; the sandboxes made of it stay. |
-| [`AppClient.connect`](#appclientconnect) | Makes a sandbox of a package as an app's user, and reaches it with its grant alone from then on. |
-| [`AppClient.resume`](#appclientresume) | Reaches again the sandbox a kept grant reaches. |
-| [`AppClient.resume_as`](#appclientresume_as) | Reaches again a sandbox the user made, as who they are, with a new grant. |
+| [`AppClient.connect`](#appclientconnect) | Makes a sandbox of a package as an app's user, and reaches it as them. |
+| [`AppClient.resume`](#appclientresume) | Reaches again a sandbox the user made, as them. |
 | [`AppClient.close`](#appclientclose) | Closes the client, leaving its sandbox. |
-| [`AppClient.remove`](#appclientremove) | Removes its sandbox, and every grant to it, and closes the client. |
+| [`AppClient.remove`](#appclientremove) | Removes its sandbox, and closes the client. |
 
 ## `put_package`
 
@@ -29,9 +27,9 @@ Keeps the package `name`, made or replaced in whole: each sandbox made of it is 
 Its image and volumes have to be in the project already.
 Replacing a package keeps its `id`, and changes no sandbox made of it.
 
-- `max` is how large a sandbox made of it may be resized with its grant, each no less than what the package makes it with. One left out holds the grant to the size the sandbox was made with.
-- `access` is who beside the project's members may make one: any of a `PublicAccess`, anyone with no credentials, or a `JwtAccess`, whoever sends a JSON Web Token `issuer` signed for `audience` and carrying each of `claims`.
-- `origins` are the web pages they may make one from, and reach it with its grant from, each as `https://app.example`.
+- `max` is how large one its access let in may resize a sandbox they made of it, each no less than what the package makes it with. One left out holds them to the size the sandbox was made with.
+- `access` is who beside the project's members may make one, each a `JwtAccess`: whoever sends a JSON Web Token `issuer` signed for `audience` and carrying each of `claims`, which they then reach the sandbox with.
+- `origins` are the web pages they may make one from, and reach it from, each as `https://app.example`.
 - `limits` is how many sandboxes made of it by those `access` lets in may live at once: `sandboxes`, all of theirs, and `per_subject`, each one's.
 
 <Tabs syncKey="lang">
@@ -42,7 +40,7 @@ async def put_package(
     name: str, image: str | ImageName, *,
     # ... every option of create_sandbox but name ...
     max: Mapping[str, int] | None = None,
-    access: Iterable[PublicAccess | JwtAccess] = (),
+    access: Iterable[JwtAccess] = (),
     origins: Iterable[str] = (),
     limits: PackageLimits | None = None,
 ) -> Package
@@ -73,9 +71,13 @@ interface PackageOptions extends Omit<SandboxCreateOptions, 'name'> {
   limits?: { sandboxes?: number; perSubject?: number }
 }
 
-type PackageAccess =
-  | { type: 'public' }
-  | { type: 'jwt'; issuer: string; audience: string; jwks?: string; claims?: Record<string, unknown> }
+type PackageAccess = {
+  type: 'jwt'
+  issuer: string
+  audience: string
+  jwks?: string
+  claims?: Record<string, unknown>
+}
 ```
 
 </TabItem>
@@ -93,7 +95,6 @@ impl PackagePutArgs {
 }
 
 pub enum PackageAccess {
-    Public,
     Jwt { issuer: String, audience: String, jwks: Option<String>, claims: Map<String, Value> },
 }
 
@@ -136,8 +137,7 @@ pub fn get_package(&self, package: impl AsRef<str>) -> Call<Package>
 
 ## `create_sandbox`
 
-Makes a sandbox of the package, answered as a `PackageSandbox`: the `sandbox`, and its `grant`, the token that reaches it alone, in this answer and no other.
-A server that takes no credentials, such as one started by `Client.spawn()`, gives no grant.
+Makes a sandbox of the package, answered as a `Sandbox`.
 `create_package_sandbox` on the client does the same for a package by its `id` or name.
 
 - `name` finds it again with `find_sandbox`. Only a member of the project may give one; anyone else is refused with `400`.
@@ -148,16 +148,11 @@ A server that takes no credentials, such as one started by `Client.spawn()`, giv
 
 ```python
 # Package
-async def create_sandbox(*, name: str | None = None, ports: Iterable[PortSpec] = ()) -> PackageSandbox
+async def create_sandbox(*, name: str | None = None, ports: Iterable[PortSpec] = ()) -> Sandbox
 # Client
 async def create_package_sandbox(
     package: str, *, name: str | None = None, ports: Iterable[PortSpec] = ()
-) -> PackageSandbox
-
-@dataclass(frozen=True)
-class PackageSandbox:
-    sandbox: Sandbox
-    grant: str | None
+) -> Sandbox
 ```
 
 </TabItem>
@@ -165,14 +160,9 @@ class PackageSandbox:
 
 ```ts
 // Package
-createSandbox(options?: { name?: string; ports?: PortSpec[] }): Promise<PackageSandbox>
+createSandbox(options?: { name?: string; ports?: PortSpec[] }): Promise<Sandbox>
 // Client
-createPackageSandbox(pkg: string, options?: { name?: string; ports?: PortSpec[] }): Promise<PackageSandbox>
-
-interface PackageSandbox {
-  sandbox: Sandbox
-  grant: string | null
-}
+createPackageSandbox(pkg: string, options?: { name?: string; ports?: PortSpec[] }): Promise<Sandbox>
 ```
 
 </TabItem>
@@ -180,18 +170,13 @@ interface PackageSandbox {
 
 ```rust
 // Package
-pub fn create_sandbox(&self, args: &PackageSandboxCreateArgs) -> Call<PackageSandbox>
+pub fn create_sandbox(&self, args: &PackageSandboxCreateArgs) -> Call<Sandbox>
 // Client
-pub fn create_package_sandbox(&self, package: impl AsRef<str>, args: &PackageSandboxCreateArgs) -> Call<PackageSandbox>
+pub fn create_package_sandbox(&self, package: impl AsRef<str>, args: &PackageSandboxCreateArgs) -> Call<Sandbox>
 
 impl PackageSandboxCreateArgs {
     pub fn name(self, name: impl Into<String>) -> Self
     pub fn port(self, port: PortSpec) -> Self
-}
-
-pub struct PackageSandbox {
-    pub sandbox: Sandbox,
-    pub grant: Option<String>,
 }
 ```
 
@@ -200,8 +185,8 @@ pub struct PackageSandbox {
 
 ## `list_sandbox`
 
-The sandboxes made of the package that the client's credentials made: to a member of the project, every one; to one its access lets in, those made with the same subject, as it lets them in now.
-A request with no credentials is refused with `401`: a sandbox made so is reached with its grant alone.
+The sandboxes made of the package that the client's credentials made: to a member of the project, every one; to one its access lets in, those made with the same issuer and subject, as it lets them in now.
+A request with no credentials is refused with `401`.
 `list_package_sandbox` on the client does the same for a package by its `id` or name.
 A server that takes no credentials answers none of this.
 
@@ -238,50 +223,10 @@ pub fn list_package_sandbox(&self, package: impl AsRef<str>) -> Call<Vec<Sandbox
 </TabItem>
 </Tabs>
 
-## `grant_sandbox`
-
-Gives out a new grant to the sandbox `sandbox`, one `list_sandbox` answers, answered as a `PackageSandbox` as `create_sandbox` is.
-Its other grants still reach it, and each is held to the package's `max` and `origins` as they were when the sandbox was made.
-A sandbox that is none of the client's credentials', or none made of the package, is refused with `404`.
-`grant_package_sandbox` on the client does the same for a package by its `id` or name.
-
-<Tabs syncKey="lang">
-<TabItem label="Python" icon="seti:python">
-
-```python
-# Package
-async def grant_sandbox(sandbox: str) -> PackageSandbox
-# Client
-async def grant_package_sandbox(package: str, sandbox: str) -> PackageSandbox
-```
-
-</TabItem>
-<TabItem label="Node.js" icon="node">
-
-```ts
-// Package
-grantSandbox(sandbox: string): Promise<PackageSandbox>
-// Client
-grantPackageSandbox(pkg: string, sandbox: string): Promise<PackageSandbox>
-```
-
-</TabItem>
-<TabItem label="Rust" icon="seti:rust">
-
-```rust
-// Package
-pub fn grant_sandbox(&self, sandbox: impl AsRef<str>) -> Call<PackageSandbox>
-// Client
-pub fn grant_package_sandbox(&self, package: impl AsRef<str>, sandbox: impl AsRef<str>) -> Call<PackageSandbox>
-```
-
-</TabItem>
-</Tabs>
-
 ## `remove`
 
 Removes the package, and what its access lets in from then on.
-The sandboxes made of it stay, each with its grant.
+The sandboxes made of it stay, each reached by who made it.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
@@ -309,13 +254,12 @@ pub fn remove(&self) -> Call<()>
 
 ## `AppClient.connect`
 
-Makes a sandbox of the package `package`, by its `id`, on the server at `url`, as `auth` lets in: none where the package is public, or a bearer token of the issuer its access names.
+Makes a sandbox of the package `package`, by its id, on the server at `url`, as `auth` lets in: a bearer token of the issuer its access names, such as the ID token your app's user signed in with.
 `ports` are its ports on local, each `on="local"`, beside those the package gives it in the sandbox.
-From then on the client sends the sandbox's grant alone, and its `sandbox` reaches that sandbox and nothing else.
-Its `grant` is that token, to keep and come back to the sandbox with [`resume`](#appclientresume).
+From then on the client sends `auth` with every request, and its `sandbox` reaches that sandbox: `auth` reaches the sandboxes the user made of the package, and nothing else.
+Keep the sandbox's `id` to come back to it with [`resume`](#appclientresume).
 
 It is refused as making the sandbox is: `401` or `403` for one the package does not let in, `429` past its limits, and `400` for a port in the sandbox.
-A server that gives no grant fails it too.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
@@ -327,7 +271,6 @@ async def connect(
 ) -> AppClient
 
 sandbox: Sandbox
-grant: str
 ```
 
 </TabItem>
@@ -337,7 +280,6 @@ grant: str
 static connect(url: string, pkg: string, auth?: Auth | null, options?: { ports?: PortSpec[] }): Promise<AppClient>
 
 readonly sandbox: Sandbox
-readonly grant: string
 ```
 
 </TabItem>
@@ -352,7 +294,6 @@ pub async fn connect(
 ) -> Result<AppClient, Error>
 
 pub fn sandbox(&self) -> &Sandbox
-pub fn grant(&self) -> &str
 ```
 
 </TabItem>
@@ -360,60 +301,29 @@ pub fn grant(&self) -> &str
 
 ## `AppClient.resume`
 
-Reaches again the sandbox `grant` reaches, on the server at `url`, with that grant alone.
-It is refused with `401` once the sandbox is removed.
+Reaches again the sandbox `sandbox`, one the user made of the package `package` as `auth` lets in, such as [`list_sandbox`](#list_sandbox) finds.
+It is refused with `401` or `403` for a sandbox they did not make, or one removed.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
 
 ```python
 @classmethod
-async def resume(url: str, grant: str) -> AppClient
+async def resume(url: str, package: str, auth: Auth, sandbox: str) -> AppClient
 ```
 
 </TabItem>
 <TabItem label="Node.js" icon="node">
 
 ```ts
-static resume(url: string, grant: string): Promise<AppClient>
+static resume(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
 ```
 
 </TabItem>
 <TabItem label="Rust" icon="seti:rust">
 
 ```rust
-pub async fn resume(url: &str, grant: &str) -> Result<AppClient, Error>
-```
-
-</TabItem>
-</Tabs>
-
-## `AppClient.resume_as`
-
-Reaches again the sandbox `sandbox`, one the user made of the package `package` with `auth`, as [`list_sandbox`](#list_sandbox) finds it, with a new grant: for one who kept no grant, let in by who they are.
-It is refused with `401` with no credentials, as for a sandbox made of a public package, and with `404` for a sandbox they did not make.
-It is `resumeAs` in Node.js.
-
-<Tabs syncKey="lang">
-<TabItem label="Python" icon="seti:python">
-
-```python
-@classmethod
-async def resume_as(url: str, package: str, auth: Auth, sandbox: str) -> AppClient
-```
-
-</TabItem>
-<TabItem label="Node.js" icon="node">
-
-```ts
-static resumeAs(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
-```
-
-</TabItem>
-<TabItem label="Rust" icon="seti:rust">
-
-```rust
-pub async fn resume_as(url: &str, package: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
+pub async fn resume(url: &str, package: &str, auth: Auth, sandbox: &str) -> Result<AppClient, Error>
 ```
 
 </TabItem>
@@ -450,7 +360,7 @@ pub async fn close(self) -> Result<(), Error>
 
 ## `AppClient.remove`
 
-Removes its sandbox, which takes every grant to it with it, and closes the client.
+Removes its sandbox, and closes the client.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">

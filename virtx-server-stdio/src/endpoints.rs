@@ -29,11 +29,10 @@ use tokio::task::{AbortHandle, JoinSet};
 use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream};
 use virtx_core::{
     DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, PackagePutArgs, PackageSandbox,
-    PackageSandboxCreateArgs, PortSide, ProjectCreateArgs, ProjectListOutputItem, Role,
-    SandboxCreateArgs, SandboxExecArgs, SandboxExecItem, SandboxPort, SandboxResizeArgs,
-    SandboxSignalArgs, SandboxStdinArgs, VolumeCreateArgs, VolumeListOutputItem,
-    VolumeMountCreateArgs, VolumeMountListOutputItem,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, PackagePutArgs, PackageSandboxCreateArgs,
+    PortSide, ProjectCreateArgs, ProjectListOutputItem, Role, SandboxCreateArgs, SandboxExecArgs,
+    SandboxExecItem, SandboxPort, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs,
+    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::backend::Backing;
 use virtx_uvm::{
@@ -1008,7 +1007,7 @@ async fn package_remove(
 }
 
 /// `POST /packages/{package}/sandboxes/`: the sandbox, made as the package says, by the one client
-/// stdio has, and no grant, which it has no use for.
+/// stdio has.
 async fn package_sandbox_create(
     Extension(host): Extension<Arc<Host>>,
     Segments(named): Segments<String>,
@@ -1028,13 +1027,7 @@ async fn package_sandbox_create(
     let args: PackageSandboxCreateArgs = body(&request)?;
     let made = virtx_uvm::package_sandbox_args(&package, args)?;
     let sandbox = home.create(made).await?;
-    Ok(created(
-        format!("/sandboxes/{}", sandbox.id),
-        &PackageSandbox {
-            sandbox,
-            grant: None,
-        },
-    ))
+    Ok(created(format!("/sandboxes/{}", sandbox.id), &sandbox))
 }
 
 async fn sandbox_get(

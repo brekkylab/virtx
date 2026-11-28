@@ -46,7 +46,7 @@ pub use files::Files;
 pub use image::ImageJob;
 pub use job::{JobEnd, JobLog, StartedJob};
 pub use library::{LIBRARY_ENV, library_path, load};
-pub use package::{Package, PackageSandbox};
+pub use package::Package;
 pub use port_forward::{Closed, PortForwarder};
 pub use project::Project;
 pub use sandbox::{Sandbox, SandboxJob};

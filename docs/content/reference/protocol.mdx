@@ -34,7 +34,6 @@ A server offers several endpoints, and each speaks its own protocol:
 | [`/sandboxes/{id}/jobs/{job}/events`](#events) | Event stream | A process's output and end |
 | [`/packages/`](#packages) | HTTP | Package CRUD |
 | [`/packages/{package}/sandboxes/`](#packages) | HTTP | Making a sandbox as a package says, by its members or whom its [access](#access) lets in, and finding theirs again |
-| [`/packages/{package}/sandboxes/{id}/grant`](#packages) | HTTP | A new [grant](#grants) to a sandbox made of a package, for the one who made it |
 
 Everything is made, read and removed with plain HTTP, each request standing alone.
 What runs for a while, such as a build or a process, is a [job](#jobs): started with a `POST`, read with a `GET`, cancelled with a `DELETE`, and its log read as an event stream by any client allowed to, from where it left off.
@@ -60,7 +59,7 @@ A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface
 
 A web page could reach a server through DNS rebinding, so the server MUST check the `Origin` header of every request, the opening of a [port's](#ports) WebSocket included.
 It MUST answer `403 Forbidden` to a request whose `Origin` names an origin it does not allow.
-A [package's](#packages) `origins` are allowed beside the server's own, for the requests that make a sandbox of it or find one again, and those its [grant](#grants) sends.
+A [package's](#packages) `origins` are allowed beside the server's own, for the requests that make a sandbox of it or find one again, and those that reach a sandbox by its [grant](#grants).
 A request with no `Origin`, from any non-browser client, is not refused for that.
 
 ### Stdio
@@ -84,7 +83,7 @@ How the client obtains the token is outside this protocol, but a server MAY say 
 - `oidc`, if the tokens are an OpenID Connect provider's, is `{"issuer": "...", "client_id": "..."}`: the provider, and the public client to sign in to it as. The token is then the ID token the provider issues that client.
 - Without `oidc`, the server names no way to sign in: it takes tokens given out some other way, or none.
 
-A server that takes credentials also takes, sent the same way, the tokens a [package's `access`](#access) lets in to make a sandbox of it, and the [grant](#grants) of each sandbox so made: a token of its own, which reaches that sandbox alone.
+A server that takes credentials also takes, sent the same way, the tokens a [package's `access`](#access) lets in: to make a sandbox of it, and then to reach that sandbox by its [grant](#grants), and nothing else.
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
@@ -491,7 +490,7 @@ With `stdin` `true`, the client writes to it with `POST {job}/stdin`:
 ### Packages
 
 A package is a sandbox kept under a name, made as many times as it is asked for: what a [sandbox's `POST`](#sandboxes) takes, said once by a project's members, with who else may make one and how many.
-It lets the users of an app built on VirtX make sandboxes from the app itself, with no server of the app's own between them and VirtX: each is let in by what its package's [`access`](#access) takes, and reaches the sandbox it made alone, with a [grant](#grants).
+It lets the users of an app built on VirtX make sandboxes from the app itself, with no server of the app's own between them and VirtX: each is let in by what its package's [`access`](#access) takes, and reaches the sandboxes they made alone, by their [grants](#grants), with the same tokens.
 
 | Request | Body | Answer |
 | --- | --- | --- |
@@ -499,68 +498,63 @@ It lets the users of an app built on VirtX make sandboxes from the app itself, w
 | `PUT /packages/{name}` | `{sandbox, max?, access?, origins?, limits?}` | `201` or `200`, the package |
 | `GET /packages/{package}` | | `200`, the package |
 | `DELETE /packages/{package}` | | `204` |
-| `POST /packages/{package}/sandboxes/` | `{name?, ports?}` | `201`, `{sandbox, grant?}` |
+| `POST /packages/{package}/sandboxes/` | `{name?, ports?}` | `201`, the sandbox |
 | `GET /packages/{package}/sandboxes/` | | `200`, array of sandboxes |
-| `POST /packages/{package}/sandboxes/{id}/grant` | | `201`, `{sandbox, grant}` |
 
 A package is `{id, name, sandbox, max?, access, origins, limits?}`:
 
 - `id` is given it by the server once, kept as it is replaced, and names its project with it. `name` is letters, digits, `.`, `_` and `-`, as a sandbox's, and any other is refused with `400`, `invalid`.
 - `{package}` names a package by its id, or by its name in the project the request names. An app names it by its id: its users are no project's members, and name no project.
 - `sandbox` is what a sandbox's `POST` takes, but `name` and a [port](#ports) on local, each refused with `400`, `invalid`: each sandbox is named, and has its ports on local, as it is made. It is held to what that `POST` holds it to as the `PUT` is answered. Its `image` names a tag or a digest as there; a tag is read as each sandbox is made, so a package of `app:latest` makes the next sandbox of the image the tag points at then.
-- `max` is `{vcpus?, memory_mib?, disk_gib?}`: how large a sandbox made of it may be [resized](#resizing) with its grant, each no less than what `sandbox` makes it, or `400`, `invalid`. One left out, or no `max`, holds the grant to the size the sandbox was made with.
+- `max` is `{vcpus?, memory_mib?, disk_gib?}`: how large one `access` lets in may [resize](#resizing) a sandbox they made of it, each no less than what `sandbox` makes it, or `400`, `invalid`. One left out, or no `max`, holds them to the size the sandbox was made with.
 - `access` is who beside the project's members may make a sandbox of it, as [Access](#access) says: a list of ways in, any of which lets a request in. Without it, or empty, its members alone may.
-- `origins` are the [origins](#origin) a web page may make a sandbox of it from, and reach that sandbox with its grant from, beside those the server allows itself: each a scheme, host and port, as `https://app.example`.
-- `limits` is `{sandboxes?, per_subject?}`: how many sandboxes made of it by those `access` lets in may live at once, however many grants each has, all of them and each subject's. A `POST` past either is refused with `429`, `quota`, its `reason` `sandboxes`, as [Refused for now](#refused-for-now) says. Without one, that is the server's to limit.
+- `origins` are the [origins](#origin) a web page may make a sandbox of it from, and reach that sandbox from, beside those the server allows itself: each a scheme, host and port, as `https://app.example`.
+- `limits` is `{sandboxes?, per_subject?}`: how many sandboxes made of it by those `access` lets in may live at once, all of them and each subject's. A `POST` past either is refused with `429`, `quota`, its `reason` `sandboxes`, as [Refused for now](#refused-for-now) says. Without one, that is the server's to limit.
 
 `PUT` makes a package, answered `201`, or replaces one in whole, `200`, and is refused for an image or a volume the project has none of, as a sandbox's `POST` is.
 A package's tag and its volumes are in use from its `PUT` until its `DELETE`: the `DELETE` that would take the tag away is refused as under [Images](#images), and a volume's `DELETE` with `409`, `in_use`. Moving the tag to another image is not refused.
 `DELETE` removes the package, and what it lets in from then on.
 A sandbox made of a package is a sandbox as any other, and knows nothing of it: replacing or removing the package changes no sandbox made of it, nor its grant.
 
-`POST /packages/{package}/sandboxes/` makes a sandbox as the package says, answered `{sandbox, grant?}`: the sandbox, as a sandbox's `POST` answers it, and its [grant](#grants), in this answer alone.
+`POST /packages/{package}/sandboxes/` makes a sandbox as the package says, answered as a sandbox's `POST` is; for one `access` let in, the server keeps its [grant](#grants).
 
 - `ports` are its ports on local, each `{"port", "on": "local", "label"?}` as under [Ports](#ports), beside those in the sandbox the package gives it: the machine of the one who makes it is theirs to offer. A port in the sandbox is the package's to give, and is refused with `400`, `invalid`.
 - A member makes it as a sandbox's `POST` does, and may name it with `name`.
 - One `access` lets in may not: a `name` is refused with `400`, `invalid`, since names are the project's.
 - A request no way lets in is refused with `401`, `unauthorized`, with no credentials or a token no one's, and with `403`, `forbidden`, with a token that is someone's but not one the package takes.
 
-A sandbox lives until it is deleted, so the one who made it can come back to it: with its grant, which reaches it as long as it lives, or, without one, as who they are.
-`GET /packages/{package}/sandboxes/` answers the sandboxes made of the package that the request's sender made, as `GET /sandboxes/` answers each: to one `access` lets in, those made with the same subject, as `access` lets them in now; to a member, every sandbox made of it.
-`POST /packages/{package}/sandboxes/{id}/grant` gives out a new [grant](#grants) to one of those, answered `{sandbox, grant}` as a sandbox's making is, and leaves its other grants as they are.
+A sandbox lives until it is deleted, so the one who made it can come back to it, as who they are.
+`GET /packages/{package}/sandboxes/` answers the sandboxes made of the package that the request's sender made, as `GET /sandboxes/` answers each: to one `access` lets in, those made with the same issuer and subject, as `access` lets them in now; to a member, every sandbox made of it.
+It is let in, or refused, as the `POST` that makes a sandbox is, `name` and `ports` aside.
 
-- Each is let in, or refused, as the `POST` that makes a sandbox is, `name` and `ports` aside.
-- A request with no credentials is refused with `401`, `unauthorized`, whatever the package's `access`: a `public` subject is an address, which many share, so a sandbox made with none is come back to with its grant alone.
-- A sandbox that is none of the sender's, or none made of the package, is refused with `404`, `not_found`, as one that does not exist is.
-
-A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), keeps packages for its one client, and answers no `grant`: `access`, `origins` and `limits` are kept and answered, and let no one in. It keeps no record of which sandbox was made of which package, and answers neither of the requests that find one again: its client reaches every sandbox already.
+A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), keeps packages for its one client: `access`, `origins` and `limits` are kept and answered, and let no one in. It keeps no grant, and answers no `GET` of the sandboxes made of a package: its client reaches every sandbox already.
 
 #### Access
 
-Each way in is an object with a `type`:
+Each way in is an object with a `type`, of which there is one:
 
-- `{"type": "public"}` lets in a request with no credentials, from anyone. Its subject is the address the request came from, as the server sees it.
-- `{"type": "jwt", "issuer", "audience", "jwks"?, "claims"?}` lets in a request whose `Authorization: Bearer` is a JSON Web Token (RFC 7519) `issuer` signed: its `iss` is `issuer`, its `aud` is or holds `audience`, its `exp` has not passed, and each member `claims` names, an object of claims, equals the value given there. Its subject is the token's `sub`.
+- `{"type": "jwt", "issuer", "audience", "jwks"?, "claims"?}` lets in a request whose `Authorization: Bearer` is a JSON Web Token (RFC 7519) `issuer` signed: its `iss` is `issuer`, its `aud` is or holds `audience`, its `exp` has not passed, and each member `claims` names, an object of claims, equals the value given there. Its subject is the token's `sub`, of that issuer: two issuers' tokens of the same `sub` are two subjects.
 
 For `jwt`:
 
 - `issuer` is an `https` URL, and so is `jwks`, but for an `http` one to the server's own loopback, which any other is refused with `400`, `invalid`. Its keys are the JWK Set at `jwks`, or without one at the `jwks_uri` of the OpenID Connect discovery document at `{issuer}/.well-known/openid-configuration`. A server MAY keep the keys for a while, and fetches them again for a key ID it does not know.
 - The token is signed with an asymmetric algorithm, such as `RS256`, `ES256` or `EdDSA`. One signed with `none` or an HMAC algorithm is refused, whatever its claims.
 - `claims` narrows an issuer that gives tokens to others than the app's users, such as one that gives them to every workload of a platform: `{"repository": "owner/app"}` lets in that repository's alone.
+- Its tokens expire: the one let in sends a fresh one with each request, as its issuer gives them, and is let in by it as long as their subject is the same.
 
 A token the server takes from its own members, as [Authentication](#authentication) says, is a member's: the member makes the sandbox as one, and no way in is asked.
 
 #### Grants
 
-A grant is a token that reaches one sandbox and nothing else, given out by the `POST` that made that sandbox of a [package](#packages), and by each `POST` to its `grant` after: what the one who made it calls it with from then on. A sandbox may have several, each reaching it alike.
+A grant is what the server keeps of a sandbox made of a [package](#packages) for one its `access` let in: the sandbox, given to them, as the way in that let them in and their subject, with the package's `max` and `origins` as they were as it was made.
+It is no token: the one it is given to reaches the sandbox with the tokens that way lets in.
 
-- It is answered by the `POST` that gave it out alone. The server MUST NOT keep it beyond what tells it apart, such as its hash, show it in another answer, or write it to a log of its own.
-- It is sent as credentials are, `Authorization: Bearer <grant>`, and reaches the sandbox's project, with no `virtx-project`: a request naming another project is refused with `403`, `forbidden`.
-- It reaches `GET /sandboxes/`, answered with its sandbox alone, `GET`, `PATCH` and `DELETE /sandboxes/{id}`, and everything under `/sandboxes/{id}/` -- its [files](#files), [ports](#ports) and [jobs](#sandbox-jobs). A `PATCH` past the package's `max`, as it was when the sandbox was made, is refused with `403`, `forbidden`, changing nothing. Every other request is refused with `403`, `forbidden`.
-- A web page's requests with it are let in from the package's `origins`, as they were when the sandbox was made, beside the server's own.
-- It lives as its sandbox does, with no time of its own: once the sandbox is deleted, by it, a member or the server, it is refused with `401`, `unauthorized`, as a token no one's is.
+- A request reaches the sandbox by its grant when it names the sandbox's project by its id in `virtx-project`, and carries a token the grant's way in lets in, as it was when the sandbox was made, of the grant's subject. One that does not is refused as a request to any sandbox of the project is, `401`, `unauthorized`, or `403`, `forbidden`.
+- It reaches `GET`, `PATCH` and `DELETE /sandboxes/{id}`, and everything under `/sandboxes/{id}/` -- its [files](#files), [ports](#ports) and [jobs](#sandbox-jobs). A `PATCH` past the grant's `max` is refused with `403`, `forbidden`, changing nothing. No other request of the project is reached by it, the listing `GET /sandboxes/` among them.
+- A web page's requests are let in by it from the grant's `origins`, beside the server's own.
+- It lives as its sandbox does: once the sandbox is deleted, by the one it is given to, a member or the server, it is gone, and the sandbox with it.
 
-A grant is no member of the project, and reaches neither its other sandboxes nor anything else in it.
+A grant makes no one a member of the project, and reaches neither its other sandboxes nor anything else in it.
 
 ## Images
 

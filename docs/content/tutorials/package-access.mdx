@@ -6,70 +6,18 @@ description: "Let people who are not members of your project make a sandbox of a
 import { Aside, Tabs, TabItem } from "@astrojs/starlight/components";
 
 A [package](/docs/tutorials/packages/) is made by the members of its project alone, until you say who else may make one.
-Its **access** says who: anyone, or whoever brings a token from an issuer you name, such as the provider your app signs its users in with.
+Its **access** says who: whoever brings a token from an issuer you name, such as the provider your app signs its users in with.
 
-Each of them makes a sandbox of the package as a member does, and gets its **grant**: a token that reaches that sandbox and nothing else.
+Each of them makes a sandbox of the package as a member does, and the server keeps its **grant**: the sandbox, given to them.
+From then on the same tokens reach that sandbox, and the others they made of the package, and nothing else.
 They never become members of the project, and never see its other sandboxes, images or volumes.
 
 ## Before you start
 
 Access is kept by every server, but only a server reached over HTTP, one that takes credentials, lets anyone in by it.
-A server started by `Client.spawn()` has one user, you, and gives no grant.
+A server started by `Client.spawn()` has one user, you, and lets no one else in.
 
 Keep the package in the project your app's users will make sandboxes in, on the server they will reach.
-
-## Let anyone in
-
-`PublicAccess` lets in a request with no credentials, from anyone:
-
-<Tabs syncKey="lang">
-<TabItem label="Python" icon="seti:python">
-
-```python
-from virtx import PackageLimits, PublicAccess
-
-package = await client.put_package(
-    "workspace",
-    "app:latest",
-    ports=[8000],
-    access=[PublicAccess()],
-    limits=PackageLimits(sandboxes=50, per_subject=1),
-)
-```
-
-</TabItem>
-<TabItem label="Node.js" icon="node">
-
-```js
-const pkg = await client.putPackage('workspace', 'app:latest', {
-  ports: [8000],
-  access: [{ type: 'public' }],
-  limits: { sandboxes: 50, perSubject: 1 },
-})
-```
-
-</TabItem>
-<TabItem label="Rust" icon="seti:rust">
-
-```rust
-use virtx::{PackageAccess, PackageLimits, PackagePutArgs, SandboxCreateArgs};
-
-let args = PackagePutArgs::new(SandboxCreateArgs::new("app:latest").port(8000))
-    .access(PackageAccess::Public)
-    .limits(PackageLimits { sandboxes: Some(50), per_subject: Some(1) });
-let package = client.put_package("workspace", &args).await?;
-```
-
-</TabItem>
-</Tabs>
-
-Each one who comes in is a **subject**, which [limits](#limit-how-many) count by.
-With public access, the subject is the address the request came from, as the server sees it.
-
-<Aside type="caution">
-Anyone who has the package's `id` can then make sandboxes of it, and the project pays for them.
-Give a public package `limits`, and the smallest size and `max` it needs.
-</Aside>
 
 ## Let your users in by their tokens
 
@@ -126,7 +74,8 @@ The server lets a token in when:
 - It has not expired.
 - It is signed with one of the issuer's keys, by an asymmetric algorithm such as `RS256`, `ES256` or `EdDSA`. A token signed with an HMAC algorithm, or not signed, is refused.
 
-The subject is the token's `sub`: one user, however many devices they come from.
+Each one who comes in is a **subject**, the token's `sub` of its issuer: one user, however many devices they come from.
+[Limits](#limit-how-many) count by it, and the sandboxes they made are found again by it.
 
 The server finds the issuer's keys through its OpenID Connect discovery document, at `{issuer}/.well-known/openid-configuration`.
 For an issuer with none, give its JWK Set's URL as `jwks`.
@@ -194,24 +143,24 @@ A sandbox made past either is refused with `429`, `quota`, until one of theirs i
 Without `limits`, the server sets its own.
 Sandboxes the project's members make do not count.
 
+Anyone your issuer signs in can make sandboxes of the package, and the project pays for them: give it `limits`, and the smallest size and `max` it needs.
 A sandbox lives until it is removed, so an app that does not remove its sandbox when it is done keeps using up its user's share.
 See [Remove the sandbox](/docs/tutorials/app-client/#remove-the-sandbox).
 
 ## What a grant reaches
 
-The sandbox made of a package comes with its grant, a token that the one who made it sends from then on.
-[Building an app on a package](/docs/tutorials/app-client/) shows the client that does this for you.
+The sandbox made of a package is granted to the one who made it: their issuer and subject, and the way in that let them in.
+They reach it with that way's tokens, each request naming the sandbox's project by its id, which [Building an app on a package](/docs/tutorials/app-client/) shows the client doing for you.
+A token they get later, once the first has expired, reaches it just the same: it is who they are that the grant names, not one token.
 
-A grant reaches its own sandbox, and all of it:
+Their tokens reach the sandbox, and all of it:
 
 - Its commands, its files and its ports.
 - Resizing it, up to the package's [`max`](/docs/tutorials/packages/#size) as it was when the sandbox was made.
 - Removing it.
 
-Every other request with it is refused with `403`.
-Once the sandbox is removed, by the one who made it, a member or the server, its grant is refused with `401`.
-The server keeps no copy of a grant it could show again: it is in the answer that made the sandbox, and nowhere else.
-One let in by a token can be given a new grant to a sandbox they made, as [Come back to the sandbox](/docs/tutorials/app-client/#come-back-to-the-sandbox) shows; the grants before it still reach it.
+Every other request with them is refused, `401` or `403`.
+Once the sandbox is removed, by the one who made it, a member or the server, its grant is gone with it.
 
 Replacing or removing the package changes no sandbox made of it, nor its grant.
 To take back a sandbox someone made, a member removes it.
@@ -219,7 +168,7 @@ To take back a sandbox someone made, a member removes it.
 ## Let web pages in
 
 A web page that reaches the server itself, from your users' browser, is held to the server's [`Origin`](/docs/reference/protocol/#origin) check.
-`origins` lists the pages that may make a sandbox of the package, and reach it with its grant, beside those the server allows:
+`origins` lists the pages that may make a sandbox of the package, and reach it, beside those the server allows:
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
@@ -267,7 +216,7 @@ The clients run in Python, Node.js and Rust, not in a browser: a web page speaks
 
 1. **`401`, `unauthorized`, making a sandbox of a package**
 
-   **Cause:** No credentials for a package without public access, or a token the server takes from no one: expired, of another issuer or audience, or signed with a key the issuer does not have.
+   **Cause:** No credentials, or a token the server takes from no one: expired, of another issuer or audience, or signed with a key the issuer does not have.
 
    **Fix:** Send a fresh token of the issuer and audience the package names.
 
@@ -289,18 +238,12 @@ The clients run in Python, Node.js and Rust, not in a browser: a web page speaks
 
    **Fix:** Use the issuer exactly as its tokens' `iss` has it.
 
-5. **`403`, `forbidden`, with a grant**
+5. **`401` or `403`, reaching a sandbox made of a package**
 
-   **Cause:** A request the grant does not reach, such as another sandbox, a resize past the package's `max`, or another project.
+   **Cause:** A request its grant does not reach: another sandbox, one removed, a resize past the package's `max`, a token of another subject, or no `virtx-project` naming the sandbox's project by its id.
 
-   **Fix:** Keep to the sandbox it was given for.
-
-6. **`401`, `unauthorized`, with a grant**
-
-   **Cause:** Its sandbox was removed.
-
-   **Fix:** Make another sandbox of the package.
+   **Fix:** Keep to the sandboxes the user made, with their own token, through `AppClient`, which names the project for you. For one removed, make another sandbox of the package.
 
 ## Next
 
-- [Building an app on a package](/docs/tutorials/app-client/): make a sandbox of a package from your app, and use it with its grant.
+- [Building an app on a package](/docs/tutorials/app-client/): make a sandbox of a package from your app, and use it as your user.

@@ -649,8 +649,8 @@ struct VirtxFuture *virtx_client_list_package(struct VirtxClient *client);
 
 // Keeps the package `name`, made or replaced in whole, given `{"name": "...", "args":
 // {"sandbox": {...}, "max": {"vcpus": n, "memory_mib": n, "disk_gib": n}, "access":
-// [{"type": "public"} | {"type": "jwt", "issuer": "...", "audience": "...", "jwks": "...",
-// "claims": {...}}], "origins": ["..."], "limits": {"sandboxes": n, "per_subject": n}}}`,
+// [{"type": "jwt", "issuer": "...", "audience": "...", "jwks": "...", "claims": {...}}],
+// "origins": ["..."], "limits": {"sandboxes": n, "per_subject": n}}}`,
 // all of `args` but `sandbox` optional. Answers with the package, as
 // `virtx_client_list_package` answers each.
 //
@@ -682,9 +682,8 @@ struct VirtxFuture *virtx_client_remove_package(struct VirtxClient *client,
 
 // Makes a sandbox of the package `package` names, given `{"package": "...", "name": "...",
 // "ports": [{"port": n, "on": "local", "label": "..."}]}`, `name` optional and a member's
-// alone to give, and `ports` its ports on local beside the package's in the sandbox. Answers with `{"sandbox": {...},
-// "grant": "..."}`: the sandbox as `virtx_client_list_sandbox` answers each, and the token
-// that reaches it alone, which no other answer gives; over stdio, no `grant`.
+// alone to give, and `ports` its ports on local beside the package's in the sandbox. Answers
+// with the sandbox, as `virtx_client_list_sandbox` answers each.
 //
 // # Safety
 //
@@ -704,22 +703,10 @@ struct VirtxFuture *virtx_client_list_package_sandbox(struct VirtxClient *client
                                                       const uint8_t *args,
                                                       size_t args_len);
 
-// Gives out a new grant to the sandbox `sandbox`, one the client made of the package
-// `package` names, given `{"package": "...", "sandbox": "..."}`. Answers as
-// `virtx_client_create_package_sandbox` does.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_grant_package_sandbox(struct VirtxClient *client,
-                                                       const uint8_t *args,
-                                                       size_t args_len);
-
-// Makes a sandbox of the package `package`, by its id, as what `client` is connected with
-// lets in, given `{"package": "...", "ports": [{"port": n, "on": "local", "label": "..."}]}`,
-// `ports` optional; and from then on sends its grant alone. Answers
-// `{"sandbox": {...}, "grant": "..."}`, the sandbox as `virtx_client_get_sandbox` answers
-// it: a sandbox the server gives no grant is removed, and refused.
+// Makes a sandbox of the package `package`, by its id, as the credentials `client` sends
+// let in, given `{"package": "...", "ports": [{"port": n, "on": "local", "label": "..."}]}`,
+// `ports` optional; and from then on names the package's project. Answers with the sandbox,
+// as `virtx_client_get_sandbox` answers it.
 //
 // # Safety
 //
@@ -728,8 +715,9 @@ struct VirtxFuture *virtx_client_app_create(struct VirtxClient *client,
                                             const uint8_t *args,
                                             size_t args_len);
 
-// Sends the grant `grant` alone from now on, and answers with the sandbox it reaches, given
-// `{"grant": "..."}`, as `virtx_client_app_create` answers.
+// Answers with the sandbox `sandbox`, one made of the package `package` with the
+// credentials `client` sends, given `{"package": "...", "sandbox": "..."}`, as
+// `virtx_client_app_create` answers; and from then on names the package's project.
 //
 // # Safety
 //
@@ -737,17 +725,6 @@ struct VirtxFuture *virtx_client_app_create(struct VirtxClient *client,
 struct VirtxFuture *virtx_client_app_resume(struct VirtxClient *client,
                                             const uint8_t *args,
                                             size_t args_len);
-
-// Gives out a new grant to the sandbox `sandbox`, one made of the package `package` with
-// what `client` is connected with, and sends it alone from then on, given
-// `{"package": "...", "sandbox": "..."}`. Answers as `virtx_client_app_create` does.
-//
-// # Safety
-//
-// As `virtx_client_build_image`.
-struct VirtxFuture *virtx_client_app_resume_as(struct VirtxClient *client,
-                                               const uint8_t *args,
-                                               size_t args_len);
 
 // Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
 // answers each.

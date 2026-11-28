@@ -238,14 +238,12 @@ fn check(args: &PackagePutArgs, vm: &[OsString]) -> Result<(), SandboxError> {
             return invalid(why);
         }
     }
-    for access in &args.access {
-        if let PackageAccess::Jwt { issuer, jwks, .. } = access {
-            for (name, url) in [("issuer", Some(issuer)), ("jwks", jwks.as_ref())] {
-                if let Some(url) = url
-                    && !is_https(url)
-                {
-                    return invalid(format!("access: {name}: {url:?} is no https URL"));
-                }
+    for PackageAccess::Jwt { issuer, jwks, .. } in &args.access {
+        for (name, url) in [("issuer", Some(issuer)), ("jwks", jwks.as_ref())] {
+            if let Some(url) = url
+                && !is_https(url)
+            {
+                return invalid(format!("access: {name}: {url:?} is no https URL"));
             }
         }
     }

@@ -2,8 +2,8 @@
 
 use http_over_x::segment;
 
-use super::{AppSandbox, Package, PackagePutArgs, PackageSandbox, PackageSandboxCreateArgs};
-use crate::{Auth, Client, Error, PortSpec, Sandbox};
+use super::{Package, PackagePutArgs, PackageSandboxCreateArgs};
+use crate::{Client, Error, PortSpec, Sandbox};
 
 /// The path of the package `package` names: by its id, or its name in the project set.
 fn package(package: &str) -> String {
@@ -45,7 +45,7 @@ pub(crate) async fn create_sandbox(
     client: &Client,
     name: &str,
     args: &PackageSandboxCreateArgs,
-) -> Result<PackageSandbox, Error> {
+) -> Result<Sandbox, Error> {
     let path = format!("{}/sandboxes/", package(name));
     Ok(client.wire().post(&path, client.headers(), args).await?)
 }
@@ -56,69 +56,31 @@ pub(crate) async fn list_sandbox(client: &Client, name: &str) -> Result<Vec<Sand
     Ok(client.wire().get(&path, client.headers()).await?)
 }
 
-/// A new grant to the sandbox `id`, one the client made of the package `name` names.
-pub(crate) async fn grant_sandbox(
-    client: &Client,
-    name: &str,
-    id: &str,
-) -> Result<PackageSandbox, Error> {
-    let path = format!("{}/sandboxes/{}/grant", package(name), segment(id));
-    let empty = serde_json::json!({});
-    Ok(client.wire().post(&path, client.headers(), &empty).await?)
-}
-
-/// Make a sandbox of the package `name` names for an app's user, with `ports` on local, and
-/// send its grant alone through `client` from then on.
+/// Make a sandbox of the package `id` for an app's user, with `ports` on local, and name the
+/// package's project through `client` from then on, which the sandbox is reached in.
 pub(crate) async fn app_create(
     client: &Client,
-    name: &str,
-    ports: Vec<PortSpec>,
-) -> Result<AppSandbox, Error> {
-    let args = PackageSandboxCreateArgs { name: None, ports };
-    let made = create_sandbox(client, name, &args).await?;
-    app_reached(client, made).await
-}
-
-/// Send `grant` alone through `client` from now on, and answer the sandbox it reaches.
-pub(crate) async fn app_resume(client: &Client, grant: String) -> Result<AppSandbox, Error> {
-    client.set_auth(Auth::Bearer {
-        token: grant.clone(),
-    })?;
-    // A grant's listing is its own sandbox alone.
-    let Some(sandbox) = client.list_sandbox().await?.pop() else {
-        return Err(Error::Client(
-            "the server answered no sandbox to the grant".into(),
-        ));
-    };
-    Ok(AppSandbox { sandbox, grant })
-}
-
-/// A new grant to the sandbox `id`, one the client made of the package `name` names, sent alone
-/// through `client` from then on.
-pub(crate) async fn app_resume_as(
-    client: &Client,
-    name: &str,
     id: &str,
-) -> Result<AppSandbox, Error> {
-    let made = grant_sandbox(client, name, id).await?;
-    app_reached(client, made).await
+    ports: Vec<PortSpec>,
+) -> Result<Sandbox, Error> {
+    client.set_project(Some(project_of(id)?))?;
+    let args = PackageSandboxCreateArgs { name: None, ports };
+    create_sandbox(client, id, &args).await
 }
 
-/// `made`, reached through `client` with its grant alone from now on.
-async fn app_reached(client: &Client, made: PackageSandbox) -> Result<AppSandbox, Error> {
-    let Some(grant) = made.grant else {
-        // Nothing would reach it with no grant: it goes.
-        client.remove_sandbox(&made.sandbox.id).await?;
-        return Err(Error::Client(
-            "the server gave the sandbox no grant to reach it with".into(),
-        ));
-    };
-    // From here on, the grant alone: what made it reaches nothing more through this client.
-    client.set_auth(Auth::Bearer {
-        token: grant.clone(),
-    })?;
-    Ok(AppSandbox {
-        sandbox: made.sandbox,
-        grant,
-    })
+/// The sandbox `sandbox`, one the app's user made of the package `id`, its project named through
+/// `client` from now on.
+pub(crate) async fn app_resume(client: &Client, id: &str, sandbox: &str) -> Result<Sandbox, Error> {
+    client.set_project(Some(project_of(id)?))?;
+    client.get_sandbox(sandbox).await
+}
+
+/// The id of the project the package `id` is in, which the package's id starts with.
+fn project_of(id: &str) -> Result<&str, Error> {
+    match id.split_once('.') {
+        Some((project, _)) if !project.is_empty() => Ok(project),
+        _ => Err(Error::Client(format!(
+            "{id:?} is no package's id: an app names its package by the id put_package answered"
+        ))),
+    }
 }

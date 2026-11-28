@@ -152,7 +152,6 @@ test('a package is kept, makes a sandbox, and is removed', async () => {
     await alpine(client)
     const name = unique('package')
     const access = [
-      { type: 'public' },
       { type: 'jwt', issuer: 'https://idp.example', audience: 'app', claims: { repo_name: 'a' } },
     ]
     const pkg = await client.putPackage(name, ALPINE, {
@@ -170,9 +169,8 @@ test('a package is kept, makes a sandbox, and is removed', async () => {
     assert.ok((await client.listPackage()).some((kept) => kept.id === pkg.id))
 
     const made = await pkg.createSandbox({ name: unique('of-package') })
-    assert.ok(made.sandbox instanceof virtx.Sandbox)
-    assert.equal(made.grant, null, 'a server over stdio gives no grant')
-    await made.sandbox.remove()
+    assert.ok(made instanceof virtx.Sandbox)
+    await made.remove()
     await pkg.remove()
     await assert.rejects(client.getPackage(pkg.id), { status: 404 })
   } finally {
@@ -181,7 +179,7 @@ test('a package is kept, makes a sandbox, and is removed', async () => {
 })
 
 test('an app client reaches the sandbox a package lets it make', async () => {
-  const { url, token, project } = fixture()
+  const { url, token, project, users } = fixture()
   const client = Client.connect(url, { type: 'bearer', token }, project)
   try {
     await alpine(client)
@@ -189,35 +187,35 @@ test('an app client reaches the sandbox a package lets it make', async () => {
     await assert.rejects(virtx.AppClient.connect(url, members.id), { status: 401 })
     await members.remove()
 
-    const pkg = await client.putPackage(unique('public'), ALPINE, {
-      access: [{ type: 'public' }],
+    // The fixture's own issuer lets bob in, a member of another project.
+    const { oidc } = await (await fetch(`${url}auth`)).json()
+    const pkg = await client.putPackage(unique('jwt'), ALPINE, {
+      access: [
+        { type: 'jwt', issuer: oidc.issuer, audience: oidc.client_id, jwks: `${oidc.issuer}/keys` },
+      ],
     })
-    const app = await virtx.AppClient.connect(url, pkg.id)
+    const bob = { type: 'bearer', token: JSON.parse(users).bob }
+    const app = await virtx.AppClient.connect(url, pkg.id, bob)
     const { id } = app.sandbox
-    const { grant } = app
     try {
       assert.equal(await app.sandbox.exec(['true']).complete(), 0)
-      assert.equal(typeof grant, 'string')
-      assert.ok(!Object.keys(app).includes('grant'), 'not shown as the client is logged')
     } finally {
       await app.close()
     }
     assert.equal((await client.getSandbox(id)).id, id, 'closed, it stays')
 
-    const resumed = await virtx.AppClient.resume(url, grant)
+    const resumed = await virtx.AppClient.resume(url, pkg.id, bob, id)
     assert.equal(resumed.sandbox.id, id)
-    assert.equal(resumed.grant, grant)
-    await assert.rejects(virtx.AppClient.resumeAs(url, pkg.id, null, id), { status: 401 })
     await resumed.remove()
     await assert.rejects(client.getSandbox(id), { status: 404 })
-    await assert.rejects(virtx.AppClient.resume(url, grant), { status: 401 })
+    await assert.rejects(virtx.AppClient.resume(url, pkg.id, bob, id), { status: 403 })
     await pkg.remove()
   } finally {
     await client.close()
   }
 })
 
-test("a member finds a package's sandboxes and grants one again", async () => {
+test("a member finds a package's sandboxes", async () => {
   const { url, token, project } = fixture()
   const client = Client.connect(url, { type: 'bearer', token }, project)
   try {
@@ -227,24 +225,15 @@ test("a member finds a package's sandboxes and grants one again", async () => {
     const found = await pkg.listSandbox()
     assert.deepEqual(
       found.map((sandbox) => sandbox.id),
-      [made.sandbox.id],
+      [made.id],
     )
     assert.ok(found.every((sandbox) => sandbox instanceof virtx.Sandbox))
     const byName = await client.listPackageSandbox(pkg.name)
     assert.deepEqual(
       byName.map((sandbox) => sandbox.id),
-      [made.sandbox.id],
+      [made.id],
     )
-
-    const granted = await pkg.grantSandbox(made.sandbox.id)
-    assert.ok(granted.sandbox instanceof virtx.Sandbox)
-    assert.equal(granted.sandbox.id, made.sandbox.id)
-    assert.equal(typeof granted.grant, 'string')
-    assert.notEqual(granted.grant, made.grant)
-    const again = await client.grantPackageSandbox(pkg.id, made.sandbox.id)
-    assert.ok(![made.grant, granted.grant].includes(again.grant))
-    await assert.rejects(pkg.grantSandbox('none'), { status: 404 })
-    await made.sandbox.remove()
+    await made.remove()
     await pkg.remove()
   } finally {
     await client.close()

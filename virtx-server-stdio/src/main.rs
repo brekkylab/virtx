@@ -397,7 +397,8 @@ mod tests {
             (status, String::from_utf8(body.to_vec()).unwrap())
         };
         let mounting = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"},
-            "volumes": [{"volume": "data", "path": "/data"}]}, "access": [{"type": "public"}]}"#;
+            "volumes": [{"volume": "data", "path": "/data"}]},
+            "access": [{"type": "jwt", "issuer": "https://idp.example", "audience": "app"}]}"#;
         assert_eq!(send("PUT", "/packages/app", mounting).await.0, 404);
         server.file_image("app:1");
         assert_eq!(
@@ -414,7 +415,7 @@ mod tests {
         assert!(id.starts_with(&format!("{project}.")), "{id}");
         assert_eq!(
             made["access"],
-            serde_json::json!([{"type": "public"}]),
+            serde_json::json!([{"type": "jwt", "issuer": "https://idp.example", "audience": "app"}]),
             "kept, letting no one in"
         );
         assert_eq!(send("PUT", "/packages/app", mounting).await.0, 200);
@@ -435,7 +436,7 @@ mod tests {
             send("POST", "/packages/none/sandboxes/", named).await.0,
             404
         );
-        let unknown = r#"{"name": "dev", "grant": true}"#;
+        let unknown = r#"{"name": "dev", "unknown": true}"#;
         assert_eq!(
             send("POST", &format!("/packages/{id}/sandboxes/"), unknown)
                 .await

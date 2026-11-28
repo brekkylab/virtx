@@ -26,7 +26,7 @@ use virtx_core::{
 };
 
 use crate::{
-    Error, ImageJob, Package, PackageSandbox, Project, Sandbox, SandboxJob, Volume,
+    Error, ImageJob, Package, Project, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -720,27 +720,22 @@ impl Client {
     }
 
     /// Make a sandbox of the package `package` names, by its id or its name, as `args` says: a
-    /// name, and its ports on local. Answered with it and its grant.
+    /// name, and its ports on local.
     pub fn create_package_sandbox(
         &self,
         package: impl AsRef<str>,
         args: &PackageSandboxCreateArgs,
-    ) -> Call<PackageSandbox> {
+    ) -> Call<Sandbox> {
         let mut args = serde_json::to_value(args).expect("a sandbox's args serialize");
         args["package"] = json!(package.as_ref());
         let client = self.clone();
-        let call: Call<virtx_core::PackageSandbox> =
-            self.call(self.api.virtx_client_create_package_sandbox, args);
-        call.map(move |made| PackageSandbox {
-            sandbox: Sandbox::new(client.clone(), made.sandbox),
-            grant: made.grant,
-        })
+        let call: Call<SandboxInfo> = self.call(self.api.virtx_client_create_package_sandbox, args);
+        call.map(move |info| Sandbox::new(client.clone(), info))
     }
 
     /// The sandboxes made of the package `package` names that this client's credentials made: a
-    /// member's, every one; one its access let in, those of the same subject. A sandbox made
-    /// with no credentials is reached with its grant alone, and a server over stdio answers
-    /// none of this.
+    /// member's, every one; one its access let in, those of the same issuer and subject. A
+    /// server over stdio answers none of this.
     pub fn list_package_sandbox(&self, package: impl AsRef<str>) -> Call<Vec<Sandbox>> {
         let args = json!({ "package": package.as_ref() });
         let client = self.clone();
@@ -751,24 +746,6 @@ impl Client {
                 .into_iter()
                 .map(|info| Sandbox::new(client.clone(), info))
                 .collect()
-        })
-    }
-
-    /// A new grant to the sandbox `sandbox`, one [`list_package_sandbox`](Self::list_package_sandbox)
-    /// finds, answered with it as [`create_package_sandbox`](Self::create_package_sandbox) is.
-    /// Its other grants still reach it.
-    pub fn grant_package_sandbox(
-        &self,
-        package: impl AsRef<str>,
-        sandbox: impl AsRef<str>,
-    ) -> Call<PackageSandbox> {
-        let args = json!({ "package": package.as_ref(), "sandbox": sandbox.as_ref() });
-        let client = self.clone();
-        let call: Call<virtx_core::PackageSandbox> =
-            self.call(self.api.virtx_client_grant_package_sandbox, args);
-        call.map(move |made| PackageSandbox {
-            sandbox: Sandbox::new(client.clone(), made.sandbox),
-            grant: made.grant,
         })
     }
 

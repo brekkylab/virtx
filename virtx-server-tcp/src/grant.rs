@@ -1,15 +1,13 @@
-//! Grants: each a token that reaches one sandbox and nothing else, given out as the sandbox is
-//! made of a package. A home keeps each by its token's hash alone, with what it reaches, and
-//! takes it away with its sandbox; the sandbox knows nothing of it.
-//!
-//! A grant's token names its project, so a request with one is taken to its home without
-//! asking anyone: `vxg.<project>.<secret>`.
+//! Grants: each sandbox made of a package, given to who made it, as they were let in. A request
+//! to the sandbox from one who is no member of its project is let in by its grant: sent with a
+//! token the same way in lets in, of the same issuer and subject. A home keeps one grant per
+//! sandbox, and takes it away with the sandbox.
 //!
 //! # Layout
 //!
 //! ```text
 //! <root>/
-//!   grant/<hash>.json   a grant, by the SHA-256 of its token, in hex
+//!   grant/<sandbox>.json   the grant of the sandbox <sandbox>
 //! ```
 
 use std::fs;
@@ -17,58 +15,70 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use virtx_core::SandboxResizeArgs;
-use virtx_uvm::ProjectId;
+use virtx_core::{PackageAccess, SandboxResizeArgs};
 
 const GRANT: &str = "grant";
 
-/// What a grant's token starts with.
-const PREFIX: &str = "vxg.";
-
-/// What a grant reaches, and who it was given to.
+/// Who makes a sandbox of a package, as [`Access::maker`](crate::access::Access::maker) found.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Grant {
-    /// The sandbox it reaches.
-    pub sandbox: String,
-    /// The package the sandbox was made of, by id.
-    pub package: String,
-    /// Who made it: the member, or the subject the package's access let in.
-    pub subject: String,
-    /// Whether that was a member, who counts toward none of the package's limits.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub member: bool,
-    /// How large it may resize the sandbox to, each member given.
-    pub max: SandboxResizeArgs,
-    /// The origins a web page may send it from, beside the server's own.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub origins: Vec<String>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Maker {
+    /// A member of its project, by their user.
+    Member { user: String },
+    /// One its access let in: the way in that let them in, and their token's `sub`.
+    LetIn { way: PackageAccess, subject: String },
 }
 
-impl Grant {
-    /// Whether it reaches a request to `path` with `method`: the listing of the sandboxes, which
-    /// answers its own alone, its sandbox's `GET`, `PATCH` and `DELETE`, and everything under
-    /// its sandbox.
-    pub fn reaches(&self, method: &http::Method, path: &str) -> bool {
-        use http::Method;
-        let Some(rest) = path.strip_prefix("/sandboxes/") else {
-            return false;
-        };
-        match rest.split_once('/') {
-            None if rest.is_empty() => method == Method::GET,
-            None => {
-                rest == self.sandbox
-                    && [Method::GET, Method::PATCH, Method::DELETE].contains(method)
-            }
-            Some((id, _)) => id == self.sandbox,
+impl Maker {
+    /// Who one let in is, whichever of the package's ways let them in: their token's issuer and
+    /// subject. `None` for a member, who counts toward none of the package's limits.
+    pub fn subject(&self) -> Option<(&str, &str)> {
+        match self {
+            Maker::Member { .. } => None,
+            Maker::LetIn {
+                way: PackageAccess::Jwt { issuer, .. },
+                subject,
+            } => Some((issuer, subject)),
         }
     }
 }
 
-/// The project a grant's `token` names, if it is a grant's.
-pub fn project_of(token: &str) -> Option<ProjectId> {
-    let (project, _) = token.strip_prefix(PREFIX)?.split_once('.')?;
-    project.parse().ok()
+/// A sandbox made of a package, given to who made it, and what they may do to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grant {
+    /// The sandbox.
+    pub sandbox: String,
+    /// The package it was made of, by id.
+    pub package: String,
+    /// Who made it.
+    pub maker: Maker,
+    /// How large one let in may resize it to, each member given.
+    pub max: SandboxResizeArgs,
+    /// The origins a web page of theirs may reach it from, beside the server's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origins: Vec<String>,
+}
+
+/// The sandbox a request to `path` with `method` is to, where one let in may send it: its
+/// `GET`, `PATCH` and `DELETE`, and everything under it. Not the listing of the sandboxes, nor
+/// an id that is no sandbox's.
+pub fn sandbox_of<'a>(method: &http::Method, path: &'a str) -> Option<&'a str> {
+    use http::Method;
+    let rest = path.strip_prefix("/sandboxes/")?;
+    let id = match rest.split_once('/') {
+        None if [Method::GET, Method::PATCH, Method::DELETE].contains(method) => rest,
+        None => return None,
+        Some((id, _)) => id,
+    };
+    is_id(id).then_some(id)
+}
+
+/// Whether `id` could be a sandbox's: letters, digits, `_` and `-`, which a file is named by.
+fn is_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// The grants of one project, kept under its root.
@@ -85,25 +95,23 @@ impl Grants {
         Ok(Grants { dir })
     }
 
-    /// Give out `grant` of project `project`: its token, which is kept nowhere.
-    pub fn give(&self, project: &ProjectId, grant: &Grant) -> io::Result<String> {
-        let secret = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
-        let token = format!("{PREFIX}{project}.{secret}");
+    /// Keep `grant`, in place of what its sandbox had.
+    pub fn keep(&self, grant: &Grant) -> io::Result<()> {
+        let path = self
+            .path(&grant.sandbox)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no sandbox's id"))?;
         let json = serde_json::to_vec_pretty(grant).map_err(io::Error::other)?;
-        let path = self.path(&token);
         let part = path.with_extension("json.part");
         fs::write(&part, json)?;
-        fs::rename(&part, &path)?;
-        Ok(token)
+        fs::rename(&part, &path)
     }
 
-    /// The grant `token` is, if it is one here.
-    pub fn find(&self, token: &str) -> io::Result<Option<Grant>> {
-        match fs::read(self.path(token)) {
+    /// The grant of sandbox `sandbox`, if it was made of a package.
+    pub fn find(&self, sandbox: &str) -> io::Result<Option<Grant>> {
+        let Some(path) = self.path(sandbox) else {
+            return Ok(None);
+        };
+        match fs::read(path) {
             Ok(json) => Ok(Some(
                 serde_json::from_slice(&json).map_err(io::Error::other)?,
             )),
@@ -112,9 +120,9 @@ impl Grants {
         }
     }
 
-    /// Every grant here.
+    /// Every grant here, by its sandbox's id.
     pub fn list(&self) -> io::Result<Vec<Grant>> {
-        let mut grants = Vec::new();
+        let mut grants: Vec<Grant> = Vec::new();
         for entry in fs::read_dir(&self.dir)? {
             let path = entry?.path();
             if path
@@ -124,70 +132,75 @@ impl Grants {
                 grants.push(serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?);
             }
         }
+        grants.sort_by(|a, b| a.sandbox.cmp(&b.sandbox));
         Ok(grants)
     }
 
-    /// Take away every grant of sandbox `sandbox`.
+    /// Take away the grant of sandbox `sandbox`, if it has one.
     pub fn take_away(&self, sandbox: &str) -> io::Result<()> {
-        for entry in fs::read_dir(&self.dir)? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|extension| extension != "json") {
-                continue;
-            }
-            let grant: Grant =
-                serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?;
-            if grant.sandbox == sandbox {
-                fs::remove_file(&path)?;
-            }
+        let Some(path) = self.path(sandbox) else {
+            return Ok(());
+        };
+        match fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
-    fn path(&self, token: &str) -> PathBuf {
-        let hash = Sha256::digest(token.as_bytes());
-        let hex: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
-        self.dir.join(format!("{hex}.json"))
+    fn path(&self, sandbox: &str) -> Option<PathBuf> {
+        is_id(sandbox).then(|| self.dir.join(format!("{sandbox}.json")))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use http::Method;
+
     use super::*;
 
     fn grant(sandbox: &str) -> Grant {
         Grant {
             sandbox: sandbox.into(),
             package: "p".into(),
-            subject: "alice".into(),
-            member: false,
+            maker: Maker::Member {
+                user: "alice".into(),
+            },
             max: SandboxResizeArgs::default().vcpus(2),
             origins: Vec::new(),
         }
     }
 
-    /// A grant is found by its token alone, which names its project and is kept nowhere, and is
-    /// taken away with its sandbox.
+    /// A grant is found by its sandbox's id, and taken away with it; an id that is no
+    /// sandbox's names no file.
     #[test]
-    fn a_grant_is_found_by_its_token_and_taken_away_with_its_sandbox() {
+    fn a_grant_is_found_by_its_sandbox_and_taken_away_with_it() {
         let root = tempfile::tempdir().unwrap();
-        let grants = Grants::new(root.path()).unwrap();
-        let project = ProjectId::new();
-        let token = grants.give(&project, &grant("a")).unwrap();
-        let other = grants.give(&project, &grant("b")).unwrap();
-        assert_eq!(project_of(&token), Some(project));
-        assert_eq!(grants.find(&token).unwrap(), Some(grant("a")));
-        assert_eq!(grants.find(&format!("{token}x")).unwrap(), None);
-        assert_eq!(project_of("vxg.nothing.secret"), None);
-        assert_eq!(project_of("eyJhbGciOi"), None);
-        let kept = fs::read_dir(root.path().join(GRANT)).unwrap();
-        for entry in kept {
-            let json = fs::read_to_string(entry.unwrap().path()).unwrap();
-            assert!(!json.contains(token.rsplit('.').next().unwrap()), "{json}");
-        }
+        let store = Grants::new(root.path()).unwrap();
+        store.keep(&grant("b")).unwrap();
+        store.keep(&grant("a")).unwrap();
+        assert_eq!(store.find("a").unwrap(), Some(grant("a")));
+        assert_eq!(store.find("../grant/a").unwrap(), None);
+        assert!(store.keep(&grant("../a")).is_err());
+        assert_eq!(store.list().unwrap(), [grant("a"), grant("b")]);
 
-        grants.take_away("a").unwrap();
-        assert_eq!(grants.find(&token).unwrap(), None);
-        assert_eq!(grants.find(&other).unwrap(), Some(grant("b")));
-        assert_eq!(grants.list().unwrap(), [grant("b")]);
+        store.take_away("a").unwrap();
+        store.take_away("a").unwrap();
+        assert_eq!(store.find("a").unwrap(), None);
+        assert_eq!(store.list().unwrap(), [grant("b")]);
+    }
+
+    /// One let in reaches a sandbox's own requests, and not the listing of them all.
+    #[test]
+    fn one_let_in_sends_a_sandbox_s_own_requests_alone() {
+        assert_eq!(sandbox_of(&Method::GET, "/sandboxes/a"), Some("a"));
+        assert_eq!(sandbox_of(&Method::DELETE, "/sandboxes/a"), Some("a"));
+        assert_eq!(
+            sandbox_of(&Method::POST, "/sandboxes/a/jobs/exec/"),
+            Some("a")
+        );
+        assert_eq!(sandbox_of(&Method::POST, "/sandboxes/a"), None);
+        assert_eq!(sandbox_of(&Method::GET, "/sandboxes/"), None);
+        assert_eq!(sandbox_of(&Method::GET, "/sandboxes/../volumes/"), None);
+        assert_eq!(sandbox_of(&Method::GET, "/volumes/"), None);
     }
 }

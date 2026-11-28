@@ -16,7 +16,7 @@ They make sandboxes too, from your app, on the server your project is on, with n
 
 - **VirtX** keeps your project: its images, volumes and packages, and every sandbox made in it.
 - **You, the developer,** are a member of the project. You build your app's image, keep it as a [package](/docs/tutorials/packages/) that says what each user's sandbox is made of, and [say who may make one](/docs/tutorials/package-access/).
-- **Your app's users** are no members of the project. Your app makes them a sandbox of the package, and reaches it with its grant, a token that reaches that sandbox and nothing else in the project. See [Building an app on a package](/docs/tutorials/app-client/).
+- **Your app's users** are no members of the project. Your app makes them a sandbox of the package with the token they signed in to your app with, which reaches the sandboxes they made and nothing else in the project. See [Building an app on a package](/docs/tutorials/app-client/).
 
 The tutorials from here go through it in that order, starting from the project everything lives in, and the server it is on.
 

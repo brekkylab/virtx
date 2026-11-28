@@ -26,7 +26,7 @@ from .image import (
     RegistryAuth,
 )
 from .job import StartedJob
-from .package import Package, PackageAccess, PackageLimits, PackageSandbox
+from .package import Package, PackageAccess, PackageLimits
 from .project import Project
 from .sandbox import PortSpec, Sandbox, SandboxVolume, create_args
 from .volume import Volume
@@ -442,10 +442,10 @@ class Client:
     ) -> Package:
         """Keep the package ``name``, made or replaced in whole: each sandbox made of it made of
         ``image`` as ``create_sandbox`` makes one with the rest, but a name, which each is given
-        as it is made. ``max`` is how large one may be resized with its grant, as
+        as it is made. ``max`` is how large one its access let in may resize theirs, as
         ``{"vcpus": n, "memory_mib": n, "disk_gib": n}``; ``access`` who beside the project's
-        members may make one, each a ``PublicAccess`` or a ``JwtAccess``; ``origins`` the web
-        pages they may do so from; and ``limits`` how many of theirs may live at once. The image
+        members may make one, each a ``JwtAccess``; ``origins`` the web pages they may do so
+        from, and reach it from; and ``limits`` how many of theirs may live at once. The image
         and the volumes have to be on the server already."""
         sandbox = create_args(
             image,
@@ -476,28 +476,20 @@ class Client:
 
     async def create_package_sandbox(
         self, package: str, *, name: str | None = None, ports: Iterable[PortSpec] = ()
-    ) -> PackageSandbox:
+    ) -> Sandbox:
         """Make a sandbox of the package ``package`` names, by its id or its name, named ``name``
         where one is given, with ``ports`` on local, each ``on="local"``, beside those the
-        package gives it in the sandbox: answered with it and its grant."""
+        package gives it in the sandbox."""
         request = _args(package=package, name=name, ports=[p.to_dict() for p in ports] or None)
         output = await self._call("virtx_client_create_package_sandbox", request)
-        return PackageSandbox.from_dict(self, output)
+        return Sandbox.from_dict(self, output)
 
     async def list_package_sandbox(self, package: str) -> list[Sandbox]:
         """The sandboxes made of the package ``package`` names that this client's credentials
-        made: a member's, every one; one its access let in, those of the same subject. A sandbox
-        made with no credentials is reached with its grant alone, and a server over stdio
-        answers none of this."""
+        made: a member's, every one; one its access let in, those of the same issuer and subject.
+        A server over stdio answers none of this."""
         items = await self._call("virtx_client_list_package_sandbox", _args(package=package))
         return [Sandbox.from_dict(self, item) for item in items]
-
-    async def grant_package_sandbox(self, package: str, sandbox: str) -> PackageSandbox:
-        """A new grant to the sandbox ``sandbox``, one ``list_package_sandbox`` finds, answered
-        with it as ``create_package_sandbox`` is. Its other grants still reach it."""
-        request = _args(package=package, sandbox=sandbox)
-        output = await self._call("virtx_client_grant_package_sandbox", request)
-        return PackageSandbox.from_dict(self, output)
 
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds."""

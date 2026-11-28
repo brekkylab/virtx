@@ -96,7 +96,7 @@ A volume a package names cannot be removed, `409`, `in_use`, until the package i
 
 ### Size
 
-`max` is how large a sandbox made of the package may be [resized](/docs/tutorials/setting-sandboxes/) by whoever made it, through its grant:
+`max` is how large one the package's [access](/docs/tutorials/package-access/) lets in may [resize](/docs/tutorials/setting-sandboxes/) a sandbox they made of it:
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
@@ -144,15 +144,13 @@ A member of the project resizes it as any sandbox, with no `max`.
 
 ## Make a sandbox of it
 
-`create_sandbox` on the package makes one.
-It answers the sandbox and its **grant**, a token that reaches that sandbox and nothing else:
+`create_sandbox` on the package makes one, and answers it:
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">
 
 ```python
-made = await package.create_sandbox(name="task-42")
-sandbox = made.sandbox
+sandbox = await package.create_sandbox(name="task-42")
 await sandbox.exec(["uname", "-a"]).complete(print=True)
 ```
 
@@ -160,7 +158,7 @@ await sandbox.exec(["uname", "-a"]).complete(print=True)
 <TabItem label="Node.js" icon="node">
 
 ```js
-const { sandbox } = await pkg.createSandbox({ name: 'task-42' })
+const sandbox = await pkg.createSandbox({ name: 'task-42' })
 await sandbox.exec(['uname', '-a']).complete({ print: true })
 ```
 
@@ -170,8 +168,7 @@ await sandbox.exec(['uname', '-a']).complete({ print: true })
 ```rust
 use virtx::{PackageSandboxCreateArgs, SandboxExecArgs};
 
-let made = package.create_sandbox(&PackageSandboxCreateArgs::default().name("task-42")).await?;
-let sandbox = made.sandbox;
+let sandbox = package.create_sandbox(&PackageSandboxCreateArgs::default().name("task-42")).await?;
 sandbox.exec(&SandboxExecArgs::new(["uname", "-a"])).complete(true).await?;
 ```
 
@@ -184,16 +181,13 @@ It knows nothing of the package: replacing or removing the package changes no sa
 - **`name`** finds it again with `find_sandbox`. Only a member of the project may name one, since names are the project's.
 - **`ports`** are its ports on local, each `on="local"`, beside the ports in the sandbox the package gives it. A port in the sandbox is the package's to give, and is refused with `400`. See [A port on local](/docs/tutorials/networks-ports/#a-port-on-local).
 
-You reach the sandbox through your own client already, so you need its grant only to hand the sandbox to someone else.
-The grant is in this answer and no other; a server started by `Client.spawn()` gives none.
-
 `client.create_package_sandbox` does the same with the package's `id` or name, for a package you have not looked up.
 
 ## Find, replace and remove a package
 
 - `list_package` lists the project's packages, and `get_package` finds one by its `id` or its name.
 - `put_package` with a name the project already has replaces that package in whole. Its `id` stays the same, so an app that names it keeps working, and the sandboxes made of it stay as they were.
-- `remove` removes the package. The sandboxes made of it stay, each with its grant, until they are removed.
+- `remove` removes the package. The sandboxes made of it stay, each reached by who made it, until they are removed.
 
 <Tabs syncKey="lang">
 <TabItem label="Python" icon="seti:python">

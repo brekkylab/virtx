@@ -25,7 +25,7 @@ known by its id or name is had with ``get_sandbox``, ``find_sandbox``, ``get_vol
 ``await volume.read_file("a.txt")``.
 
 A package is answered as a ``Package``, which makes sandboxes of it; an app's user reaches the
-one they made with an ``AppClient``, by its grant alone.
+sandboxes they made with an ``AppClient``, by the token that let them in.
 
 A project is answered as a ``Project``, carrying its client the same way: its members, and its
 removal. What is in it, a client reaches in the project ``Client.set_project`` names.
@@ -65,8 +65,6 @@ from .package import (
     Package,
     PackageAccess,
     PackageLimits,
-    PackageSandbox,
-    PublicAccess,
 )
 from .port_forward import PortForwarder
 from .project import Project, ProjectMemberListOutputItem, Role
@@ -130,14 +128,12 @@ __all__ = [
     "Package",
     "PackageAccess",
     "PackageLimits",
-    "PackageSandbox",
     "PortForwarder",
     "PortSide",
     "PortSpec",
     "Progress",
     "Project",
     "ProjectMemberListOutputItem",
-    "PublicAccess",
     "Recipe",
     "RegistryAuth",
     "Role",

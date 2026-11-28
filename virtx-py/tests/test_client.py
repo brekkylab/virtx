@@ -163,14 +163,17 @@ async def test_a_package_is_kept_makes_a_sandbox_and_is_removed(client: Client) 
     package = await client.put_package(
         name,
         ALPINE,
-        lifetime=600,
         max={"vcpus": 8},
         access=access,
         origins=["https://app.example"],
         limits=virtx.PackageLimits(per_subject=1),
     )
     assert isinstance(package, virtx.Package)
-    assert (package.name, package.sandbox["lifetime"], package.max) == (name, 600, {"vcpus": 8})
+    assert (package.name, package.sandbox["image"], package.max) == (
+        name,
+        {"type": "tag", "tag": ALPINE},
+        {"vcpus": 8},
+    )
     assert package.access == access
     assert package.limits == virtx.PackageLimits(per_subject=1)
     assert (await client.get_package(package.id)).name == name

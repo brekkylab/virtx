@@ -158,20 +158,6 @@ pub async fn run(listener: tokio::net::TcpListener, router: axum::Router) -> any
     Ok(())
 }
 
-/// The sandboxes of every home `access` has deleted once their lifetime has passed, looked for
-/// every second from now on.
-pub fn keep_expired(access: Arc<Access>) {
-    tokio::spawn(async move {
-        let mut every = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            every.tick().await;
-            for home in access.homes() {
-                home.remove_expired().await;
-            }
-        }
-    });
-}
-
 /// Once this process is asked to stop: by ctrl-c; on Unix by `SIGTERM` too, as a service
 /// manager, `docker stop` or a plain `kill` asks; on Windows by ctrl-break, the one console
 /// event a process group of its own can be sent, and by its console's closing, a logoff or a

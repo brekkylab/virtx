@@ -156,7 +156,6 @@ test('a package is kept, makes a sandbox, and is removed', async () => {
       { type: 'jwt', issuer: 'https://idp.example', audience: 'app', claims: { repo_name: 'a' } },
     ]
     const pkg = await client.putPackage(name, ALPINE, {
-      lifetime: 600,
       max: { vcpus: 8 },
       access,
       origins: ['https://app.example'],
@@ -164,7 +163,7 @@ test('a package is kept, makes a sandbox, and is removed', async () => {
     })
     assert.ok(pkg instanceof virtx.Package)
     assert.equal(pkg.name, name)
-    assert.equal(pkg.sandbox.lifetime, 600)
+    assert.deepEqual(pkg.sandbox.image, { type: 'tag', tag: ALPINE })
     assert.deepEqual(pkg.access, access, 'its claims as they were given')
     assert.deepEqual(pkg.limits, { perSubject: 1 })
     assert.equal((await client.getPackage(pkg.id)).name, name)

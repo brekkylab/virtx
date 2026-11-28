@@ -269,18 +269,6 @@ impl Home {
         Ok(())
     }
 
-    /// Remove each sandbox here whose lifetime has passed, as its `DELETE` does.
-    pub async fn remove_expired(&self) {
-        let now = std::time::SystemTime::now();
-        let expired: Vec<String> = (self.sandboxes.lock().unwrap().values())
-            .filter(|held| held.sandbox.expires().is_some_and(|at| at <= now))
-            .map(|held| held.sandbox.id().to_owned())
-            .collect();
-        for id in expired {
-            let _ = self.remove_sandbox(&id).await;
-        }
-    }
-
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
         let sandboxes = self.sandboxes.lock().unwrap();
         sandboxes

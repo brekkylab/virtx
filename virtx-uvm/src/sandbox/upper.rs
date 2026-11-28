@@ -489,7 +489,6 @@ mod tests {
             args,
             exited: false,
             jobs: Vec::new(),
-            expires: None,
         };
         record.write(dir, id).unwrap();
     }

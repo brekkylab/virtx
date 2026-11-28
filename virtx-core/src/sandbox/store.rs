@@ -102,11 +102,6 @@ pub struct SandboxCreateArgs {
     /// by is refused.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abins: Vec<String>,
-
-    /// How many seconds it lives from its making, at least 1: the server deletes it then.
-    /// Without it, it lives until it is deleted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lifetime: Option<u64>,
 }
 
 impl SandboxCreateArgs {
@@ -138,7 +133,6 @@ impl SandboxCreateArgs {
             gpu_memory_mib: None,
             volumes: Vec::new(),
             abins: Vec::new(),
-            lifetime: None,
         }
     }
 
@@ -208,12 +202,6 @@ impl SandboxCreateArgs {
     /// Give it virtx's program `name` at `/abin`, beside those given before.
     pub fn abin(mut self, name: impl Into<String>) -> Self {
         self.abins.push(name.into());
-        self
-    }
-
-    /// Deleted by the server `seconds` after it is made.
-    pub fn lifetime(mut self, seconds: u64) -> Self {
-        self.lifetime = Some(seconds);
         self
     }
 }

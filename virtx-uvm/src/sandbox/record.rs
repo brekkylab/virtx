@@ -28,10 +28,6 @@ pub(super) struct Record {
     /// process let it go, and is known again as ended so.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) jobs: Vec<SandboxJob>,
-    /// When its server deletes it, in seconds since the Unix epoch, for one made with a
-    /// `lifetime`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) expires: Option<u64>,
 }
 
 impl Record {
@@ -89,7 +85,6 @@ mod tests {
             ),
             exited: false,
             jobs: Vec::new(),
-            expires: Some(1),
         };
         record.write(dir.path(), "kept").unwrap();
         assert_eq!(Record::read(dir.path(), "kept").unwrap(), record);

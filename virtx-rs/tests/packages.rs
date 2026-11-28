@@ -1,8 +1,6 @@
 //! Packages and the sandboxes made of them, against the fixture's servers: a member keeps one,
-//! an app's user makes a sandbox of it and reaches that sandbox alone with its grant, and a
-//! sandbox's lifetime ends it.
-
-use std::time::{Duration, Instant};
+//! an app's user makes a sandbox of it and reaches that sandbox alone with its grant, and over
+//! stdio a package makes sandboxes with no grant.
 
 use virtx::{
     AppClient, Auth, PackageAccess, PackagePutArgs, PackageSandboxCreateArgs, PortSide, PortSpec,
@@ -117,24 +115,4 @@ fn over_stdio_a_package_makes_sandboxes_with_no_grant() {
     package.remove().wait().unwrap();
     let kept = client.list_package().wait().unwrap();
     assert!(kept.iter().all(|kept| kept.id() != package.id()));
-}
-
-#[test]
-fn a_sandbox_is_deleted_once_its_lifetime_has_passed() {
-    let client = common::client();
-    common::alpine(&client);
-    let sandbox = client
-        .create_sandbox(&SandboxCreateArgs::new(common::ALPINE).lifetime(2))
-        .wait()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match client.get_sandbox(sandbox.id()).wait() {
-            Err(gone) if gone.status() == Some(404) => break,
-            answered => {
-                assert!(Instant::now() < deadline, "still there: {answered:?}");
-                std::thread::sleep(Duration::from_millis(200));
-            }
-        }
-    }
 }

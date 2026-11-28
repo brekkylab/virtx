@@ -515,20 +515,6 @@ impl Home {
         Ok(())
     }
 
-    /// Remove each sandbox here whose lifetime has passed, as its `DELETE` does.
-    pub async fn remove_expired(&self) {
-        let now = std::time::SystemTime::now();
-        let expired: Vec<String> = (self.sandboxes.lock().unwrap().values())
-            .filter(|sandbox| sandbox.expires().is_some_and(|at| at <= now))
-            .map(|sandbox| sandbox.id().to_owned())
-            .collect();
-        for id in expired {
-            if let Err(e) = self.remove_sandbox(&id).await {
-                eprintln!("removing sandbox {id}, its lifetime passed: {}", e.2);
-            }
-        }
-    }
-
     /// The package `named` names here, by its id or its name: `404` where none does.
     pub(crate) async fn package(&self, named: &str) -> Result<Package, Refused> {
         let (packages, looked) = (self.packages.clone(), named.to_owned());

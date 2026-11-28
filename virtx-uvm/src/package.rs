@@ -360,8 +360,6 @@ mod tests {
         assert!(refused("app", offering).starts_with("sandbox: ports: 5037"));
         let named = PackagePutArgs::new(SandboxCreateArgs::new("app:1").name("dev"));
         assert!(refused("app", named).starts_with("sandbox: name:"));
-        let forever = PackagePutArgs::new(SandboxCreateArgs::new("app:1").lifetime(0));
-        assert!(refused("app", forever).starts_with("sandbox: lifetime:"));
         let larger = args("app:1").max(SandboxResizeArgs::default().vcpus(DEFAULT_VCPUS + 1));
         let made = PackagePutArgs::new(SandboxCreateArgs::new("app:1").vcpus(2));
         assert!(

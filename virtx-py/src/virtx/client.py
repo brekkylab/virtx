@@ -435,7 +435,6 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
         abins: Iterable[str] = (),
-        lifetime: int | None = None,
         max: Mapping[str, int] | None = None,
         access: Iterable[PackageAccess] = (),
         origins: Iterable[str] = (),
@@ -459,7 +458,6 @@ class Client:
             gpu_memory_mib=gpu_memory_mib,
             volumes=volumes,
             abins=abins,
-            lifetime=lifetime,
         )
         package = {
             "sandbox": sandbox,
@@ -505,7 +503,6 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
         abins: Iterable[str] = (),
-        lifetime: int | None = None,
     ) -> Sandbox:
         """Make a sandbox of ``image``, with ``volumes`` mounted into it, each a ``SandboxVolume``,
         and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
@@ -517,8 +514,7 @@ class Client:
         image, in GiB, at most 1024, which goes with it. ``name`` finds it again with
         ``find_sandbox``, rather than keeping its id: letters, digits, ``.``, ``_`` and ``-``, not
         starting with ``.`` or ``-``, at most 128, or it is refused with ``400``; one another
-        sandbox has is refused with ``409``. ``lifetime`` is how many seconds it lives: the
-        server deletes it then.
+        sandbox has is refused with ``409``.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
@@ -534,7 +530,6 @@ class Client:
             gpu_memory_mib=gpu_memory_mib,
             volumes=volumes,
             abins=abins,
-            lifetime=lifetime,
         )
         output = await self._call("virtx_client_create_sandbox", json.dumps(request).encode())
         return Sandbox.from_dict(self, output)

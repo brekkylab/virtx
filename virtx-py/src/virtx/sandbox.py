@@ -120,7 +120,6 @@ def create_args(
     gpu_memory_mib: int | None = None,
     volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
     abins: Iterable[str] = (),
-    lifetime: int | None = None,
 ) -> dict[str, Any]:
     """What making a sandbox takes, as the wire has it, without the members left out."""
     request = {
@@ -135,7 +134,6 @@ def create_args(
         "gpu_memory_mib": gpu_memory_mib,
         "volumes": [v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
         "abins": list(abins),
-        "lifetime": lifetime,
     }
     return {key: value for key, value in request.items() if value is not None}
 

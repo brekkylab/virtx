@@ -432,8 +432,6 @@ export interface SandboxCreateOptions {
   volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
   /** virtx's own programs it gets at `/abin`, by name, each with its `SKILL.md` at `/abin/skills/{name}/`. */
   abins?: string[]
-  /** How many seconds it lives from its making: the server deletes it then. */
-  lifetime?: number
 }
 
 /** A way in to make a sandbox of a package, for one who is no member of its project: anyone with no credentials, their subject the address they came from; or whoever sends a JSON Web Token `issuer` signed for `audience` carrying each of `claims`, their subject its `sub`, its keys at `jwks` where given and otherwise where the issuer's discovery document says. */

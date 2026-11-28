@@ -56,16 +56,6 @@ fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     let root = virtx_uvm::cache_root();
     let (app, host) = app(&root).await?;
-    let expiring = Arc::clone(&host);
-    tokio::spawn(async move {
-        let mut every = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            every.tick().await;
-            for home in expiring.homes() {
-                home.remove_expired().await;
-            }
-        }
-    });
     let served = serve_stdio(app, tokio::io::stdin(), tokio::io::stdout()).await;
     // The client is gone, and every sandbox was its.
     tokio::task::spawn_blocking(move || host.close_all()).await?;

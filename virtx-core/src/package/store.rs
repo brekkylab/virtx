@@ -72,7 +72,7 @@ impl PackagePutArgs {
     ///
     /// ```
     /// # use virtx_core::{PackageAccess, PackagePutArgs, SandboxCreateArgs};
-    /// let args = PackagePutArgs::new(SandboxCreateArgs::new("app:latest").lifetime(3600))
+    /// let args = PackagePutArgs::new(SandboxCreateArgs::new("app:latest"))
     ///     .access(PackageAccess::Public)
     ///     .origin("https://app.example");
     ///

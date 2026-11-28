@@ -34,7 +34,6 @@ fn main() -> anyhow::Result<()> {
 async fn run(config: Config) -> anyhow::Result<()> {
     let (access, router) = serve::configured(&config).await?;
     serve::keep_pruned(Arc::clone(&access));
-    serve::keep_expired(Arc::clone(&access));
     let listener = serve::bind(config.listen).await?;
     let served = serve::run(listener, router).await;
     // Each sandbox parked and kept, for this server started again to know it.

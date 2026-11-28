@@ -133,6 +133,11 @@ const SIGNATURES = {
   virtx_client_remove_file: WITH_ARGS,
   virtx_client_rename_file: WITH_ARGS,
   virtx_client_copy_file: WITH_ARGS,
+  virtx_client_list_preset: PLAIN,
+  virtx_client_put_preset: WITH_ARGS,
+  virtx_client_get_preset: WITH_ARGS,
+  virtx_client_remove_preset: WITH_ARGS,
+  virtx_client_create_preset_sandbox: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
@@ -335,13 +340,18 @@ function library() {
   return opened
 }
 
+// The members whose value is the caller's own, its keys sent and answered as they are: a JSON
+// Web Token's claims, which a preset's access names.
+const VERBATIM = new Set(['claims'])
+
 // camelCase keys to the wire's snake_case, and back, through plain objects and arrays.
 function rekey(value, key) {
   if (Array.isArray(value)) return value.map((item) => rekey(item, key))
   if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return value
   const rekeyed = {}
   for (const [name, item] of Object.entries(value)) {
-    if (item !== undefined && item !== null) rekeyed[key(name)] = rekey(item, key)
+    if (item === undefined || item === null) continue
+    rekeyed[key(name)] = VERBATIM.has(name) ? item : rekey(item, key)
   }
   return rekeyed
 }
@@ -714,17 +724,31 @@ class Client {
     return infos.map((info) => new Sandbox(this, info))
   }
 
-  // Each of `volumes`' `volume` is a handle or its name.
   async createSandbox(image, options = {}) {
-    const { volumes } = options
-    const info = await this._call('virtx_client_create_sandbox', {
-      ...options,
-      image: imageName(image),
-      volumes: volumes?.map((v) =>
-        v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v,
-      ),
-    })
+    const info = await this._call('virtx_client_create_sandbox', sandboxArgs(image, options))
     return new Sandbox(this, info)
+  }
+
+  async listPreset() {
+    const infos = await this._call('virtx_client_list_preset')
+    return infos.map((info) => new Preset(this, info))
+  }
+
+  // Each sandbox made of it is made of `image` as `createSandbox` makes one with the rest of
+  // `options`; `max`, `access`, `origins` and `limits` are the preset's own.
+  async putPreset(name, image, options = {}) {
+    const { max, access, origins, limits, ...sandbox } = options
+    const args = { sandbox: sandboxArgs(image, sandbox), max, access, origins, limits }
+    return new Preset(this, await this._call('virtx_client_put_preset', { name, args }))
+  }
+
+  async getPreset(preset) {
+    return new Preset(this, await this._call('virtx_client_get_preset', { preset }))
+  }
+
+  async createPresetSandbox(preset, { name } = {}) {
+    const made = await this._call('virtx_client_create_preset_sandbox', { preset, name })
+    return { sandbox: new Sandbox(this, made.sandbox), grant: made.grant ?? null }
   }
 
   async getSandbox(id) {
@@ -740,6 +764,19 @@ class Client {
 
 // `await using`, where the runtime has it.
 if (Symbol.asyncDispose) Client.prototype[Symbol.asyncDispose] = Client.prototype.close
+
+// What making a sandbox of `image` as `options` say takes, as the wire has it: each of
+// `volumes`' `volume` a handle or its name.
+function sandboxArgs(image, options) {
+  const { volumes } = options
+  return {
+    ...options,
+    image: imageName(image),
+    volumes: volumes?.map((v) =>
+      v.volume instanceof Volume ? { ...v, volume: v.volume.name } : v,
+    ),
+  }
+}
 
 // Each forwarder not closed, freed when it is collected.
 const forwarders = new FinalizationRegistry(({ lib, raw }) => {
@@ -1100,6 +1137,62 @@ class Sandbox extends Files {
 
 // A process run in a sandbox (`id`, `kind`, `pid`, `cmd`, `running`, `code`), and the client and
 // sandbox, `sandboxId`, that reach it. Dropping it leaves the job; `remove` removes it.
+// A preset the server keeps, as keeping it or asking for it answered, and the client that
+// reaches it: what makes sandboxes of it. Dropping it leaves the preset; `remove` removes it.
+class Preset {
+  constructor(client, info) {
+    held(this, client, info)
+  }
+
+  // A sandbox made of it, named `name` where one is given, and its grant.
+  createSandbox({ name } = {}) {
+    return this.client.createPresetSandbox(this.id, { name })
+  }
+
+  // The sandboxes made of it stay, each with its grant.
+  async remove() {
+    await this.client._call('virtx_client_remove_preset', { preset: this.id })
+  }
+}
+
+// One sandbox, made of a preset for whom its access lets in and reached with its grant alone:
+// what an app's user runs processes in, reads and writes the files of, and forwards the ports
+// of, as `sandbox`, and deletes with `close`. The grant reaches nothing else, so neither does
+// this.
+class AppClient {
+  constructor(sandbox) {
+    this.sandbox = sandbox
+  }
+
+  // Make a sandbox of the preset `preset`, by its id, on the server at `url`, as `auth` lets in
+  // -- null where the preset is public, or `{ type: 'bearer', token }` of the issuer its access
+  // names -- and reach it with its grant from then on.
+  static async connect(url, preset, auth = null) {
+    const client = Client.connect(url, auth)
+    try {
+      const made = await client.createPresetSandbox(preset)
+      if (!made.grant) throw new VirtxError('the server gave the sandbox no grant to reach it with')
+      // From here on, the grant alone: what made it reaches nothing more through this client.
+      client.setAuth({ type: 'bearer', token: made.grant })
+      return new AppClient(made.sandbox)
+    } catch (e) {
+      await client.close()
+      throw e
+    }
+  }
+
+  // Delete its sandbox, and with it its grant, and close the client.
+  async close() {
+    try {
+      await this.sandbox.remove()
+    } finally {
+      await this.sandbox.client.close()
+    }
+  }
+}
+
+if (Symbol.asyncDispose) AppClient.prototype[Symbol.asyncDispose] = AppClient.prototype.close
+
 class SandboxJob {
   constructor(client, sandbox, info) {
     Object.defineProperty(this, 'sandboxId', { value: sandbox })
@@ -1165,11 +1258,13 @@ class SandboxJob {
 if (Symbol.dispose) PortForwarder.prototype[Symbol.dispose] = PortForwarder.prototype.close
 
 module.exports = {
+  AppClient,
   Client,
   Files,
   ImageJob,
   LIBRARY_ENV,
   PortForwarder,
+  Preset,
   Project,
   Recipe,
   Sandbox,

@@ -17,16 +17,16 @@ use virtx_core::{
     FileWriteArgs, ImageBuildArgs, ImageDownloadArgs, ImageDownloadOutput,
     ImageJob as ImageJobInfo, ImageJobEntry, ImageListOutputItem, ImagePruneOutput, ImagePullArgs,
     ImagePushArgs, ImageRemoveArgs, ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
-    ImageUploadOutput, LogEntry, Metadata, MountSource, ProjectCreateArgs,
-    ProjectListOutputItem as ProjectInfo, ProjectMemberListOutputItem as ProjectMemberInfo, Recipe,
-    RegistryAuth, Role, Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs,
-    SandboxResources, VolumeCreateArgs, VolumeListOutputItem as VolumeInfo,
-    VolumeMountListOutputItem,
+    ImageUploadOutput, LogEntry, Metadata, MountSource, Preset as PresetInfo, PresetPutArgs,
+    ProjectCreateArgs, ProjectListOutputItem as ProjectInfo,
+    ProjectMemberListOutputItem as ProjectMemberInfo, Recipe, RegistryAuth, Role,
+    Sandbox as SandboxInfo, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    SandboxJob as SandboxJobInfo, SandboxJobEntry, SandboxResizeArgs, SandboxResources,
+    VolumeCreateArgs, VolumeListOutputItem as VolumeInfo, VolumeMountListOutputItem,
 };
 
 use crate::{
-    Error, ImageJob, Project, Sandbox, SandboxJob, Volume,
+    Error, ImageJob, Preset, PresetSandbox, Project, Sandbox, SandboxJob, Volume,
     call::{Call, Events, take},
     job::StartedJob,
     library::{Api, Opaque, VIRTX_OK, VirtxBytes, api},
@@ -680,6 +680,60 @@ impl Client {
             overwrite,
         };
         self.call(self.api.virtx_client_copy_file, args)
+    }
+
+    /// Every preset in the project.
+    pub fn list_preset(&self) -> Call<Vec<Preset>> {
+        let client = self.clone();
+        let call: Call<Vec<PresetInfo>> = Call::new(self.api, unsafe {
+            (self.api.virtx_client_list_preset)(self.raw)
+        });
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Preset::new(client.clone(), info))
+                .collect()
+        })
+    }
+
+    /// Keep `args` as the preset `name`, made or replaced in whole; see [`PresetPutArgs::new`].
+    /// Its image and volumes have to be on the server already.
+    pub fn put_preset(&self, name: impl AsRef<str>, args: &PresetPutArgs) -> Call<Preset> {
+        let args = json!({ "name": name.as_ref(), "args": args });
+        let client = self.clone();
+        let call: Call<PresetInfo> = self.call(self.api.virtx_client_put_preset, args);
+        call.map(move |info| Preset::new(client.clone(), info))
+    }
+
+    /// The preset `preset` names: by its id, or its name in the project.
+    pub fn get_preset(&self, preset: impl AsRef<str>) -> Call<Preset> {
+        let args = json!({ "preset": preset.as_ref() });
+        let client = self.clone();
+        let call: Call<PresetInfo> = self.call(self.api.virtx_client_get_preset, args);
+        call.map(move |info| Preset::new(client.clone(), info))
+    }
+
+    /// Remove the preset `preset` names.
+    pub(crate) fn remove_preset(&self, preset: impl AsRef<str>) -> Call<()> {
+        let args = json!({ "preset": preset.as_ref() });
+        self.call(self.api.virtx_client_remove_preset, args)
+    }
+
+    /// Make a sandbox of the preset `preset` names, by its id or its name, named `name` where
+    /// one is given: answered with it and its grant.
+    pub fn create_preset_sandbox(
+        &self,
+        preset: impl AsRef<str>,
+        name: Option<&str>,
+    ) -> Call<PresetSandbox> {
+        let args = json!({ "preset": preset.as_ref(), "name": name });
+        let client = self.clone();
+        let call: Call<virtx_core::PresetSandbox> =
+            self.call(self.api.virtx_client_create_preset_sandbox, args);
+        call.map(move |made| PresetSandbox {
+            sandbox: Sandbox::new(client.clone(), made.sandbox),
+            grant: made.grant,
+        })
     }
 
     /// Every sandbox the server holds.

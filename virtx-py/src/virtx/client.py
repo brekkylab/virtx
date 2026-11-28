@@ -24,11 +24,11 @@ from .image import (
     ImageUploadOutput,
     Recipe,
     RegistryAuth,
-    image_name,
 )
 from .job import StartedJob
+from .preset import Preset, PresetAccess, PresetLimits, PresetSandbox
 from .project import Project
-from .sandbox import PortSpec, Sandbox, SandboxVolume
+from .sandbox import PortSpec, Sandbox, SandboxVolume, create_args
 from .volume import Volume
 
 T = TypeVar("T")
@@ -416,6 +416,73 @@ class Client:
         output = await self._call("virtx_client_get_volume", _args(name=name))
         return Volume.from_dict(self, output)
 
+    async def list_preset(self) -> list[Preset]:
+        """Every preset in the project."""
+        items = await self._call("virtx_client_list_preset")
+        return [Preset.from_dict(self, item) for item in items]
+
+    async def put_preset(
+        self,
+        name: str,
+        image: str | ImageName,
+        *,
+        network: bool = True,
+        ports: Iterable[int | PortSpec] = (),
+        vcpus: int | None = None,
+        memory_mib: int | None = None,
+        disk_gib: int | None = None,
+        gpu: bool | None = None,
+        gpu_memory_mib: int | None = None,
+        volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
+        abins: Iterable[str] = (),
+        lifetime: int | None = None,
+        max: Mapping[str, int] | None = None,
+        access: Iterable[PresetAccess] = (),
+        origins: Iterable[str] = (),
+        limits: PresetLimits | None = None,
+    ) -> Preset:
+        """Keep the preset ``name``, made or replaced in whole: each sandbox made of it made of
+        ``image`` as ``create_sandbox`` makes one with the rest, but a name, which each is given
+        as it is made. ``max`` is how large one may be resized with its grant, as
+        ``{"vcpus": n, "memory_mib": n, "disk_gib": n}``; ``access`` who beside the project's
+        members may make one, each a ``PublicAccess`` or a ``JwtAccess``; ``origins`` the web
+        pages they may do so from; and ``limits`` how many of theirs may live at once. The image
+        and the volumes have to be on the server already."""
+        sandbox = create_args(
+            image,
+            network=network,
+            ports=ports,
+            vcpus=vcpus,
+            memory_mib=memory_mib,
+            disk_gib=disk_gib,
+            gpu=gpu,
+            gpu_memory_mib=gpu_memory_mib,
+            volumes=volumes,
+            abins=abins,
+            lifetime=lifetime,
+        )
+        preset = {
+            "sandbox": sandbox,
+            "max": dict(max) if max is not None else None,
+            "access": [way.to_dict() for way in access],
+            "origins": list(origins),
+            "limits": limits.to_dict() if limits is not None else None,
+        }
+        request = _args(name=name, args={k: v for k, v in preset.items() if v is not None})
+        return Preset.from_dict(self, await self._call("virtx_client_put_preset", request))
+
+    async def get_preset(self, preset: str) -> Preset:
+        """The preset ``preset`` names: by its id, or its name in the project."""
+        output = await self._call("virtx_client_get_preset", _args(preset=preset))
+        return Preset.from_dict(self, output)
+
+    async def create_preset_sandbox(self, preset: str, *, name: str | None = None) -> PresetSandbox:
+        """Make a sandbox of the preset ``preset`` names, by its id or its name, named ``name``
+        where one is given: answered with it and its grant."""
+        request = _args(preset=preset, name=name)
+        output = await self._call("virtx_client_create_preset_sandbox", request)
+        return PresetSandbox.from_dict(self, output)
+
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds."""
         items = await self._call("virtx_client_list_sandbox")
@@ -435,6 +502,7 @@ class Client:
         gpu_memory_mib: int | None = None,
         volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
         abins: Iterable[str] = (),
+        lifetime: int | None = None,
     ) -> Sandbox:
         """Make a sandbox of ``image``, with ``volumes`` mounted into it, each a ``SandboxVolume``,
         and virtx's programs named in ``abins`` at ``/abin``, each with its ``SKILL.md`` at
@@ -446,24 +514,27 @@ class Client:
         image, in GiB, at most 1024, which goes with it. ``name`` finds it again with
         ``find_sandbox``, rather than keeping its id: letters, digits, ``.``, ``_`` and ``-``, not
         starting with ``.`` or ``-``, at most 128, or it is refused with ``400``; one another
-        sandbox has is refused with ``409``.
+        sandbox has is refused with ``409``. ``lifetime`` is how many seconds it lives: the
+        server deletes it then.
 
         ``image`` has to be on the server already, pulled or built: this does not pull it, and a
         tag the server has no image by is refused with ``404``."""
-        request = _args(
-            image=image_name(image).to_dict(),
+        request = create_args(
+            image,
             name=name,
             network=network,
-            ports=[p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
+            ports=ports,
             vcpus=vcpus,
             memory_mib=memory_mib,
             disk_gib=disk_gib,
             gpu=gpu,
             gpu_memory_mib=gpu_memory_mib,
-            volumes=[v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
-            abins=list(abins),
+            volumes=volumes,
+            abins=abins,
+            lifetime=lifetime,
         )
-        return Sandbox.from_dict(self, await self._call("virtx_client_create_sandbox", request))
+        output = await self._call("virtx_client_create_sandbox", json.dumps(request).encode())
+        return Sandbox.from_dict(self, output)
 
     async def get_sandbox(self, id: str) -> Sandbox:
         """The sandbox ``id``."""

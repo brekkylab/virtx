@@ -154,3 +154,52 @@ def test_virtx_error_keeps_body() -> None:
     assert str(err_with_status_and_body) == "service unavailable"
     assert err_with_status_and_body.status == 503
     assert err_with_status_and_body.body == "<html>error</html>"
+
+
+async def test_a_preset_is_kept_makes_a_sandbox_and_is_removed(client: Client) -> None:
+    await alpine(client)
+    name = unique("preset")
+    access = [virtx.PublicAccess(), virtx.JwtAccess("https://idp.example", "app", claims={"r": 1})]
+    preset = await client.put_preset(
+        name,
+        ALPINE,
+        lifetime=600,
+        max={"vcpus": 8},
+        access=access,
+        origins=["https://app.example"],
+        limits=virtx.PresetLimits(per_subject=1),
+    )
+    assert isinstance(preset, virtx.Preset)
+    assert (preset.name, preset.sandbox["lifetime"], preset.max) == (name, 600, {"vcpus": 8})
+    assert preset.access == access
+    assert preset.limits == virtx.PresetLimits(per_subject=1)
+    assert (await client.get_preset(preset.id)).name == name
+    assert preset.id in [kept.id for kept in await client.list_preset()]
+
+    made = await preset.create_sandbox(name=unique("of-preset"))
+    assert isinstance(made.sandbox, virtx.Sandbox)
+    assert made.grant is None, "a server over stdio gives no grant"
+    await made.sandbox.remove()
+    await preset.remove()
+    with pytest.raises(VirtxError) as refused:
+        await client.get_preset(preset.id)
+    assert refused.value.status == 404
+
+
+async def test_an_app_client_reaches_the_sandbox_a_preset_lets_it_make(tcp_client: Client) -> None:
+    await alpine(tcp_client)
+    preset = await tcp_client.put_preset(unique("members"), ALPINE)
+    url = fixture("VIRTX_TEST_URL")
+    with pytest.raises(VirtxError) as refused:
+        await virtx.AppClient.connect(url, preset.id)
+    assert refused.value.status == 401
+    await preset.remove()
+
+    public = await tcp_client.put_preset(unique("public"), ALPINE, access=[virtx.PublicAccess()])
+    async with await virtx.AppClient.connect(url, public.id) as app:
+        assert await app.sandbox.exec(["true"]).complete() == 0
+        id = app.sandbox.id
+    with pytest.raises(VirtxError) as gone:
+        await tcp_client.get_sandbox(id)
+    assert gone.value.status == 404, "closed, it is deleted"
+    await public.remove()

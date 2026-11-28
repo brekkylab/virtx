@@ -432,6 +432,91 @@ export interface SandboxCreateOptions {
   volumes?: { volume: string | Volume; path: string; readonly?: boolean }[]
   /** virtx's own programs it gets at `/abin`, by name, each with its `SKILL.md` at `/abin/skills/{name}/`. */
   abins?: string[]
+  /** How many seconds it lives from its making: the server deletes it then. */
+  lifetime?: number
+}
+
+/** A way in to make a sandbox of a preset, for one who is no member of its project: anyone with no credentials, their subject the address they came from; or whoever sends a JSON Web Token `issuer` signed for `audience` carrying each of `claims`, their subject its `sub`, its keys at `jwks` where given and otherwise where the issuer's discovery document says. */
+export type PresetAccess =
+  | { type: 'public' }
+  | {
+      type: 'jwt'
+      issuer: string
+      audience: string
+      jwks?: string
+      claims?: Record<string, unknown>
+    }
+
+/** How many sandboxes made of a preset by those its access lets in may live at once: all of theirs, and each subject's. */
+export interface PresetLimits {
+  sandboxes?: number
+  perSubject?: number
+}
+
+/** What a preset is beside the sandbox it makes. */
+export interface PresetOptions extends Omit<SandboxCreateOptions, 'name'> {
+  /** How large a sandbox made of it may be resized with its grant. */
+  max?: SandboxResizeOptions
+  /** Who beside the project's members may make one. */
+  access?: PresetAccess[]
+  /** The web pages they may do so from, and reach it with its grant from, as `https://app.example`. */
+  origins?: string[]
+  limits?: PresetLimits
+}
+
+/** What the server answers about a preset. */
+export interface PresetInfo {
+  /** The id the server gave it, which names its project with it: what an app names it by. */
+  id: string
+  name: string
+  /** What each sandbox made of it is made with, as the wire has it. */
+  sandbox: Record<string, unknown>
+  max?: SandboxResizeOptions
+  access: PresetAccess[]
+  origins: string[]
+  limits?: PresetLimits
+}
+
+/** A preset the server keeps, and the client that reaches it: what makes sandboxes of it. Dropping it leaves the preset; `remove` removes it. */
+export class Preset implements PresetInfo {
+  private constructor()
+  id: string
+  name: string
+  sandbox: Record<string, unknown>
+  max?: SandboxResizeOptions
+  access: PresetAccess[]
+  origins: string[]
+  limits?: PresetLimits
+  /** A sandbox made of it, named `name` where one is given, and its grant. */
+  createSandbox(options?: { name?: string }): Promise<PresetSandbox>
+  /** Remove it. The sandboxes made of it stay, each with its grant. */
+  remove(): Promise<void>
+}
+
+/** A sandbox made of a preset, and its grant: the token that reaches it alone, given out as it is made and never again, which an `AppClient` reaches it with. A server over stdio gives none. */
+export interface PresetSandbox {
+  sandbox: Sandbox
+  grant: string | null
+}
+
+/**
+ * One sandbox, made of a preset for whom its access lets in and reached with its grant alone:
+ * what an app's user runs processes in, reads and writes the files of, and forwards the ports of,
+ * as `sandbox`, and deletes with `close`. The grant reaches nothing else, so neither does this.
+ */
+export class AppClient {
+  private constructor()
+  /**
+   * Make a sandbox of the preset `preset`, by its id, on the server at `url`, as `auth` lets in --
+   * none where the preset is public, or a bearer token of the issuer its access names -- and reach
+   * it with its grant from then on. Refused as the server refuses making it: `401` or `403` for
+   * one the preset does not let in, and `429` past its limits.
+   */
+  static connect(url: string, preset: string, auth?: Auth | null): Promise<AppClient>
+  readonly sandbox: Sandbox
+  /** Delete its sandbox, and with it its grant, and close the client. */
+  close(): Promise<void>
+  [Symbol.asyncDispose](): Promise<void>
 }
 
 export interface SandboxExecOptions {
@@ -626,6 +711,14 @@ export class Client {
   /** The server picks a name if none is given. */
   createVolume(name?: string): Promise<Volume>
   getVolume(name: string): Promise<Volume>
+  /** Every preset in the project. */
+  listPreset(): Promise<Preset[]>
+  /** Keep the preset `name`, made or replaced in whole: each sandbox made of it made of `image` as `createSandbox` makes one. Its image and volumes have to be on the server already. */
+  putPreset(name: string, image: string | ImageName, options?: PresetOptions): Promise<Preset>
+  /** The preset `preset` names: by its id, or its name in the project. */
+  getPreset(preset: string): Promise<Preset>
+  /** Make a sandbox of the preset `preset` names, by its id or its name, named `name` where one is given: answered with it and its grant. */
+  createPresetSandbox(preset: string, options?: { name?: string }): Promise<PresetSandbox>
   /** Every sandbox the server holds. */
   listSandbox(): Promise<Sandbox[]>
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */

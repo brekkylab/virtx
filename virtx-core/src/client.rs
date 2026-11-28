@@ -23,6 +23,7 @@ use crate::{
         ImageListOutputItem, ImagePruneOutput, ImagePullArgs, ImagePushArgs, ImageUploadOutput,
         Recipe, RegistryAuth, oci,
     },
+    preset::{self, Preset, PresetPutArgs, PresetSandbox, PresetSandboxCreateArgs},
     project::{
         self, ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem,
         ProjectMemberSetArgs, Role,
@@ -480,6 +481,42 @@ impl Client {
         Ok(self.files(root).copy(from, to, overwrite).await?)
     }
 
+    /// Every preset in the project.
+    pub async fn list_preset(&self) -> Result<Vec<Preset>, Error> {
+        preset::client::list(self).await
+    }
+
+    /// Keep `args` as the preset `name`, made or replaced in whole; see [`PresetPutArgs::new`].
+    /// Its image and volumes have to be on the server already.
+    pub async fn put_preset(
+        &self,
+        name: impl AsRef<str>,
+        args: &PresetPutArgs,
+    ) -> Result<Preset, Error> {
+        preset::client::put(self, name.as_ref(), args).await
+    }
+
+    /// The preset `preset` names: by its id, or its name in the project.
+    pub async fn get_preset(&self, preset: impl AsRef<str>) -> Result<Preset, Error> {
+        preset::client::get(self, preset.as_ref()).await
+    }
+
+    /// Remove the preset `preset` names. The sandboxes made of it stay, each with its grant.
+    pub async fn remove_preset(&self, preset: impl AsRef<str>) -> Result<(), Error> {
+        preset::client::remove(self, preset.as_ref()).await
+    }
+
+    /// Make a sandbox of the preset `preset` names, by its id or its name, as `args` says:
+    /// answered with the sandbox and its grant, the token that reaches it alone, given out in
+    /// this answer and no other. A server over stdio gives no grant.
+    pub async fn create_preset_sandbox(
+        &self,
+        preset: impl AsRef<str>,
+        args: &PresetSandboxCreateArgs,
+    ) -> Result<PresetSandbox, Error> {
+        preset::client::create_sandbox(self, preset.as_ref(), args).await
+    }
+
     /// Every sandbox the server holds.
     pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
         sandbox::client::list(self).await
@@ -662,6 +699,7 @@ pub(crate) mod ffi {
             ImageBuildArgs, ImageDownloadArgs, ImagePullArgs, ImagePushArgs, ImageRemoveArgs,
             ImageTagArgs, ImageUntagArgs, ImageUploadArgs,
         },
+        preset::{PresetPutArgs, PresetSandboxCreateArgs},
         project::{ProjectCreateArgs, Role},
         sandbox::{SandboxCreateArgs, SandboxExecArgs, SandboxResizeArgs},
         volume::{MountSource, VolumeCreateArgs},
@@ -689,6 +727,29 @@ pub(crate) mod ffi {
     #[serde(deny_unknown_fields)]
     struct Id {
         id: String,
+    }
+
+    /// A preset, by its id or its name: `{"preset": "..."}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PresetNamed {
+        preset: String,
+    }
+
+    /// What keeping a preset takes: `{"name": "...", "args": {...}}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PresetPut {
+        name: String,
+        args: PresetPutArgs,
+    }
+
+    /// What making a sandbox of a preset takes: `{"preset": "...", "name": "..."}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PresetSandboxCreate {
+        preset: String,
+        name: Option<String>,
     }
 
     /// What resizing a sandbox takes: `{"id": "...", "vcpus": n, "memory_mib": n,
@@ -1821,6 +1882,99 @@ pub(crate) mod ffi {
     ) -> *mut VirtxFuture {
         let args = unsafe { json::<SandboxCreateArgs>(args, args_len) };
         unsafe { &(*client).0 }.future(|client| async move { client.create_sandbox(&args?).await })
+    }
+
+    /// Answers with each preset in the project, as `[{"id": "...", "name": "...", "sandbox":
+    /// {...}, "max": {...}, "access": [...], "origins": ["..."], "limits": {...}}, ...]`,
+    /// `sandbox` as `virtx_client_create_sandbox` takes it and `max` and `limits` only where set.
+    ///
+    /// # Safety
+    ///
+    /// `client` is as in `virtx_client_list_volume`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_preset(
+        client: *mut VirtxClient,
+    ) -> *mut VirtxFuture {
+        unsafe { &(*client).0 }.future(|client| async move { client.list_preset().await })
+    }
+
+    /// Keeps the preset `name`, made or replaced in whole, given `{"name": "...", "args":
+    /// {"sandbox": {...}, "max": {"vcpus": n, "memory_mib": n, "disk_gib": n}, "access":
+    /// [{"type": "public"} | {"type": "jwt", "issuer": "...", "audience": "...", "jwks": "...",
+    /// "claims": {...}}], "origins": ["..."], "limits": {"sandboxes": n, "per_subject": n}}}`,
+    /// all of `args` but `sandbox` optional. Answers with the preset, as
+    /// `virtx_client_list_preset` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_put_preset(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<PresetPut>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let PresetPut { name, args } = args?;
+            client.put_preset(name, &args).await
+        })
+    }
+
+    /// Answers with the preset `preset` names, by its id or its name, given
+    /// `{"preset": "..."}`, as `virtx_client_list_preset` answers each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_get_preset(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<PresetNamed>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.get_preset(args?.preset).await })
+    }
+
+    /// Removes the preset `preset` names, given `{"preset": "..."}`. Answers with `null`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_remove_preset(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<PresetNamed>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.remove_preset(args?.preset).await })
+    }
+
+    /// Makes a sandbox of the preset `preset` names, given `{"preset": "...", "name": "..."}`,
+    /// `name` optional and a member's alone to give. Answers with `{"sandbox": {...},
+    /// "grant": "..."}`: the sandbox as `virtx_client_list_sandbox` answers each, and the token
+    /// that reaches it alone, which no other answer gives; over stdio, no `grant`.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_create_preset_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<PresetSandboxCreate>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let PresetSandboxCreate { preset, name } = args?;
+            client
+                .create_preset_sandbox(preset, &PresetSandboxCreateArgs { name })
+                .await
+        })
     }
 
     /// Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`

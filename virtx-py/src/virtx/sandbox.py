@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from ._library import VirtxError, args
 from .files import Files
+from .image import ImageName, image_name
 from .job import LogEntry, StartedJob, Truncated
 from .volume import Volume
 
@@ -104,6 +105,39 @@ class SandboxResources:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SandboxResources:
         return cls(value["vcpus"], value["memory_mib"], value["disk_gib"], value["up"])
+
+
+def create_args(
+    image: str | ImageName,
+    *,
+    name: str | None = None,
+    network: bool = True,
+    ports: Iterable[int | PortSpec] = (),
+    vcpus: int | None = None,
+    memory_mib: int | None = None,
+    disk_gib: int | None = None,
+    gpu: bool | None = None,
+    gpu_memory_mib: int | None = None,
+    volumes: Iterable[SandboxVolume | Mapping[str, Any]] = (),
+    abins: Iterable[str] = (),
+    lifetime: int | None = None,
+) -> dict[str, Any]:
+    """What making a sandbox takes, as the wire has it, without the members left out."""
+    request = {
+        "image": image_name(image).to_dict(),
+        "name": name,
+        "network": network,
+        "ports": [p.to_dict() if isinstance(p, PortSpec) else p for p in ports],
+        "vcpus": vcpus,
+        "memory_mib": memory_mib,
+        "disk_gib": disk_gib,
+        "gpu": gpu,
+        "gpu_memory_mib": gpu_memory_mib,
+        "volumes": [v.to_dict() if isinstance(v, SandboxVolume) else dict(v) for v in volumes],
+        "abins": list(abins),
+        "lifetime": lifetime,
+    }
+    return {key: value for key, value in request.items() if value is not None}
 
 
 @dataclass(frozen=True)

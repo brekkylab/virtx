@@ -145,3 +145,64 @@ test('setProject changes the project a request reaches', async () => {
     await alice.close()
   }
 })
+
+test('a preset is kept, makes a sandbox, and is removed', async () => {
+  const client = Client.spawn(fixture().stdio)
+  try {
+    await alpine(client)
+    const name = unique('preset')
+    const access = [
+      { type: 'public' },
+      { type: 'jwt', issuer: 'https://idp.example', audience: 'app', claims: { repo_name: 'a' } },
+    ]
+    const preset = await client.putPreset(name, ALPINE, {
+      lifetime: 600,
+      max: { vcpus: 8 },
+      access,
+      origins: ['https://app.example'],
+      limits: { perSubject: 1 },
+    })
+    assert.ok(preset instanceof virtx.Preset)
+    assert.equal(preset.name, name)
+    assert.equal(preset.sandbox.lifetime, 600)
+    assert.deepEqual(preset.access, access, 'its claims as they were given')
+    assert.deepEqual(preset.limits, { perSubject: 1 })
+    assert.equal((await client.getPreset(preset.id)).name, name)
+    assert.ok((await client.listPreset()).some((kept) => kept.id === preset.id))
+
+    const made = await preset.createSandbox({ name: unique('of-preset') })
+    assert.ok(made.sandbox instanceof virtx.Sandbox)
+    assert.equal(made.grant, null, 'a server over stdio gives no grant')
+    await made.sandbox.remove()
+    await preset.remove()
+    await assert.rejects(client.getPreset(preset.id), { status: 404 })
+  } finally {
+    await client.close()
+  }
+})
+
+test('an app client reaches the sandbox a preset lets it make', async () => {
+  const { url, token, project } = fixture()
+  const client = Client.connect(url, { type: 'bearer', token }, project)
+  try {
+    await alpine(client)
+    const members = await client.putPreset(unique('members'), ALPINE)
+    await assert.rejects(virtx.AppClient.connect(url, members.id), { status: 401 })
+    await members.remove()
+
+    const preset = await client.putPreset(unique('public'), ALPINE, {
+      access: [{ type: 'public' }],
+    })
+    const app = await virtx.AppClient.connect(url, preset.id)
+    const { id } = app.sandbox
+    try {
+      assert.equal(await app.sandbox.exec(['true']).complete(), 0)
+    } finally {
+      await app.close()
+    }
+    await assert.rejects(client.getSandbox(id), { status: 404 })
+    await preset.remove()
+  } finally {
+    await client.close()
+  }
+})

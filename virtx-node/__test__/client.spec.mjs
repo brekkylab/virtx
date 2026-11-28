@@ -194,12 +194,57 @@ test('an app client reaches the sandbox a package lets it make', async () => {
     })
     const app = await virtx.AppClient.connect(url, pkg.id)
     const { id } = app.sandbox
+    const { grant } = app
     try {
       assert.equal(await app.sandbox.exec(['true']).complete(), 0)
+      assert.equal(typeof grant, 'string')
+      assert.ok(!Object.keys(app).includes('grant'), 'not shown as the client is logged')
     } finally {
       await app.close()
     }
+    assert.equal((await client.getSandbox(id)).id, id, 'closed, it stays')
+
+    const resumed = await virtx.AppClient.resume(url, grant)
+    assert.equal(resumed.sandbox.id, id)
+    assert.equal(resumed.grant, grant)
+    await assert.rejects(virtx.AppClient.resumeAs(url, pkg.id, null, id), { status: 401 })
+    await resumed.remove()
     await assert.rejects(client.getSandbox(id), { status: 404 })
+    await assert.rejects(virtx.AppClient.resume(url, grant), { status: 401 })
+    await pkg.remove()
+  } finally {
+    await client.close()
+  }
+})
+
+test("a member finds a package's sandboxes and grants one again", async () => {
+  const { url, token, project } = fixture()
+  const client = Client.connect(url, { type: 'bearer', token }, project)
+  try {
+    await alpine(client)
+    const pkg = await client.putPackage(unique('found'), ALPINE)
+    const made = await pkg.createSandbox()
+    const found = await pkg.listSandbox()
+    assert.deepEqual(
+      found.map((sandbox) => sandbox.id),
+      [made.sandbox.id],
+    )
+    assert.ok(found.every((sandbox) => sandbox instanceof virtx.Sandbox))
+    const byName = await client.listPackageSandbox(pkg.name)
+    assert.deepEqual(
+      byName.map((sandbox) => sandbox.id),
+      [made.sandbox.id],
+    )
+
+    const granted = await pkg.grantSandbox(made.sandbox.id)
+    assert.ok(granted.sandbox instanceof virtx.Sandbox)
+    assert.equal(granted.sandbox.id, made.sandbox.id)
+    assert.equal(typeof granted.grant, 'string')
+    assert.notEqual(granted.grant, made.grant)
+    const again = await client.grantPackageSandbox(pkg.id, made.sandbox.id)
+    assert.ok(![made.grant, granted.grant].includes(again.grant))
+    await assert.rejects(pkg.grantSandbox('none'), { status: 404 })
+    await made.sandbox.remove()
     await pkg.remove()
   } finally {
     await client.close()

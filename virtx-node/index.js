@@ -138,6 +138,8 @@ const SIGNATURES = {
   virtx_client_get_package: WITH_ARGS,
   virtx_client_remove_package: WITH_ARGS,
   virtx_client_create_package_sandbox: WITH_ARGS,
+  virtx_client_list_package_sandbox: WITH_ARGS,
+  virtx_client_grant_package_sandbox: WITH_ARGS,
   virtx_client_list_sandbox: PLAIN,
   virtx_client_create_sandbox: WITH_ARGS,
   virtx_client_get_sandbox: WITH_ARGS,
@@ -753,6 +755,20 @@ class Client {
     return { sandbox: new Sandbox(this, made.sandbox), grant: made.grant ?? null }
   }
 
+  // Those made of the package `pkg` names that this client's credentials made: a member's,
+  // every one; one its access let in, those of the same subject.
+  async listPackageSandbox(pkg) {
+    const infos = await this._call('virtx_client_list_package_sandbox', { package: pkg })
+    return infos.map((info) => new Sandbox(this, info))
+  }
+
+  // A new grant to `sandbox`, one `listPackageSandbox` finds. Its other grants still reach it.
+  async grantPackageSandbox(pkg, sandbox) {
+    const args = { package: pkg, sandbox }
+    const made = await this._call('virtx_client_grant_package_sandbox', args)
+    return { sandbox: new Sandbox(this, made.sandbox), grant: made.grant ?? null }
+  }
+
   async getSandbox(id) {
     return new Sandbox(this, await this._call('virtx_client_get_sandbox', { id }))
   }
@@ -1151,6 +1167,16 @@ class Package {
     return this.client.createPackageSandbox(this.id, { name, ports })
   }
 
+  // The sandboxes made of it that the client's credentials made.
+  listSandbox() {
+    return this.client.listPackageSandbox(this.id)
+  }
+
+  // A new grant to `sandbox`, one `listSandbox` finds.
+  grantSandbox(sandbox) {
+    return this.client.grantPackageSandbox(this.id, sandbox)
+  }
+
   // The sandboxes made of it stay, each with its grant.
   async remove() {
     await this.client._call('virtx_client_remove_package', { package: this.id })
@@ -1159,11 +1185,14 @@ class Package {
 
 // One sandbox, made of a package for whom its access lets in and reached with its grant alone:
 // what an app's user runs processes in, reads and writes the files of, and forwards the ports
-// of, as `sandbox`, and deletes with `close`. The grant reaches nothing else, so neither does
-// this.
+// of, as `sandbox`. The grant reaches nothing else, so neither does this. The sandbox lives until
+// `remove`: closed, this leaves it, to be come back to with `resume` and its `grant`, or with
+// `resumeAs` as the one who made it.
 class AppClient {
-  constructor(sandbox) {
+  constructor(sandbox, grant) {
     this.sandbox = sandbox
+    // Not enumerable, so that logging the client shows no grant.
+    Object.defineProperty(this, 'grant', { value: grant })
   }
 
   // Make a sandbox of the package `pkg`, by its id, on the server at `url`, as `auth` lets in
@@ -1171,20 +1200,55 @@ class AppClient {
   // names -- and reach it with its grant from then on.
   static async connect(url, pkg, auth = null, { ports } = {}) {
     const client = Client.connect(url, auth)
+    return AppClient._reaching(client, () => client.createPackageSandbox(pkg, { ports }))
+  }
+
+  // Reach again the sandbox `grant` reaches: refused `401` once the sandbox is deleted.
+  static async resume(url, grant) {
+    const client = Client.connect(url, { type: 'bearer', token: grant })
     try {
-      const made = await client.createPackageSandbox(pkg, { ports })
-      if (!made.grant) throw new VirtxError('the server gave the sandbox no grant to reach it with')
-      // From here on, the grant alone: what made it reaches nothing more through this client.
-      client.setAuth({ type: 'bearer', token: made.grant })
-      return new AppClient(made.sandbox)
+      // A grant's listing is its own sandbox alone.
+      const [sandbox] = await client.listSandbox()
+      if (!sandbox) throw new VirtxError('the server answered no sandbox to the grant')
+      return new AppClient(sandbox, grant)
     } catch (e) {
       await client.close()
       throw e
     }
   }
 
-  // Delete its sandbox, and with it its grant, and close the client.
+  // Reach again `sandbox`, one made of the package `pkg` with `auth`, with a new grant: for one
+  // who kept no grant, let in by who they are.
+  static async resumeAs(url, pkg, auth, sandbox) {
+    const client = Client.connect(url, auth)
+    return AppClient._reaching(client, () => client.grantPackageSandbox(pkg, sandbox))
+  }
+
+  // What `making` answers, reached through `client` with its grant alone from then on.
+  static async _reaching(client, making) {
+    try {
+      const made = await making()
+      if (!made.grant) {
+        // Nothing reaches it once this client is gone: it goes too.
+        await made.sandbox.remove()
+        throw new VirtxError('the server gave the sandbox no grant to reach it with')
+      }
+      // From here on, the grant alone: what made it reaches nothing more through this client.
+      client.setAuth({ type: 'bearer', token: made.grant })
+      return new AppClient(made.sandbox, made.grant)
+    } catch (e) {
+      await client.close()
+      throw e
+    }
+  }
+
+  // Close the client, leaving its sandbox as it is.
   async close() {
+    await this.sandbox.client.close()
+  }
+
+  // Delete its sandbox, and with it every grant to it, and close the client.
+  async remove() {
     try {
       await this.sandbox.remove()
     } finally {

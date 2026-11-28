@@ -14,7 +14,8 @@
 //! Starting a job is a [`StartedJob`], a call answering with the job, its [`JobLog`], or its
 //! `complete`: a [`JobEnd`], what the job ended with once it has.
 //!
-//! An app's user reaches the one sandbox they make of a package with an [`AppClient`].
+//! An app's user reaches the one sandbox they make of a package with an [`AppClient`], and comes
+//! back to it later.
 //!
 //! Making or asking for a sandbox or a volume answers a [`Sandbox`] or a [`Volume`], running a
 //! process in a sandbox a [`SandboxJob`], and building, pulling or pushing an image an

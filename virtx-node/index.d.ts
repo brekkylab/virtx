@@ -487,6 +487,10 @@ export class Package implements PackageInfo {
   limits?: PackageLimits
   /** A sandbox made of it, named `name` where one is given, and its grant. */
   createSandbox(options?: PackageSandboxOptions): Promise<PackageSandbox>
+  /** The sandboxes made of it that the client's credentials made. */
+  listSandbox(): Promise<Sandbox[]>
+  /** A new grant to `sandbox`, one `listSandbox` finds. */
+  grantSandbox(sandbox: string): Promise<PackageSandbox>
   /** Remove it. The sandboxes made of it stay, each with its grant. */
   remove(): Promise<void>
 }
@@ -499,7 +503,7 @@ export interface PackageSandboxOptions {
   ports?: PortSpec[]
 }
 
-/** A sandbox made of a package, and its grant: the token that reaches it alone, given out as it is made and never again, which an `AppClient` reaches it with. A server over stdio gives none. */
+/** A sandbox made of a package, and a grant to it: the token that reaches it alone, given out in this answer and no other, which an `AppClient` reaches it with. A server over stdio gives none. */
 export interface PackageSandbox {
   sandbox: Sandbox
   grant: string | null
@@ -508,7 +512,11 @@ export interface PackageSandbox {
 /**
  * One sandbox, made of a package for whom its access lets in and reached with its grant alone:
  * what an app's user runs processes in, reads and writes the files of, and forwards the ports of,
- * as `sandbox`, and deletes with `close`. The grant reaches nothing else, so neither does this.
+ * as `sandbox`. The grant reaches nothing else, so neither does this.
+ *
+ * The sandbox lives until it is deleted, with `remove`: closed, or left by `await using`, this
+ * leaves it, to be come back to with `resume` and its `grant`, or with `resumeAs` as the one who
+ * made it.
  */
 export class AppClient {
   private constructor()
@@ -525,9 +533,21 @@ export class AppClient {
     auth?: Auth | null,
     options?: { ports?: PortSpec[] },
   ): Promise<AppClient>
+  /** Reach again the sandbox `grant` reaches, on the server at `url`: refused `401` once the sandbox is deleted. */
+  static resume(url: string, grant: string): Promise<AppClient>
+  /**
+   * Reach again the sandbox `sandbox`, one made of the package `pkg` with `auth`, as
+   * `Client.listPackageSandbox` finds it, with a new grant: for one who kept no grant, let in by
+   * who they are. Refused `401` with no credentials, and `404` for a sandbox they did not make.
+   */
+  static resumeAs(url: string, pkg: string, auth: Auth, sandbox: string): Promise<AppClient>
   readonly sandbox: Sandbox
-  /** Delete its sandbox, and with it its grant, and close the client. */
+  /** The token that reaches its sandbox, to keep and `resume` with: as a password to it, kept where the app's user's other secrets are. */
+  readonly grant: string
+  /** Close the client, leaving its sandbox as it is. */
   close(): Promise<void>
+  /** Delete its sandbox, and with it every grant to it, and close the client. */
+  remove(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 }
 
@@ -731,6 +751,10 @@ export class Client {
   getPackage(pkg: string): Promise<Package>
   /** Make a sandbox of the package `pkg` names, by its id or its name, named `name` where one is given: answered with it and its grant. */
   createPackageSandbox(pkg: string, options?: PackageSandboxOptions): Promise<PackageSandbox>
+  /** The sandboxes made of the package `pkg` names that this client's credentials made: a member's, every one; one its access let in, those of the same subject. A sandbox made with no credentials is reached with its grant alone, and a server over stdio answers none of this. */
+  listPackageSandbox(pkg: string): Promise<Sandbox[]>
+  /** A new grant to `sandbox`, one `listPackageSandbox` finds, answered with it as `createPackageSandbox` is. Its other grants still reach it. */
+  grantPackageSandbox(pkg: string, sandbox: string): Promise<PackageSandbox>
   /** Every sandbox the server holds. */
   listSandbox(): Promise<Sandbox[]>
   /** `image` has to be on the server already, pulled or built: this does not pull it, and a tag the server has no image by is refused with `404`. */

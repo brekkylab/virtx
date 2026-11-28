@@ -484,6 +484,21 @@ class Client:
         output = await self._call("virtx_client_create_package_sandbox", request)
         return PackageSandbox.from_dict(self, output)
 
+    async def list_package_sandbox(self, package: str) -> list[Sandbox]:
+        """The sandboxes made of the package ``package`` names that this client's credentials
+        made: a member's, every one; one its access let in, those of the same subject. A sandbox
+        made with no credentials is reached with its grant alone, and a server over stdio
+        answers none of this."""
+        items = await self._call("virtx_client_list_package_sandbox", _args(package=package))
+        return [Sandbox.from_dict(self, item) for item in items]
+
+    async def grant_package_sandbox(self, package: str, sandbox: str) -> PackageSandbox:
+        """A new grant to the sandbox ``sandbox``, one ``list_package_sandbox`` finds, answered
+        with it as ``create_package_sandbox`` is. Its other grants still reach it."""
+        request = _args(package=package, sandbox=sandbox)
+        output = await self._call("virtx_client_grant_package_sandbox", request)
+        return PackageSandbox.from_dict(self, output)
+
     async def list_sandbox(self) -> list[Sandbox]:
         """Every sandbox the server holds."""
         items = await self._call("virtx_client_list_sandbox")

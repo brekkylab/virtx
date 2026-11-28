@@ -200,6 +200,8 @@ api! {
     virtx_client_get_package: WithArgs,
     virtx_client_remove_package: WithArgs,
     virtx_client_create_package_sandbox: WithArgs,
+    virtx_client_list_package_sandbox: WithArgs,
+    virtx_client_grant_package_sandbox: WithArgs,
     virtx_client_list_sandbox: Plain,
     virtx_client_create_sandbox: WithArgs,
     virtx_client_get_sandbox: WithArgs,

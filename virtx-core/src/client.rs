@@ -517,6 +517,30 @@ impl Client {
         package::client::create_sandbox(self, package.as_ref(), args).await
     }
 
+    /// The sandboxes made of the package `package` names that this client's credentials made:
+    /// a member's, every one; one its access let in, those of the same subject. A sandbox made
+    /// with no credentials is reached with its grant alone, and a server over stdio answers
+    /// none of this.
+    pub async fn list_package_sandbox(
+        &self,
+        package: impl AsRef<str>,
+    ) -> Result<Vec<Sandbox>, Error> {
+        package::client::list_sandbox(self, package.as_ref()).await
+    }
+
+    /// A new grant to the sandbox `sandbox`, one [`list_package_sandbox`] finds: answered with
+    /// it and the grant, as [`create_package_sandbox`] answers. Its other grants still reach it.
+    ///
+    /// [`list_package_sandbox`]: Client::list_package_sandbox
+    /// [`create_package_sandbox`]: Client::create_package_sandbox
+    pub async fn grant_package_sandbox(
+        &self,
+        package: impl AsRef<str>,
+        sandbox: impl AsRef<str>,
+    ) -> Result<PackageSandbox, Error> {
+        package::client::grant_sandbox(self, package.as_ref(), sandbox.as_ref()).await
+    }
+
     /// Every sandbox the server holds.
     pub async fn list_sandbox(&self) -> Result<Vec<Sandbox>, Error> {
         sandbox::client::list(self).await
@@ -753,6 +777,14 @@ pub(crate) mod ffi {
         name: Option<String>,
         #[serde(default)]
         ports: Vec<crate::PortSpec>,
+    }
+
+    /// A sandbox made of a package: `{"package": "...", "sandbox": "..."}`.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PackageSandboxNamed {
+        package: String,
+        sandbox: String,
     }
 
     /// What resizing a sandbox takes: `{"id": "...", "vcpus": n, "memory_mib": n,
@@ -1982,6 +2014,44 @@ pub(crate) mod ffi {
             client
                 .create_package_sandbox(package, &PackageSandboxCreateArgs { name, ports })
                 .await
+        })
+    }
+
+    /// Answers with the sandboxes made of the package `package` names that the client's
+    /// credentials made, given `{"package": "..."}`, as `virtx_client_list_sandbox` answers
+    /// each.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_list_package_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<PackageNamed>(args, args_len) };
+        unsafe { &(*client).0 }
+            .future(|client| async move { client.list_package_sandbox(args?.package).await })
+    }
+
+    /// Gives out a new grant to the sandbox `sandbox`, one the client made of the package
+    /// `package` names, given `{"package": "...", "sandbox": "..."}`. Answers as
+    /// `virtx_client_create_package_sandbox` does.
+    ///
+    /// # Safety
+    ///
+    /// As `virtx_client_build_image`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn virtx_client_grant_package_sandbox(
+        client: *mut VirtxClient,
+        args: *const u8,
+        args_len: usize,
+    ) -> *mut VirtxFuture {
+        let args = unsafe { json::<PackageSandboxNamed>(args, args_len) };
+        unsafe { &(*client).0 }.future(|client| async move {
+            let PackageSandboxNamed { package, sandbox } = args?;
+            client.grant_package_sandbox(package, sandbox).await
         })
     }
 

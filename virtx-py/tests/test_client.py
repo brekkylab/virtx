@@ -201,8 +201,45 @@ async def test_an_app_client_reaches_the_sandbox_a_package_lets_it_make(tcp_clie
     public = await tcp_client.put_package(unique("public"), ALPINE, access=[virtx.PublicAccess()])
     async with await virtx.AppClient.connect(url, public.id) as app:
         assert await app.sandbox.exec(["true"]).complete() == 0
-        id = app.sandbox.id
+        id, grant = app.sandbox.id, app.grant
+    assert isinstance(grant, str)
+    assert grant not in repr(app)
+    assert (await tcp_client.get_sandbox(id)).id == id, "closed, it stays"
+
+    app = await virtx.AppClient.resume(url, grant)
+    assert (app.sandbox.id, app.grant) == (id, grant)
+    with pytest.raises(VirtxError) as refused:
+        await virtx.AppClient.resume_as(url, public.id, None, id)
+    assert refused.value.status == 401, "made with no credentials: its grant alone"
+    await app.remove()
     with pytest.raises(VirtxError) as gone:
         await tcp_client.get_sandbox(id)
-    assert gone.value.status == 404, "closed, it is deleted"
+    assert gone.value.status == 404, "removed, it is deleted"
+    with pytest.raises(VirtxError) as refused:
+        await virtx.AppClient.resume(url, grant)
+    assert refused.value.status == 401
     await public.remove()
+
+
+async def test_a_member_finds_a_package_s_sandboxes_and_grants_one_again(
+    tcp_client: Client,
+) -> None:
+    await alpine(tcp_client)
+    package = await tcp_client.put_package(unique("found"), ALPINE)
+    made = await package.create_sandbox()
+    found = await package.list_sandbox()
+    assert [sandbox.id for sandbox in found] == [made.sandbox.id]
+    assert all(isinstance(sandbox, virtx.Sandbox) for sandbox in found)
+    assert [s.id for s in await tcp_client.list_package_sandbox(package.name)] == [made.sandbox.id]
+
+    granted = await package.grant_sandbox(made.sandbox.id)
+    assert isinstance(granted, virtx.PackageSandbox)
+    assert granted.sandbox.id == made.sandbox.id
+    assert isinstance(granted.grant, str) and granted.grant != made.grant
+    again = await tcp_client.grant_package_sandbox(package.id, made.sandbox.id)
+    assert again.grant not in (made.grant, granted.grant)
+    with pytest.raises(VirtxError) as refused:
+        await package.grant_sandbox("none")
+    assert refused.value.status == 404
+    await made.sandbox.remove()
+    await package.remove()

@@ -3,7 +3,7 @@
 use http_over_x::segment;
 
 use super::{Package, PackagePutArgs, PackageSandbox, PackageSandboxCreateArgs};
-use crate::{Client, Error};
+use crate::{Client, Error, Sandbox};
 
 /// The path of the package `package` names: by its id, or its name in the project set.
 fn package(package: &str) -> String {
@@ -48,4 +48,21 @@ pub(crate) async fn create_sandbox(
 ) -> Result<PackageSandbox, Error> {
     let path = format!("{}/sandboxes/", package(name));
     Ok(client.wire().post(&path, client.headers(), args).await?)
+}
+
+/// The sandboxes made of the package `name` names that the client made.
+pub(crate) async fn list_sandbox(client: &Client, name: &str) -> Result<Vec<Sandbox>, Error> {
+    let path = format!("{}/sandboxes/", package(name));
+    Ok(client.wire().get(&path, client.headers()).await?)
+}
+
+/// A new grant to the sandbox `id`, one the client made of the package `name` names.
+pub(crate) async fn grant_sandbox(
+    client: &Client,
+    name: &str,
+    id: &str,
+) -> Result<PackageSandbox, Error> {
+    let path = format!("{}/sandboxes/{}/grant", package(name), segment(id));
+    let empty = serde_json::json!({});
+    Ok(client.wire().post(&path, client.headers(), &empty).await?)
 }

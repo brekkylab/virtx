@@ -15,8 +15,8 @@ pub struct Package {
     info: PackageInfo,
 }
 
-/// A sandbox made of a package, and its grant: the token that reaches it alone, given out as it
-/// is made and never again, which an [`AppClient`](crate::AppClient) reaches it with. A server
+/// A sandbox made of a package, and a grant to it: the token that reaches it alone, given out in
+/// this answer and no other, which an [`AppClient`](crate::AppClient) reaches it with. A server
 /// over stdio gives none.
 #[derive(Clone, Debug)]
 pub struct PackageSandbox {
@@ -51,6 +51,16 @@ impl Package {
     /// Make a sandbox of it as `args` says: a name, and its ports on local.
     pub fn create_sandbox(&self, args: &PackageSandboxCreateArgs) -> Call<PackageSandbox> {
         self.client.create_package_sandbox(&self.info.id, args)
+    }
+
+    /// The sandboxes made of it that the client's credentials made.
+    pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
+        self.client.list_package_sandbox(&self.info.id)
+    }
+
+    /// A new grant to the sandbox `sandbox`, one [`list_sandbox`](Self::list_sandbox) finds.
+    pub fn grant_sandbox(&self, sandbox: impl AsRef<str>) -> Call<PackageSandbox> {
+        self.client.grant_package_sandbox(&self.info.id, sandbox)
     }
 
     /// Remove it. The sandboxes made of it stay, each with its grant.

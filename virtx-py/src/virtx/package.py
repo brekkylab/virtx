@@ -111,6 +111,14 @@ class Package:
         """Make a sandbox of it, named ``name`` where one is given, with ``ports`` on local."""
         return await self.client.create_package_sandbox(self.id, name=name, ports=ports)
 
+    async def list_sandbox(self) -> list[Sandbox]:
+        """The sandboxes made of it that the client's credentials made."""
+        return await self.client.list_package_sandbox(self.id)
+
+    async def grant_sandbox(self, sandbox: str) -> PackageSandbox:
+        """A new grant to the sandbox ``sandbox``, one ``list_sandbox`` finds."""
+        return await self.client.grant_package_sandbox(self.id, sandbox)
+
     async def remove(self) -> None:
         """Remove it. The sandboxes made of it stay, each with its grant."""
         await self.client._call("virtx_client_remove_package", args(package=self.id))
@@ -118,8 +126,8 @@ class Package:
 
 @dataclass(frozen=True)
 class PackageSandbox:
-    """A sandbox made of a package, and its grant: the token that reaches it alone, given out as
-    it is made and never again, which an ``AppClient`` reaches it with. A server over stdio gives
+    """A sandbox made of a package, and a grant to it: the token that reaches it alone, given out
+    in this answer and no other, which an ``AppClient`` reaches it with. A server over stdio gives
     none."""
 
     sandbox: Sandbox
@@ -133,11 +141,20 @@ class PackageSandbox:
 class AppClient:
     """One sandbox, made of a package for whom its access lets in and reached with its grant
     alone: what an app's user runs processes in, reads and writes the files of, and forwards the
-    ports of, as ``sandbox``, and deletes with ``close``. The grant reaches nothing else, so
-    neither does this."""
+    ports of, as ``sandbox``. The grant reaches nothing else, so neither does this.
 
-    def __init__(self, sandbox: Sandbox) -> None:
+    The sandbox lives until it is deleted, with ``remove``: closed, or left by ``async with``,
+    this leaves it, to be come back to with ``resume`` and its ``grant``, or with ``resume_as``
+    as the one who made it."""
+
+    def __init__(self, sandbox: Sandbox, grant: str) -> None:
         self.sandbox = sandbox
+        self.grant = grant
+        """The token that reaches its sandbox, to keep and ``resume`` with: as a password to it,
+        kept where the app's user's other secrets are."""
+
+    def __repr__(self) -> str:
+        return f"AppClient({self.sandbox!r})"
 
     @classmethod
     async def connect(
@@ -146,25 +163,73 @@ class AppClient:
         """Make a sandbox of the package ``package``, by its id, on the server at ``url``, as
         ``auth`` lets in -- none where the package is public, or a ``BearerAuth`` of a token of
         the issuer its access names -- with ``ports`` on local, each ``on="local"``, beside
-        those the package gives it in the sandbox, and reach it with its grant from then on. Refused as the
-        server refuses making it: ``401`` or ``403`` for one the package does not let in, and
-        ``429`` past its limits. One client does both."""
+        those the package gives it in the sandbox, and reach it with its grant from then on.
+        Refused as the server refuses making it: ``401`` or ``403`` for one the package does not
+        let in, and ``429`` past its limits. One client does both."""
         from .client import Client
 
         client = Client.connect(url, auth)
         try:
             made = await client.create_package_sandbox(package, ports=ports)
+        except BaseException:
+            await client.aclose()
+            raise
+        return await cls._reaching(client, made)
+
+    @classmethod
+    async def resume(cls, url: str, grant: str) -> AppClient:
+        """Reach again the sandbox ``grant`` reaches, on the server at ``url``: refused ``401``
+        once the sandbox is deleted."""
+        from .client import Client
+
+        client = Client.connect(url, BearerAuth(grant))
+        try:
+            # A grant's listing is its own sandbox alone.
+            listed = await client.list_sandbox()
+            if not listed:
+                raise ValueError("the server answered no sandbox to the grant")
+        except BaseException:
+            await client.aclose()
+            raise
+        return cls(listed[0], grant)
+
+    @classmethod
+    async def resume_as(cls, url: str, package: str, auth: Auth, sandbox: str) -> AppClient:
+        """Reach again the sandbox ``sandbox``, one made of the package ``package`` with
+        ``auth``, as ``Client.list_package_sandbox`` finds it, with a new grant: for one who kept
+        no grant, let in by who they are. Refused ``401`` with no credentials, and ``404`` for
+        a sandbox they did not make."""
+        from .client import Client
+
+        client = Client.connect(url, auth)
+        try:
+            made = await client.grant_package_sandbox(package, sandbox)
+        except BaseException:
+            await client.aclose()
+            raise
+        return await cls._reaching(client, made)
+
+    @classmethod
+    async def _reaching(cls, client: Client, made: PackageSandbox) -> AppClient:
+        """``made``, reached through ``client`` with its grant alone from now on."""
+        try:
             if made.grant is None:
+                # Nothing reaches it once this client is gone: it goes too.
+                await made.sandbox.remove()
                 raise ValueError("the server gave the sandbox no grant to reach it with")
             # From here on, the grant alone: what made it reaches nothing more through this client.
             client.set_auth(BearerAuth(made.grant))
         except BaseException:
             await client.aclose()
             raise
-        return cls(made.sandbox)
+        return cls(made.sandbox, made.grant)
 
     async def close(self) -> None:
-        """Delete its sandbox, and with it its grant, and close the client."""
+        """Close the client, leaving its sandbox as it is."""
+        await self.sandbox.client.aclose()
+
+    async def remove(self) -> None:
+        """Delete its sandbox, and with it every grant to it, and close the client."""
         try:
             await self.sandbox.remove()
         finally:

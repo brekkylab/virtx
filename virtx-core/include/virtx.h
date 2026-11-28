@@ -693,6 +693,28 @@ struct VirtxFuture *virtx_client_create_package_sandbox(struct VirtxClient *clie
                                                         const uint8_t *args,
                                                         size_t args_len);
 
+// Answers with the sandboxes made of the package `package` names that the client's
+// credentials made, given `{"package": "..."}`, as `virtx_client_list_sandbox` answers
+// each.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_list_package_sandbox(struct VirtxClient *client,
+                                                      const uint8_t *args,
+                                                      size_t args_len);
+
+// Gives out a new grant to the sandbox `sandbox`, one the client made of the package
+// `package` names, given `{"package": "...", "sandbox": "..."}`. Answers as
+// `virtx_client_create_package_sandbox` does.
+//
+// # Safety
+//
+// As `virtx_client_build_image`.
+struct VirtxFuture *virtx_client_grant_package_sandbox(struct VirtxClient *client,
+                                                       const uint8_t *args,
+                                                       size_t args_len);
+
 // Answers with the sandbox `id`, given `{"id": "..."}`, as `virtx_client_list_sandbox`
 // answers each.
 //

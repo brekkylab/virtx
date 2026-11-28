@@ -737,6 +737,41 @@ impl Client {
         })
     }
 
+    /// The sandboxes made of the package `package` names that this client's credentials made: a
+    /// member's, every one; one its access let in, those of the same subject. A sandbox made
+    /// with no credentials is reached with its grant alone, and a server over stdio answers
+    /// none of this.
+    pub fn list_package_sandbox(&self, package: impl AsRef<str>) -> Call<Vec<Sandbox>> {
+        let args = json!({ "package": package.as_ref() });
+        let client = self.clone();
+        let call: Call<Vec<SandboxInfo>> =
+            self.call(self.api.virtx_client_list_package_sandbox, args);
+        call.map(move |infos| {
+            infos
+                .into_iter()
+                .map(|info| Sandbox::new(client.clone(), info))
+                .collect()
+        })
+    }
+
+    /// A new grant to the sandbox `sandbox`, one [`list_package_sandbox`](Self::list_package_sandbox)
+    /// finds, answered with it as [`create_package_sandbox`](Self::create_package_sandbox) is.
+    /// Its other grants still reach it.
+    pub fn grant_package_sandbox(
+        &self,
+        package: impl AsRef<str>,
+        sandbox: impl AsRef<str>,
+    ) -> Call<PackageSandbox> {
+        let args = json!({ "package": package.as_ref(), "sandbox": sandbox.as_ref() });
+        let client = self.clone();
+        let call: Call<virtx_core::PackageSandbox> =
+            self.call(self.api.virtx_client_grant_package_sandbox, args);
+        call.map(move |made| PackageSandbox {
+            sandbox: Sandbox::new(client.clone(), made.sandbox),
+            grant: made.grant,
+        })
+    }
+
     /// Every sandbox the server holds.
     pub fn list_sandbox(&self) -> Call<Vec<Sandbox>> {
         let client = self.clone();

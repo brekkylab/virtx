@@ -87,9 +87,11 @@ components:
                   /abin and no /alib";
 
 /// The client's packages, which `check` checks before `init` has run.
-const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx", "virtx-cli"];
-/// The package the client library is built from.
+const CLIENT_PACKAGES: &[&str] = &["virtx-core", "virtx-cabi", "virtx", "virtx-cli"];
+/// The client's crate, whose own tests `test` runs first.
 const CLIENT_PACKAGE: &str = "virtx-core";
+/// The package the client library, `libvirtx_core`, is built from.
+const LIBRARY_PACKAGE: &str = "virtx-cabi";
 /// The packages that link libkrun, and `xtask`, which `check` checks once `init` has run.
 const SERVER_PACKAGES: &[&str] = &[
     "virtx-uvm",
@@ -752,6 +754,8 @@ fn lint_bindings() -> anyhow::Result<()> {
             "install",
             "--prefix",
             "virtx-node",
+            // The tools alone: not the library its `prepare` builds.
+            "--ignore-scripts",
             "--no-audit",
             "--no-fund",
             "--silent",
@@ -840,14 +844,13 @@ fn client_library() -> String {
     )
 }
 
-/// The library alone, with the features its default is: no kernel and nothing to sign. Its
-/// crate builds an rlib alone, so the library for C is asked for here.
+/// The library alone, and its static library: no kernel and nothing to sign.
 fn build_client(options: &Options) -> anyhow::Result<()> {
     let mut cargo = cargo();
     cargo.current_dir(root_path()).args([
         "rustc",
         "-p",
-        CLIENT_PACKAGE,
+        LIBRARY_PACKAGE,
         "--lib",
         "--crate-type",
         "cdylib,staticlib",
@@ -971,6 +974,28 @@ fn run_target(args: Vec<OsString>, test: bool, vars: &[(&str, OsString)]) -> any
         Some(at) => (&args[..at], &args[at + 1..]),
         None => (&args[..], &[][..]),
     };
+    let targets = compile_targets(cargo_args, test)?;
+    if !test {
+        ensure!(
+            targets.len() == 1,
+            "cargo built {} runnable targets; name one with --bin, --example or -p",
+            targets.len()
+        );
+        let (exe, _) = &targets[0];
+        sign(exe)?;
+        let status = Command::new(exe)
+            .args(program_args)
+            .envs(vars.iter().cloned())
+            .status()
+            .with_context(|| format!("running {}", exe.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    run_tests(&targets, program_args, vars)
+}
+
+/// Build what `cargo_args` names (its tests if `test`), and return each executable with its
+/// package's directory, made ready to boot a VM.
+fn compile_targets(cargo_args: &[OsString], test: bool) -> anyhow::Result<Vec<(PathBuf, PathBuf)>> {
     // Anything but the client's packages, named each, may build the servers' patched trees.
     let mut packages: Vec<String> = Vec::new();
     let mut named = cargo_args.iter().map(|a| a.to_string_lossy().into_owned());
@@ -1048,38 +1073,32 @@ fn run_target(args: Vec<OsString>, test: bool, vars: &[(&str, OsString)]) -> any
             targets.push((exe.into(), manifest_dir));
         }
     }
+    Ok(targets)
+}
 
-    if !test {
-        ensure!(
-            targets.len() == 1,
-            "cargo built {} runnable targets; name one with --bin, --example or -p",
-            targets.len()
-        );
-    }
-
+/// Run each test binary in its package's directory; fail after all have run if any did.
+fn run_tests(
+    targets: &[(PathBuf, PathBuf)],
+    program_args: &[OsString],
+    vars: &[(&str, OsString)],
+) -> anyhow::Result<()> {
     let mut failed = 0;
-    for (exe, manifest_dir) in &targets {
+    for (exe, manifest_dir) in targets {
         // A test may boot machines of itself, as `virtx-uvm`'s do: it needs the kernel beside
         // it, wherever there is one to put there.
-        if test && kernel_library().is_ok() {
+        if kernel_library().is_ok() {
             ready(exe)?;
         } else {
             sign(exe)?;
         }
-        let mut command = Command::new(exe);
-        command.args(program_args).envs(vars.iter().cloned());
-        if test {
-            eprintln!("     Running {}", exe.display());
-            command
-                .current_dir(manifest_dir)
-                .env("CARGO_MANIFEST_DIR", manifest_dir);
-        }
-        let status = command
+        eprintln!("     Running {}", exe.display());
+        let status = Command::new(exe)
+            .args(program_args)
+            .envs(vars.iter().cloned())
+            .current_dir(manifest_dir)
+            .env("CARGO_MANIFEST_DIR", manifest_dir)
             .status()
             .with_context(|| format!("running {}", exe.display()))?;
-        if !test {
-            std::process::exit(status.code().unwrap_or(1));
-        }
         if !status.success() {
             failed += 1;
         }
@@ -1692,9 +1711,6 @@ fn test(args: Vec<OsString>) -> anyhow::Result<()> {
 /// neither `test --no-run` nor the fixture builds it then.
 const ABIN_BUILT: &str = "XTASK_ABIN_BUILT";
 
-/// The variable each package opens the library named in, in place of building its own.
-const LIBRARY_ENV: &str = "VIRTX_CORE_LIB";
-
 /// Set where `cargo xtask test --no-run` has run, as CI's compile step has: `test` then fails if
 /// cargo compiles anything during it.
 const TESTS_COMPILED: &str = "XTASK_TESTS_COMPILED";
@@ -1730,62 +1746,24 @@ fn compiled_since(since: std::time::SystemTime) -> Vec<String> {
     compiled
 }
 
-/// The library the packages' tests open, as their fixtures build it: `libvirtx_core` in the
-/// `dev` profile, with its default features.
-fn test_library() -> PathBuf {
-    target_path().join("debug").join(client_library())
-}
-
+/// `libvirtx_core` in `dev`, as virtx-rs's tests and the bindings' installs build it.
 fn build_test_library() -> anyhow::Result<()> {
     cargo_in_root(
-        &[
-            "rustc",
-            "-p",
-            CLIENT_PACKAGE,
-            "--lib",
-            "--crate-type",
-            "cdylib",
-        ],
+        &["build", "-p", LIBRARY_PACKAGE],
         "the library the packages' tests open",
     )
 }
 
-/// Each binding's install, as its directory, its command, the file the command leaves, and the
-/// manifests that file is to be newer than: what `uv run` and `npm test` run with.
-const INSTALLS: &[(&str, &[&str], &str, &[&str])] = &[
-    (
-        "virtx-py",
-        &["uv", "sync"],
-        ".venv/pyvenv.cfg",
-        &["pyproject.toml", "uv.lock"],
-    ),
-    (
-        "virtx-node",
-        &[NPM, "install", "--no-audit", "--no-fund"],
-        "node_modules/.package-lock.json",
-        &["package.json", "package-lock.json"],
-    ),
+/// Each binding's install: its directory and its command, a no-op once done.
+const INSTALLS: &[(&str, &[&str])] = &[
+    ("virtx-py", &["uv", "sync"]),
+    ("virtx-node", &[NPM, "install", "--no-audit", "--no-fund"]),
 ];
 
-/// Whether `left`, in `dir`, is newer than each of `manifests`.
-fn installed(dir: &Path, left: &str, manifests: &[&str]) -> bool {
-    let modified = |name: &str| fs::metadata(dir.join(name)).and_then(|meta| meta.modified());
-    let Ok(left) = modified(left) else {
-        return false;
-    };
-    manifests
-        .iter()
-        .all(|manifest| modified(manifest).is_ok_and(|manifest| manifest <= left))
-}
-
-/// Install the packages of the binding in `dir`, if it is one: with `always` whatever is there,
-/// else only where they are older than its manifests.
-fn install_binding(dir: &str, always: bool) -> anyhow::Result<()> {
-    for (_, argv, left, manifests) in INSTALLS.iter().filter(|install| install.0 == dir) {
+/// Install the packages of the binding in `dir`, if it is one.
+fn install_binding(dir: &str) -> anyhow::Result<()> {
+    for (_, argv) in INSTALLS.iter().filter(|install| install.0 == dir) {
         let dir = root_path().join(dir);
-        if !always && installed(&dir, left, manifests) {
-            continue;
-        }
         eprintln!("xtask: {} in {}", argv.join(" "), dir.display());
         let status = Command::new(argv[0])
             .args(&argv[1..])
@@ -1797,13 +1775,17 @@ fn install_binding(dir: &str, always: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The crates whose own tests [`test_all`] runs first, each by itself.
-const TEST_CRATES: &[&str] = &[
-    "virtx-core",
-    "virtx-uvm",
-    "virtx-server-stdio",
-    "virtx-server-tcp",
-];
+/// The crates that link libkrun, compiled by one cargo: libkrun's cdylib name carries no feature
+/// hash, so a cargo per crate would rebuild libkrun before each.
+const MACHINE_CRATES: &[&str] = &["virtx-uvm", "virtx-server-stdio", "virtx-server-tcp"];
+
+/// The cargo arguments that name [`MACHINE_CRATES`].
+fn machine_crates_args() -> Vec<&'static str> {
+    MACHINE_CRATES
+        .iter()
+        .flat_map(|name| ["-p", name])
+        .collect()
+}
 
 /// The tests of the `virtx` command's signing in, `virtx-cli`'s though they are `virtx-core`'s:
 /// those against the fixture's provider are marked ignored, for the crate's own run to leave out.
@@ -1853,8 +1835,7 @@ fn sign_in_args(args: &[OsString]) -> Option<Vec<OsString>> {
 
 /// Each package's tests, the commands run in its directory against the fixture: virtx-rs's with
 /// cargo, over the library embedded and then opened, virtx-cli's with cargo, virtx-py's with
-/// pytest, and virtx-node's with Node's own runner. Those that open the library open
-/// [`test_library`], and the bindings run with what [`INSTALLS`] installs.
+/// pytest, and virtx-node's with Node's own runner; the bindings with what [`INSTALLS`] installs.
 const PACKAGES: &[(&str, &str, &[&[&str]])] = &[
     (
         "virtx-rs",
@@ -1888,19 +1869,22 @@ fn fixture_servers() -> Options {
 }
 
 /// Everything [`test_all`] compiles and installs, the same way, and nothing run: the crates'
-/// tests, the fixture's servers and abin (unless `XTASK_ABIN_BUILT` says abin comes built), the
-/// packages' cargo tests, the library the packages open, and the bindings' packages. It takes
-/// no guest kernel, so CI does it while the kernel is still being built elsewhere.
+/// tests, those of [`MACHINE_CRATES`] by one cargo, the agent's on Linux, the fixture's servers
+/// and abin (unless `XTASK_ABIN_BUILT` says abin comes built), the packages' cargo tests, the
+/// library the packages open, and the bindings' packages. It takes no guest kernel, so CI does it
+/// while the kernel is still being built elsewhere.
 fn compile_tests() -> anyhow::Result<()> {
     if let Some(why) = servers_unready()? {
         bail!("{why} -- `cargo xtask init` readies the servers");
     }
-    for &name in TEST_CRATES {
-        cargo_in_root(
-            &["test", "--no-run", "-p", name],
-            &format!("the tests of {name}"),
-        )?;
-    }
+    cargo_in_root(
+        &["test", "--no-run", "-p", CLIENT_PACKAGE],
+        &format!("the tests of {CLIENT_PACKAGE}"),
+    )?;
+    cargo_in_root(
+        &[&["test", "--no-run"][..], &machine_crates_args()].concat(),
+        &format!("the tests of {}", MACHINE_CRATES.join(", ")),
+    )?;
     // On Linux alone, as `test` runs them.
     if cfg!(target_os = "linux") {
         eprintln!("xtask: the tests of {GUEST_PACKAGE}");
@@ -1935,7 +1919,7 @@ fn compile_tests() -> anyhow::Result<()> {
             eprintln!("xtask: {dir}'s packages left out: no {} on PATH", argv[0]);
             continue;
         }
-        install_binding(dir, true)?;
+        install_binding(dir)?;
     }
     eprintln!("xtask: compiled, nothing run");
     Ok(())
@@ -1954,13 +1938,34 @@ fn test_all() -> anyhow::Result<()> {
         }
         None => None,
     };
-    for &name in TEST_CRATES {
-        let outcome = match &unready {
-            Some(why) if name != CLIENT_PACKAGE => Outcome::Skipped(why.clone()),
-            _ => match run_target(vec!["-p".into(), name.into()], true, &[]) {
-                Ok(()) => Outcome::Passed,
-                Err(e) => Outcome::Failed(format!("{e:#}")),
-            },
+    let client = match run_target(vec!["-p".into(), CLIENT_PACKAGE.into()], true, &[]) {
+        Ok(()) => Outcome::Passed,
+        Err(e) => Outcome::Failed(format!("{e:#}")),
+    };
+    outcomes.push((CLIENT_PACKAGE, client));
+    let machine_tests = match &unready {
+        Some(why) => Err(Outcome::Skipped(why.clone())),
+        None => {
+            let args: Vec<OsString> = machine_crates_args().into_iter().map(Into::into).collect();
+            compile_targets(&args, true).map_err(|e| Outcome::Failed(format!("{e:#}")))
+        }
+    };
+    for &name in MACHINE_CRATES {
+        let outcome = match &machine_tests {
+            Err(Outcome::Skipped(why)) => Outcome::Skipped(why.clone()),
+            Err(Outcome::Failed(why)) => Outcome::Failed(why.clone()),
+            Err(Outcome::Passed) => unreachable!("the tests compiled"),
+            Ok(targets) => {
+                let ours: Vec<(PathBuf, PathBuf)> = (targets.iter())
+                    .filter(|(_, manifest_dir)| manifest_dir.ends_with(name))
+                    .cloned()
+                    .collect();
+                match run_tests(&ours, &[], &[]) {
+                    Ok(()) if ours.is_empty() => Outcome::Failed("cargo built no tests".into()),
+                    Ok(()) => Outcome::Passed,
+                    Err(e) => Outcome::Failed(format!("{e:#}")),
+                }
+            }
         };
         outcomes.push((name, outcome));
     }
@@ -1977,17 +1982,17 @@ fn test_all() -> anyhow::Result<()> {
             Err(Outcome::Skipped(why)) => Outcome::Skipped(why.clone()),
             Err(Outcome::Failed(why)) => Outcome::Failed(why.clone()),
             Err(Outcome::Passed) => unreachable!("the fixture started"),
-            Ok(fixture) => match install_binding(dir, false) {
+            Ok(fixture) => match install_binding(dir) {
                 Err(e) => Outcome::Failed(format!("installing its packages: {e:#}")),
                 Ok(()) => {
                     let mut outcome = Outcome::Passed;
                     for argv in *commands {
-                        let ran = Command::new(argv[0])
+                        let mut command = Command::new(argv[0]);
+                        command
                             .args(&argv[1..])
                             .envs(fixture.vars())
-                            .env(LIBRARY_ENV, test_library())
-                            .current_dir(root_path().join(dir))
-                            .status();
+                            .current_dir(root_path().join(dir));
+                        let ran = command.status();
                         let why = match ran {
                             Ok(status) if status.success() => continue,
                             Ok(status) => format!("`{}` {status}", argv.join(" ")),

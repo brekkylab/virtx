@@ -20,10 +20,10 @@
 #   has ended.
 #
 #   and, in a full run:
-#   build + packages (macos-aarch64,      guest         server, library, packages and their smoke,
-#     windows-x86_64)                                   in one job; macOS' clippy too
-#   build (linux-x86_64, linux-aarch64)   guest         server and library, in manylinux_2_28
-#   packages (linux-x86_64, -aarch64)     its build     packages and their smoke, on ubuntu-22.04
+#   build (macos-aarch64,                 guest         server, library and packages; macOS' clippy
+#     windows-x86_64)                                   too
+#   build (linux-x86_64, linux-aarch64)   guest         server, library and packages, in manylinux_2_28
+#   packages (each platform)              its build     the packages' smoke (`packages.yml`)
 #
 # macOS has no lint or tests of its own: no runner here can boot a machine on it, and the
 # machines virtx is written on are Macs.
@@ -32,19 +32,16 @@
 # artifacts of the run: the guest parts, which only Linux can build (its kernel is built in a
 # Linux container, which neither macOS's runners, without Docker, nor Windows', with Windows
 # containers, can run; abin's C is cross-compiled by a shell script, and alib is built in a
-# container of each C library's image), and a Linux
-# platform's build, which is made in a container and tried on the runner below its glibc. A
-# cache only ever saves time here: a miss builds the thing again.
-#
-# For a release (`release: true`, with `full`) each platform's job also hands on what it packed
-# and tried -- its servers' archives, its npm package and its wheel -- for `release` to attach.
+# container of each C library's image), and each platform's build, `packages-<platform>`, which
+# `packages.yml` tries and `release` attaches. A cache only ever saves time here: a miss builds
+# the thing again.
 #
 # # Platforms
 #
 # | server         | client          | built on (see Runners)               | tried on         |
 # |----------------|-----------------|--------------------------------------|------------------|
-# | macos-aarch64  | darwin-arm64    | macos-15                             | the same job     |
-# | windows-x86_64 | win32-x64-msvc  | windows-2025                         | the same job     |
+# | macos-aarch64  | darwin-arm64    | macos-15                             | macos-15         |
+# | windows-x86_64 | win32-x64-msvc  | windows-2025                         | windows-2025     |
 # | linux-x86_64   | linux-x64-gnu   | ubuntu-26.04, in manylinux_2_28      | ubuntu-22.04     |
 # | linux-aarch64  | linux-arm64-gnu | ubuntu-26.04-arm, in manylinux_2_28  | ubuntu-22.04-arm |
 #
@@ -96,7 +93,7 @@ on:
         type: boolean
         default: false
       release:
-        description: Hand on what each platform packed, for a release to attach (with `full`)
+        description: A release's run, whose Windows tests compile from nothing, without sccache
         type: boolean
         default: false
     outputs:
@@ -138,7 +135,7 @@ jobs:
           node=$(jq -r .version virtx-node/package.json)
           wrong=""
           [ "$node" = "$version" ] || wrong="$wrong virtx-node/package.json=$node"
-          for f in virtx-rs/Cargo.toml virtx-py/pyproject.toml; do
+          for f in virtx-rs/Cargo.toml virtx-cabi/Cargo.toml virtx-py/pyproject.toml; do
             [ "$(toml "$f")" = "$version" ] || wrong="$wrong $f=$(toml "$f")"
           done
           # The `virtx-core` a published `virtx` depends on is the one released with it.
@@ -340,9 +337,11 @@ jobs:
           targets: x86_64-unknown-linux-musl
           components: clippy, rustfmt
 
+      # choco exits 0 even when it installs nothing.
       - name: Toolchain
         run: |
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
+          where.exe pkg-config.exe || { echo "::error::no pkg-config.exe: Chocolatey did not install it"; exit 1; }
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2.9.3
@@ -407,10 +406,9 @@ jobs:
       - run: cargo xtask clippy --gpu
 
   # macOS and Windows: `virtx-stdio` and `virtx-server-tcp`, each archived with the kernel, abin
-  # and alib; `libvirtx_core`; and the platform's packages packed from them and tried, all on one
-  # runner.
+  # and alib, and the platform's packages.
   build-native:
-    name: build + packages (${{ matrix.release }})
+    name: build (${{ matrix.release }})
     needs: [version, guest]
     if: inputs.full
     strategy:
@@ -422,13 +420,11 @@ jobs:
             hosted: macos-15
             arch: aarch64
             target: aarch64-apple-darwin
-            file: libvirtx_core.dylib
           - release: windows-x86_64
             platform: win32-x64-msvc
             hosted: windows-2025
             arch: x86_64
             target: x86_64-pc-windows-msvc
-            file: virtx_core.dll
     runs-on: ${{ matrix.hosted }}
     timeout-minutes: 120
     defaults:
@@ -438,9 +434,11 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       # Before any checkout: Windows' git converts to CRLF, and the GPU libraries' builds run
-      # shell scripts written against LF.
-      - name: Keep line endings as committed
-        run: git config --global core.autocrlf false
+      # shell scripts written against LF; the wheel reads its README through a link.
+      - name: Keep line endings and links as committed
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.symlinks true
 
       - uses: actions/checkout@v7.0.1
         with:
@@ -470,7 +468,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           where.exe pkg-config.exe 2>/dev/null || choco install -y --no-progress pkgconfiglite
-          where.exe pkg-config.exe
+          where.exe pkg-config.exe || { echo "::error::no pkg-config.exe: Chocolatey did not install it"; exit 1; }
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
 
       # The GPU libraries `cargo xtask` builds for the servers' `gpu` feature.
@@ -494,8 +492,7 @@ jobs:
 
       # macOS links the kernel.c the Linux job built; Windows takes the library as it is. alib
       # stays in `guest/`, named as virtx's cache to the server build and `archive`, which take
-      # it from `alib/` there -- to those two steps only: the packages' smoke keeps a cache of
-      # its own.
+      # it from `alib/` there.
       - name: Put the kernel, abin and alib in place
         run: |
           tar -xf guest-${{ matrix.arch }}.tar
@@ -553,47 +550,61 @@ jobs:
           cp -v "$CARGO_TARGET_DIR/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz" \
             "$CARGO_TARGET_DIR/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz" dist/release/
 
-      - name: libvirtx_core
+      - uses: ./.github/actions/pack
         env:
           # The oldest macOS the wheel's tag says it runs on.
           MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: |
-          cargo xtask build client --locked --target ${{ matrix.target }}
-          mkdir -p dist/lib/${{ matrix.platform }}
-          cp "$CARGO_TARGET_DIR/${{ matrix.target }}/release/${{ matrix.file }}" dist/lib/${{ matrix.platform }}/
-          ls -la dist/lib/${{ matrix.platform }}
-
-      # No DLL Windows does not ship: the C runtime is linked in (`.cargo/config.toml`).
-      - name: Library's DLL imports (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          f=dist/lib/${{ matrix.platform }}/${{ matrix.file }}
-          "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
-            | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
-            | sort -u | tee "$RUNNER_TEMP/imports.txt"
-          if grep -iE "load: (vcruntime|msvcp)" "$RUNNER_TEMP/imports.txt"; then
-            echo "::error::$f needs the DLLs above to load"; exit 1
-          fi
-
-      - uses: ./.github/actions/packages
         with:
-          version: ${{ needs.version.outputs.version }}
           platform: ${{ matrix.platform }}
+          target: ${{ matrix.target }}
+          out: dist/release
 
-      - if: inputs.release
-        uses: actions/upload-artifact@v7.0.2
+      # The library each package carries loads where its tag says: on macOS 11 with the system's
+      # libraries alone, and on Windows with no C runtime DLL (it is linked in, `.cargo/config.toml`).
+      # Nor does it name where it was built.
+      - name: The packages' libraries
+        run: |
+          lib="$RUNNER_TEMP/libs"
+          python -m zipfile -e dist/release/virtx-*.whl "$lib/wheel"
+          python -m tarfile --filter data -e dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz "$lib/npm"
+          for f in "$lib"/wheel/virtx/_virtx_core.* "$lib"/npm/package/*virtx_core.*; do
+            echo "$f:"
+            for p in "$HOME" "$GITHUB_WORKSPACE"; do
+              if [ "$RUNNER_OS" = Windows ]; then p=$(cygpath -w "$p"); fi
+              if grep -qaF "$p" "$f"; then
+                echo "::error::$f names $p, where it was built"; fail=1
+                LC_ALL=C grep -aoE '[[:print:]]{4,}' "$f" | grep -F "$p" | head -5
+              fi
+            done
+            if [ "$RUNNER_OS" = Windows ]; then
+              "/c/Program Files/LLVM/bin/llvm-readobj.exe" --coff-imports "$f" \
+                | awk '/^Import \{/{k="load"} /^DelayImport \{/{k="delay"} /Name: .*\.dll/{print "  " k ": " $2}' \
+                | sort -u | tee "$RUNNER_TEMP/imports.txt"
+              ! grep -iE "load: (vcruntime|msvcp)" "$RUNNER_TEMP/imports.txt" \
+                || { echo "::error::$f needs the DLLs above to load"; fail=1; }
+            else
+              minos=$(otool -l "$f" | awk '/LC_BUILD_VERSION/{b=1} b && /minos/{print $2; exit}')
+              links=$(otool -l "$f" | awk '/cmd LC_LOAD(_WEAK)?_DYLIB/{l=1} l && / name /{print $2; l=0}' | tr '\n' ' ')
+              echo "  macOS $minos; links $links"
+              [ "$minos" = 11.0 ] || { echo "::error::$f needs macOS $minos"; fail=1; }
+              for l in $links; do
+                case "$l" in
+                  /usr/lib/* | /System/Library/*) ;;
+                  *) echo "::error::$f links $l, which macOS does not ship"; fail=1 ;;
+                esac
+              done
+            fi
+          done
+          exit ${fail:-0}
+
+      - uses: actions/upload-artifact@v7.0.2
         with:
-          name: release-${{ matrix.platform }}
-          path: |
-            dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
-            dist/release/virtx-server-tcp-${{ matrix.release }}.tar.gz
-            dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
-            dist/release/*.whl
+          name: packages-${{ matrix.platform }}
+          path: dist/release/
           overwrite: true
           retention-days: 1
 
-  # Linux: `virtx-stdio`, `virtx-server-tcp` and `libvirtx_core`, built in manylinux_2_28 and handed to
-  # `packages-linux` to be packed and tried below the build runners' glibc.
+  # Linux: the same, built in manylinux_2_28.
   build-linux:
     name: build (${{ matrix.release }})
     needs: guest
@@ -671,13 +682,23 @@ jobs:
       - name: Servers
         run: VIRTX_HOME="$PWD/guest" cargo xtask build server-stdio server-tcp --locked
 
-      - name: libvirtx_core
-        run: cargo xtask build client --locked --target ${{ matrix.target }}
+      # In the image, for manylinux_2_28's glibc.
+      - uses: ./.github/actions/pack
+        with:
+          platform: ${{ matrix.platform }}
+          target: ${{ matrix.target }}
+          out: dist/release
 
-      # `__isoc23_*` is glibc 2.38's and comes in unversioned, so the version alone would not show it.
+      # The servers and the library each package carries. `__isoc23_*` is glibc 2.38's and comes
+      # in unversioned, so the version alone would not show it. A package's library names nowhere
+      # it was built either.
       - name: The glibc floor
         run: |
-          for f in target/release/virtx-stdio target/release/virtx-server-tcp target/${{ matrix.target }}/release/libvirtx_core.so; do
+          lib="$RUNNER_TEMP/libs"
+          mkdir -p "$lib/wheel" "$lib/npm"
+          python -m zipfile -e dist/release/*.whl "$lib/wheel"
+          tar -xzf dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz -C "$lib/npm"
+          for f in target/release/virtx-stdio target/release/virtx-server-tcp "$lib"/wheel/virtx/_virtx_core*.so "$lib"/npm/package/*virtx_core.*; do
             syms=$(objdump -T "$f")
             need=$(grep -oE 'GLIBC_2\.[0-9]+' <<<"$syms" | sort -t. -k2 -n -u | tail -1)
             libs=$(objdump -p "$f" | awk '/NEEDED/{print $2}' | tr '\n' ' ')
@@ -685,26 +706,57 @@ jobs:
             [ "${need#GLIBC_2.}" -le 28 ] || { echo "::error::$f needs $need, above glibc 2.28"; fail=1; }
             if grep -q __isoc23_ <<<"$syms"; then echo "::error::$f references __isoc23_*"; fail=1; fi
             if printf '%s' "$libs" | grep -qE 'libssl|libcrypto'; then echo "::error::$f links OpenSSL"; fail=1; fi
+            # A package's library, as auditwheel's manylinux policy holds it: glibc's libraries alone.
+            case "$f" in "$lib"/*)
+              for p in "$HOME" "$GITHUB_WORKSPACE"; do
+                if grep -qaF "$p" "$f"; then
+                  echo "::error::$f names $p, where it was built"; fail=1
+                  LC_ALL=C grep -aoE '[[:print:]]{4,}' "$f" | grep -F "$p" | head -5
+                fi
+              done
+              for n in $libs; do
+                case "$n" in
+                  libc.so.6|libm.so.6|libdl.so.2|libpthread.so.0|librt.so.1|libgcc_s.so.1|ld-linux-*) ;;
+                  *) echo "::error::$f links $n, which manylinux does not allow"; fail=1 ;;
+                esac
+              done ;;
+            esac
           done
           exit ${fail:-0}
 
-      - name: Hand the build on
+      - name: Servers' archives
         run: |
           VIRTX_HOME="$PWD/guest" cargo xtask archive --with-abin
-          mkdir -p built/dist/release built/dist/lib/${{ matrix.platform }}
           cp -v target/release/dist/virtx-stdio-${{ matrix.release }}.tar.gz \
-            target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz built/dist/release/
-          cp -v target/${{ matrix.target }}/release/libvirtx_core.so built/dist/lib/${{ matrix.platform }}/
+            target/release/dist/virtx-server-tcp-${{ matrix.release }}.tar.gz dist/release/
 
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: linux-${{ matrix.platform }}
-          path: built/
+          name: packages-${{ matrix.platform }}
+          path: dist/release/
           overwrite: true
           retention-days: 1
 
-  # A Linux platform's packages, packed from what `linux` built and tried on ubuntu-22.04,
-  # below the build runners' glibc.
+  # Two callers, so each waits only for its own builds; Linux's run below the build's glibc.
+  packages-native:
+    name: packages (${{ matrix.release }})
+    needs: [version, build-native]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: macos-aarch64
+            platform: darwin-arm64
+            runner: macos-15
+          - release: windows-x86_64
+            platform: win32-x64-msvc
+            runner: windows-2025
+    uses: ./.github/workflows/packages.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      platform: ${{ matrix.platform }}
+      runner: ${{ matrix.runner }}
+
   packages-linux:
     name: packages (${{ matrix.release }})
     needs: [version, build-linux]
@@ -718,31 +770,11 @@ jobs:
           - release: linux-aarch64
             platform: linux-arm64-gnu
             runner: ubuntu-22.04-arm
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/download-artifact@v8.0.2
-        with:
-          name: linux-${{ matrix.platform }}
-
-      - uses: ./.github/actions/packages
-        with:
-          version: ${{ needs.version.outputs.version }}
-          platform: ${{ matrix.platform }}
-
-      - if: inputs.release
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: release-${{ matrix.platform }}
-          path: |
-            dist/release/virtx-stdio-${{ matrix.release }}.tar.gz
-            dist/release/virtx-server-tcp-${{ matrix.release }}.tar.gz
-            dist/release/brekkylab-virtx-${{ matrix.platform }}-*.tgz
-            dist/release/*.whl
-          overwrite: true
-          retention-days: 1
+    uses: ./.github/workflows/packages.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      platform: ${{ matrix.platform }}
+      runner: ${{ matrix.runner }}
 
   # `cargo xtask test` with the servers built here: the crates' own tests, then the packages'
   # against the fixture, each booting machines, on KVM, which GitHub's Linux x86_64 runners have.

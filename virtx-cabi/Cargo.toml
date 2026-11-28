@@ -1,0 +1,18 @@
+[package]
+name = "virtx-cabi"
+version = "0.2.1"
+edition = "2024"
+description = "libvirtx_core: virtx-core's C ABI as a library for C, which the Python and Node packages open."
+license = "Apache-2.0"
+repository = "https://github.com/brekkylab/virtx"
+homepage = "https://virtx.sh"
+publish = false
+
+[lib]
+# A crate of its own: a cdylib's file name carries no hash of its features, so no other crate
+# builds one.
+name = "virtx_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+ffi ={ package = "virtx-core", path = "../virtx-core", features = ["ffi", "cli"] }

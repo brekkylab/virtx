@@ -1,0 +1,104 @@
+# The one place the client's packages are built: the wheel (setuptools-rust), the platform's npm
+# package (`virtx-node/build.js`, from the wheel's build) and `@brekkylab/virtx`. On Linux it runs
+# in the manylinux image, with its Python.
+name: pack
+description: Build this platform's wheel and npm package, and @brekkylab/virtx, into a directory.
+
+inputs:
+  platform:
+    description: The platform's npm name (darwin-arm64, linux-x64-gnu, ...)
+    required: true
+  target:
+    description: The Rust target triple the library is built for
+    required: true
+  out:
+    description: The directory the wheel and the package's tarball go into
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # npm 11: npm 10 runs `prepare` despite --ignore-scripts.
+    - uses: actions/setup-node@v7.1.0
+      with:
+        node-version: 24
+
+    - if: runner.os != 'Linux'
+      uses: actions/setup-python@v7.1.0
+      with:
+        python-version: "3.12"
+
+    # The paths a library's panics name, by where they are under cargo's and rustup's homes, the
+    # clone and its target directory, not where this runner keeps those (the last that matches
+    # wins). For the target alone, so the config's own flags still apply, and for both packages'
+    # builds, which share one.
+    - name: Source paths
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        flags=
+        for pair in "${CARGO_HOME:-$HOME/.cargo}=cargo" "${RUSTUP_HOME:-$HOME/.rustup}=rustup" \
+          "$PWD=virtx" "${CARGO_TARGET_DIR:-$PWD/target}=target"; do
+          from=${pair%=*}
+          if [ "$RUNNER_OS" = Windows ]; then from=$(cygpath -w "$from"); fi
+          flags="$flags --remap-path-prefix=$from=${pair##*=}"
+        done
+        echo "CARGO_TARGET_$(tr a-z- A-Z_ <<<"$TARGET")_RUSTFLAGS=${flags# }" >> "$GITHUB_ENV"
+        # aws-lc's C names its sources in `__FILE__`, which clang maps by aws-lc-sys's own
+        # `-ffile-prefix-map` and MSVC only trims, by this.
+        if [ "$RUNNER_OS" = Windows ]; then
+          echo "CFLAGS_$(tr - _ <<<"$TARGET")=/d1trimfile:$(cygpath -w "${CARGO_HOME:-$HOME/.cargo}")\\" >> "$GITHUB_ENV"
+        fi
+
+    - name: Wheel
+      shell: bash
+      env:
+        CARGO_BUILD_TARGET: ${{ inputs.target }}
+        OUT: ${{ inputs.out }}
+      run: |
+        mkdir -p "$OUT"
+        python -m pip install --quiet build~=1.6 wheel~=0.48
+        # setuptools takes the LICENSE beside pyproject.toml.
+        cp LICENSE virtx-py/
+        python -m build --wheel --outdir "$OUT" virtx-py
+        # The library is no CPython extension, so any Python 3 opens it. The platform is named,
+        # not the building Python's: setup-python's macOS one is universal2. On Linux, not
+        # auditwheel: `pipeline` checks the library links glibc alone.
+        case "$RUNNER_OS" in
+          Linux) plat=(--platform-tag "manylinux_2_28_$(uname -m)") ;;
+          macOS) plat=(--platform-tag "macosx_11_0_$(uname -m)") ;;
+          *) plat=() ;;
+        esac
+        python -m wheel tags --remove --python-tag py3 --abi-tag none "${plat[@]}" "$OUT"/virtx-*.whl
+
+    # From the wheel's build in `target/`: cargo compiles nothing again, and on macOS links again.
+    - name: npm package
+      shell: bash
+      working-directory: virtx-node
+      env:
+        PLATFORM: ${{ inputs.platform }}
+        CARGO_BUILD_TARGET: ${{ inputs.target }}
+        OUT: ${{ inputs.out }}
+      run: |
+        node build.js --release --package "$PLATFORM"
+        npm pack "./npm/$PLATFORM" --pack-destination "$GITHUB_WORKSPACE/$OUT"
+
+    # npm packs only what is in `virtx-node/`. Every platform's package is named here, as
+    # `index.js`'s `PLATFORM_PACKAGE` names them, not only the one built on this runner; here, not
+    # in package.json, whose lock could not name a version not yet published. What builds the
+    # package from a clone is left out.
+    - name: "@brekkylab/virtx"
+      shell: bash
+      working-directory: virtx-node
+      env:
+        OUT: ${{ inputs.out }}
+      run: |
+        cp ../README.md ../LICENSE .
+        name=$(node -p 'require("./package.json").name')
+        version=$(node -p 'require("./package.json").version')
+        for platform in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc; do
+          npm pkg set "optionalDependencies.$name-$platform=$version"
+        done
+        npm pkg delete scripts devDependencies
+        npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/$OUT"

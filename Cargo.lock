@@ -3983,6 +3983,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtx-cabi"
+version = "0.2.1"
+dependencies = [
+ "virtx-core",
+]
+
+[[package]]
 name = "virtx-cli"
 version = "0.2.1"
 dependencies = [

@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.25", "hatch-fancy-pypi-readme>=24"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=80", "setuptools-rust>=1.13"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "virtx"
 version = "0.2.1"
-# The repository's README, which lies outside this directory: hatchling reads it only as a hook's.
-dynamic = ["readme"]
+# The repository's README, linked here: setuptools reads nothing outside this directory.
+readme = "README.md"
 description = "microVM sandbox for AI agents: run commands in an isolated Linux VM from Python, with no Docker or daemon to set up."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -25,8 +25,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 # What crosses the C ABI is JSON, and the C ABI itself is reached with ctypes, so the package
-# depends on nothing and has no extension module of its own: a wheel is the Python files and
-# `libvirtx_core` for its platform, which the release copies into `src/virtx/` beside them.
+# depends on nothing: a wheel is the Python files and `libvirtx_core` for its platform.
 dependencies = []
 
 [project.urls]
@@ -36,10 +35,6 @@ Repository = "https://github.com/brekkylab/virtx"
 Issues = "https://github.com/brekkylab/virtx/issues"
 Changelog = "https://github.com/brekkylab/virtx/releases"
 
-[tool.hatch.metadata.hooks.fancy-pypi-readme]
-content-type = "text/markdown"
-fragments = [{ path = "../README.md" }]
-
 [project.scripts]
 # `libvirtx_core`'s `virtx` command, as the `virtx-cli` binary is.
 virtx = "virtx._cli:main"
@@ -47,11 +42,29 @@ virtx = "virtx._cli:main"
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff==0.17.5"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/virtx"]
-artifacts = ["src/virtx/libvirtx_core.*", "src/virtx/virtx_core.dll"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+virtx = ["py.typed"]
+
+# `libvirtx_core`, which `_library.py` opens with ctypes.
+[[tool.setuptools-rust.ext-modules]]
+target = "virtx._virtx_core"
+path = "../virtx-cabi/Cargo.toml"
+binding = "NoBinding"
+
+[tool.uv]
+# The editable install's library is rebuilt when the crates change.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "../Cargo.lock" },
+    { file = "../virtx-cabi/**" },
+    { file = "../virtx-core/Cargo.toml" },
+    { file = "../virtx-core/build.rs" },
+    { file = "../virtx-core/src/**/*.rs" },
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-

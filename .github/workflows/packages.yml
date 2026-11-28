@@ -1,0 +1,131 @@
+# Installs one platform's `packages-<platform>` as a user would, on a runner that did not build
+# it, and smoke-tests the packages and the server they fetch.
+name: packages
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version every manifest says
+        type: string
+        required: true
+      platform:
+        description: The platform's npm name (darwin-arm64, ...), which names its build's artifact
+        type: string
+        required: true
+      runner:
+        description: The runner the packages are tried on
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: packages-${{ inputs.platform }}
+          path: dist/release
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.12"
+
+      # A package missing would pass untried.
+      - name: What the build handed on
+        working-directory: dist/release
+        env:
+          VERSION: ${{ inputs.version }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          ls -la
+          count() { ls $1 2>/dev/null | wc -l | tr -d ' '; }
+          for f in "brekkylab-virtx-$VERSION.tgz" "brekkylab-virtx-$PLATFORM-$VERSION.tgz"; do
+            [ -f "$f" ] || { echo "::error::no $f"; exit 1; }
+          done
+          [ "$(count '*.tgz')" = 2 ] || { echo "::error::not one platform's npm package"; exit 1; }
+          [ "$(count '*.whl')" = 1 ] || { echo "::error::not one wheel"; exit 1; }
+          [ "$(count 'virtx-stdio-*.tar.gz')" = 1 ] || { echo "::error::not one stdio server archive"; exit 1; }
+          [ "$(count 'virtx-server-tcp-*.tar.gz')" = 1 ] || { echo "::error::not one HTTP server archive"; exit 1; }
+
+      # In Python: macOS has no sha256sum.
+      - name: SHA256SUMS
+        working-directory: dist/release
+        run: |
+          python - <<'EOF'
+          import hashlib, pathlib
+          lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}"
+                   for p in sorted(pathlib.Path(".").iterdir()) if p.is_file() and p.name != "SHA256SUMS"]
+          pathlib.Path("SHA256SUMS").write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          EOF
+
+      # An explicit --registry: publishConfig names npmjs. Its storage is under RUNNER_TEMP, so a
+      # kept checkout starts clean.
+      - name: Install from a local registry
+        run: |
+          npm install --global --silent verdaccio@^6.11.2
+          registry="$RUNNER_TEMP/verdaccio"
+          mkdir -p "$registry"
+          cp scripts/packages/verdaccio.yaml "$registry/"
+          cd "$registry"
+          verdaccio --config ./verdaccio.yaml --listen 4873 > "$RUNNER_TEMP/verdaccio.log" 2>&1 &
+          for _ in $(seq 120); do curl -sf http://localhost:4873/-/ping >/dev/null && break; sleep 1; done
+          curl -sf http://localhost:4873/-/ping >/dev/null || { echo "::error::the local registry did not start"; exit 1; }
+          token=$(curl -sf -X PUT -H 'content-type: application/json' \
+            -d '{"name":"ci","password":"ci-local-only"}' \
+            http://localhost:4873/-/user/org.couchdb.user:ci | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')
+          npmrc="$RUNNER_TEMP/npmrc"
+          printf 'registry=http://localhost:4873/\n//localhost:4873/:_authToken=%s\n' "$token" > "$npmrc"
+          # npm 11 publishes a pre-release only under a tag.
+          for tgz in "$GITHUB_WORKSPACE"/dist/release/*.tgz; do
+            npm publish "$tgz" --tag ci --userconfig "$npmrc" --registry http://localhost:4873/
+          done
+          mkdir -p "$RUNNER_TEMP/project" && cd "$RUNNER_TEMP/project"
+          echo '{"name":"project","private":true,"type":"module"}' > package.json
+          npm install @brekkylab/virtx --userconfig "$npmrc" --registry http://localhost:4873/
+          ls node_modules/@brekkylab
+
+      - name: Install the wheel pip picks
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          py="$RUNNER_TEMP/venv/bin/python"; [ -x "$py" ] || py="$RUNNER_TEMP/venv/Scripts/python.exe"
+          "$py" -m pip install --no-index --find-links dist/release virtx
+          "$py" -m pip show virtx
+          echo "SMOKE_PYTHON=$py" >> "$GITHUB_ENV"
+
+      - name: Smoke, Node
+        run: cd "$RUNNER_TEMP/project" && node "$GITHUB_WORKSPACE/scripts/packages/smoke/node.mjs"
+
+      - name: Smoke, Python
+        run: '"$SMOKE_PYTHON" "$GITHUB_WORKSPACE/scripts/packages/smoke/python.py"'
+
+      # Served as a release is: `<base>/v<version>/`.
+      - name: Smoke, server
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          releases="$RUNNER_TEMP/releases"
+          mkdir -p "$releases/v$VERSION"
+          cp dist/release/virtx-stdio-*.tar.gz dist/release/SHA256SUMS "$releases/v$VERSION/"
+          "$SMOKE_PYTHON" -m http.server 8765 --bind 127.0.0.1 --directory "$releases" > "$RUNNER_TEMP/http.log" 2>&1 &
+          for _ in $(seq 30); do curl -sf "http://127.0.0.1:8765/v$VERSION/SHA256SUMS" >/dev/null && break; sleep 1; done
+          VIRTX_DIST_URL=http://127.0.0.1:8765 VIRTX_HOME="$RUNNER_TEMP/virtx-home" \
+            "$SMOKE_PYTHON" "$GITHUB_WORKSPACE/scripts/packages/smoke/server.py"
+
+      - name: Logs
+        if: failure()
+        run: cat "$RUNNER_TEMP/verdaccio.log" "$RUNNER_TEMP/http.log" 2>/dev/null || true

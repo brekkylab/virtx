@@ -76,7 +76,7 @@ use std::time::{Duration, Instant};
 
 use krun::{
     BalloonDevice, BlockDevice, ConsoleDevice, DiskFormat, FreePageReportingMode, FsDevice,
-    FsOverlay, MmioDeviceManager, Payload, RngDevice, VmmBuilder,
+    FsOverlay, MmioDeviceManager, Payload, RngDevice, SyncMode, VmmBuilder,
 };
 use oci_spec::image::Config;
 use serde::{Deserialize, Serialize};
@@ -400,11 +400,14 @@ pub(super) fn boot(machine: MachineConfig, ctrlin: File, io: (File, File)) -> Re
             .map_err(|e| Error::io("opening the upper disk", e))?,
         None => None,
     };
-    let upper_device = match &opened {
+    let mut upper_device = match &opened {
         Some(disk) => BlockDevice::with_storage("vdb", upper_path, DiskFormat::Raw, disk.storage()),
         None => BlockDevice::new("vdb", upper_path, DiskFormat::Raw),
     }
     .map_err(|e| Error::vmm("attaching the upper disk", e))?;
+    if !crate::disks::disks().flushed(&machine.upper) {
+        upper_device.set_sync_mode(SyncMode::None);
+    }
     // Told its machine has booted, as its agent says it is ready.
     let booting = opened.clone();
     if let Some(disk) = opened {

@@ -317,6 +317,11 @@ impl Disks for Embedded {
         Ok(())
     }
 
+    fn flushed(&self, disk: &Path) -> bool {
+        let home = disk.parent().unwrap().parent().unwrap();
+        !home.join("unflushed").exists()
+    }
+
     fn forget(&self, disk: &Path) -> std::io::Result<()> {
         FORGOTTEN.lock().unwrap().push(disk.to_owned());
         let home = disk.parent().unwrap().parent().unwrap();
@@ -1930,6 +1935,23 @@ async fn a_sandbox_s_args_are_what_it_was_made_with_as_last_resized(home: Home) 
     close(Arc::clone(&known[0])).await;
 }
 
+/// A sandbox's disk has a write cache its guest flushes to the host's storage, unless its
+/// embedder says its copy that counts is kept elsewhere.
+async fn a_disk_its_embedder_keeps_elsewhere_has_no_write_cache_to_flush(home: Home) {
+    let write_cache = async || {
+        let sandbox = home.sandbox(&small(), None).await;
+        let (lines, code) = run(&sandbox, &["cat", "/sys/block/vdb/queue/write_cache"], None)
+            .await
+            .unwrap();
+        close(sandbox).await;
+        assert_eq!(code, 0, "{lines:?}");
+        lines.join("\n")
+    };
+    assert_eq!(write_cache().await, "write back");
+    std::fs::write(home.root.join("unflushed"), "").unwrap();
+    assert_eq!(write_cache().await, "write through");
+}
+
 async fn a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was(home: Home) {
     let mut args = small();
     args.disk_gib = Some(1);
@@ -3221,6 +3243,7 @@ fn main() -> ExitCode {
         a_sandbox_s_writable_layer_is_as_large_as_asked,
         a_resized_sandbox_boots_so_with_its_disk_grown_and_is_kept_so,
         a_sandbox_whose_disk_fails_to_grow_boots_on_it_as_it_was,
+        a_disk_its_embedder_keeps_elsewhere_has_no_write_cache_to_flush,
         a_sandbox_s_disk_is_made_whole_by_the_embedder_before_it_is_grown,
         a_sandbox_s_args_are_what_it_was_made_with_as_last_resized,
         a_sandbox_without_a_network_reaches_nothing_off_its_machine,

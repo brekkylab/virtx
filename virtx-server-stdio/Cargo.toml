@@ -27,6 +27,8 @@ tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "r
 virtx-core = { workspace = true, features = ["server"] }
 # What the endpoints answer from, and the machines they start.
 virtx-uvm = { workspace = true }
+# A preset's id.
+uuid = { version = "1", features = ["v4"] }
 # The endpoints, routed, the router served as the service: the ports endpoints are WebSockets,
 # opened over HTTP/2.
 axum = { version = "0.8", default-features = false, features = ["http2", "ws"] }

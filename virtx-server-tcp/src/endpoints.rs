@@ -32,11 +32,12 @@ use tokio::task::AbortHandle;
 use http_over_x::{described_type, from_body, sse::Log, sse::accepts_event_stream};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use virtx_core::{
-    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind,
-    ImagePruneOutput, ImagePullArgs, ImagePushArgs, ProjectCreateArgs, ProjectListOutputItem,
-    ProjectMemberListOutputItem, ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs,
-    SandboxExecItem, SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step,
-    VolumeCreateArgs, VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
+    DEFAULT_PROJECT, ImageBuildArgs, ImageJob, ImageJobEnd, ImageJobEntry, ImageJobKind, ImageName,
+    ImagePruneOutput, ImagePullArgs, ImagePushArgs, Preset, PresetPutArgs, PresetSandbox,
+    PresetSandboxCreateArgs, ProjectCreateArgs, ProjectListOutputItem, ProjectMemberListOutputItem,
+    ProjectMemberSetArgs, Role, SandboxCreateArgs, SandboxExecArgs, SandboxExecItem,
+    SandboxResizeArgs, SandboxSignalArgs, SandboxStdinArgs, Step, VolumeCreateArgs,
+    VolumeListOutputItem, VolumeMountCreateArgs, VolumeMountListOutputItem,
 };
 use virtx_uvm::backend::{Backing, Refusal, Stored, TagError};
 use virtx_uvm::{
@@ -47,10 +48,11 @@ use virtx_uvm::{
     UnknownSandbox, VolumeError, VolumeStore, based_on, build_step, park_after, signal_number,
 };
 
-use virtx_uvm::ProjectError;
+use virtx_uvm::{PresetStore, ProjectError, ProjectId};
 
 use crate::access::Access;
 use crate::access::Principal;
+use crate::grant::{Grant, Grants};
 use crate::project::Project;
 
 /// An image job, with the entries its log carries.
@@ -66,6 +68,8 @@ const IMAGE_JOB_KEPT: Duration = Duration::from_secs(60);
 /// What one project's requests reach: the stores, and the sandboxes and jobs its members made
 /// from them, which are theirs together.
 pub struct Home {
+    /// The project it is the home of.
+    project: ProjectId,
     images: ImageStore,
     registry: Arc<RegistryServer>,
     /// What its image jobs -- a pull, a push, a build's base -- connect to registries through.
@@ -77,6 +81,12 @@ pub struct Home {
     /// The home, under whose `sandbox/` the sandboxes keep their upper disks.
     pub root: PathBuf,
     volumes: VolumeStore,
+    presets: PresetStore,
+    /// The grants given out to the sandboxes made of its presets.
+    grants: Grants,
+    /// The preset and subject of each sandbox being made of a preset for one its access let
+    /// in, until it is made or is not: counted toward the preset's limits as those made are.
+    making: Mutex<Vec<(String, String)>>,
     /// The files of the volumes and sandboxes, over WebDAV.
     files: Files,
     /// This binary, as each machine is spawned.
@@ -99,19 +109,29 @@ pub struct Home {
 }
 
 impl Home {
-    /// The images in `images`, which `registry` answers for, and the volumes and the
-    /// sandboxes' upper disks under `root`, with each sandbox a server before it kept there
+    /// Project `project`'s home: the images in `images`, which `registry` answers for, and the
+    /// volumes, presets and grants and the sandboxes' upper disks under `root`, with each sandbox a server before it kept there
     /// known again, parked ([`Sandbox::kept`]). Its image jobs connect to registries on public
     /// addresses alone, through [`PublicRegistries`] with none named, unless the [`Access`] it
     /// is made for says otherwise ([`Access::through`]). `registry` is this home's alone: it is
     /// backed as the home is ([`backed_by`](Home::backed_by)). Blocking work, as knowing each
     /// sandbox again is.
     pub fn new(
+        project: ProjectId,
         images: ImageStore,
         registry: Arc<RegistryServer>,
         root: &Path,
     ) -> anyhow::Result<Home> {
         let volumes = VolumeStore::new(root)?;
+        let presets = PresetStore::new(root)?;
+        let naming = presets.clone();
+        registry.keeping(Arc::new(move |tag| {
+            let named = naming.steady().naming_tag(tag);
+            named
+                .ok()
+                .flatten()
+                .map(|name| format!("preset {name} names it"))
+        }));
         let vm: Vec<OsString> = vec![
             std::env::current_exe()?.into(),
             crate::serve::MACHINE_SUBCOMMAND.into(),
@@ -130,6 +150,7 @@ impl Home {
             .map(|sandbox| (sandbox.id().to_owned(), sandbox))
             .collect();
         Ok(Home {
+            project,
             images,
             registry,
             registries: Arc::new(PublicRegistries::default()),
@@ -138,6 +159,9 @@ impl Home {
             files: Files::new(volumes.clone()).backed_by(backing.clone()),
             root: root.to_owned(),
             volumes,
+            presets,
+            grants: Grants::new(root)?,
+            making: Mutex::default(),
             vm,
             sandboxes: Mutex::new(sandboxes),
             unknown: Mutex::new(unknown),
@@ -459,6 +483,165 @@ impl Home {
         });
     }
 
+    /// Remove sandbox `id`, its disk kept beyond this machine first, and take away its grants:
+    /// refused, and nothing removed, where the backend refuses; `404` for an id no sandbox here
+    /// has. Blocks until its machine has stopped.
+    pub async fn remove_sandbox(&self, id: &str) -> Result<(), Refused> {
+        let here = self.sandboxes.lock().unwrap().contains_key(id)
+            || self.unknown.lock().unwrap().contains_key(id);
+        if !here {
+            return Err(not_found(format!("no sandbox here has the id {id}")));
+        }
+        if let Some(backend) = self.backing.get() {
+            match backend.remove(Stored::Disk(id)).await {
+                Ok(()) | Err(Refusal::Unknown(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let grants = self.grants.clone();
+        let taken = id.to_owned();
+        tokio::task::spawn_blocking(move || grants.take_away(&taken))
+            .await?
+            .map_err(|e| internal(format!("taking away sandbox {id}'s grants: {e}")))?;
+        let unknown = self.unknown.lock().unwrap().remove(id);
+        if let Some(unknown) = unknown {
+            tokio::task::spawn_blocking(move || unknown.remove()).await?;
+            return Ok(());
+        }
+        let removed = self.sandboxes.lock().unwrap().remove(id);
+        let removed =
+            removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
+        tokio::task::spawn_blocking(move || removed.close()).await?;
+        Ok(())
+    }
+
+    /// Remove each sandbox here whose lifetime has passed, as its `DELETE` does.
+    pub async fn remove_expired(&self) {
+        let now = std::time::SystemTime::now();
+        let expired: Vec<String> = (self.sandboxes.lock().unwrap().values())
+            .filter(|sandbox| sandbox.expires().is_some_and(|at| at <= now))
+            .map(|sandbox| sandbox.id().to_owned())
+            .collect();
+        for id in expired {
+            if let Err(e) = self.remove_sandbox(&id).await {
+                eprintln!("removing sandbox {id}, its lifetime passed: {}", e.2);
+            }
+        }
+    }
+
+    /// The preset `named` names here, by its id or its name: `404` where none does.
+    pub(crate) async fn preset(&self, named: &str) -> Result<Preset, Refused> {
+        let (presets, looked) = (self.presets.clone(), named.to_owned());
+        tokio::task::spawn_blocking(move || presets.get(&looked))
+            .await??
+            .ok_or_else(|| not_found(format!("no preset here is {named}")))
+    }
+
+    /// A sandbox made of `preset` by `maker`, as `args` asks, and its grant: `400` for a name
+    /// asked by one its access let in, and `429` `quota` past its limits for one.
+    pub(crate) async fn make_of(
+        &self,
+        preset: &Preset,
+        maker: Maker,
+        args: PresetSandboxCreateArgs,
+    ) -> Result<PresetSandbox, Refused> {
+        let (subject, member) = match maker {
+            Maker::Member(user) => (user, true),
+            Maker::LetIn(subject) => (subject, false),
+        };
+        if !member && args.name.is_some() {
+            return Err(invalid(
+                "name: a sandbox's name is its project's members' to give",
+            ));
+        }
+        let _reserved = match member {
+            true => None,
+            false => Some(self.reserve(preset, &subject).await?),
+        };
+        let mut made = preset.sandbox.clone();
+        made.name = args.name;
+        let sandbox = self.create(made, None).await?;
+        let size = self.sandbox(&sandbox.id)?.args();
+        let max = preset.max.clone().unwrap_or_default();
+        let grant = Grant {
+            sandbox: sandbox.id.clone(),
+            preset: preset.id.clone(),
+            subject,
+            member,
+            max: SandboxResizeArgs {
+                vcpus: Some(max.vcpus.or(size.vcpus).unwrap_or(DEFAULT_VCPUS)),
+                memory_mib: Some(
+                    max.memory_mib
+                        .or(size.memory_mib)
+                        .unwrap_or(DEFAULT_MEMORY_MIB),
+                ),
+                disk_gib: Some(
+                    max.disk_gib
+                        .or(size.disk_gib)
+                        .unwrap_or(virtx_uvm::DEFAULT_DISK_GIB),
+                ),
+            },
+            origins: preset.origins.clone(),
+        };
+        let (grants, project) = (self.grants.clone(), self.project);
+        match tokio::task::spawn_blocking(move || grants.give(&project, &grant)).await? {
+            Ok(token) => Ok(PresetSandbox {
+                sandbox,
+                grant: Some(token),
+            }),
+            Err(e) => {
+                let _ = self.remove_sandbox(&sandbox.id).await;
+                Err(internal(format!("giving out the sandbox's grant: {e}")))
+            }
+        }
+    }
+
+    /// Room under `preset`'s limits for one more sandbox of `subject`'s, held until what this
+    /// answers drops: `429` `quota` where those alive and being made fill them.
+    async fn reserve(&self, preset: &Preset, subject: &str) -> Result<Reserved<'_>, Refused> {
+        let grants = self.grants.clone();
+        let given = tokio::task::spawn_blocking(move || grants.list())
+            .await?
+            .map_err(|e| internal(format!("reading the grants: {e}")))?;
+        let mut making = self.making.lock().unwrap();
+        let of = (given.iter())
+            .filter(|grant| !grant.member && grant.preset == preset.id)
+            .map(|grant| grant.subject.as_str())
+            .chain(
+                (making.iter())
+                    .filter(|(of, _)| *of == preset.id)
+                    .map(|(_, subject)| subject.as_str()),
+            );
+        let (all, theirs) = of.fold((0, 0), |(all, theirs), of| {
+            (all + 1, theirs + u32::from(of == subject))
+        });
+        let limits = preset.limits.unwrap_or_default();
+        if limits.sandboxes.is_some_and(|most| all >= most)
+            || limits.per_subject.is_some_and(|most| theirs >= most)
+        {
+            return Err(refused(
+                StatusCode::TOO_MANY_REQUESTS,
+                "quota",
+                format!(
+                    "preset {} has as many sandboxes as its limits let it",
+                    preset.name
+                ),
+            )
+            .with("reason", "sandboxes"));
+        }
+        let held = (preset.id.clone(), subject.to_owned());
+        making.push(held.clone());
+        Ok(Reserved(self, held))
+    }
+
+    /// The grant `token` is, if it is one of this home's.
+    pub(crate) async fn grant(&self, token: &str) -> Result<Option<Grant>, Refused> {
+        let (grants, token) = (self.grants.clone(), token.to_owned());
+        tokio::task::spawn_blocking(move || grants.find(&token))
+            .await?
+            .map_err(|e| internal(format!("reading a grant: {e}")))
+    }
+
     /// The sandbox `id`: refused `409`, `ended`, for one not known again, which takes only its
     /// `DELETE`.
     fn sandbox(&self, id: &str) -> Result<Arc<Sandbox>, Refused> {
@@ -541,6 +724,28 @@ impl Drop for Naming<'_> {
             self.0.naming.lock().unwrap().remove(name);
         }
     }
+}
+
+/// Room for a sandbox being made of a preset, given back as this drops: once its grant is
+/// given out, which counts it from there, or once its making failed.
+struct Reserved<'a>(&'a Home, (String, String));
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        let mut making = self.0.making.lock().unwrap();
+        if let Some(at) = making.iter().position(|held| *held == self.1) {
+            making.swap_remove(at);
+        }
+    }
+}
+
+/// Who makes a sandbox of a preset, as [`Access::maker`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Maker {
+    /// A member of its project, by their user.
+    Member(String),
+    /// One its access let in, by their subject.
+    LetIn(String),
 }
 
 /// The id a sandbox is made under, chosen by a server built on this one rather than picked
@@ -652,6 +857,11 @@ pub fn router() -> Router {
         )
         .route("/sandboxes/{id}/jobs/{job}/stdin", post(sandbox_job_stdin))
         .route("/sandboxes/{id}/jobs/{job}/events", get(sandbox_job_events))
+        .route("/presets/", get(preset_list))
+        .route(
+            "/presets/{preset}",
+            get(preset_get).put(preset_put).delete(preset_remove),
+        )
         .method_not_allowed_fallback(async || {
             refused(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -660,6 +870,13 @@ pub fn router() -> Router {
             )
         })
         .fallback(async || not_found("no endpoint here"))
+}
+
+/// Making a sandbox of a preset, as its members or whom its access lets in: answered from the
+/// [`Access`] in its extensions, which reaches the preset's home by its id with no member's
+/// token.
+pub fn preset_sandboxes() -> Router {
+    Router::new().route("/presets/{preset}/sandboxes/", post(preset_sandbox_create))
 }
 
 /// The projects, and their members, each request answered as its sender, from the [`Access`] in
@@ -1305,6 +1522,16 @@ async fn volume_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(name): Segments<String>,
 ) -> Answer {
+    let presets = home.presets.clone();
+    let looked = name.clone();
+    let naming = tokio::task::spawn_blocking(move || presets.steady().naming_volume(&looked));
+    if let Some(preset) = naming.await?? {
+        return Err(refused(
+            StatusCode::CONFLICT,
+            "in_use",
+            format!("volume {name} is in use: preset {preset} mounts it"),
+        ));
+    }
     let Some(backend) = home.backing.get() else {
         home.volumes.remove(&name)?;
         return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1410,7 +1637,13 @@ async fn sandbox_files(
 }
 
 /// Every sandbox; with `?name=`, the one named so, if any.
-async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): RawQuery) -> Answer {
+/// Every sandbox; with `?name=`, the one named so, if any; to a grant, its own alone.
+async fn sandbox_list(
+    Extension(home): Extension<Arc<Home>>,
+    grant: Option<Extension<Grant>>,
+    RawQuery(query): RawQuery,
+) -> Answer {
+    let reached = |id: &str| grant.as_ref().is_none_or(|grant| grant.sandbox == id);
     let name = query.as_deref().and_then(|query| {
         form_urlencoded::parse(query.as_bytes())
             .find(|(key, _)| key == "name")
@@ -1420,6 +1653,7 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
     let mut listed: Vec<_> = sandboxes
         .values()
         .filter(|held| name.is_none() || held.name() == name.as_deref())
+        .filter(|held| reached(held.id()))
         .map(|held| held.answer())
         .collect();
     let unknown = home.unknown.lock().unwrap();
@@ -1427,6 +1661,7 @@ async fn sandbox_list(Extension(home): Extension<Arc<Home>>, RawQuery(query): Ra
         unknown
             .values()
             .filter(|kept| name.is_none() || kept.name() == name.as_deref())
+            .filter(|kept| reached(kept.id()))
             .map(UnknownSandbox::answer),
     );
     Ok(json(&listed))
@@ -1454,38 +1689,29 @@ async fn sandbox_get(
 /// grown, never shrunk, as its VM next boots, without parking it.
 async fn sandbox_resize(
     Extension(home): Extension<Arc<Home>>,
+    grant: Option<Extension<Grant>>,
     Segments(id): Segments<String>,
     Whole(request): Whole,
 ) -> Answer {
     let args: SandboxResizeArgs = body(&request)?;
+    if let Some(Extension(grant)) = grant {
+        let past =
+            |asked: Option<u32>, max: Option<u32>| asked.zip(max).is_some_and(|(a, m)| a > m);
+        if past(args.vcpus.map(u32::from), grant.max.vcpus.map(u32::from))
+            || past(args.memory_mib, grant.max.memory_mib)
+            || past(args.disk_gib, grant.max.disk_gib)
+        {
+            return Err(forbidden("past the largest its grant may resize it to"));
+        }
+    }
     Ok(json(&home.sandbox(&id)?.resize(&args).await?))
 }
 
-/// Remove it, and its disk kept beyond this machine first: refused, and nothing removed, where
-/// the backend refuses.
 async fn sandbox_remove(
     Extension(home): Extension<Arc<Home>>,
     Segments(id): Segments<String>,
 ) -> Answer {
-    let here = home.sandboxes.lock().unwrap().contains_key(&id)
-        || home.unknown.lock().unwrap().contains_key(&id);
-    if !here {
-        return Err(not_found(format!("no sandbox here has the id {id}")));
-    }
-    if let Some(backend) = home.backing.get() {
-        match backend.remove(Stored::Disk(&id)).await {
-            Ok(()) | Err(Refusal::Unknown(_)) => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let unknown = home.unknown.lock().unwrap().remove(&id);
-    if let Some(unknown) = unknown {
-        tokio::task::spawn_blocking(move || unknown.remove()).await?;
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
-    let removed = home.sandboxes.lock().unwrap().remove(&id);
-    let removed = removed.ok_or_else(|| not_found(format!("no sandbox here has the id {id}")))?;
-    tokio::task::spawn_blocking(move || removed.close()).await?;
+    home.remove_sandbox(&id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1615,6 +1841,117 @@ async fn sandbox_job_events(
 }
 
 /// A name for what a client named nothing: eight hex digits for which `taken` is false.
+async fn preset_list(Extension(home): Extension<Arc<Home>>) -> Answer {
+    let presets = home.presets.clone();
+    Ok(json(
+        &tokio::task::spawn_blocking(move || presets.list()).await??,
+    ))
+}
+
+/// The preset `{preset}` names here, by its id or its name.
+async fn preset_get(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(named): Segments<String>,
+) -> Answer {
+    Ok(json(&home.preset(&named).await?))
+}
+
+/// `PUT /presets/{name}`: refused for an image or a volume not here, as a sandbox's `POST`
+/// is, before it is kept.
+async fn preset_put(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(name): Segments<String>,
+    Whole(request): Whole,
+) -> Answer {
+    let args: PresetPutArgs = body(&request)?;
+    let backend = home.backing.get();
+    match &args.sandbox.image {
+        ImageName::Tag { tag } => {
+            let reference = reference(tag)?;
+            if let Some(backend) = backend {
+                backend
+                    .want(virtx_uvm::backend::Wanted::Tag(&reference))
+                    .await
+                    .map_err(wanted)?;
+            }
+            if home.images.get_tag(&reference)?.is_none() {
+                return Err(not_found(format!(
+                    "no image here is tagged {tag}: pull it first"
+                )));
+            }
+        }
+        ImageName::Digest { digest } => {
+            let digest: Digest = digest
+                .parse()
+                .map_err(|e| invalid(format!("sandbox: image: {digest}: {e}")))?;
+            if let Some(backend) = backend {
+                backend
+                    .want(virtx_uvm::backend::Wanted::Image(&digest))
+                    .await
+                    .map_err(wanted)?;
+            }
+            let digest = home.images.get_image_origin(&digest)?.unwrap_or(digest);
+            if home.images.get_image(&digest)?.is_none() {
+                return Err(not_found(format!("no image here is {digest}")));
+            }
+        }
+    }
+    for asked in &args.sandbox.volumes {
+        bring_up(&home, &asked.volume).await?;
+        home.volumes.open(&asked.volume)?;
+    }
+    let (presets, vm, project) = (home.presets.clone(), home.vm.clone(), home.project);
+    let put = move || {
+        presets.put(&name, args, &vm, || {
+            format!("{project}.{}", uuid::Uuid::new_v4().simple())
+        })
+    };
+    let (preset, made) = tokio::task::spawn_blocking(put).await??;
+    Ok(match made {
+        true => created(format!("/presets/{}", preset.id), &preset),
+        false => json(&preset),
+    })
+}
+
+/// What a backend failing to bring an image here is answered: with no word of why, which can
+/// name what the backend runs on, and logged.
+fn wanted(e: anyhow::Error) -> Refused {
+    eprintln!("bringing an image from where it is kept: {e:#}");
+    internal("the image could not be brought from where it is kept")
+}
+
+/// `DELETE /presets/{preset}`: the sandboxes made of it stay, with their grants.
+async fn preset_remove(
+    Extension(home): Extension<Arc<Home>>,
+    Segments(named): Segments<String>,
+) -> Answer {
+    let presets = home.presets.clone();
+    let looked = named.clone();
+    match tokio::task::spawn_blocking(move || presets.remove(&looked)).await?? {
+        true => Ok(StatusCode::NO_CONTENT.into_response()),
+        false => Err(not_found(format!("no preset here is {named}"))),
+    }
+}
+
+/// `POST /presets/{preset}/sandboxes/`, as its member or one its access lets in, as
+/// [`Access::maker`] says: the sandbox, and its grant.
+async fn preset_sandbox_create(
+    Extension(access): Extension<Arc<Access>>,
+    connected: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    Segments(named): Segments<String>,
+    headers: HeaderMap,
+    Whole(request): Whole,
+) -> Answer {
+    let from = connected.map(|Extension(connected)| connected.0.ip());
+    let (home, preset, maker) = access.maker(&headers, &named, from).await?;
+    let args: PresetSandboxCreateArgs = body(&request)?;
+    let answer = home.make_of(&preset, maker, args).await?;
+    Ok(created(
+        format!("/sandboxes/{}", answer.sandbox.id),
+        &answer,
+    ))
+}
+
 fn pick(taken: impl Fn(&str) -> bool) -> String {
     loop {
         let name = format!("{:08x}", RandomState::new().build_hasher().finish() as u32);
@@ -2179,7 +2516,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let images = ImageStore::new(root.join("images")).unwrap();
         let registry = Arc::new(RegistryServer::new(images.clone(), "/images").unwrap());
-        let home = Arc::new(Home::new(images, registry, &root).unwrap());
+        let home = Arc::new(Home::new(ProjectId::new(), images, registry, &root).unwrap());
         let started = image_job(
             &home,
             ImageJobKind::Build,

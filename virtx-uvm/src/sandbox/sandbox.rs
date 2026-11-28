@@ -228,6 +228,8 @@ pub struct Sandbox {
     watching: AtomicBool,
     /// When it was made, or a job in it or an [`Activity`] on it last ended.
     used: Mutex<Instant>,
+    /// When its server deletes it, for one made with a `lifetime`.
+    expires: Option<SystemTime>,
     /// How many [`Activity`]s are under way.
     active: AtomicUsize,
     /// What a conditional write to its files holds as it lands (see [`Files`](crate::Files)).
@@ -235,52 +237,16 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// Boot a sandbox as `args` asks, of what `images` and `volumes` hold, writing over its
-    /// image to an upper disk it makes under `root`, by running `vm` as its machine's process
-    /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
-    /// nothing for `park_after`.
-    ///
-    /// It is made under `id` where one is given -- letters, digits, `_` and `-`, the first a
-    /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
-    /// under `root` has, has made or keeps; under an id it picks otherwise.
-    ///
-    /// `kept`, it is kept past this process: its record is written once it has booted, and a
-    /// making cut short before then leaves nothing. Otherwise it goes with this process.
-    ///
-    /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
-    /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
-    /// [made](crate::StorageBackend::made) there before its machine first boots -- and removed
-    /// from there again where its making fails after.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create(
-        images: &ImageStore,
-        root: &Path,
-        volumes: &VolumeStore,
-        args: &SandboxCreateArgs,
-        vm: Vec<OsString>,
-        park_after: Option<Duration>,
-        id: Option<&str>,
-        kept: bool,
-        backing: &Backing,
-    ) -> Result<Arc<Sandbox>, Error> {
-        // What can be refused without starting anything, first.
+    /// Refuse `args` where a sandbox cannot be made of them whatever is here: what
+    /// [`create`](Sandbox::create) refuses before it starts anything, but for its image and
+    /// volumes, which it looks for. `vm` is the program its machines run as, beside which its
+    /// abins are.
+    pub fn check(args: &SandboxCreateArgs, vm: &[OsString]) -> Result<(), Error> {
         if let Some(name) = args.name.as_deref().filter(|name| !crate::is_name(name)) {
             return Err(Error::Invalid(format!(
                 "name: {name:?} is not a sandbox's name: letters, digits, '.', '_' and '-', not \
                  starting with '.' or '-', 128 at most"
             )));
-        }
-        if let Some(id) = id {
-            if !is_id(id) {
-                return Err(Error::Invalid(format!(
-                    "id: {id:?} is not a sandbox's id: letters, digits, '_' and '-', the first a \
-                     letter or digit, 64 at most"
-                )));
-            }
-            let dir = root.join(SANDBOX);
-            if dir.join(format!("{id}.ext4")).exists() || Record::path(&dir, id).exists() {
-                return Err(exists(id));
-            }
         }
         let mut given = HashSet::new();
         if let Some(spec) =
@@ -316,6 +282,16 @@ impl Sandbox {
             )));
         }
         check_size(args.vcpus, args.memory_mib, args.disk_gib)?;
+        if let Some(seconds) = args.lifetime
+            && (seconds == 0
+                || SystemTime::now()
+                    .checked_add(Duration::from_secs(seconds))
+                    .is_none())
+        {
+            return Err(Error::Invalid(format!(
+                "lifetime: {seconds} is no time a sandbox lives"
+            )));
+        }
         if args.gpu_memory_mib == Some(0) {
             return Err(Error::Invalid(
                 "gpu_memory_mib: 0 is a machine nothing runs on".into(),
@@ -354,6 +330,53 @@ impl Sandbox {
                 )));
             }
         }
+
+        Ok(())
+    }
+
+    /// Boot a sandbox as `args` asks, of what `images` and `volumes` hold, writing over its
+    /// image to an upper disk it makes under `root`, by running `vm` as its machine's process
+    /// (see [`Machine::start`]). Its machine is stopped once the sandbox has been in use by
+    /// nothing for `park_after`.
+    ///
+    /// It is made under `id` where one is given -- letters, digits, `_` and `-`, the first a
+    /// letter or digit, 64 at most -- and refused [`Exists`](Error::Exists) for one a sandbox
+    /// under `root` has, has made or keeps; under an id it picks otherwise.
+    ///
+    /// `kept`, it is kept past this process: its record is written once it has booted, and a
+    /// making cut short before then leaves nothing. Otherwise it goes with this process.
+    ///
+    /// Where `backing` has a backend, its image is [wanted](crate::StorageBackend::want) and its
+    /// volumes [brought up](crate::StorageBackend::bring_up) before it is made, and its disk is
+    /// [made](crate::StorageBackend::made) there before its machine first boots -- and removed
+    /// from there again where its making fails after.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create(
+        images: &ImageStore,
+        root: &Path,
+        volumes: &VolumeStore,
+        args: &SandboxCreateArgs,
+        vm: Vec<OsString>,
+        park_after: Option<Duration>,
+        id: Option<&str>,
+        kept: bool,
+        backing: &Backing,
+    ) -> Result<Arc<Sandbox>, Error> {
+        if let Some(id) = id {
+            if !is_id(id) {
+                return Err(Error::Invalid(format!(
+                    "id: {id:?} is not a sandbox's id: letters, digits, '_' and '-', the first a \
+                     letter or digit, 64 at most"
+                )));
+            }
+            let dir = root.join(SANDBOX);
+            if dir.join(format!("{id}.ext4")).exists() || Record::path(&dir, id).exists() {
+                return Err(exists(id));
+            }
+        }
+        Sandbox::check(args, &vm)?;
+        let expires =
+            (args.lifetime).map(|seconds| SystemTime::now() + Duration::from_secs(seconds));
 
         // Room for its machine before anything of it is made, held for its first boot.
         let room = crate::admit(&machine_spec(args))?;
@@ -412,7 +435,7 @@ impl Sandbox {
                 }
                 None => None,
             };
-            Sandbox::build(
+            let mut sandbox = Sandbox::build(
                 &images,
                 &root,
                 &volumes,
@@ -422,7 +445,9 @@ impl Sandbox {
                 park_after,
                 (upper, None),
                 backed,
-            )
+            )?;
+            sandbox.expires = expires;
+            Ok::<_, Error>(sandbox)
         };
         let sandbox = Arc::new(tokio::task::spawn_blocking(built).await??);
         if let Some(backend) = backend {
@@ -440,6 +465,7 @@ impl Sandbox {
                     args,
                     exited: false,
                     jobs: Vec::new(),
+                    expires: expires.map(unix_seconds),
                 }),
                 false => Ok(()),
             }
@@ -536,6 +562,8 @@ impl Sandbox {
         };
         let disk_gib = args.disk_gib.unwrap_or(DEFAULT_DISK_GIB);
         let exited = record.as_ref().is_some_and(|record| record.exited);
+        let expires = (record.as_ref().and_then(|record| record.expires))
+            .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds));
         let jobs = record.iter().flat_map(|record| record.jobs.iter().cloned());
         let jobs = jobs.map(|job| (job.id.clone(), Job::kept(job))).collect();
         Ok(Sandbox {
@@ -585,6 +613,7 @@ impl Sandbox {
             park_after,
             watching: AtomicBool::new(false),
             used: Mutex::new(Instant::now()),
+            expires,
             active: AtomicUsize::new(0),
             writing: Arc::default(),
         })
@@ -604,6 +633,12 @@ impl Sandbox {
     /// `disk_gib` as it was last [resized](Sandbox::resize) to, where it was.
     pub fn args(&self) -> SandboxCreateArgs {
         self.args.lock().unwrap().clone()
+    }
+
+    /// When its server is to delete it, for one made with a `lifetime`: as it is made, or as
+    /// its record kept it.
+    pub fn expires(&self) -> Option<SystemTime> {
+        self.expires
     }
 
     /// When its machine came up, while it is up; `None` while it is parked or has exited.
@@ -1701,6 +1736,12 @@ impl Unknown {
     pub fn remove(mut self) {
         self.upper.kept = false;
     }
+}
+
+/// `at` as seconds since the Unix epoch, as a record keeps it.
+fn unix_seconds(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Refuse a size no machine is given: `0` of anything, memory under what a machine boots in,

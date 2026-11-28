@@ -27,6 +27,7 @@ mod image;
 mod log_entry;
 #[cfg(feature = "client")]
 mod port_forward;
+mod preset;
 mod project;
 mod sandbox;
 mod volume;
@@ -46,6 +47,7 @@ pub use image::*;
 pub use log_entry::{LogEntry, UnknownEntry};
 #[cfg(feature = "client")]
 pub use port_forward::{ForwardError, PortForwarder, PortForwarderArgs};
+pub use preset::*;
 pub use project::*;
 pub use sandbox::*;
 pub use volume::*;

@@ -11,6 +11,8 @@ A server offers several endpoints, and each speaks its own protocol:
 
 | Endpoint | Protocol | For |
 | --- | --- | --- |
+| [`/projects/`](#projects) | HTTP | Project CRUD |
+| [`/projects/{name}/members/`](#projects) | HTTP | Project member CRUD |
 | [`/images/oci/v2/`](#images) | OCI Distribution | Images: manifests, blobs and tags |
 | [`/images/jobs/`](#image-jobs) | HTTP | Image jobs: read, cancel |
 | [`/images/jobs/pull/`](#image-jobs) | HTTP | Starting an image pull from another registry |
@@ -18,8 +20,6 @@ A server offers several endpoints, and each speaks its own protocol:
 | [`/images/jobs/build/`](#image-jobs) | HTTP | Starting an image build |
 | [`/images/jobs/{id}/events`](#events) | Event stream | An image job's log and end |
 | [`/images/prune`](#image-jobs) | HTTP | Deleting the images nothing uses |
-| [`/projects/`](#projects) | HTTP | Project CRUD |
-| [`/projects/{name}/members/`](#projects) | HTTP | Project member CRUD |
 | [`/volumes/`](#volumes) | HTTP | Volume CRUD |
 | [`/volumes/{name}/mounts/`](#mounts) | HTTP | Volume mount CRUD |
 | [`/volumes/{name}/files/`](#files) | WebDAV | The files in a volume |
@@ -32,6 +32,8 @@ A server offers several endpoints, and each speaks its own protocol:
 | [`/sandboxes/{id}/jobs/{job}/stdin`](#sandbox-jobs) | HTTP | Writing to a process's stdin |
 | [`/sandboxes/{id}/jobs/{job}/signal`](#sandbox-jobs) | HTTP | Sending a signal to a process |
 | [`/sandboxes/{id}/jobs/{job}/events`](#events) | Event stream | A process's output and end |
+| [`/presets/`](#presets) | HTTP | Preset CRUD |
+| [`/presets/{preset}/sandboxes/`](#presets) | HTTP | Making a sandbox as a preset says, by its members or whom its [access](#access) lets in |
 
 Everything is made, read and removed with plain HTTP, each request standing alone.
 What runs for a while, such as a build or a process, is a [job](#jobs): started with a `POST`, read with a `GET`, cancelled with a `DELETE`, and its log read as an event stream by any client allowed to, from where it left off.
@@ -57,6 +59,7 @@ A server on the local machine SHOULD bind to `127.0.0.1`, not to every interface
 
 A web page could reach a server through DNS rebinding, so the server MUST check the `Origin` header of every request, the opening of a [port's](#ports) WebSocket included.
 It MUST answer `403 Forbidden` to a request whose `Origin` names an origin it does not allow.
+A [preset's](#presets) `origins` are allowed beside the server's own, for the requests that make a sandbox of it and those its [grant](#grants) sends.
 A request with no `Origin`, from any non-browser client, is not refused for that.
 
 ### Stdio
@@ -79,6 +82,8 @@ How the client obtains the token is outside this protocol, but a server MAY say 
 
 - `oidc`, if the tokens are an OpenID Connect provider's, is `{"issuer": "...", "client_id": "..."}`: the provider, and the public client to sign in to it as. The token is then the ID token the provider issues that client.
 - Without `oidc`, the server names no way to sign in: it takes tokens given out some other way, or none.
+
+A server that takes credentials also takes, sent the same way, the tokens a [preset's `access`](#access) lets in to make a sandbox of it, and the [grant](#grants) of each sandbox so made: a token of its own, which reaches that sandbox alone.
 
 A server answers `401 Unauthorized` to a request without valid credentials, and `403 Forbidden` to one whose credentials do not allow it.
 
@@ -275,7 +280,7 @@ Its files are reached at [`/volumes/{name}/files/`](#files).
 
 Without `name` the server picks one, and a name in use is refused with `409`, `exists`.
 `size` is the bytes the volume's files take on the server.
-`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`.
+`DELETE` deletes everything in it, and refuses a volume a sandbox mounts with `409`, `in_use`, from the sandbox's `POST` until its `DELETE`, and one a [preset](#presets) names, from its `PUT` until its `DELETE`.
 
 #### Mounts
 
@@ -309,7 +314,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 | --- | --- | --- |
 | `GET /sandboxes/` | | `200`, array of `{id, name?, image, running, ports?, abins?, error?}` |
 | `GET /sandboxes/?name={name}` | | `200`, array of the one named so, or of none |
-| `POST /sandboxes/` | `{image, name?, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?}` | `201`, `{id, name?, image, running, ports?, abins?}` |
+| `POST /sandboxes/` | `{image, name?, network?, ports?, vcpus?, memory_mib?, disk_gib?, gpu?, gpu_memory_mib?, volumes?, abins?, lifetime?}` | `201`, `{id, name?, image, running, ports?, abins?}` |
 | `GET /sandboxes/{id}` | | `200`, `{id, name?, image, running, ports?, abins?, error?}` |
 | `PATCH /sandboxes/{id}` | `{vcpus?, memory_mib?, disk_gib?}` | `200`, `{vcpus, memory_mib, disk_gib, up}` |
 | `DELETE /sandboxes/{id}` | | `204` |
@@ -320,6 +325,7 @@ A sandbox is a VM booted from an image, with [volumes](#volumes) mounted into it
 - `vcpus`, `memory_mib`, `disk_gib`, `gpu` and `gpu_memory_mib` each leave it to the server without one. The server gives exactly what is asked or refuses; `0` for a number is refused, and so is a `memory_mib` under the least a machine boots in, which the refusal names. `disk_gib` is how much it may write over its image, in GiB, at most `1024`; what it wrote there goes with it. `gpu` `false` forbids a GPU on a server that would attach one, and `gpu_memory_mib` is refused without one.
 - `volumes` are mounted into it in order, so a later path may be inside an earlier one, each as `{volume, path, readonly?}`: the volume by name, where it appears to processes, absolute, and whether a write in it fails. A path is read with repeated and trailing `/` dropped, so `//data/` is `/data`; one that is not absolute, has a `.` or `..` segment, or is `/`, and two at one path so read, are refused with `400`.
 - `abins` are VirtX's own programs it gets, by name, at `/abin`, which goes in front of its `PATH`, each with its `SKILL.md` at `/abin/skills/{name}/`. Without any it has no `/abin`; a name the server has no program by is refused. The answer names them as asked.
+- `lifetime` is how many seconds it lives from its `POST`, at least `1`: the server deletes it then, as its `DELETE` does. Without it, it lives until it is deleted.
 - `running` is whether it takes processes: `false` once its VM has exited on its own, and never `true` again. One whose VM the server stopped, as below, is `true`.
 
 Its files are reached at [`/sandboxes/{id}/files/`](#files).
@@ -333,7 +339,7 @@ Each member is held to what `POST` holds it to, and one left out stays as it is.
 - `disk_gib` grows what it may write over its image, to as large as its VM next boots with, and keeps what it wrote there. A VM that is up is neither stopped for it nor refused, in use or not: a request that changes `disk_gib` alone is answered at once with `up` `true`, and its VM keeps the disk it booted with until it next boots, after it is next stopped. A request that also changes `vcpus` or `memory_mib` is stopped or refused for those, and the disk grows at that same boot. A disk is grown, never shrunk: one smaller than the disk the VM last booted with is refused with `400`, `invalid`, and one down to that size is taken, so a grow not yet made can be taken back. A grow the server cannot make as the VM boots leaves the disk as it was, and the VM boots on it; the size asked for stays, and the grow is tried again at each boot.
 - The answer is its size as it is to be, each member as the server gives it, and `up`, whether its VM is up now: one that is, the size it booted with until it boots again.
 
-A sandbox lives until it is deleted: by its `DELETE`, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
+A sandbox lives until it is deleted: by its `DELETE`, by the server once its `lifetime` has passed, or by the server, which MAY reclaim one on conditions it chooses, such as no activity for a while.
 Either stops its VM, kills every job in it that runs, as its [reason](#sandbox-jobs) `sandbox_deleted` says, and closes its ports; what it wrote outside its volumes goes with it, its volumes stay, and every request naming it is answered `404`, `not_found`.
 One whose VM has exited is still held until then.
 
@@ -482,6 +488,69 @@ With `stdin` `true`, the client writes to it with `POST {job}/stdin`:
 - A job started without `stdin`, one whose stdin is closed -- by `eof` or by its process -- and one that has ended refuse it with `409`, `ended`. So does a write its process closed its stdin under part-way, with `written` beside `code` and `message`: how many bytes of `data`, as UTF-8, went in before it closed, so `{"error": {"code": "ended", "message": "...", "written": 65536}}`. No other refusal of a write has `written`.
 - An empty `data` writes nothing, and is answered as any write is: `204` while the process's stdin still has a reader.
 
+### Presets
+
+A preset is a sandbox kept under a name, made as many times as it is asked for: what a [sandbox's `POST`](#sandboxes) takes, said once by a project's members, with who else may make one and how many.
+It lets the users of an app built on VirtX make sandboxes from the app itself, with no server of the app's own between them and VirtX: each is let in by what its preset's [`access`](#access) takes, and reaches the sandbox it made alone, with a [grant](#grants).
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `GET /presets/` | | `200`, array of presets |
+| `PUT /presets/{name}` | `{sandbox, max?, access?, origins?, limits?}` | `201` or `200`, the preset |
+| `GET /presets/{preset}` | | `200`, the preset |
+| `DELETE /presets/{preset}` | | `204` |
+| `POST /presets/{preset}/sandboxes/` | `{name?}` | `201`, `{sandbox, grant?}` |
+
+A preset is `{id, name, sandbox, max?, access, origins, limits?}`:
+
+- `id` is given it by the server once, kept as it is replaced, and names its project with it. `name` is letters, digits, `.`, `_` and `-`, as a sandbox's, and any other is refused with `400`, `invalid`.
+- `{preset}` names a preset by its id, or by its name in the project the request names. An app names it by its id: its users are no project's members, and name no project.
+- `sandbox` is what a sandbox's `POST` takes, `lifetime` among it, but `name`, which is refused with `400`, `invalid`. It is held to what that `POST` holds it to as the `PUT` is answered. Its `image` names a tag or a digest as there; a tag is read as each sandbox is made, so a preset of `app:latest` makes the next sandbox of the image the tag points at then.
+- `max` is `{vcpus?, memory_mib?, disk_gib?}`: how large a sandbox made of it may be [resized](#resizing) with its grant, each no less than what `sandbox` makes it, or `400`, `invalid`. One left out, or no `max`, holds the grant to the size the sandbox was made with.
+- `access` is who beside the project's members may make a sandbox of it, as [Access](#access) says: a list of ways in, any of which lets a request in. Without it, or empty, its members alone may.
+- `origins` are the [origins](#origin) a web page may make a sandbox of it from, and reach that sandbox with its grant from, beside those the server allows itself: each a scheme, host and port, as `https://app.example`.
+- `limits` is `{sandboxes?, per_subject?}`: how many sandboxes made of it by those `access` lets in may live at once, all of them and each subject's. A `POST` past either is refused with `429`, `quota`, its `reason` `sandboxes`, as [Refused for now](#refused-for-now) says. Without one, that is the server's to limit.
+
+`PUT` makes a preset, answered `201`, or replaces one in whole, `200`, and is refused for an image or a volume the project has none of, as a sandbox's `POST` is.
+A preset's tag and its volumes are in use from its `PUT` until its `DELETE`: the `DELETE` that would take the tag away is refused as under [Images](#images), and a volume's `DELETE` with `409`, `in_use`. Moving the tag to another image is not refused.
+`DELETE` removes the preset, and what it lets in from then on.
+A sandbox made of a preset is a sandbox as any other, and knows nothing of it: replacing or removing the preset changes no sandbox made of it, nor its grant.
+
+`POST /presets/{preset}/sandboxes/` makes a sandbox as the preset says, answered `{sandbox, grant?}`: the sandbox, as a sandbox's `POST` answers it, and its [grant](#grants), in this answer alone.
+
+- A member makes it as a sandbox's `POST` does, and may name it with `name`.
+- One `access` lets in sends `{}`: a `name` is refused with `400`, `invalid`, since names are the project's.
+- A request no way lets in is refused with `401`, `unauthorized`, with no credentials or a token no one's, and with `403`, `forbidden`, with a token that is someone's but not one the preset takes.
+
+A server that takes no [credentials](#authentication), such as one over [stdio](#stdio), keeps presets for its one client, and answers no `grant`: `access`, `origins` and `limits` are kept and answered, and let no one in.
+
+#### Access
+
+Each way in is an object with a `type`:
+
+- `{"type": "public"}` lets in a request with no credentials, from anyone. Its subject is the address the request came from, as the server sees it.
+- `{"type": "jwt", "issuer", "audience", "jwks"?, "claims"?}` lets in a request whose `Authorization: Bearer` is a JSON Web Token (RFC 7519) `issuer` signed: its `iss` is `issuer`, its `aud` is or holds `audience`, its `exp` has not passed, and each member `claims` names, an object of claims, equals the value given there. Its subject is the token's `sub`.
+
+For `jwt`:
+
+- `issuer` is an `https` URL, and so is `jwks`, but for an `http` one to the server's own loopback, which any other is refused with `400`, `invalid`. Its keys are the JWK Set at `jwks`, or without one at the `jwks_uri` of the OpenID Connect discovery document at `{issuer}/.well-known/openid-configuration`. A server MAY keep the keys for a while, and fetches them again for a key ID it does not know.
+- The token is signed with an asymmetric algorithm, such as `RS256`, `ES256` or `EdDSA`. One signed with `none` or an HMAC algorithm is refused, whatever its claims.
+- `claims` narrows an issuer that gives tokens to others than the app's users, such as one that gives them to every workload of a platform: `{"repository": "owner/app"}` lets in that repository's alone.
+
+A token the server takes from its own members, as [Authentication](#authentication) says, is a member's: the member makes the sandbox as one, and no way in is asked.
+
+#### Grants
+
+A grant is a token that reaches one sandbox and nothing else, given out by the `POST` that made that sandbox of a [preset](#presets): what the one who made it calls it with from then on.
+
+- It is answered by that `POST` alone. The server MUST NOT keep it beyond what tells it apart, such as its hash, show it in another answer, or write it to a log of its own.
+- It is sent as credentials are, `Authorization: Bearer <grant>`, and reaches the sandbox's project, with no `virtx-project`: a request naming another project is refused with `403`, `forbidden`.
+- It reaches `GET /sandboxes/`, answered with its sandbox alone, `GET`, `PATCH` and `DELETE /sandboxes/{id}`, and everything under `/sandboxes/{id}/` -- its [files](#files), [ports](#ports) and [jobs](#sandbox-jobs). A `PATCH` past the preset's `max`, as it was when the sandbox was made, is refused with `403`, `forbidden`, changing nothing. Every other request is refused with `403`, `forbidden`.
+- A web page's requests with it are let in from the preset's `origins`, as they were when the sandbox was made, beside the server's own.
+- It lives as its sandbox does: once the sandbox is deleted, by it, a member or the server, it is refused with `401`, `unauthorized`, as a token no one's is.
+
+A grant is no member of the project, and reaches neither its other sandboxes nor anything else in it.
+
 ## Images
 
 The server keeps images as an OCI registry, and `/images/oci/v2/` is its API: the [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md) v1.1, with every path the specification roots at `/v2/` rooted at `/images/oci/v2/` instead.
@@ -508,6 +577,7 @@ Images are listed, tagged and removed with the specification's requests:
 
 A sandbox stands on the image it was made from, from its `POST` until its `DELETE`, its VM parked or not, and a build on its base while it runs.
 A `DELETE` that would leave an image a sandbox or a build stands on with no tag -- the image's removal, or the untagging of its last tag -- is refused with `409 Conflict` and the code `DENIED`, and removes nothing.
+So is a `DELETE` that would take away a tag a [preset](#presets) names: its untagging, or the removal of the image it points at.
 A manifest no tag points at, and a blob no manifest names, MAY be deleted by the server at any time.
 A client pushing an image therefore puts its manifest by tag, not by digest alone.
 

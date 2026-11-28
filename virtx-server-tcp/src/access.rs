@@ -13,16 +13,17 @@ use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
-use http::{HeaderMap, StatusCode, header};
-use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Role};
+use http::{HeaderMap, Method, StatusCode, header};
+use virtx_core::{DEFAULT_PROJECT, PROJECT_HEADER, Preset, PresetAccess, Role};
 use virtx_uvm::{
     ImageStore, ProjectError, ProjectId, ProjectStore, PublicImages, PublicRegistries,
     RegistryProxy, RegistryServer, Sandbox,
 };
 
 use crate::config::Config;
-use crate::endpoints::Home;
-use crate::oidc::Oidc;
+use crate::endpoints::{Home, Maker, Refused, refusal, refused};
+use crate::grant::{self, Grant};
+use crate::oidc::{Issuer, Oidc};
 use crate::project::{Membership, TcpMembership};
 
 /// Where a home's images are served as a registry.
@@ -72,11 +73,15 @@ impl Homes for ProjectStore {
             let dir = self.path(id);
             let images = ImageStore::new(dir.join("images"))?;
             let registry = Arc::new(RegistryServer::new(images.clone(), REGISTRY_PATH)?);
-            let made = move || Home::new(images, registry, &dir);
+            let project = *id;
+            let made = move || Home::new(project, images, registry, &dir);
             Ok(Some(tokio::task::spawn_blocking(made).await??))
         })
     }
 }
+
+/// An issuer, and where its keys are where it is said.
+type IssuerKeys = (String, Option<String>);
 
 pub struct Access {
     /// The `Origin`s a browser may call from.
@@ -97,6 +102,9 @@ pub struct Access {
     mirror: Option<Arc<str>>,
     /// Where the homes' anonymous pulls are shared, in place of what each home was made with.
     public: Option<Arc<dyn PublicImages>>,
+    /// The issuers presets' access names, by issuer and where its keys are, each made as a
+    /// token is first checked against it.
+    issuers: Mutex<HashMap<IssuerKeys, Arc<Issuer>>>,
 }
 
 impl Access {
@@ -122,6 +130,7 @@ impl Access {
             registries: Arc::new(PublicRegistries::default()),
             mirror: None,
             public: None,
+            issuers: Mutex::default(),
         }
     }
 
@@ -197,10 +206,14 @@ impl Access {
 
     /// `403` for a request with `headers` from an `Origin` not let in.
     pub fn origin(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        self.origin_among(headers, &[])
+    }
+
+    /// `403` for a request with `headers` from an `Origin` neither the server lets in nor one
+    /// of `also`.
+    fn origin_among(&self, headers: &HeaderMap, also: &[String]) -> Result<(), StatusCode> {
         if let Some(origin) = headers.get(header::ORIGIN)
-            && !self
-                .origins
-                .iter()
+            && !(self.origins.iter().chain(also))
                 .any(|allowed| allowed.as_bytes() == origin.as_bytes())
         {
             return Err(StatusCode::FORBIDDEN);
@@ -208,10 +221,150 @@ impl Access {
         Ok(())
     }
 
-    /// Who a request with `headers` is from: `403` from an `Origin` not let in, and `401` for a
-    /// token that is no one's.
+    /// The home a request to `path` with `method` and `headers` reaches, and its grant where it
+    /// is sent with one: a grant's own project's, as far as [`Grant::reaches`] says, `401` for
+    /// one no longer given, and `403` for anything else of it, from an origin neither the
+    /// server nor its preset let in, or naming another project; otherwise a member's, as
+    /// [`home`](Access::home) says.
+    pub async fn reach(
+        &self,
+        method: &Method,
+        path: &str,
+        headers: &HeaderMap,
+    ) -> Result<(Arc<Home>, Option<Grant>), StatusCode> {
+        let Some(project) = bearer(headers).and_then(grant::project_of) else {
+            let (_, home) = self.home(headers).await?;
+            return Ok((home, None));
+        };
+        let home = self.home_of(&project).await.map_err(|e| {
+            eprintln!("making project {project}'s home: {e:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        let home = home.ok_or(StatusCode::UNAUTHORIZED)?;
+        let grant = home
+            .grant(bearer(headers).unwrap_or_default())
+            .await
+            .map_err(|refused| refused.status())?
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        self.origin_among(headers, &grant.origins)?;
+        let named = headers.get(PROJECT_HEADER);
+        if named.is_some_and(|named| named.as_bytes() != project.to_string().as_bytes())
+            || !grant.reaches(method, path)
+        {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        Ok((home, Some(grant)))
+    }
+
+    /// The home of the preset `named` names, the preset, and who makes a sandbox of it with
+    /// `headers`, from `from`: a member of its project, with their token, or one its access
+    /// lets in. Named by its id, it is reached with no member's token; by its name, in the
+    /// project the request names, by members alone. Refused `404` for no such preset, `401`
+    /// for a request no way lets in with no credentials or a token no one's, `403` for one
+    /// with a token that is someone's but not one the preset takes, or a grant, and from an
+    /// origin neither the server nor the preset lets in.
+    pub(crate) async fn maker(
+        &self,
+        headers: &HeaderMap,
+        named: &str,
+        from: Option<std::net::IpAddr>,
+    ) -> Result<(Arc<Home>, Preset, Maker), Refused> {
+        let token = bearer(headers);
+        if token.and_then(grant::project_of).is_some() {
+            return Err(refusal(StatusCode::FORBIDDEN));
+        }
+        let none = || {
+            refused(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("no preset here is {named}"),
+            )
+        };
+        let by_id =
+            (named.split_once('.')).and_then(|(project, _)| project.parse::<ProjectId>().ok());
+        let (home, who, member) = match by_id {
+            Some(project) => {
+                let home = self.home_of(&project).await.map_err(|e| {
+                    eprintln!("making project {project}'s home: {e:#}");
+                    refusal(StatusCode::INTERNAL_SERVER_ERROR)
+                })?;
+                let home = home.ok_or_else(none)?;
+                let who = self.identity.identify(token).await;
+                let member = match &who {
+                    Some(who) => self.membership.role(&project, who).await?.is_some(),
+                    None => false,
+                };
+                (home, who, member)
+            }
+            None => {
+                let (who, home) = self.home(headers).await.map_err(refusal)?;
+                (home, Some(who), true)
+            }
+        };
+        let preset = home.preset(named).await?;
+        self.origin_among(headers, &preset.origins)
+            .map_err(refusal)?;
+        if member && let Some(who) = who {
+            return Ok((home, preset, Maker::Member(who.user)));
+        }
+        let mut someone_s = who.is_some();
+        for way in &preset.access {
+            match (way, token) {
+                (PresetAccess::Public, None) => {
+                    let subject =
+                        from.map_or_else(|| "unknown".to_owned(), |from| from.to_string());
+                    return Ok((home, preset, Maker::LetIn(subject)));
+                }
+                (
+                    PresetAccess::Jwt {
+                        issuer,
+                        audience,
+                        jwks,
+                        claims,
+                    },
+                    Some(token),
+                ) => {
+                    let issuer = self.issuer(issuer, jwks.as_deref());
+                    let Some(carried) = issuer.claims(token, audience).await else {
+                        continue;
+                    };
+                    someone_s = true;
+                    let subject = carried.get("sub").and_then(|sub| sub.as_str());
+                    if let Some(subject) = subject
+                        && claims
+                            .iter()
+                            .all(|(name, value)| carried.get(name) == Some(value))
+                    {
+                        return Ok((home, preset, Maker::LetIn(subject.to_owned())));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(refusal(match someone_s {
+            true => StatusCode::FORBIDDEN,
+            false => StatusCode::UNAUTHORIZED,
+        }))
+    }
+
+    /// The issuer `issuer`, its keys at `jwks` where it says, made as it is first asked for.
+    fn issuer(&self, issuer: &str, jwks: Option<&str>) -> Arc<Issuer> {
+        let key = (issuer.to_owned(), jwks.map(str::to_owned));
+        let mut issuers = self.issuers.lock().unwrap();
+        Arc::clone(
+            issuers.entry(key).or_insert_with(|| {
+                Arc::new(Issuer::new(issuer.to_owned(), jwks.map(str::to_owned)))
+            }),
+        )
+    }
+
+    /// Who a request with `headers` is from: `403` from an `Origin` not let in, and for a
+    /// [grant](crate::grant), which is no one; `401` for a token that is no one's.
     pub async fn principal(&self, headers: &HeaderMap) -> Result<Principal, StatusCode> {
         self.origin(headers)?;
+        if bearer(headers).and_then(grant::project_of).is_some() {
+            return Err(StatusCode::FORBIDDEN);
+        }
         self.identity
             .identify(bearer(headers))
             .await
@@ -599,6 +752,181 @@ mod tests {
         let in_home = crate::endpoints::router().layer(axum::Extension(home));
         let Ok(refused) = tower::ServiceExt::oneshot(in_home, pull).await;
         assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Who makes a sandbox of a preset named by its id: a member of its project with their token,
+    /// or one its access lets in -- anyone with no credentials where it is public, its subject
+    /// their address, and a token of its issuer's for its audience carrying its claims, its
+    /// subject the token's -- from the server's origins or the preset's. Refused `401` with a
+    /// token no one's, `403` with someone's the preset does not take or a grant, and `404` for
+    /// no such preset. One let in names no sandbox, and is held to the preset's limits.
+    #[tokio::test]
+    async fn a_preset_s_sandbox_is_made_by_its_members_and_whom_its_access_lets_in() {
+        use std::time::SystemTime;
+
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        use virtx_core::{
+            PresetAccess, PresetLimits, PresetPutArgs, PresetSandboxCreateArgs, SandboxCreateArgs,
+            SandboxResizeArgs,
+        };
+        use virtx_uvm::PresetStore;
+
+        use crate::endpoints::Maker;
+        use crate::grant::{Grant, Grants};
+        use crate::oidc::tests::{KEY, X, Y};
+
+        let keys = json!({"keys": [{
+            "kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256", "use": "sig", "x": X, "y": Y,
+        }]});
+        let served = axum::Router::new().route(
+            "/keys",
+            axum::routing::get(move || async move { keys.to_string() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let jwks = format!("http://{}/keys", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, served).await });
+
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Arc::new(TcpMembership::new(dir.path()));
+        let demo = projects
+            .create(&Principal::new("alice"), "demo")
+            .await
+            .unwrap()
+            .id;
+        let store = ProjectStore::new(dir.path());
+        let access = Access::new(
+            vec!["https://allowed.example".to_owned()],
+            Arc::new(TokenIsUser(["alice".to_owned(), "bob".to_owned()].into())),
+            projects,
+            store.clone(),
+            Arc::new(store.clone()),
+        );
+        let home = access.home_of(&demo).await.unwrap().unwrap();
+        let mut claims = serde_json::Map::new();
+        claims.insert("repository".into(), json!("owner/app"));
+        let args = PresetPutArgs::new(SandboxCreateArgs::new("app:1"))
+            .access(PresetAccess::Public)
+            .access(PresetAccess::Jwt {
+                issuer: "https://idp.example".into(),
+                audience: "app".into(),
+                jwks: Some(jwks),
+                claims,
+            })
+            .origin("https://app.example")
+            .limits(PresetLimits {
+                sandboxes: Some(2),
+                per_subject: Some(1),
+            });
+        let presets = PresetStore::new(&store.path(&demo)).unwrap();
+        let (preset, _) = presets
+            .put("app", args, &[], || format!("{demo}.p1"))
+            .unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let signed = |audience: &str, repository: &str| {
+            let mut header = Header::new(Algorithm::ES256);
+            header.kid = Some("k1".into());
+            let claims = json!({
+                "iss": "https://idp.example", "aud": audience, "exp": now.as_secs() + 600,
+                "sub": "user-1", "repository": repository,
+            });
+            let key = EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap();
+            jsonwebtoken::encode(&header, &claims, &key).unwrap()
+        };
+        let from = "203.0.113.7".parse().ok();
+        let maker = async |token: Option<&str>, project, origin, named: &str| {
+            let headers = headers(token, project, origin);
+            let made = access.maker(&headers, named, from).await;
+            made.map(|(_, _, maker)| maker)
+                .map_err(|refused| refused.status())
+        };
+        let id = preset.id.as_str();
+        let let_in = |subject: &str| Ok(Maker::LetIn(subject.into()));
+
+        assert_eq!(maker(None, None, None, id).await, let_in("203.0.113.7"));
+        assert_eq!(
+            maker(Some("alice"), None, None, id).await,
+            Ok(Maker::Member("alice".into()))
+        );
+        assert_eq!(
+            maker(Some("alice"), Some("demo"), None, "app").await,
+            Ok(Maker::Member("alice".into()))
+        );
+        let good = signed("app", "owner/app");
+        assert_eq!(maker(Some(&good), None, None, id).await, let_in("user-1"));
+        let origin = Some("https://app.example");
+        assert_eq!(maker(Some(&good), None, origin, id).await, let_in("user-1"));
+        let origin = Some("https://allowed.example");
+        assert_eq!(maker(None, None, origin, id).await, let_in("203.0.113.7"));
+
+        let refused = async |token, origin, named| maker(token, None, origin, named).await.err();
+        let forbidden = Some(StatusCode::FORBIDDEN);
+        assert_eq!(
+            refused(Some("bob"), None, id).await,
+            forbidden,
+            "someone's, no member"
+        );
+        let other = signed("app", "owner/other");
+        assert_eq!(
+            refused(Some(&other), None, id).await,
+            forbidden,
+            "not its claims"
+        );
+        let grant = format!("vxg.{demo}.secret");
+        assert_eq!(refused(Some(&grant), None, id).await, forbidden);
+        assert_eq!(
+            refused(None, Some("https://evil.example"), id).await,
+            forbidden
+        );
+        let unauthorized = Some(StatusCode::UNAUTHORIZED);
+        assert_eq!(refused(Some("mallory"), None, id).await, unauthorized);
+        let elsewhere = signed("another", "owner/app");
+        assert_eq!(
+            refused(Some(&elsewhere), None, id).await,
+            unauthorized,
+            "not its audience"
+        );
+        let none = format!("{demo}.none");
+        assert_eq!(
+            refused(None, None, &none).await,
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            refused(None, None, "app").await,
+            unauthorized,
+            "by name, members alone"
+        );
+
+        // One let in names no sandbox, and makes none past the preset's limits, with those of
+        // its sandboxes alive given out: a member's counted toward none.
+        let make = async |subject: &str, name: Option<&str>| {
+            let args = PresetSandboxCreateArgs {
+                name: name.map(str::to_owned),
+            };
+            let made = home
+                .make_of(&preset, Maker::LetIn(subject.into()), args)
+                .await;
+            made.err().map(|refused| refused.status())
+        };
+        assert_eq!(make("a", Some("dev")).await, Some(StatusCode::BAD_REQUEST));
+        let grants = Grants::new(&store.path(&demo)).unwrap();
+        let given = |subject: &str, member| Grant {
+            sandbox: format!("of-{subject}"),
+            preset: preset.id.clone(),
+            subject: subject.into(),
+            member,
+            max: SandboxResizeArgs::default(),
+            origins: Vec::new(),
+        };
+        grants.give(&demo, &given("alice", true)).unwrap();
+        grants.give(&demo, &given("a", false)).unwrap();
+        let quota = Some(StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(make("a", None).await, quota, "its own");
+        grants.give(&demo, &given("c", false)).unwrap();
+        assert_eq!(make("b", None).await, quota, "all of theirs");
+        task.abort();
     }
 
     /// Homes made only for the projects listed, none for any other.

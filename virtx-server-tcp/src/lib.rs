@@ -44,6 +44,7 @@
 pub mod access;
 pub mod config;
 pub mod endpoints;
+pub mod grant;
 pub mod oidc;
 pub mod project;
 pub mod serve;

@@ -56,6 +56,16 @@ fn main() -> anyhow::Result<()> {
 async fn serve() -> anyhow::Result<()> {
     let root = virtx_uvm::cache_root();
     let (app, host) = app(&root).await?;
+    let expiring = Arc::clone(&host);
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            every.tick().await;
+            for home in expiring.homes() {
+                home.remove_expired().await;
+            }
+        }
+    });
     let served = serve_stdio(app, tokio::io::stdin(), tokio::io::stdout()).await;
     // The client is gone, and every sandbox was its.
     tokio::task::spawn_blocking(move || host.close_all()).await?;
@@ -97,6 +107,7 @@ async fn app(root: &Path) -> anyhow::Result<(axum::Router, Arc<Host>)> {
                 }
             },
         ))
+        .merge(endpoints::preset_sandboxes().layer(Extension(Arc::clone(&host))))
         .merge(endpoints::projects().layer(Extension(Arc::clone(&host))))
         .route("/images/oci/v2", any(images.clone()))
         .route("/images/oci/v2/", any(images.clone()))
@@ -170,7 +181,7 @@ impl Host {
 
     /// The home of the project `headers` name, or of the client's own where they name none:
     /// `403` for a project not here.
-    async fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
+    pub async fn home(&self, headers: &HeaderMap) -> Result<Arc<Home>, Refused> {
         let named = match headers.get(PROJECT_HEADER) {
             None => None,
             Some(named) => Some(
@@ -190,7 +201,7 @@ impl Host {
     }
 
     /// Project `id`'s home, its images its own: `None` once it is being removed.
-    fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
+    pub fn home_of(&self, id: &ProjectId) -> anyhow::Result<Option<Arc<Home>>> {
         let mut homes = self.homes.lock().unwrap();
         if let Some(home) = homes.get(id) {
             return Ok(home.clone());
@@ -199,7 +210,7 @@ impl Host {
         let images = ImageStore::new(dir.join("images"))?;
         let registry = RegistryServer::new(images.clone(), REGISTRY_PATH)?;
         let registry = Arc::new(registry.with_host_paths(HostPaths::Named));
-        let home = Arc::new(Home::new(images, registry, &dir)?);
+        let home = Arc::new(Home::new(*id, images, registry, &dir)?);
         homes.insert(*id, Some(Arc::clone(&home)));
         Ok(Some(home))
     }
@@ -222,6 +233,12 @@ impl Host {
         true
     }
 
+    /// Every home made, but those being removed.
+    fn homes(&self) -> Vec<Arc<Home>> {
+        let homes = self.homes.lock().unwrap();
+        homes.values().flatten().cloned().collect()
+    }
+
     /// Let requests reach project `id` again, once its removal has failed.
     pub fn release(&self, id: &ProjectId) {
         self.homes.lock().unwrap().remove(id);
@@ -230,14 +247,7 @@ impl Host {
     /// Close every sandbox of every home, as removing each does: blocks until each machine has
     /// stopped and synced what it wrote.
     fn close_all(&self) {
-        let homes: Vec<_> = self
-            .homes
-            .lock()
-            .unwrap()
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
+        let homes = self.homes();
         for home in homes {
             home.close_all();
         }
@@ -374,6 +384,79 @@ mod tests {
 
     fn names(entries: Vec<DirEntry>) -> Vec<String> {
         entries.into_iter().map(|entry| entry.name).collect()
+    }
+
+    /// A preset is kept as it is put, refused for an image or a volume not here, found by its id
+    /// or its name, and removed; while it is kept, its volume and its tag are refused their
+    /// removal. A sandbox is made of one by its id in the project the id names, or by its name
+    /// in the one the request names.
+    #[tokio::test]
+    async fn a_project_s_presets_are_kept_and_what_they_name_is_in_use() {
+        let server = Server::spawn("presets").await;
+        let send = async |method: &str, path: &str, body: &str| {
+            let request = http::Request::builder()
+                .method(method)
+                .uri(path)
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap();
+            let Ok(response) = server.app.clone().oneshot(request).await;
+            let status = response.status().as_u16();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8(body.to_vec()).unwrap())
+        };
+        let mounting = r#"{"sandbox": {"image": {"type": "tag", "tag": "app:1"},
+            "volumes": [{"volume": "data", "path": "/data"}]}, "access": [{"type": "public"}]}"#;
+        assert_eq!(send("PUT", "/presets/app", mounting).await.0, 404);
+        server.file_image("app:1");
+        assert_eq!(
+            send("PUT", "/presets/app", mounting).await.0,
+            404,
+            "no volume"
+        );
+        server.client.create_volume(Some("data")).await.unwrap();
+        let (status, body) = send("PUT", "/presets/app", mounting).await;
+        assert_eq!(status, 201, "{body}");
+        let made: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let id = made["id"].as_str().unwrap().to_owned();
+        let project = server.home.file_name().unwrap().to_str().unwrap();
+        assert!(id.starts_with(&format!("{project}.")), "{id}");
+        assert_eq!(
+            made["access"],
+            serde_json::json!([{"type": "public"}]),
+            "kept, letting no one in"
+        );
+        assert_eq!(send("PUT", "/presets/app", mounting).await.0, 200);
+        for named in ["app", id.as_str()] {
+            assert_eq!(send("GET", &format!("/presets/{named}"), "").await.0, 200);
+        }
+
+        let (status, body) = send("DELETE", "/volumes/data", "").await;
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("preset app"), "{body}");
+        let (status, body) = send("DELETE", "/images/oci/v2/app/manifests/1", "").await;
+        assert_eq!(status, 409, "{body}");
+
+        let named = r#"{"name": "dev"}"#;
+        let elsewhere = format!("/presets/{}.none/sandboxes/", virtx_uvm::ProjectId::new());
+        assert_eq!(send("POST", &elsewhere, named).await.0, 404);
+        assert_eq!(send("POST", "/presets/none/sandboxes/", named).await.0, 404);
+        let unknown = r#"{"name": "dev", "grant": true}"#;
+        assert_eq!(
+            send("POST", &format!("/presets/{id}/sandboxes/"), unknown)
+                .await
+                .0,
+            400
+        );
+
+        assert_eq!(send("DELETE", &format!("/presets/{id}"), "").await.0, 204);
+        assert_eq!(send("GET", "/presets/app", "").await.0, 404);
+        assert_eq!(send("DELETE", "/volumes/data", "").await.0, 204);
+        assert_eq!(
+            send("DELETE", "/images/oci/v2/app/manifests/1", "").await.0,
+            202
+        );
     }
 
     #[tokio::test]

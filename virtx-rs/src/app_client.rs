@@ -6,10 +6,11 @@ use crate::{Client, Error, Sandbox};
 
 /// One sandbox, made of a preset for whom its access lets in and reached with its grant alone:
 /// what an app's user runs processes in, reads and writes the files of, and forwards the ports
-/// of, through [`sandbox`](Self::sandbox), and deletes with [`close`](Self::close). The grant
-/// reaches nothing else, so neither does this.
+/// of, through [`sandbox`](Self::sandbox), and deletes with [`close`](Self::close), or as it
+/// drops, blocking until it is. The grant reaches nothing else, so neither does this.
 pub struct AppClient {
-    sandbox: Sandbox,
+    /// Its sandbox, until it is deleted.
+    sandbox: Option<Sandbox>,
 }
 
 impl AppClient {
@@ -29,22 +30,38 @@ impl AppClient {
         // From here on, the grant alone: what made it reaches nothing more through this client.
         client.set_auth(Auth::Bearer { token })?;
         Ok(AppClient {
-            sandbox: made.sandbox,
+            sandbox: Some(made.sandbox),
         })
     }
 
     /// Its sandbox, and the client with its grant that reaches it.
     pub fn sandbox(&self) -> &Sandbox {
-        &self.sandbox
+        self.sandbox
+            .as_ref()
+            .expect("an app client holds its sandbox until it drops")
     }
 
-    /// Delete its sandbox, and with it its grant, and close the client.
-    pub async fn close(self) -> Result<(), Error> {
-        let removed = self.sandbox.remove().await;
-        let client = self.sandbox.client().clone();
-        drop(self.sandbox);
+    /// Delete its sandbox, and with it its grant, and close the client, answering once both are
+    /// done.
+    pub async fn close(mut self) -> Result<(), Error> {
+        let sandbox = self
+            .sandbox
+            .take()
+            .expect("an app client holds its sandbox until it drops");
+        let removed = sandbox.remove().await;
+        let client = sandbox.client().clone();
+        drop(sandbox);
         client.close().await?;
         removed
+    }
+}
+
+/// Deletes its sandbox, as [`AppClient::close`] does, waited for.
+impl Drop for AppClient {
+    fn drop(&mut self) {
+        if let Some(sandbox) = self.sandbox.take() {
+            let _ = sandbox.remove().wait();
+        }
     }
 }
 

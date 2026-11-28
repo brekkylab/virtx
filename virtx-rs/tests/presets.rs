@@ -55,6 +55,17 @@ fn an_app_s_user_makes_a_sandbox_of_a_public_preset_and_reaches_it_alone() {
     common::block_on(app.close()).unwrap();
     let gone = member.get_sandbox(&id).wait().unwrap_err();
     assert_eq!(gone.status(), Some(404), "{gone}");
+    // Dropped, as closed: its sandbox is deleted.
+    let dropped = common::block_on(AppClient::connect(
+        &common::fixture().url,
+        preset.id(),
+        Auth::None,
+    ))
+    .unwrap();
+    let id = dropped.sandbox().id().to_owned();
+    drop(dropped);
+    let gone = member.get_sandbox(&id).wait().unwrap_err();
+    assert_eq!(gone.status(), Some(404), "{gone}");
     // Removing the preset leaves what was made of it before.
     preset.remove().wait().unwrap();
     other.remove().wait().unwrap();

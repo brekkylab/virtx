@@ -12,8 +12,18 @@
     "code-execution",
     "llm"
   ],
+  "homepage": "https://virtx.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brekkylab/virtx.git",
+    "directory": "virtx-node"
+  },
   "bugs": {
     "url": "https://github.com/brekkylab/virtx/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "main": "index.js",
   "types": "index.d.ts",
@@ -29,6 +39,9 @@
     "node": ">= 22"
   },
   "scripts": {
+    "build": "node build.js",
+    "prepare": "npm run build",
+    "pretest": "npm run build",
     "test": "cargo xtask fixture -- node --test --test-concurrency=1 '__test__/**/*.spec.mjs'"
   },
   "dependencies": {

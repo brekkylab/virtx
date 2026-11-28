@@ -4,7 +4,7 @@ virtx is a microVM sandbox for AI agents: it runs tasks in disposable Linux micr
 
 ## One behaviour, two ends
 
-- The client's behaviour is `virtx-core`, built as `libvirtx_core`. `virtx` (the Rust crate in `virtx-rs/`), `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
+- The client's behaviour is `virtx-core`, built as `libvirtx_core` by `virtx-cabi`. `virtx` (the Rust crate in `virtx-rs/`), `virtx-py` and `virtx-node` load that library at run time through its C ABI and carry only what one language needs of its own. A feature goes into `virtx-core` first and the packages connect to it.
 - A change to what the client does moves the packages in the same pull request, and, when a public API they show changes, the Quickstart blocks in `README.md`, which every package ships as its own, and its translations (`README.*.md`), and the examples.
 - That is the standard for a change you make: the library first, every package connected, before the work is done. It is not the gate for a person's pull request: `CONTRIBUTING.md` accepts a change that reaches one package only, and a review holds a PR to that, with the library-first shape as a suggestion or a follow-up.
 - Names follow each language's convention and nothing else: `create_sandbox` in Rust and Python, `createSandbox` in Node. The thing they name is the same.
@@ -13,14 +13,15 @@ virtx is a microVM sandbox for AI agents: it runs tasks in disposable Linux micr
 ## Where a change goes
 
 - `virtx-core/` — the methods' args and outputs (`image/`, `sandbox/`, `volume/`), the client and server ends of the transport (`transport/`, plain HTTP over TCP or over a child's stdio), the C ABI (`ffi/`, declared by `include/virtx.h`, which the build writes).
-- `virtx-rs/`, `virtx-py/`, `virtx-node/` — the packages: Rust over `libloading`, Python over `ctypes`, Node over `koffi`.
+- `virtx-cabi/` — `libvirtx_core`, the C ABI exported as a cdylib: a crate of its own, so that no other crate's build makes one.
+- `virtx-rs/`, `virtx-py/`, `virtx-node/` — the packages: Rust over `libloading`, Python over `ctypes`, Node over `koffi`. The Python package builds `virtx-cabi` with setuptools-rust (`virtx-py/pyproject.toml`), and the Node package with `virtx-node/build.js`, which runs cargo as setuptools-rust does, so the two share one build in `target/`.
 - `virtx-uvm/` — the server's machinery: images and their store (`image/`), the filesystems a disk is made of (`fstree/`), machines over libkrun (`machine/`), the sandboxes the servers make of them and the jobs run in each (`sandbox/`), volumes and their remote stores (`volume/`), and the WebDAV files endpoints (`files/`).
 - `virtx-server-stdio/` and `virtx-server-tcp/` — the endpoints over `virtx-uvm`, served over stdio (the `virtx-stdio` binary a client spawns) and over HTTP. Each binary is also the process a VM runs in. `virtx-server-tcp` is a library too, which its binary and a server with an authenticator and routes of its own are built from.
 - `virtx-uvm-guest/` — the agent inside every VM, cross-compiled to musl and embedded by `virtx-uvm`'s build script. `virtx-abins/` — the programs a sandbox gets at `/abin`, those its `abins` name; each one's `SKILL.md` is what an agent reads to use it: its `--help` copied by hand, so a clap string that changes is a `SKILL.md` to regenerate, or, for `browser`, which runs another's program, a guide to that program written for it. What every VM gets at `/alib` is built by `xtask/scripts/build-alib.sh`.
 - `3rdparty/` — libkrun, rutabaga_gfx, smoltcp, virglrenderer, MoltenVK and SPIRV-Cross as submodules, virglrenderer and MoltenVK each built by its own script there, `3rdparty/_scripts/build-virglrenderer.*` and `build-moltenvk.sh`, which `xtask/scripts/build-deps.*` runs in order for the server's `gpu` feature. The guest kernel, libkrunfw, is built there too, by `3rdparty/_scripts/build-libkrunfw.sh` from upstream's tag, with no submodule and no patch. None is a fork: each is upstream's own repository pinned to a commit of its `main`, and what virtx changes in it is its patches in `3rdparty/_patches/`; each patch's message says why virtx needs it and when it can go. libkrun's, rutabaga_gfx's and smoltcp's are applied in each submodule's own tree by `cargo xtask init`, since cargo takes their crates from there by path, and the others' to a copy under `build/` by their build. `3rdparty/README.md` says how a patch is written and when one is taken out, and a project virtx comes to change is taken the same way.
 - `xtask/` — every build, check and release step, as `cargo xtask`.
-- `scripts/packages/` — what the workflows run to pack and smoke-test the client's packages.
-- `.github/workflows/` — `pipeline` lints and tests every platform, and in full also builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and smoke-tests them; `ci` runs it on a pull request (lint and tests) and on `main` (in full), and `release` runs it in full on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `pipeline` refuses any other spelling of), runs `publish`'s checks over what was built, and attaches it to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
+- `scripts/packages/` — what the workflows run to smoke-test the client's packages. `.github/actions/pack` is the one place they are built, each platform's with the packages' own builds, and `.github/workflows/packages.yml` tries them on a runner that did not build them.
+- `.github/workflows/` — `pipeline` lints and tests every platform, and in full also builds the servers (`virtx-stdio` and `virtx-server-tcp`, each archived with the guest kernel, abin and alib) and the client's packages for every platform and smoke-tests them (`packages`); `ci` runs it on a pull request (lint and tests) and on `main` (in full), and `release` runs it in full on a version tag (`vX.Y.Z`, or a pre-release `vX.Y.Z-alpha.N`, `-beta.N` or `-rc.N`, which `pipeline` refuses any other spelling of), runs `publish`'s checks over what was built, and attaches it to the tag's draft GitHub release. Publishing the draft runs `publish`, which checks every package of the release and, all of them right, puts its npm packages and wheels on npm and PyPI and the crates on crates.io. `docs` builds `docs/` and checks its links on a pull request that touches it.
 
 ## Building from source
 
@@ -53,21 +54,14 @@ export VIRTX_STDIO=~/.local/bin/virtx-stdio       # what Client.spawn() starts, 
 
 ### Clients
 
-The Python and Node packages, and the Rust crate without its `embedded` feature, open one library, `libvirtx_core`, so build it first and point the package at it:
+The Python and Node packages, and the Rust crate without its `embedded` feature, open one library, `libvirtx_core`, which `virtx-cabi` builds. Each package installed from the clone builds it and keeps it beside its files:
 
-```bash
-cargo xtask build client
-cargo xtask install --prefix ~/.local
-export VIRTX_CORE_LIB=~/.local/bin/libvirtx_core.so   # .dylib on macOS, virtx_core.dll on Windows
-```
+- **Python:** `pip install path/to/virtx/virtx-py`, with setuptools-rust, in `release`. `pip install -e` (and `uv sync` in `virtx-py/`) builds it in `dev`, and `uv` builds it again when the crates change.
+- **Node:** `npm install` in `virtx-node/`, whose `prepare` runs `build.js`, in `dev`, as `pretest` does before `npm test`; then `npm install path/to/virtx/virtx-node` in your own project. npm links the directory without installing its dependencies, so `virtx-node/` needs its own `npm install` first.
+- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in; with `--no-default-features` it opens one at run time instead, from `VIRTX_CORE_LIB`.
 
-Then, in your own project, install the package for your language from the clone:
-
-- **Python:** `pip install path/to/virtx/virtx-py`
-- **Node:** `npm install path/to/virtx/virtx-node`
-- **Rust:** `cargo add virtx --path path/to/virtx/virtx-rs`, which links the library in and needs none of the above; with `--no-default-features` it opens the one above instead.
-
-- `load(path)` opens a library from the program itself, in place of `VIRTX_CORE_LIB`; a process opens one.
+- `cargo build -p virtx-cabi` builds the library alone; `cargo xtask build client` builds it and `libvirtx_core.a` in `release`, and `cargo xtask install` copies the library out.
+- `VIRTX_CORE_LIB` names a library to open in place of the one a package carries; `load(path)` opens one from the program itself; a process opens one.
 - A module that takes a client from another opens the file `library_path()` answers, and takes the client from the pointer `client.clone().into_raw()` answers, with `Client.from_raw`. In Node, `libraryPath()`, `intoRaw()` and `fromRaw`.
 - A change to the client needs nothing of `init`, only those three submodules checked out, as every cargo command does. A change to the servers needs `init` and the guest kernel, and `init` again after a pull that changed their patches in `3rdparty/_patches/` or their pins: a server is not built from a tree `init` has not brought to them. It is `init` that moves those three to a new pin, not `git submodule update` or `git pull --recurse-submodules`, which git refuses over a tree with the patches applied.
 

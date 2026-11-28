@@ -35,7 +35,7 @@ const FILE_NAME =
       ? 'libvirtx_core.dylib'
       : 'libvirtx_core.so'
 
-// The package carrying the library for this platform, which npm installs only here.
+// The package carrying this platform's library, which `build.js --package` makes.
 const PLATFORM_PACKAGE = {
   'darwin-arm64': '@brekkylab/virtx-darwin-arm64',
   'linux-x64': '@brekkylab/virtx-linux-x64-gnu',
@@ -329,8 +329,8 @@ function platformLibrary() {
   }
 }
 
-// The open library, opening it first if none is: `$VIRTX_CORE_LIB`, else one beside this file,
-// else the one in this platform's package, else the platform's file name for the system's
+// The open library, opening it first if none is: `$VIRTX_CORE_LIB`, else one built beside this
+// file, else the one in this platform's package, else the platform's file name for the system's
 // loader to look up.
 function library() {
   if (opened === null) {
